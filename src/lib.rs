@@ -1,6 +1,6 @@
 // External Crates
 use reqwest::ClientBuilder; // HTTP client builder
-use serde::{Deserialize, Serialize}; // JSON (de)serialization
+use serde::{Deserialize, Serialize}; // Data format (e.g.,JSON, TOML) (de)serialization
 use std::time::Duration; // Duration for timeout handling
 
 // Request as per Ollama API Guide
@@ -45,7 +45,7 @@ pub async fn send_request(
 
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
-        .build()?; // 30 sec Default to short for some LLMS.
+        .build()?; // 30 sec Default too short for some LLMs.
 
     let reply = client
         .post("http://localhost:11434/api/generate")

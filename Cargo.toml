@@ -1,6 +1,6 @@
 [package]
 name = "cargo-ai"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 license = "MIT"
 description = "Ship AI Data the right way with Rust."
@@ -8,5 +8,4 @@ description = "Ship AI Data the right way with Rust."
 [dependencies]
 reqwest = { version = "0.12.15", features = ["json"] }
 serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
 tokio = { version = "1.44.1", features = ["full"] }
