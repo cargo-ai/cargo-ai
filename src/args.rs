@@ -1,7 +1,22 @@
-use clap::{Arg, Command, ArgMatches};
+// clap - Command Line Arguement Parsing
+use clap::{Arg, ArgMatches, Command};
 
 pub fn build_cli() -> ArgMatches {
+
+    // Collect the original command-line arguments
+    let mut args: Vec<String> = std::env::args().collect();
+
+    let mut bin_name = "cargo-ai";
+    // Check if runing as a cargo subcommand, i.e. cargo ai
+    if let Some(first_arg) = args.get(1) {
+        if first_arg == "ai" {
+            bin_name = "cargo ai";
+            args.remove(1);
+        }
+    }
+
     Command::new("cargo-ai")
+        .bin_name(bin_name)
         .arg(
             Arg::new("server")
                 .long("server")
@@ -16,16 +31,12 @@ pub fn build_cli() -> ArgMatches {
                 .help("LLM model to use")
                 .required(true),
         )
-        .arg(
-            Arg::new("token")
-                .long("token")
-                .help("API token")
-        )
+        .arg(Arg::new("token").long("token").help("API token"))
         .arg(
             Arg::new("timeout_in_sec")
                 .long("timeout_in_sec")
                 .help("Client timeout request")
                 .default_value("60"),
         )
-        .get_matches()
+        .get_matches_from(args)
 }

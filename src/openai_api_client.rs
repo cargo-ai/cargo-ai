@@ -79,11 +79,13 @@ pub async fn send_request(
         .json::<Response>()
         .await?;
 
-    let response_content = response.choices
+    let response_content = response
+        .choices
         .get(0)
         .ok_or("No ChatGPT Response Index 0 Choice.")?
         .message
-        .content.clone();
+        .content
+        .clone();
 
     Ok(response_content)
 }

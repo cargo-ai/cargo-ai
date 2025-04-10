@@ -6,7 +6,6 @@ use std::io::stdin;
 // Executor: Responsible for polling and running to completion
 #[tokio::main]
 async fn main() {
-
     let cmd_args = args::build_cli();
 
     // Begin: Argument assignments
@@ -33,15 +32,15 @@ async fn main() {
         .parse::<u64>()
         .expect("Expected unsigned int, u8");
 
-    if !(server == "ollama" || server == "openai") { 
-        panic!("Unknown AI Server") 
+    if !(server == "ollama" || server == "openai") {
+        panic!("Unknown AI Server")
     }
     // End: Argument assignments
 
     let mut prompt = String::new();
 
     println!("Enter a prompt for {model}!"); // Request to use for input
-    
+
     stdin().read_line(&mut prompt).expect("Failed to read line"); // Captures user input into prompt String
 
     let prompt = prompt.trim().to_string(); // Remove trailing newline from user input
@@ -64,8 +63,7 @@ async fn main() {
                 println!("We have an error {}", e);
             }
         };
-    } 
-    
+    }
+
     println!("{server} Response: {response}");
- 
 }
