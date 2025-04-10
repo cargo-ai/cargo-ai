@@ -5,7 +5,7 @@ use std::time::Duration; // Duration for timeout handling
 
 // Request as per Ollama API Guide
 #[derive(Serialize, Debug)]
-struct GenerateRequest {
+struct Request {
     model: String,
     prompt: String,
     stream: bool,
@@ -19,7 +19,7 @@ struct Options {
 
 #[derive(Deserialize, Debug)]
 #[allow(dead_code)] // Currently not using all response fields
-struct GenerateResponse {
+struct Response {
     model: String,
     created_at: String,
     response: String,
@@ -31,14 +31,13 @@ struct GenerateResponse {
 // It's syntactic sugar for implementing the `Future` trait,
 // which uses the `poll` method to return `Ready` or `Pending`.
 pub async fn send_request(
-    model: String,
-    prompt: String,
+    model: &String,
+    prompt: &String,
     timeout_in_sec: u64,
 ) -> Result<String, Box<dyn std::error::Error>> {
-
-    let request = GenerateRequest {
-        model,
-        prompt,
+    let request = Request {
+        model: model.clone(),
+        prompt: prompt.clone(),
         stream: false,
         options: Options { temperature: 0.75 },
     };
@@ -52,7 +51,7 @@ pub async fn send_request(
         .json(&request)
         .send()
         .await?
-        .json::<GenerateResponse>()
+        .json::<Response>()
         .await?;
 
     Ok(reply.response)

@@ -1,11 +1,12 @@
 [package]
 name = "cargo-ai"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 license = "MIT"
 description = "Ship AI Data the right way with Rust."
 
 [dependencies]
+clap = "4.5.35"
 reqwest = { version = "0.12.15", features = ["json"] }
 serde = { version = "1.0.219", features = ["derive"] }
 tokio = { version = "1.44.1", features = ["full"] }
