@@ -14,9 +14,8 @@ async fn main() {
         server.push_str(&server_arg.to_lowercase());
     }
 
-    let mut token = String::from("NA");
+    let mut token = String::new();
     if let Some(cmd_token) = cmd_args.get_one::<String>("token") {
-        token.clear();
         token.push_str(cmd_token);
     }
 
@@ -30,7 +29,7 @@ async fn main() {
         .get_one::<String>("timeout_in_sec")
         .expect("Timeout value expected")
         .parse::<u64>()
-        .expect("Expected unsigned int, u8");
+        .expect("Expected unsigned int, u64");
 
     if !(server == "ollama" || server == "openai") {
         panic!("Unknown AI Server")
