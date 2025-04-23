@@ -2,6 +2,7 @@
 use reqwest::ClientBuilder; // HTTP client builder
 use serde::{Deserialize, Serialize}; // Data format (e.g.,JSON, TOML) (de)serialization
 use std::time::Duration; // Duration for timeout handling
+use std::env; // for overriding the API URL in tests
 
 // Request as per Ollama API Guide
 #[derive(Serialize, Debug)]
@@ -26,10 +27,6 @@ struct Response {
     done: bool,
 }
 
-// `async` allows us to pause execution and yield control back to the runtime,
-// enabling other tasks to run concurrently and make progress.
-// It's syntactic sugar for implementing the `Future` trait,
-// which uses the `poll` method to return `Ready` or `Pending`.
 pub async fn send_request(
     model: &String,
     prompt: &String,
@@ -46,8 +43,12 @@ pub async fn send_request(
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()?; // 30 sec Default too short for some LLMs.
 
+    // Allow overriding Ollama API URL in tests via OLLAMA_API_URL env var
+    let api_url = env::var("OLLAMA_API_URL")
+                            .unwrap_or_else(|_| "http://localhost:11434/api/generate".to_string());   
+
     let reply = client
-        .post("http://localhost:11434/api/generate")
+        .post(&api_url)
         .json(&request)
         .send()
         .await?
@@ -55,4 +56,46 @@ pub async fn send_request(
         .await?;
 
     Ok(reply.response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mockito::Server;
+    use tokio;
+
+    #[tokio::test]
+    async fn test_send_request_with_mock() {
+
+        // Start an async mock server instance
+        let mut server = Server::new_async().await;
+        let mock_path = "/api/generate";
+
+        // Override the API URL to point to our mock server
+        std::env::set_var("OLLAMA_API_URL", format!("{}{}", &server.url().to_string(), &mock_path));
+
+        // Set up the mock endpoint on this server
+        let _m = server
+            .mock("POST", mock_path)
+            .match_header("content-type", "application/json")
+            .with_status(200)
+            .with_body(r#"{
+                 "model": "test-model",
+                 "created_at": "2025-04-19T00:00:00Z",
+                 "response": "Mocked response",
+                 "done": true
+             }"#)
+            .create();
+
+        // Execute the client against the mock
+        let result = send_request(
+            &"test-model".to_string(),
+            &"test prompt".to_string(),
+            5,
+        )
+        .await
+        .expect("send_request failed");
+
+        assert_eq!(result, "Mocked response");
+    }
 }
