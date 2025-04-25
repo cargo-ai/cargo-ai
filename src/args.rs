@@ -17,26 +17,36 @@ pub fn build_cli() -> ArgMatches {
 
     Command::new("cargo-ai")
         .bin_name(bin_name)
+        .subcommand(
+            Command::new("rude")
+                .about("Rude Mode")
+        )
         .arg(
             Arg::new("server")
                 .long("server")
                 .short('s')
                 .help("Client Type - Ollama or OpenAI")
-                .required(true),
+                .global(true),
         )
         .arg(
             Arg::new("model")
                 .long("model")
                 .short('m')
                 .help("LLM model to use")
-                .required(true),
+                .global(true),
         )
-        .arg(Arg::new("token").long("token").help("API token"))
+        .arg(
+            Arg::new("token")
+                .long("token")
+                .help("API token")
+                .global(true)
+        )
         .arg(
             Arg::new("timeout_in_sec")
                 .long("timeout_in_sec")
                 .help("Client timeout request")
-                .default_value("60"),
+                .default_value("60")
+                .global(true),
         )
         .get_matches_from(args)
 }
