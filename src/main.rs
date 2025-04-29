@@ -46,13 +46,9 @@ async fn main() {
 
     let prompt = prompt.trim().to_string(); // Remove trailing newline from user input
 
-    let mut structured = false;
-
     if let Some(_) = cmd_args.subcommand_matches("float-answer") {
 
         println!("Float Answer Mode Activite");
-
-        structured = true;
 
         #[derive(Clone, Debug, Deserialize, Serialize)]
         struct Answer {
@@ -79,7 +75,7 @@ async fn main() {
 
         if server == "ollama" {
             // Send request to Ollama and `await` the LLM response
-            match cargo_ai::ollama_send_request(&model, &structured_prompt, timeout_in_sec, structured).await {
+            match cargo_ai::ollama_send_request(&model, &structured_prompt, timeout_in_sec, true).await {
                 Ok(r) => {
                     response.push_str(&r);
                 },
@@ -100,8 +96,6 @@ async fn main() {
 
     } else if let Some(_) = cmd_args.subcommand_matches("response-time") {
         println!("response-time");
-
-        structured = true;
 
         #[derive(Clone, Debug, Deserialize, Serialize)]
         struct ResponseTime {
@@ -142,7 +136,7 @@ async fn main() {
         if server == "ollama" {
             // Send request to Ollama and `await` the LLM response
             
-            match cargo_ai::ollama_send_request(&model, &structured_prompt, timeout_in_sec, structured).await {
+            match cargo_ai::ollama_send_request(&model, &structured_prompt, timeout_in_sec, true).await {
                 Ok(r) => {
                     println!("I'm here");
                     response.push_str(&r);
@@ -156,7 +150,7 @@ async fn main() {
         let is_response_set = ai_cargo.set_response(response);
         println!("AI Cargo: {ai_cargo:#?}");
         
-        // Specific code begins here.
+        // Non-Generic code begins here.
         if is_response_set {
             let days = ai_cargo.get_response().unwrap().days;
             let response_required = ai_cargo.get_response().unwrap().response_required;

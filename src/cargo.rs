@@ -7,8 +7,11 @@ pub struct Cargo<T: for<'de> Deserialize<'de> + Serialize + Clone> {
     context: String,
     samples: Vec<T>,
     response: Option<T>,
-}
+} // TODO: Hints
 
+// We use `for<'de>` to tell the compiler how long any borrowed data inside T
+// must stay valid during deserialization. This annotation only guides the compiler;
+// it does not tie that lifetime to the entire struct. 
 impl<T: for<'de> Deserialize<'de> + Serialize + Clone> Cargo<T> {
     pub fn new(prompt: String, context: String, samples: Vec<T>) -> Self {
         Cargo {
