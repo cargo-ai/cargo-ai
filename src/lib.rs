@@ -27,12 +27,15 @@
 //! - `ollama_api_client`: Functions for interacting with the Ollama API.
 //! - `openai_api_client`: Functions for interacting with the OpenAI API.
 
+mod cargo;
 mod ollama_api_client;
 mod openai_api_client;
 
+pub use cargo::Cargo;
+
 /// Re-exports the `send_request` function from the `ollama_api_client` module.
 /// This function sends a request to the Ollama API and returns the response.
-/// 
+///
 /// # Parameters
 /// - `model`: The name of the model to query.
 /// - `prompt`: The query prompt.
@@ -41,7 +44,7 @@ pub use ollama_api_client::send_request as ollama_send_request;
 
 /// Re-exports the `send_request` function from the `openai_api_client` module.
 /// This function sends a request to the OpenAI API and returns the response.
-/// 
+///
 /// # Parameters
 /// - `model`: The name of the model to query.
 /// - `prompt`: The query prompt.

@@ -1,14 +1,15 @@
 // External Crates
 use reqwest::ClientBuilder; // HTTP client builder
 use serde::{Deserialize, Serialize}; // Data format (e.g.,JSON, TOML) (de)serialization
-use std::time::Duration; // Duration for timeout handling
-use std::env; // for overriding the API URL in tests
+use std::env;
+use std::time::Duration; // Duration for timeout handling // for overriding the API URL in tests
 
 // Request as per Ollama API Guide
 #[derive(Serialize, Debug)]
 struct Request {
     model: String,
     prompt: String,
+    format: String,
     stream: bool,
     options: Options,
 }
@@ -31,10 +32,12 @@ pub async fn send_request(
     model: &String,
     prompt: &String,
     timeout_in_sec: u64,
+    structured: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let request = Request {
         model: model.clone(),
         prompt: prompt.clone(),
+        format: {if structured {"json".to_string()} else {"".to_string()}},
         stream: false,
         options: Options { temperature: 0.75 },
     };
@@ -45,7 +48,7 @@ pub async fn send_request(
 
     // Allow overriding Ollama API URL in tests via OLLAMA_API_URL env var
     let api_url = env::var("OLLAMA_API_URL")
-                            .unwrap_or_else(|_| "http://localhost:11434/api/generate".to_string());   
+        .unwrap_or_else(|_| "http://localhost:11434/api/generate".to_string());
 
     let reply = client
         .post(&api_url)
@@ -66,25 +69,29 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_request_with_mock() {
-
         // Start an async mock server instance
         let mut server = Server::new_async().await;
         let mock_path = "/api/generate";
 
         // Override the API URL to point to our mock server
-        std::env::set_var("OLLAMA_API_URL", format!("{}{}", &server.url().to_string(), &mock_path));
+        std::env::set_var(
+            "OLLAMA_API_URL",
+            format!("{}{}", &server.url().to_string(), &mock_path),
+        );
 
         // Set up the mock endpoint on this server
         let _m = server
             .mock("POST", mock_path)
             .match_header("content-type", "application/json")
             .with_status(200)
-            .with_body(r#"{
+            .with_body(
+                r#"{
                  "model": "test-model",
                  "created_at": "2025-04-19T00:00:00Z",
                  "response": "Mocked response",
                  "done": true
-             }"#)
+             }"#,
+            )
             .create();
 
         // Execute the client against the mock
@@ -92,6 +99,7 @@ mod tests {
             &"test-model".to_string(),
             &"test prompt".to_string(),
             5,
+            false,
         )
         .await
         .expect("send_request failed");
