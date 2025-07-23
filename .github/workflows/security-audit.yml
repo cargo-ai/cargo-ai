@@ -3,8 +3,8 @@ name: Security Audit
 on:
   push:
     branches:
-      - dev/team-zero
-      - RT0-9-Add-GitHub-Action
+      - dev
+      - main
   workflow_dispatch:  # allows manual ad hoc runs from GitHub UI
 
 jobs:
