@@ -3,8 +3,8 @@ name: Security Audit
 on:
   push:
     branches:
-      - dev
       - main
+      - develop
   workflow_dispatch:  # allows manual ad hoc runs from GitHub UI
 
 jobs:
