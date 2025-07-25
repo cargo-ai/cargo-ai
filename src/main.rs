@@ -40,11 +40,7 @@ async fn main() {
 
     let mut prompt = String::new();
 
-    if let Some(_) = cmd_args.subcommand_matches("rude") {
-        println!("Hurry up and ask me a question!");
-    } else {
-        println!("Enter a prompt for {model}!"); // Request to use for input
-    }
+    println!("Enter a prompt for {model}!"); // Request to use for input
 
     stdin().read_line(&mut prompt).expect("Failed to read line"); // Captures user input into prompt String
 
