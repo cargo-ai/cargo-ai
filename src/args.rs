@@ -2,7 +2,6 @@
 use clap::{Arg, ArgMatches, Command};
 
 pub fn build_cli() -> ArgMatches {
-
     // Collect the original command-line arguments
     let mut args: Vec<String> = std::env::args().collect();
 
@@ -17,10 +16,8 @@ pub fn build_cli() -> ArgMatches {
 
     Command::new("cargo-ai")
         .bin_name(bin_name)
-        .subcommand(
-            Command::new("rude")
-                .about("Rude Mode")
-        )
+        .subcommand(Command::new("float-answer").about("Float Answer Mode"))
+        .subcommand(Command::new("response-time").about("Response Time"))
         .arg(
             Arg::new("server")
                 .long("server")
@@ -39,7 +36,7 @@ pub fn build_cli() -> ArgMatches {
             Arg::new("token")
                 .long("token")
                 .help("API token")
-                .global(true)
+                .global(true),
         )
         .arg(
             Arg::new("timeout_in_sec")
