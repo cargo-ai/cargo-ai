@@ -26,8 +26,7 @@ fn main() -> std::io::Result<()> {
         let rust_type = match value {
             Value::String(_) => "String",
             Value::Bool(_) => "bool",
-            Value::Number(n) if n.is_f64() => "f64",
-            Value::Number(_) => "i64",
+            Value::Number(_) => "f64",
             _ => panic!("Unsupported value type for key {}", key),
         };
         struct_fields.push_str(&format!("    pub {}: {},\n", key, rust_type));

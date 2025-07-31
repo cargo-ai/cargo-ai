@@ -86,9 +86,6 @@ async fn main() {
 
         println!("AI Cargo: {ai_cargo:#?}");
 
-        let x: f64 = ai_cargo.get_response().unwrap().number;
-        println!("Return Value:{x}");
-
     } else if let Some(_) = cmd_args.subcommand_matches("float-answer") {
 
         println!("Float Answer Mode Activite");
