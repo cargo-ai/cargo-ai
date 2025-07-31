@@ -4,14 +4,12 @@ use std::io::stdin;
 
 use serde::{Deserialize, Serialize};
 
-include!(concat!(env!("OUT_DIR"), "/sample_response.rs"));
+include!(concat!(env!("OUT_DIR"), "/answer.rs"));
 
 // Initialize Tokio runtime macro
 // Executor: Responsible for polling and running to completion
 #[tokio::main]
 async fn main() {
-
-    println!("Build-script sample response: {}", JSON_SAMPLE_RESPONSE.number);
 
     let cmd_args = args::build_cli();
 
@@ -51,20 +49,12 @@ async fn main() {
 
     let prompt = prompt.trim().to_string(); // Remove trailing newline from user input
 
-    if let Some(_) = cmd_args.subcommand_matches("sample-json") {
+    if let Some(_) = cmd_args.subcommand_matches("json-sample-response") {
 
-        println!("Float Answer Mode Activite");
+        println!("JSON Sample Mode");
 
-        #[derive(Clone, Debug, Deserialize, Serialize)]
-        struct Answer {
-            number: f64,
-        }
-
-        let samples = vec![
-            Answer { number: 4.78 },
-            Answer { number: 2.0 },
-            Answer { number: 3.3333 },
-        ];
+        let samples = answers();
+        println!("Build-script sample responses: {:#?}", samples);
 
         let context = format!("A math question will be asked and you will need to return the answer in the specified JSON format.");
 
