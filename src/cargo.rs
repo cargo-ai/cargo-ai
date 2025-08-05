@@ -36,7 +36,7 @@ impl<T: for<'de> Deserialize<'de> + Serialize + Clone> Cargo<T> {
 
         let sample_jsons = {
             let mut sample_jsons_string = 
-                String::from("Ensure your JSON has all of the key and value fields specified in the example(s) below.\n Samples:\n");
+                String::from("Ensure your JSON has all of the key and value fields specified in the example(s) below. Return a percision point if a number even if a whole number, i.e. 4.0\n Samples:\n");
             for (i, sample_json) in sample_jsons.iter().enumerate() {
                 let header = format!("Sample {i} JSON\n");
                 let body = format!("{sample_json}\n");

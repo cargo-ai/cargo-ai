@@ -4,10 +4,13 @@ use std::io::stdin;
 
 use serde::{Deserialize, Serialize};
 
+include!(concat!(env!("OUT_DIR"), "/answer.rs"));
+
 // Initialize Tokio runtime macro
 // Executor: Responsible for polling and running to completion
 #[tokio::main]
 async fn main() {
+
     let cmd_args = args::build_cli();
 
     // Begin: Argument assignments
@@ -46,7 +49,44 @@ async fn main() {
 
     let prompt = prompt.trim().to_string(); // Remove trailing newline from user input
 
-    if let Some(_) = cmd_args.subcommand_matches("float-answer") {
+    if let Some(_) = cmd_args.subcommand_matches("json-sample-response") {
+
+        println!("JSON Sample Mode");
+
+        let samples = answers();
+        println!("Build-script sample responses: {:#?}", samples);
+
+        let context = format!("A math question will be asked and you will need to return the answer in the specified JSON format.");
+
+        let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, samples);
+
+        println!("Cargo Contents: {ai_cargo:#?}");
+
+        let structured_prompt = ai_cargo.prompt();
+        
+        println!("Structured Prompt: {structured_prompt}");
+
+        let mut response = String::new(); // Holds the LLM response
+
+        if server == "ollama" {
+            // Send request to Ollama and `await` the LLM response
+            match cargo_ai::ollama_send_request(&model, &structured_prompt, timeout_in_sec, true).await {
+                Ok(r) => {
+                    response.push_str(&r);
+                },
+                Err(e) => {
+                    println!("We have an error {}", e);
+                }
+            }
+        }
+
+        println!("{server} Response: {response}");
+        
+        ai_cargo.set_response(response);
+
+        println!("AI Cargo: {ai_cargo:#?}");
+
+    } else if let Some(_) = cmd_args.subcommand_matches("float-answer") {
 
         println!("Float Answer Mode Activite");
 
