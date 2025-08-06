@@ -53,7 +53,8 @@ async fn main() {
 
         println!("JSON Sample Mode");
 
-        let samples = answers();
+        let sample = sample_output();
+        let samples = vec![sample];
         println!("Build-script sample responses: {:#?}", samples);
 
         let context = format!("A math question will be asked and you will need to return the answer in the specified JSON format.");

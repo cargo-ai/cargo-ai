@@ -1,3 +1,7 @@
 {
-  "raining": true
+  "sample_outputs": [
+    {
+      "raining": true
+    }
+  ]
 }
