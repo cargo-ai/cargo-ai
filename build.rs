@@ -7,17 +7,17 @@ use std::{
 use serde_json::Value;
 
 fn main() -> std::io::Result<()> {
-    // Re-run this build script if answer.json ever changes:
-    println!("cargo:rerun-if-changed=answer.json");
+    // Re-run this build script if .agentcfg ever changes:
+    println!("cargo:rerun-if-changed=.agentcfg");
 
-    // 1. Read & parse answer.json
-    let json_str = fs::read_to_string("answer.json")
-        .expect("Failed to read answer.json");
+    // 1. Read & parse .agentcfg
+    let json_str = fs::read_to_string(".agentcfg")
+        .expect("Failed to read .agentcfg");
     let v: Value = serde_json::from_str(&json_str)
-        .expect("Invalid JSON in answer.json");
+        .expect("Invalid JSON in .agentcfg");
 
     let out_dir = env::var("OUT_DIR").unwrap();
-    let dest_path = Path::new(&out_dir).join("answer.rs");
+    let dest_path = Path::new(&out_dir).join(".agentcfg");
     let mut file = File::create(&dest_path)?;
 
     // Generate struct fields

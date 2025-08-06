@@ -4,7 +4,7 @@ use std::io::stdin;
 
 use serde::{Deserialize, Serialize};
 
-include!(concat!(env!("OUT_DIR"), "/answer.rs"));
+include!(concat!(env!("OUT_DIR"), "/.agentcfg"));
 
 // Initialize Tokio runtime macro
 // Executor: Responsible for polling and running to completion
