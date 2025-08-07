@@ -2,6 +2,9 @@
   "sample_outputs": [
     {
       "raining": true
+    },    
+    {
+      "raining": false
     }
   ]
 }
