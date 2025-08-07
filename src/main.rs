@@ -1,10 +1,12 @@
+use reqwest;
+use futures::future::join_all;
 mod args;
 
 use std::io::stdin;
 
 use serde::{Deserialize, Serialize};
 
-include!(concat!(env!("OUT_DIR"), "/answer.rs"));
+include!(concat!(env!("OUT_DIR"), "/.agentcfg"));
 
 // Initialize Tokio runtime macro
 // Executor: Responsible for polling and running to completion
@@ -53,10 +55,43 @@ async fn main() {
 
         println!("JSON Sample Mode");
 
-        let samples = answers();
+        let samples = sample_outputs();
         println!("Build-script sample responses: {:#?}", samples);
 
-        let context = format!("A math question will be asked and you will need to return the answer in the specified JSON format.");
+        let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
+        
+        let resources = resource_urls();
+        println!("Resources: {:#?}", resources);
+
+        if !resources.is_empty() {
+            let urls: Vec<&str> = resources.iter().map(|r| r.url).collect();
+            match fetch_resources_parallel(&urls).await {
+                Ok(results) => {
+                    println!("Fetched Resource Contents:");
+                    for (res, content) in resources.iter().zip(results.iter()) {
+                        println!("Description: {}", res.description);
+                        println!("URL: {}", res.url);
+                        println!("Content:\n{}", content);
+                    }
+                }
+                Err(e) => {
+                    println!("Failed to fetch resources: {}", e);
+                }
+            }
+        }
+
+        // Build data block for LLM context
+        let mut data_block = String::from("Here are the current resource values:\n");
+        if !resources.is_empty() {
+            let urls: Vec<&str> = resources.iter().map(|r| r.url).collect();
+            if let Ok(results) = fetch_resources_parallel(&urls).await {
+                for (res, content) in resources.iter().zip(results.iter()) {
+                    data_block.push_str(&format!("- {} ({}): {}\n", res.description, res.url, content.trim()));
+                }
+            }
+        }
+        let context = format!("{}\n\n{}", static_context, data_block);
+        println!("LLM Context:\n{}", context);
 
         let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, samples);
 
@@ -95,7 +130,7 @@ async fn main() {
             number: f64,
         }
 
-        let samples = vec![
+       let samples = vec![
             Answer { number: 4.78 },
             Answer { number: 2.0 },
             Answer { number: 3.3333 },
@@ -221,4 +256,20 @@ async fn main() {
         }
         println!("{server} Response: {response}");
     }
+}
+
+// TEMPORARY TEST FUNCTION: Fetch resources in parallel; will be relocated later.
+pub async fn fetch_resources_parallel(urls: &[&str]) -> Result<Vec<String>, reqwest::Error> {
+    let client = reqwest::Client::new();
+
+    let futures = urls.iter().map(|&url| {
+        let client = client.clone();
+        async move {
+            let res = client.get(url).send().await?;
+            res.text().await
+        }
+    });
+
+    let results = join_all(futures).await;
+    results.into_iter().collect()
 }
