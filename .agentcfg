@@ -7,4 +7,8 @@
       "raining": false
     }
   ]
+  ,"resource_urls": [
+    "https://worldtimeapi.org/api/timezone/etc/utc",
+    "https://api.open-meteo.com/v1/forecast?latitude=39.10&longitude=-84.51&hourly=precipitation_probability"
+  ]
 }

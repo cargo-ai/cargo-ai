@@ -62,6 +62,17 @@ fn main() -> std::io::Result<()> {
         ));
     }
 
+    // Extract resource URLs
+    let urls = v["resource_urls"]
+        .as_array()
+        .expect("Expected `resource_urls` to be an array");
+
+    let mut url_list = String::new();
+    for url in urls {
+        let url_str = url.as_str().expect("Each resource URL must be a string");
+        url_list.push_str(&format!("        \"{}\",\n", url_str));
+    }
+
     // Generate code
     let generated_code = format!(
         "
@@ -74,9 +85,15 @@ pub fn sample_outputs() -> Vec<SampleOutput> {{
     vec![
 {instances}    ]
 }}
+
+pub fn resource_urls() -> Vec<&'static str> {{
+    vec![
+{url_list}    ]
+}}
 ",
         struct_fields = struct_fields,
-        instances = instances
+        instances = instances,
+        url_list = url_list
     );
 
     // Print to stdout
