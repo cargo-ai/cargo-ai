@@ -60,15 +60,18 @@ async fn main() {
 
         let context = format!("A question will be asked and you will need to return the answer in the specified JSON format.");
         
-        let urls = resource_urls();
-        print!("URLs: {:#?}", urls);
+        let resources = resource_urls();
+        println!("Resources: {:#?}", resources);
 
-        if !urls.is_empty() {
+        if !resources.is_empty() {
+            let urls: Vec<&str> = resources.iter().map(|r| r.url).collect();
             match fetch_resources_parallel(&urls).await {
                 Ok(results) => {
                     println!("Fetched Resource Contents:");
-                    for (i, content) in results.iter().enumerate() {
-                        println!("URL {} Content:\n{}", i + 1, content);
+                    for (res, content) in resources.iter().zip(results.iter()) {
+                        println!("Description: {}", res.description);
+                        println!("URL: {}", res.url);
+                        println!("Content:\n{}", content);
                     }
                 }
                 Err(e) => {

@@ -62,15 +62,19 @@ fn main() -> std::io::Result<()> {
         ));
     }
 
-    // Extract resource URLs
+    // Extract resource URLs as objects
     let urls = v["resource_urls"]
         .as_array()
         .expect("Expected `resource_urls` to be an array");
-
     let mut url_list = String::new();
-    for url in urls {
-        let url_str = url.as_str().expect("Each resource URL must be a string");
-        url_list.push_str(&format!("        \"{}\",\n", url_str));
+    for entry in urls {
+        let obj = entry.as_object().expect("Each resource must be an object");
+        let url_str = obj["url"].as_str().expect("Expected url to be a string");
+        let desc_str = obj["description"].as_str().expect("Expected description to be a string");
+        url_list.push_str(&format!(
+            "        ResourceUrl {{ url: \"{}\", description: \"{}\" }},\n",
+            url_str, desc_str
+        ));
     }
 
     // Generate code
@@ -80,13 +84,18 @@ fn main() -> std::io::Result<()> {
 pub struct SampleOutput {{
 {struct_fields}}}
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ResourceUrl {{
+    pub url: &'static str,
+    pub description: &'static str,
+}}
 
 pub fn sample_outputs() -> Vec<SampleOutput> {{
     vec![
 {instances}    ]
 }}
 
-pub fn resource_urls() -> Vec<&'static str> {{
+pub fn resource_urls() -> Vec<ResourceUrl> {{
     vec![
 {url_list}    ]
 }}
