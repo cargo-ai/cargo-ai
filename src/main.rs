@@ -1,3 +1,5 @@
+use reqwest;
+use futures::future::join_all;
 mod args;
 
 use std::io::stdin;
@@ -57,6 +59,23 @@ async fn main() {
         println!("Build-script sample responses: {:#?}", samples);
 
         let context = format!("A question will be asked and you will need to return the answer in the specified JSON format.");
+        
+        let urls = resource_urls();
+        print!("URLs: {:#?}", urls);
+
+        if !urls.is_empty() {
+            match fetch_resources_parallel(&urls).await {
+                Ok(results) => {
+                    println!("Fetched Resource Contents:");
+                    for (i, content) in results.iter().enumerate() {
+                        println!("URL {} Content:\n{}", i + 1, content);
+                    }
+                }
+                Err(e) => {
+                    println!("Failed to fetch resources: {}", e);
+                }
+            }
+        }
 
         let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, samples);
 
@@ -221,4 +240,20 @@ async fn main() {
         }
         println!("{server} Response: {response}");
     }
+}
+
+// TEMPORARY TEST FUNCTION: Fetch resources in parallel; will be relocated later.
+pub async fn fetch_resources_parallel(urls: &[&str]) -> Result<Vec<String>, reqwest::Error> {
+    let client = reqwest::Client::new();
+
+    let futures = urls.iter().map(|&url| {
+        let client = client.clone();
+        async move {
+            let res = client.get(url).send().await?;
+            res.text().await
+        }
+    });
+
+    let results = join_all(futures).await;
+    results.into_iter().collect()
 }
