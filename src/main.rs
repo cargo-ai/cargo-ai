@@ -58,7 +58,7 @@ async fn main() {
         let samples = sample_outputs();
         println!("Build-script sample responses: {:#?}", samples);
 
-        let context = format!("A question will be asked and you will need to return the answer in the specified JSON format.");
+        let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
         
         let resources = resource_urls();
         println!("Resources: {:#?}", resources);
@@ -79,6 +79,19 @@ async fn main() {
                 }
             }
         }
+
+        // Build data block for LLM context
+        let mut data_block = String::from("Here are the current resource values:\n");
+        if !resources.is_empty() {
+            let urls: Vec<&str> = resources.iter().map(|r| r.url).collect();
+            if let Ok(results) = fetch_resources_parallel(&urls).await {
+                for (res, content) in resources.iter().zip(results.iter()) {
+                    data_block.push_str(&format!("- {} ({}): {}\n", res.description, res.url, content.trim()));
+                }
+            }
+        }
+        let context = format!("{}\n\n{}", static_context, data_block);
+        println!("LLM Context:\n{}", context);
 
         let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, samples);
 
