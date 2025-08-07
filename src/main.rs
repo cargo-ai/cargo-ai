@@ -53,11 +53,10 @@ async fn main() {
 
         println!("JSON Sample Mode");
 
-        let sample = sample_output();
-        let samples = vec![sample];
+        let samples = sample_outputs();
         println!("Build-script sample responses: {:#?}", samples);
 
-        let context = format!("A math question will be asked and you will need to return the answer in the specified JSON format.");
+        let context = format!("A question will be asked and you will need to return the answer in the specified JSON format.");
 
         let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, samples);
 
@@ -96,7 +95,7 @@ async fn main() {
             number: f64,
         }
 
-        let samples = vec![
+       let samples = vec![
             Answer { number: 4.78 },
             Answer { number: 2.0 },
             Answer { number: 3.3333 },

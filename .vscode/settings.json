@@ -1,4 +1,3 @@
 {
-  "rust-analyzer.cargo.buildScripts.enable": true,
-  "rust-analyzer.cargo.loadOutDirsFromCheck": true
+  "rust-analyzer.diagnostics.disabled": ["unresolved-include"]
 }
