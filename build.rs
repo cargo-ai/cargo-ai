@@ -118,11 +118,6 @@ pub fn resource_urls() -> Vec<ResourceUrl> {{
     let dest_path = Path::new(&out_dir).join("agent_model.rs");
     let mut file = File::create(&dest_path)?;
 
-    // Determine output path and create file
-    let out_dir = env::var("OUT_DIR").unwrap();
-    let dest_path = Path::new(&out_dir).join(".agentcfg");
-    let mut file = File::create(&dest_path)?;
-
     // Write to file
     write!(file, "{}", generated_code)?;
 
