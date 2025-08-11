@@ -7,6 +7,7 @@ use std::{
 use serde_json::Value;      // dynamic JSON parsing
 
 fn main() -> std::io::Result<()> {
+
     // Hint to Cargo: only rerun build.rs when the config changes (and when build.rs itself changes).
     println!("cargo:rerun-if-changed=.agentcfg");
 
@@ -23,6 +24,7 @@ fn main() -> std::io::Result<()> {
         .expect("Expected `sample_outputs` to be an array");
 
     // Build struct fields from the first sample to define the struct
+
     let sample = &sample_outputs[0];
 
     let sample_map = sample
@@ -114,6 +116,11 @@ pub fn resource_urls() -> Vec<ResourceUrl> {{
     // OUT_DIR is a Cargo-provided scratch dir for generated artifacts consumed by this crate.
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("agent_model.rs");
+    let mut file = File::create(&dest_path)?;
+
+    // Determine output path and create file
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let dest_path = Path::new(&out_dir).join(".agentcfg");
     let mut file = File::create(&dest_path)?;
 
     // Write to file
