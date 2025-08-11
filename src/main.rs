@@ -6,7 +6,7 @@ use std::io::stdin;
 
 use serde::{Deserialize, Serialize};
 
-include!(concat!(env!("OUT_DIR"), "/.agentcfg"));
+include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
 // Initialize Tokio runtime macro
 // Executor: Responsible for polling and running to completion
@@ -55,8 +55,8 @@ async fn main() {
 
         println!("JSON Sample Mode");
 
-        let samples = sample_outputs();
-        println!("Build-script sample responses: {:#?}", samples);
+        let sample_outputs = sample_outputs();
+        println!("Build-script sample responses: {:#?}", sample_outputs);
 
         let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
         
@@ -93,7 +93,7 @@ async fn main() {
         let context = format!("{}\n\n{}", static_context, data_block);
         println!("LLM Context:\n{}", context);
 
-        let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, samples);
+        let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, sample_outputs);
 
         println!("Cargo Contents: {ai_cargo:#?}");
 
@@ -130,7 +130,7 @@ async fn main() {
             number: f64,
         }
 
-       let samples = vec![
+       let sample_outputs = vec![
             Answer { number: 4.78 },
             Answer { number: 2.0 },
             Answer { number: 3.3333 },
@@ -138,7 +138,7 @@ async fn main() {
 
         let context = format!("A math question will be asked and you will need to return the answer in the specified JSON format.");
 
-        let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, samples);
+        let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, sample_outputs);
 
         println!("Cargo Contents: {ai_cargo:#?}");
 
@@ -178,7 +178,7 @@ async fn main() {
             days: i32,
         }
 
-        let samples = vec![
+        let sample_outputs = vec![
             ResponseTime {
                 response_required: true,
                 days: 2,
@@ -198,7 +198,7 @@ async fn main() {
             messages do not require a response.  Messages that require a response that day \
             should have a required response days value of 0."
         );
-        let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, samples);
+        let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, sample_outputs);
 
         println!("Cargo Contents: {ai_cargo:#?}");
 

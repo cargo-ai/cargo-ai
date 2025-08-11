@@ -10,11 +10,11 @@
   ,"resource_urls": [
     {
       "url": "https://worldtimeapi.org/api/timezone/etc/utc",
-      "description": "Current UTC date and time"
+      "description": "Current UTC date and time."
     },
     {
       "url": "https://api.open-meteo.com/v1/forecast?latitude=39.10&longitude=-84.51&hourly=precipitation_probability",
-      "description": "Hourly precipitation probability for Cincinnati, OH"
+      "description": "Hourly precipitation probabilities for Cincinnati"
     }
   ]
 }
