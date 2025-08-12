@@ -5,6 +5,7 @@ mod args;
 use std::io::stdin;
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
@@ -55,9 +56,6 @@ async fn main() {
 
         println!("JSON Sample Mode");
 
-        let sample_outputs = sample_outputs();
-        println!("Build-script sample responses: {:#?}", sample_outputs);
-
         let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
         
         let resources = resource_urls();
@@ -93,7 +91,11 @@ async fn main() {
         let context = format!("{}\n\n{}", static_context, data_block);
         println!("LLM Context:\n{}", context);
 
-        let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, sample_outputs);
+        let sample: Vec<serde_json::Value> = vec![json!({
+            "example_key": "example_value"
+        })];
+
+        let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, sample);
 
         println!("Cargo Contents: {ai_cargo:#?}");
 

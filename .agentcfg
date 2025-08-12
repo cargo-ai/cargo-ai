@@ -1,13 +1,15 @@
 {
-  "sample_outputs": [
-    {
-      "raining": true
-    },    
-    {
-      "raining": false
-    }
-  ]
-  ,"resource_urls": [
+  "json_schema": {
+    "type": "object",
+    "properties": {
+      "raining": {
+        "type": "boolean",
+        "description": "Indicates whether it is raining."
+      }
+    },
+    "required": ["raining"]
+  },
+  "resource_urls": [
     {
       "url": "https://worldtimeapi.org/api/timezone/etc/utc",
 

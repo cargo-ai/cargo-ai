@@ -18,51 +18,50 @@ fn main() -> std::io::Result<()> {
     let json: Value = serde_json::from_str(&json_str)
         .expect("Invalid JSON in .agentcfg");
 
-    // Extract `sample_outputs` from the config; this defines the LLM's expected JSON schema.
-    let sample_outputs = json["sample_outputs"]
-        .as_array()
-        .expect("Expected `sample_outputs` to be an array");
+    // Extract schema: properties + required (optional)
+    let schema = json["json_schema"].as_object().expect("Expected `json_schema` to be an object");
+    let props = schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .expect("Expected `json_schema.properties` to be an object");
+    let required: Vec<String> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_else(|| Vec::new());
 
-    // Build struct fields from the first sample to define the struct
+    let schema_json = serde_json::to_string_pretty(&json["json_schema"]).expect("Failed to serialize json_schema");
 
-    let sample = &sample_outputs[0];
-
-    let sample_map = sample
-        .as_object()
-        .expect("Expected element 0 of `sample_outputs` to be an object");
-
+    // Build struct fields from schema
     let mut struct_fields = String::new();
-    
-    for (key, value) in sample_map.iter() {
-        let rust_type = match value {
-            Value::String(_) => "String",
-            Value::Bool(_) => "bool",
-            Value::Number(_) => "f64",
-            _ => panic!("Unsupported type for field `{}`", key),
+    for (key, prop) in props.iter() {
+        let t = prop.get("type").and_then(|v| v.as_str()).unwrap_or("object");
+        let base_ty = match t {
+            "string" => "String".to_string(),
+            "boolean" => "bool".to_string(),
+            "number" => "f64".to_string(),
+            "integer" => "i64".to_string(),
+            "array" => {
+                // Infer array item type if provided; default to serde_json::Value
+                let item_ty = prop
+                    .get("items")
+                    .and_then(|it| it.get("type"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("any");
+                let inner = match item_ty {
+                    "string" => "String",
+                    "boolean" => "bool",
+                    "number" => "f64",
+                    "integer" => "i64",
+                    _ => "serde_json::Value",
+                };
+                format!("Vec<{}>", inner)
+            }
+            _ => "serde_json::Value".to_string(),
         };
-        struct_fields.push_str(&format!("    pub {}: {},\n", key, rust_type));}
-
-    // Build instance list from all samples
-    let mut instances = String::new();
-    for sample in sample_outputs {
-        let sample_map = sample
-            .as_object()
-            .expect("Each `sample_output` must be an object");
-
-        let mut fields = String::new();
-        for (key, value) in sample_map.iter() {
-            let rust_value = match value {
-                Value::String(s) => format!("\"{}\".to_string()", s),
-                Value::Bool(b) => b.to_string(),
-                Value::Number(n) => n.to_string(),
-                _ => unreachable!(),
-            };
-            fields.push_str(&format!("            {}: {},\n", key, rust_value));
-        }
-        instances.push_str(&format!(
-            "        Output {{\n{fields}        }},\n",
-            fields = fields
-        ));
+        let is_required = required.iter().any(|r| r == key);
+        let rust_ty = if is_required { base_ty } else { format!("Option<{}>", base_ty) };
+        struct_fields.push_str(&format!("    pub {}: {},\n", key, rust_ty));
     }
 
     // Extract resource URLs as objects
@@ -82,7 +81,7 @@ fn main() -> std::io::Result<()> {
 
     // Generate code
     let generated_code = format!(
-        "
+        r##"
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Output {{
 {struct_fields}}}
@@ -93,19 +92,20 @@ pub struct ResourceUrl {{
     pub description: &'static str,
 }}
 
-pub fn sample_outputs() -> Vec<Output> {{
-    vec![
-{instances}    ]
-}}
-
 pub fn resource_urls() -> Vec<ResourceUrl> {{
     vec![
 {url_list}    ]
 }}
-",
+
+/// JSON Schema that defines the expected LLM output structure.
+/// Returned as a raw string for easy inclusion in prompts or API calls.
+pub fn json_schema() -> &'static str {{
+  r#"{schema_json}"#
+    }}
+"##,
         struct_fields = struct_fields,
-        instances = instances,
-        url_list = url_list
+        url_list = url_list,
+        schema_json = schema_json
     );
 
     // Print each generated line as a separate Cargo warning (multi-line warning output)
