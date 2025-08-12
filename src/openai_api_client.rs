@@ -8,13 +8,7 @@ pub struct Request {
     pub model: String,          // Model name for OpenAI
     pub messages: Vec<Message>, // List of messages for chat format
     pub temperature: f64,       // Temperature setting
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_format: Option<ResponseFormat>, // Optional: enforce valid JSON output
-}
-
-#[derive(Serialize, Debug)]
-pub struct ResponseFormat {
-    pub r#type: String, // e.g., "json_object"
+    pub response_format: serde_json::Value,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -54,7 +48,7 @@ pub async fn send_request(
     prompt: &String,
     timeout_in_sec: u64,
     token: &String,
-    structured: bool,
+    response_format: serde_json::Value,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
@@ -77,22 +71,23 @@ pub async fn send_request(
         model: model.clone(),
         messages,
         temperature,
-        response_format: if structured {
-            Some(ResponseFormat { r#type: "json_object".to_string() })
-        } else {
-            None
-        },
+        response_format: response_format.clone(),
     };
 
-    let response = client
+    let http_resp = client
         .post("https://api.openai.com/v1/chat/completions")
         .header("Authorization", format!("Bearer {}", token))
         .header("Content-Type", "application/json")
         .json(&request)
         .send()
-        .await?
-        .json::<Response>()
         .await?;
+
+    // TEMP: print raw server response (without consuming parse-ability)
+    let body_bytes = http_resp.bytes().await?;
+    println!("Raw OpenAI response:\n{}", String::from_utf8_lossy(&body_bytes));
+
+    // Parse as usual from the captured bytes
+    let response: Response = serde_json::from_slice(&body_bytes)?;
 
     let response_content = response
         .choices

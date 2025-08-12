@@ -30,7 +30,7 @@ fn main() -> std::io::Result<()> {
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_else(|| Vec::new());
 
-    let schema_json = serde_json::to_string_pretty(&json["json_schema"]).expect("Failed to serialize json_schema");
+    let schema_value = json["json_schema"].clone();
 
     // Build struct fields from schema
     let mut struct_fields = String::new();
@@ -98,14 +98,14 @@ pub fn resource_urls() -> Vec<ResourceUrl> {{
 }}
 
 /// JSON Schema that defines the expected LLM output structure.
-/// Returned as a raw string for easy inclusion in prompts or API calls.
-pub fn json_schema() -> &'static str {{
-  r#"{schema_json}"#
-    }}
+/// Returned as a `serde_json::Value` for direct API use.
+pub fn json_schema_value() -> serde_json::Value {{
+    serde_json::json!({schema_value})
+}}
 "##,
         struct_fields = struct_fields,
         url_list = url_list,
-        schema_json = schema_json
+        schema_value = schema_value
     );
 
     // Print each generated line as a separate Cargo warning (multi-line warning output)

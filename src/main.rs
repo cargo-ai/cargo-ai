@@ -107,7 +107,7 @@ async fn main() {
 
         if server == "ollama" {
             // Send request to Ollama and `await` the LLM response
-            match cargo_ai::ollama_send_request(&model, &structured_prompt, timeout_in_sec, true).await {
+            match cargo_ai::ollama_send_request(&model, &structured_prompt, timeout_in_sec, json_schema_value()).await {
                 Ok(r) => {
                     response.push_str(&r);
                 },
@@ -116,8 +116,23 @@ async fn main() {
                 }
             }
         } else if server == "openai" {
+
+            let mut schema = json_schema_value(); // this is a serde_json::Value (object)
+            if let Some(obj) = schema.as_object_mut() {
+                obj.insert("additionalProperties".into(), serde_json::Value::Bool(false));
+            }
+
+            let fmt = serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "Output",
+                "schema": schema,     // now with additionalProperties: false
+                "strict": true
+            }
+            });
+
             // Send request to OpenAI and `await` the LLM response
-            match cargo_ai::openai_send_request(&model, &structured_prompt, timeout_in_sec, &token, true).await {
+            match cargo_ai::openai_send_request(&model, &structured_prompt, timeout_in_sec, &token, fmt).await {
                 Ok(r) => response.push_str(&r),
                 Err(e) => {
                     println!("We have an error {}", e);
@@ -135,7 +150,7 @@ async fn main() {
         let mut response = String::new(); // Holds the LLM response
         if server == "ollama" {
             // Send request to Ollama and `await` the LLM response
-            match cargo_ai::ollama_send_request(&model, &prompt, timeout_in_sec, false).await {
+            match cargo_ai::ollama_send_request(&model, &prompt, timeout_in_sec, json_schema_value()).await {
                 Ok(r) => response.push_str(&r),
                 Err(e) => {
                     println!("We have an error {}", e);
@@ -143,7 +158,7 @@ async fn main() {
             };
         } else if server == "openai" {
             // Send request to OpenAI and `await` the LLM response
-            match cargo_ai::openai_send_request(&model, &prompt, timeout_in_sec, &token, false).await {
+            match cargo_ai::openai_send_request(&model, &prompt, timeout_in_sec, &token, json_schema_value()).await {
                 Ok(r) => response.push_str(&r),
                 Err(e) => {
                     println!("We have an error {}", e);
