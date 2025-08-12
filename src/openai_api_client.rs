@@ -8,6 +8,13 @@ pub struct Request {
     pub model: String,          // Model name for OpenAI
     pub messages: Vec<Message>, // List of messages for chat format
     pub temperature: f64,       // Temperature setting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>, // Optional: enforce valid JSON output
+}
+
+#[derive(Serialize, Debug)]
+pub struct ResponseFormat {
+    pub r#type: String, // e.g., "json_object"
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -47,6 +54,7 @@ pub async fn send_request(
     prompt: &String,
     timeout_in_sec: u64,
     token: &String,
+    structured: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
@@ -63,10 +71,17 @@ pub async fn send_request(
 
     let messages = vec![message];
 
+    // When `structured` is true, request JSON-only output (OpenAI: response_format = json_object).
+    // This is equivalent to Ollama's `format: "json"` and enforces valid JSON shape at the transport level.
     let request = Request {
         model: model.clone(),
         messages,
         temperature,
+        response_format: if structured {
+            Some(ResponseFormat { r#type: "json_object".to_string() })
+        } else {
+            None
+        },
     };
 
     let response = client

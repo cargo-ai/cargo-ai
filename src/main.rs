@@ -113,6 +113,14 @@ async fn main() {
                     println!("We have an error {}", e);
                 }
             }
+        } else if server == "openai" {
+            // Send request to OpenAI and `await` the LLM response
+            match cargo_ai::openai_send_request(&model, &structured_prompt, timeout_in_sec, &token, true).await {
+                Ok(r) => response.push_str(&r),
+                Err(e) => {
+                    println!("We have an error {}", e);
+                }
+            };
         }
 
         println!("{server} Response: {response}");
@@ -133,7 +141,7 @@ async fn main() {
             };
         } else if server == "openai" {
             // Send request to OpenAI and `await` the LLM response
-            match cargo_ai::openai_send_request(&model, &prompt, timeout_in_sec, &token).await {
+            match cargo_ai::openai_send_request(&model, &prompt, timeout_in_sec, &token, false).await {
                 Ok(r) => response.push_str(&r),
                 Err(e) => {
                     println!("We have an error {}", e);
