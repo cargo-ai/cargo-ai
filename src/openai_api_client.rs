@@ -54,7 +54,7 @@ pub async fn send_request(
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()?; // 30 sec Default too short for some requests.
 
-    let temperature: f64 = 0.75;
+    let temperature: f64 = 1.0;
 
     let role = String::from("user");
 
