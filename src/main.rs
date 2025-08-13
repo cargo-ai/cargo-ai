@@ -5,7 +5,6 @@ mod args;
 use std::io::stdin;
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
@@ -91,11 +90,7 @@ async fn main() {
         let context = format!("{}\n\n{}", static_context, data_block);
         println!("LLM Context:\n{}", context);
 
-        let sample: Vec<serde_json::Value> = vec![json!({
-            "example_key": "example_value"
-        })];
-
-        let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, sample);
+        let mut ai_cargo = cargo_ai::Cargo::<Output>::new(prompt.clone(), context);
 
         println!("Cargo Contents: {ai_cargo:#?}");
 
@@ -117,19 +112,19 @@ async fn main() {
             }
         } else if server == "openai" {
 
-            let mut schema = json_schema_value(); // this is a serde_json::Value (object)
-            if let Some(obj) = schema.as_object_mut() {
-                obj.insert("additionalProperties".into(), serde_json::Value::Bool(false));
-            }
+        let mut schema = json_schema_value(); // this is a serde_json::Value (object)
+        if let Some(obj) = schema.as_object_mut() {
+            obj.insert("additionalProperties".into(), serde_json::Value::Bool(false));
+        }
 
-            let fmt = serde_json::json!({
-            "type": "json_schema",
-            "json_schema": {
-                "name": "Output",
-                "schema": schema,     // now with additionalProperties: false
-                "strict": true
-            }
-            });
+        let fmt = serde_json::json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "Output",
+            "schema": schema,     // now with additionalProperties: false
+            "strict": true
+        }
+        });
 
             // Send request to OpenAI and `await` the LLM response
             match cargo_ai::openai_send_request(&model, &structured_prompt, timeout_in_sec, &token, fmt).await {
