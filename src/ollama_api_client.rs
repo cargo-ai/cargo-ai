@@ -9,7 +9,7 @@ use std::time::Duration; // Duration for timeout handling // for overriding the 
 struct Request {
     model: String,
     prompt: String,
-    format: String,
+    format: serde_json::Value,
     stream: bool,
     options: Options,
 }
@@ -32,14 +32,14 @@ pub async fn send_request(
     model: &String,
     prompt: &String,
     timeout_in_sec: u64,
-    structured: bool,
+    format: serde_json::Value,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let request = Request {
         model: model.clone(),
         prompt: prompt.clone(),
-        format: {if structured {"json".to_string()} else {"".to_string()}},
+        format: format.clone(),
         stream: false,
-        options: Options { temperature: 0.75 },
+        options: Options { temperature: 0.75 }
     };
 
     let client = ClientBuilder::new()
@@ -99,7 +99,11 @@ mod tests {
             &"test-model".to_string(),
             &"test prompt".to_string(),
             5,
-            false,
+            serde_json::json!({
+                "type": "object",
+                "properties": { "ok": { "type": "boolean" } },
+                "required": ["ok"]
+            }),
         )
         .await
         .expect("send_request failed");

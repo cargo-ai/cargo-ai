@@ -1,17 +1,19 @@
 {
-  "sample_outputs": [
-    {
-      "raining": true
-    },    
-    {
-      "raining": false
-    }
-  ]
-  ,"resource_urls": [
+  "json_schema": {
+    "type": "object",
+    "properties": {
+      "raining": {
+        "type": "boolean",
+        "description": "Indicates whether it is raining."
+      }
+    },
+    "required": ["raining"]
+  },
+  "resource_urls": [
     {
       "url": "https://worldtimeapi.org/api/timezone/etc/utc",
 
-      "description": "Current UTC date and time"
+      "description": "Current UTC date and time."
     },
     {
       "url": "https://api.open-meteo.com/v1/forecast?latitude=39.10&longitude=-84.51&hourly=precipitation_probability",

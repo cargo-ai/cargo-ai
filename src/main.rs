@@ -55,9 +55,6 @@ async fn main() {
 
         println!("JSON Sample Mode");
 
-        let sample_outputs = sample_outputs();
-        println!("Build-script sample responses: {:#?}", sample_outputs);
-
         let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
         
         let resources = resource_urls();
@@ -81,7 +78,7 @@ async fn main() {
         }
 
         // Build data block for LLM context
-        let mut data_block = String::from("Here are the current resource values:\n");
+        let mut data_block = String::from("Here are some resources to aid in your response:\n");
         if !resources.is_empty() {
             let urls: Vec<&str> = resources.iter().map(|r| r.url).collect();
             if let Ok(results) = fetch_resources_parallel(&urls).await {
@@ -93,7 +90,7 @@ async fn main() {
         let context = format!("{}\n\n{}", static_context, data_block);
         println!("LLM Context:\n{}", context);
 
-        let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, sample_outputs);
+        let mut ai_cargo = cargo_ai::Cargo::<Output>::new(prompt.clone(), context);
 
         println!("Cargo Contents: {ai_cargo:#?}");
 
@@ -105,7 +102,7 @@ async fn main() {
 
         if server == "ollama" {
             // Send request to Ollama and `await` the LLM response
-            match cargo_ai::ollama_send_request(&model, &structured_prompt, timeout_in_sec, true).await {
+            match cargo_ai::ollama_send_request(&model, &structured_prompt, timeout_in_sec, json_schema_value()).await {
                 Ok(r) => {
                     response.push_str(&r);
                 },
@@ -113,6 +110,29 @@ async fn main() {
                     println!("We have an error {}", e);
                 }
             }
+        } else if server == "openai" {
+
+        let mut schema = json_schema_value(); // this is a serde_json::Value (object)
+        if let Some(obj) = schema.as_object_mut() {
+            obj.insert("additionalProperties".into(), serde_json::Value::Bool(false));
+        }
+
+        let fmt = serde_json::json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "Output",
+            "schema": schema,     // now with additionalProperties: false
+            "strict": true
+        }
+        });
+
+            // Send request to OpenAI and `await` the LLM response
+            match cargo_ai::openai_send_request(&model, &structured_prompt, timeout_in_sec, &token, fmt).await {
+                Ok(r) => response.push_str(&r),
+                Err(e) => {
+                    println!("We have an error {}", e);
+                }
+            };
         }
 
         println!("{server} Response: {response}");
@@ -121,125 +141,11 @@ async fn main() {
 
         println!("AI Cargo: {ai_cargo:#?}");
 
-    } else if let Some(_) = cmd_args.subcommand_matches("float-answer") {
-
-        println!("Float Answer Mode Activite");
-
-        #[derive(Clone, Debug, Deserialize, Serialize)]
-        struct Answer {
-            number: f64,
-        }
-
-       let sample_outputs = vec![
-            Answer { number: 4.78 },
-            Answer { number: 2.0 },
-            Answer { number: 3.3333 },
-        ];
-
-        let context = format!("A math question will be asked and you will need to return the answer in the specified JSON format.");
-
-        let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, sample_outputs);
-
-        println!("Cargo Contents: {ai_cargo:#?}");
-
-        let structured_prompt = ai_cargo.prompt();
-        
-        println!("Structured Prompt: {structured_prompt}");
-
-        let mut response = String::new(); // Holds the LLM response
-
-        if server == "ollama" {
-            // Send request to Ollama and `await` the LLM response
-            match cargo_ai::ollama_send_request(&model, &structured_prompt, timeout_in_sec, true).await {
-                Ok(r) => {
-                    response.push_str(&r);
-                },
-                Err(e) => {
-                    println!("We have an error {}", e);
-                }
-            }
-        }
-
-        println!("{server} Response: {response}");
-        
-        ai_cargo.set_response(response);
-
-        println!("AI Cargo: {ai_cargo:#?}");
-
-        let x: f64 = ai_cargo.get_response().unwrap().number;
-        println!("Return Value:{x}");
-
-    } else if let Some(_) = cmd_args.subcommand_matches("response-time") {
-        println!("response-time");
-
-        #[derive(Clone, Debug, Deserialize, Serialize)]
-        struct ResponseTime {
-            response_required: bool,
-            days: i32,
-        }
-
-        let sample_outputs = vec![
-            ResponseTime {
-                response_required: true,
-                days: 2,
-            },
-            ResponseTime {
-                response_required: false,
-                days: 0
-            },
-        ]; 
-        
-        // Generic
-        let context = format!(
-            "The user received a message, which will be provided in the prompt, \
-            you are to indicate if a response is required and, if so, \
-            how soon a response is required in days. A response is not requied unless \
-            the message sender is explicitly eliciting a response.  Purely informational \
-            messages do not require a response.  Messages that require a response that day \
-            should have a required response days value of 0."
-        );
-        let mut ai_cargo = cargo_ai::Cargo::new(prompt.clone(), context, sample_outputs);
-
-        println!("Cargo Contents: {ai_cargo:#?}");
-
-        let structured_prompt = ai_cargo.prompt();
-        
-        println!("Structured Prompt: {structured_prompt}");
-
-        let mut response = String::new(); // Holds the LLM response
-
-        if server == "ollama" {
-            // Send request to Ollama and `await` the LLM response
-            
-            match cargo_ai::ollama_send_request(&model, &structured_prompt, timeout_in_sec, true).await {
-                Ok(r) => {
-                    println!("I'm here");
-                    response.push_str(&r);
-                },
-                Err(e) => {
-                    println!("We have an error {}", e);
-                }
-            }
-        }
-        println!("{server} Response: {response}");
-        let is_response_set = ai_cargo.set_response(response);
-        println!("AI Cargo: {ai_cargo:#?}");
-        
-        // Non-Generic code begins here.
-        if is_response_set {
-            let days = ai_cargo.get_response().unwrap().days;
-            let response_required = ai_cargo.get_response().unwrap().response_required;
-            if response_required { 
-                println!("Respond in {days} days.");
-            } else {println!("Response not required.");}
-        } else {
-            panic!("Response Error");
-        }
     } else {
         let mut response = String::new(); // Holds the LLM response
         if server == "ollama" {
             // Send request to Ollama and `await` the LLM response
-            match cargo_ai::ollama_send_request(&model, &prompt, timeout_in_sec, false).await {
+            match cargo_ai::ollama_send_request(&model, &prompt, timeout_in_sec, json_schema_value()).await {
                 Ok(r) => response.push_str(&r),
                 Err(e) => {
                     println!("We have an error {}", e);
@@ -247,7 +153,7 @@ async fn main() {
             };
         } else if server == "openai" {
             // Send request to OpenAI and `await` the LLM response
-            match cargo_ai::openai_send_request(&model, &prompt, timeout_in_sec, &token).await {
+            match cargo_ai::openai_send_request(&model, &prompt, timeout_in_sec, &token, json_schema_value()).await {
                 Ok(r) => response.push_str(&r),
                 Err(e) => {
                     println!("We have an error {}", e);
