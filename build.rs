@@ -82,7 +82,8 @@ fn main() -> std::io::Result<()> {
     // Generate code
     let generated_code = format!(
         r##"
-#[derive(Clone, Debug, Deserialize, Serialize)]
+use schemars::{{JsonSchema, schema_for}};
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct Output {{
 {struct_fields}}}
 
@@ -98,14 +99,20 @@ pub fn resource_urls() -> Vec<ResourceUrl> {{
 }}
 
 /// JSON Schema that defines the expected LLM output structure.
+/// Derived from the `Output` struct to ensure single source of truth.
 /// Returned as a `serde_json::Value` for direct API use.
 pub fn json_schema_value() -> serde_json::Value {{
-    serde_json::json!({schema_value})
+    let schema = schema_for!(Output); // schemars::schema::Schema in this setup
+    let mut v = serde_json::to_value(&schema).expect("Failed to serialize derived schema");
+    // Ensure strictness expected by some providers (e.g., OpenAI JSON Schema mode)
+    if let Some(obj) = v.as_object_mut() {{
+        obj.entry("additionalProperties").or_insert(serde_json::Value::Bool(false));
+    }}
+    v
 }}
 "##,
         struct_fields = struct_fields,
-        url_list = url_list,
-        schema_value = schema_value
+        url_list = url_list
     );
 
     // Print each generated line as a separate Cargo warning (multi-line warning output)
