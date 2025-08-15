@@ -1,13 +1,12 @@
 {
-  "json_schema": {
+  "agent_schema": {
     "type": "object",
     "properties": {
       "raining": {
         "type": "boolean",
         "description": "Indicates whether it is raining."
       }
-    },
-    "required": ["raining"]
+    }
   },
   "resource_urls": [
     {
@@ -17,7 +16,20 @@
     },
     {
       "url": "https://api.open-meteo.com/v1/forecast?latitude=39.10&longitude=-84.51&hourly=precipitation_probability",
-      "description": "Hourly precipitation probability for Cincinnati, OH"
+      "description": "Hourly precipitation probability for Cincinnati, my area."
+    }
+  ],
+  "actions": [
+    {
+      "name": "umbrella_hint_exec",
+      "when": [
+        { "field": "raining", "op": "eq", "value": true }
+      ],
+      "run": {
+        "kind": "exec",
+        "program": "echo",
+        "args": ["bring an umbrella"]
+      }
     }
   ]
 }

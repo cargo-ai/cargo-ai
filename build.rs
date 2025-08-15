@@ -19,18 +19,18 @@ fn main() -> std::io::Result<()> {
         .expect("Invalid JSON in .agentcfg");
 
     // Extract schema: properties + required (optional)
-    let schema = json["json_schema"].as_object().expect("Expected `json_schema` to be an object");
+    let schema = json["agent_schema"].as_object().expect("Expected `agent_schema` to be an object");
     let props = schema
         .get("properties")
         .and_then(|p| p.as_object())
-        .expect("Expected `json_schema.properties` to be an object");
+        .expect("Expected `agent_schema.properties` to be an object");
     let required: Vec<String> = schema
         .get("required")
         .and_then(|r| r.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_else(|| Vec::new());
 
-    let schema_value = json["json_schema"].clone();
+    let schema_value = json["agent_schema"].clone();
 
     // Build struct fields from schema
     let mut struct_fields = String::new();
@@ -102,14 +102,24 @@ pub fn resource_urls() -> Vec<ResourceUrl> {{
 /// Derived from the `Output` struct to ensure single source of truth.
 /// Returned as a `serde_json::Value` for direct API use.
 pub fn json_schema_value() -> serde_json::Value {{
-    let schema = schema_for!(Output); // schemars::schema::Schema in this setup
+    let schema = schema_for!(Output);
     let mut v = serde_json::to_value(&schema).expect("Failed to serialize derived schema");
-    // Ensure strictness expected by some providers (e.g., OpenAI JSON Schema mode)
+
     if let Some(obj) = v.as_object_mut() {{
-        obj.entry("additionalProperties").or_insert(serde_json::Value::Bool(false));
+        // Ensure strictness expected by some providers
+        obj.entry("additionalProperties")
+            .or_insert(serde_json::Value::Bool(false));
+
+        // Add required array based on properties if not already present
+        if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {{
+            let required_fields: Vec<serde_json::Value> =
+                props.keys().map(|k| serde_json::Value::String(k.clone())).collect();
+            obj.insert("required".to_string(), serde_json::Value::Array(required_fields));
+        }}
     }}
+
     v
-}}
+    }}
 "##,
         struct_fields = struct_fields,
         url_list = url_list
