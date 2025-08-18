@@ -158,6 +158,49 @@ fn main() -> std::io::Result<()> {
         actions.push(action);
     }
 
+    // Generation Action Code
+    let mut action_code = String::new();
+
+    for action in actions {
+
+        let name = action.name;
+
+        let conditions = action.when.iter()
+            .map(|condition| format!(
+                "Condition {{
+                    field: \"{}\",
+                    op: \"{}\",
+                    value: \"{}\",
+                }}", condition.field, condition.op, condition.value))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let run_steps = action.run.iter()
+            .map(|run_step| {
+                let args = run_step.args
+                    .iter()
+                    .map(|arg| format!("\"{}\"", arg))  // wrap each arg in quotes
+                    .collect::<Vec<String>>()
+                    .join(", "); // join with commas
+                format!(
+                    "RunStep {{
+                        kind: \"{}\",
+                        program: \"{}\",
+                        args: vec![{}],
+                    }}", run_step.kind, run_step.program, args)
+                })
+            .collect::<Vec<_>>()
+            .join(",");
+
+        action_code.push_str(&format!(
+            "Action {{
+                name: \"{}\".to_string(),
+                when: vec![{}],
+                run: vec![{}],
+            }},", name, conditions, run_steps
+        ));
+    }
+
     // Generate code
     let generated_code = format!(
         r##"
@@ -221,10 +264,20 @@ pub struct Action {{
     run: Vec<RunStep>,
 }}
 
+pub fn resource_urls() -> Vec<ResourceUrl> {{
+    vec![
+{url_list}    ]
+}}
+
+pub fn actions() -> Vec<Action> {{
+    vec![
+{action_code}    ]
+}}
     
 "##,
         struct_fields = struct_fields,
-        url_list = url_list
+        url_list = url_list,
+        action_code = action_code,
     );
 
     // Print each generated line as a separate Cargo warning (multi-line warning output)
