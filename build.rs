@@ -168,9 +168,9 @@ fn main() -> std::io::Result<()> {
         let conditions = action.when.iter()
             .map(|condition| format!(
                 "Condition {{
-                    field: \"{}\",
-                    op: \"{}\",
-                    value: \"{}\",
+                    field: \"{}\".to_string(),
+                    op: \"{}\".to_string(),
+                    value: \"{}\".to_string(),
                 }}", condition.field, condition.op, condition.value))
             .collect::<Vec<_>>()
             .join(",");
@@ -179,13 +179,13 @@ fn main() -> std::io::Result<()> {
             .map(|run_step| {
                 let args = run_step.args
                     .iter()
-                    .map(|arg| format!("\"{}\"", arg))  // wrap each arg in quotes
+                    .map(|arg| format!("\"{}\".to_string()", arg))  // wrap each arg as String
                     .collect::<Vec<String>>()
                     .join(", "); // join with commas
                 format!(
                     "RunStep {{
-                        kind: \"{}\",
-                        program: \"{}\",
+                        kind: \"{}\".to_string(),
+                        program: \"{}\".to_string(),
                         args: vec![{}],
                     }}", run_step.kind, run_step.program, args)
                 })
@@ -262,11 +262,6 @@ pub struct Action {{
     name: String,
     when: Vec<Condition>,
     run: Vec<RunStep>,
-}}
-
-pub fn resource_urls() -> Vec<ResourceUrl> {{
-    vec![
-{url_list}    ]
 }}
 
 pub fn actions() -> Vec<Action> {{
