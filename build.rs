@@ -6,6 +6,27 @@ use std::{
 };
 use serde_json::Value;      // dynamic JSON parsing
 
+#[derive(Debug)]
+struct Condition {
+    field: String,
+    op: String,
+    value: String,
+}
+
+#[derive(Debug)]
+struct RunStep {
+    kind: String,
+    program: String,
+    args: Vec<String>,
+}
+
+#[derive(Debug)]
+struct Action {
+    name: String,
+    when: Vec<Condition>,
+    run: Vec<RunStep>,
+}
+
 fn main() -> std::io::Result<()> {
 
     // Hint to Cargo: only rerun build.rs when the config changes (and when build.rs itself changes).
@@ -79,6 +100,64 @@ fn main() -> std::io::Result<()> {
         ));
     }
 
+    let mut actions: Vec<Action> = Vec::new(); // For configured 'action' objects.
+
+    // Extract actions as objects
+    let actions_cfg = json["actions"]
+        .as_array()
+        .expect("Expected `actions` to be an array");
+
+    for action_cfg in actions_cfg {
+        let name = action_cfg["name"].as_str().expect("Expected action name").to_string();
+        println!("Action Name: {name}");
+        
+        let conditions_cfg = action_cfg["when"].as_array().expect("Expected 'when' to be an array.");
+
+        let mut conditions: Vec<Condition> = Vec::new();
+
+        for condition_cfg in conditions_cfg {
+            let field = condition_cfg["field"].as_str().expect("Expected 'field' to be a string").to_string();
+            let op = condition_cfg["op"].as_str().expect("Expected 'op' to be a string").to_string();
+            let value = condition_cfg["value"].to_string();
+
+            let condition = Condition {
+               field,
+               op,
+               value,
+            };
+
+            conditions.push(condition);
+        }
+
+        let mut run_steps: Vec<RunStep> = Vec::new();
+
+        let runs_cfg = action_cfg["run"]
+            .as_array()
+            .expect("Expected 'run' to be an array.");
+
+        for run_cfg in runs_cfg {
+            let kind = run_cfg["kind"].as_str().expect("Expected 'kind' to be a string").to_string();
+            let program = run_cfg["program"].as_str().expect("Expected 'program' to be a string").to_string();
+            let args: Vec<String> = run_cfg["args"].as_array().expect("Expect 'args' to be an array.").iter().map(|x| x.as_str().unwrap().to_string()).collect();
+
+            let run_step = RunStep {
+                kind,
+                program,
+                args
+            };
+
+            run_steps.push(run_step);
+        }
+
+        let action = Action {
+            name,
+            when: conditions,
+            run: run_steps,
+        };
+        
+        actions.push(action);
+    }
+
     // Generate code
     let generated_code = format!(
         r##"
@@ -120,6 +199,29 @@ pub fn json_schema_value() -> serde_json::Value {{
 
     v
     }}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Condition {{
+    field: String,
+    op: String,
+    value: String,
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RunStep {{
+    kind: String,
+    program: String,
+    args: Vec<String>,
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Action {{
+    name: String,
+    when: Vec<Condition>,
+    run: Vec<RunStep>,
+}}
+
+    
 "##,
         struct_fields = struct_fields,
         url_list = url_list
