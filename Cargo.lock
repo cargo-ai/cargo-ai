@@ -143,6 +143,7 @@ version = "0.0.5"
 dependencies = [
  "clap",
  "futures",
+ "jsonlogic",
  "mockito",
  "reqwest",
  "schemars",
@@ -740,6 +741,15 @@ checksum = "1cfaf33c695fc6e08064efbc1f72ec937429614f25eef83af942d0e227c3a28f"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "jsonlogic"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fde0699c6109316a5add3d42ae21ae954f207739f12b68914a0d447b9aa45e6f"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

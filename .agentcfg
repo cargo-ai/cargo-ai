@@ -23,9 +23,9 @@
   "actions": [
     {
       "name": "umbrella_hint_exec",
-      "when": [
-        { "field": "raining", "op": "eq", "value": true }
-      ],
+      "logic": {
+        "==": [ { "var": "raining" }, true ]
+      },
       "run": [
         {
           "kind": "exec",

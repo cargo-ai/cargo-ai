@@ -4,14 +4,7 @@ use std::{
     io::Write,              // trait for write! / .write() on File
     path::Path,             // path construction / manipulation
 };
-use serde_json::Value;      // dynamic JSON parsing
-
-#[derive(Debug)]
-struct Condition {
-    field: String,
-    op: String,
-    value: String,
-}
+use serde_json;      // dynamic JSON parsing
 
 #[derive(Debug)]
 struct RunStep {
@@ -23,7 +16,7 @@ struct RunStep {
 #[derive(Debug)]
 struct Action {
     name: String,
-    when: Vec<Condition>,
+    logic: serde_json::Value, // Follows the JSON Logic Standard
     run: Vec<RunStep>,
 }
 
@@ -36,7 +29,7 @@ fn main() -> std::io::Result<()> {
     // For now, this build script only supports JSON; future versions may support TOML/YAML.
     let json_str = fs::read_to_string(".agentcfg")
         .expect("Failed to read .agentcfg");
-    let json: Value = serde_json::from_str(&json_str)
+    let json: serde_json::Value = serde_json::from_str(&json_str)
         .expect("Invalid JSON in .agentcfg");
 
     // Extract schema: properties + required (optional)
@@ -50,8 +43,6 @@ fn main() -> std::io::Result<()> {
         .and_then(|r| r.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_else(|| Vec::new());
-
-    let schema_value = json["agent_schema"].clone();
 
     // Build struct fields from schema
     let mut struct_fields = String::new();
@@ -111,23 +102,7 @@ fn main() -> std::io::Result<()> {
         let name = action_cfg["name"].as_str().expect("Expected action name").to_string();
         println!("Action Name: {name}");
         
-        let conditions_cfg = action_cfg["when"].as_array().expect("Expected 'when' to be an array.");
-
-        let mut conditions: Vec<Condition> = Vec::new();
-
-        for condition_cfg in conditions_cfg {
-            let field = condition_cfg["field"].as_str().expect("Expected 'field' to be a string").to_string();
-            let op = condition_cfg["op"].as_str().expect("Expected 'op' to be a string").to_string();
-            let value = condition_cfg["value"].to_string();
-
-            let condition = Condition {
-               field,
-               op,
-               value,
-            };
-
-            conditions.push(condition);
-        }
+        let logic = action_cfg["logic"].clone();
 
         let mut run_steps: Vec<RunStep> = Vec::new();
 
@@ -151,7 +126,7 @@ fn main() -> std::io::Result<()> {
 
         let action = Action {
             name,
-            when: conditions,
+            logic,
             run: run_steps,
         };
         
@@ -165,15 +140,7 @@ fn main() -> std::io::Result<()> {
 
         let name = action.name;
 
-        let conditions = action.when.iter()
-            .map(|condition| format!(
-                "Condition {{
-                    field: \"{}\".to_string(),
-                    op: \"{}\".to_string(),
-                    value: \"{}\".to_string(),
-                }}", condition.field, condition.op, condition.value))
-            .collect::<Vec<_>>()
-            .join(",");
+        let logic = action.logic.to_string();
 
         let run_steps = action.run.iter()
             .map(|run_step| {
@@ -195,9 +162,9 @@ fn main() -> std::io::Result<()> {
         action_code.push_str(&format!(
             "Action {{
                 name: \"{}\".to_string(),
-                when: vec![{}],
+                logic: serde_json::from_str(r#\"{}\"#).unwrap(),
                 run: vec![{}],
-            }},", name, conditions, run_steps
+            }},", name, logic, run_steps
         ));
     }
 
@@ -205,6 +172,8 @@ fn main() -> std::io::Result<()> {
     let generated_code = format!(
         r##"
 use schemars::{{JsonSchema, schema_for}};
+use serde_json;
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct Output {{
 {struct_fields}}}
@@ -244,13 +213,6 @@ pub fn json_schema_value() -> serde_json::Value {{
     }}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Condition {{
-    field: String,
-    op: String,
-    value: String,
-}}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RunStep {{
     kind: String,
     program: String,
@@ -260,7 +222,7 @@ pub struct RunStep {{
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Action {{
     name: String,
-    when: Vec<Condition>,
+    logic: serde_json::Value,
     run: Vec<RunStep>,
 }}
 
