@@ -43,6 +43,10 @@ async fn main() {
     }
     // End: Argument assignments
 
+
+   // Testingout Out Actions 
+   println!("Here are the actions: {:?}", actions());
+    
     let mut prompt = String::new();
 
     println!("Enter a prompt for {model}!"); // Request to use for input
