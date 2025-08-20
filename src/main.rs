@@ -6,6 +6,7 @@ use std::io::stdin;
 
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
+use std::process::Command;
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
@@ -197,18 +198,22 @@ pub async fn fetch_resources_parallel(urls: &[&str]) -> Result<Vec<String>, reqw
 }
 
 pub fn apply_actions(output: &Output, actions: &[Action]) {
+
+    println!("DEBUG: Applying actions -> {:?}", actions);
+
     let data = serde_json::to_value(output).unwrap();
 
     for action in actions {
         if let Ok(result) = apply(&action.logic, &data) {
+            println!("Action Loop: {:?}", action);
             if result.as_bool() == Some(true) {
                 for step in &action.run {
-                    println!("Running '{}': {} {:?}", action.name, step.program, step.args);
+                    println!("Run Step'{}': {} {:?}", action.name, step.program, step.args);
                 }
             }
         } else {
             println!("Failed to evaluate logic for action: {}", action.name);
         }
     }
-    
+
 }

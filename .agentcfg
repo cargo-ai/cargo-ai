@@ -33,6 +33,19 @@
           "args": ["bring an umbrella"]
         }
       ]
-    }
+    },
+  {
+    "name": "sunglasses_hint_exec",
+    "logic": {
+      "==": [ { "var": "raining" }, false ]
+    },
+    "run": [
+      {
+        "kind": "exec",
+        "program": "echo",
+        "args": ["bring sunglasses"]
+      }
+    ]
+  }
   ]
 }
