@@ -5,6 +5,7 @@ mod args;
 use std::io::stdin;
 
 use serde::{Deserialize, Serialize};
+use jsonlogic::apply;
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
@@ -141,7 +142,18 @@ async fn main() {
 
         println!("{server} Response: {response}");
         
-        ai_cargo.set_response(response);
+        ai_cargo.set_response(response.clone());
+
+
+        // Get Output 
+        let output: Output = ai_cargo.get_response().unwrap();
+        println!("Output: {:?}", output);
+
+        // Get Actions
+        let actions = actions();
+        println!("Actions {:?}", actions);
+
+        apply_actions(&output, &actions);
 
         println!("AI Cargo: {ai_cargo:#?}");
 
@@ -182,4 +194,21 @@ pub async fn fetch_resources_parallel(urls: &[&str]) -> Result<Vec<String>, reqw
 
     let results = join_all(futures).await;
     results.into_iter().collect()
+}
+
+pub fn apply_actions(output: &Output, actions: &[Action]) {
+    let data = serde_json::to_value(output).unwrap();
+
+    for action in actions {
+        if let Ok(result) = apply(&action.logic, &data) {
+            if result.as_bool() == Some(true) {
+                for step in &action.run {
+                    println!("Running '{}': {} {:?}", action.name, step.program, step.args);
+                }
+            }
+        } else {
+            println!("Failed to evaluate logic for action: {}", action.name);
+        }
+    }
+    
 }
