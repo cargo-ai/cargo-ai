@@ -208,7 +208,24 @@ pub fn apply_actions(output: &Output, actions: &[Action]) {
             println!("Action Loop: {:?}", action);
             if result.as_bool() == Some(true) {
                 for step in &action.run {
-                    println!("Run Step'{}': {} {:?}", action.name, step.program, step.args);
+                    println!("Running '{}': {} {:?}", action.name, step.program, step.args);
+
+                    // Execute the command
+                    let status = std::process::Command::new(&step.program)
+                        .args(&step.args)
+                        .status();
+
+                    match status {
+                        Ok(status) if status.success() => {
+                            println!("Command completed successfully.");
+                        }
+                        Ok(status) => {
+                            println!("Command exited with status: {}", status);
+                        }
+                        Err(err) => {
+                            println!("Failed to execute command: {}", err);
+                        }
+                    }
                 }
             }
         } else {
