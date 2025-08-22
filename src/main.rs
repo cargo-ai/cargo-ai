@@ -5,6 +5,8 @@ mod args;
 use std::io::stdin;
 
 use serde::{Deserialize, Serialize};
+use jsonlogic::apply;
+use std::process::Command;
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
@@ -43,13 +45,17 @@ async fn main() {
     }
     // End: Argument assignments
 
-    let mut prompt = String::new();
 
-    println!("Enter a prompt for {model}!"); // Request to use for input
+   // Testingout Out Actions 
+   println!("Here are the actions: {:?}", actions());
+    
+    // let mut prompt = String::new();
 
-    stdin().read_line(&mut prompt).expect("Failed to read line"); // Captures user input into prompt String
+    // println!("Enter a prompt for {model}!"); // Request to use for input
 
-    let prompt = prompt.trim().to_string(); // Remove trailing newline from user input
+    // stdin().read_line(&mut prompt).expect("Failed to read line"); // Captures user input into prompt String
+
+    let prompt = prompt();
 
     if let Some(_) = cmd_args.subcommand_matches("json-sample-response") {
 
@@ -137,7 +143,18 @@ async fn main() {
 
         println!("{server} Response: {response}");
         
-        ai_cargo.set_response(response);
+        ai_cargo.set_response(response.clone());
+
+
+        // Get Output 
+        let output: Output = ai_cargo.get_response().unwrap();
+        println!("Output: {:?}", output);
+
+        // Get Actions
+        let actions = actions();
+        println!("Actions {:?}", actions);
+
+        apply_actions(&output, &actions);
 
         println!("AI Cargo: {ai_cargo:#?}");
 
@@ -178,4 +195,42 @@ pub async fn fetch_resources_parallel(urls: &[&str]) -> Result<Vec<String>, reqw
 
     let results = join_all(futures).await;
     results.into_iter().collect()
+}
+
+pub fn apply_actions(output: &Output, actions: &[Action]) {
+
+    println!("DEBUG: Applying actions -> {:?}", actions);
+
+    let data = serde_json::to_value(output).unwrap();
+
+    for action in actions {
+        if let Ok(result) = apply(&action.logic, &data) {
+            println!("Action Loop: {:?}", action);
+            if result.as_bool() == Some(true) {
+                for step in &action.run {
+                    println!("Running '{}': {} {:?}", action.name, step.program, step.args);
+
+                    // Execute the command
+                    let status = std::process::Command::new(&step.program)
+                        .args(&step.args)
+                        .status();
+
+                    match status {
+                        Ok(status) if status.success() => {
+                            println!("Command completed successfully.");
+                        }
+                        Ok(status) => {
+                            println!("Command exited with status: {}", status);
+                        }
+                        Err(err) => {
+                            println!("Failed to execute command: {}", err);
+                        }
+                    }
+                }
+            }
+        } else {
+            println!("Failed to evaluate logic for action: {}", action.name);
+        }
+    }
+
 }
