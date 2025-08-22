@@ -1,5 +1,6 @@
 {
   "version": "0.0.5",
+  "prompt": "Will it rain tomorrow?",
   "agent_schema": {
     "type": "object",
     "properties": {
