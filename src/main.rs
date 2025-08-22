@@ -49,13 +49,13 @@ async fn main() {
    // Testingout Out Actions 
    println!("Here are the actions: {:?}", actions());
     
-    let mut prompt = String::new();
+    // let mut prompt = String::new();
 
-    println!("Enter a prompt for {model}!"); // Request to use for input
+    // println!("Enter a prompt for {model}!"); // Request to use for input
 
-    stdin().read_line(&mut prompt).expect("Failed to read line"); // Captures user input into prompt String
+    // stdin().read_line(&mut prompt).expect("Failed to read line"); // Captures user input into prompt String
 
-    let prompt = prompt.trim().to_string(); // Remove trailing newline from user input
+    let prompt = prompt();
 
     if let Some(_) = cmd_args.subcommand_matches("json-sample-response") {
 

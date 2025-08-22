@@ -76,6 +76,14 @@ fn main() -> std::io::Result<()> {
         struct_fields.push_str(&format!("    pub {}: {},\n", key, rust_ty));
     }
 
+    let prompt = json["prompt"]
+        .as_str()
+        .expect("Expect 'prompt' to be a string.")
+        .to_string();
+
+
+    
+        
     // Extract resource URLs as objects
     let urls = json["resource_urls"]
         .as_array()
@@ -184,9 +192,12 @@ pub struct ResourceUrl {{
     pub description: &'static str,
 }}
 
+pub fn prompt() -> String {{
+    String::from("{prompt}")
+}}
+
 pub fn resource_urls() -> Vec<ResourceUrl> {{
-    vec![
-{url_list}    ]
+    vec![{url_list}]
 }}
 
 /// JSON Schema that defines the expected LLM output structure.
@@ -233,6 +244,7 @@ pub fn actions() -> Vec<Action> {{
     
 "##,
         struct_fields = struct_fields,
+        prompt = prompt,
         url_list = url_list,
         action_code = action_code,
     );

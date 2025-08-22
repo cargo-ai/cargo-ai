@@ -1,6 +1,6 @@
 {
   "version": "0.0.5",
-  "prompt": "Will it rain tomorrow?",
+  "prompt": "Will it rain tomorrow between 9am and 5pm? (Consider true if over 40%, 40, for any give hour period.)",
   "agent_schema": {
     "type": "object",
     "properties": {
