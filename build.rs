@@ -108,7 +108,7 @@ fn main() -> std::io::Result<()> {
 
     for action_cfg in actions_cfg {
         let name = action_cfg["name"].as_str().expect("Expected action name").to_string();
-        println!("Action Name: {name}");
+        // println!("Action Name: {name}");
         
         let logic = action_cfg["logic"].clone();
 
@@ -250,9 +250,9 @@ pub fn actions() -> Vec<Action> {{
     );
 
     // Print each generated line as a separate Cargo warning (multi-line warning output)
-    for line in generated_code.lines() {
-        println!("cargo:warning={}", line);
-    }
+    // for line in generated_code.lines() {
+    //     println!("cargo:warning={}", line);
+    // }
 
     // OUT_DIR is a Cargo-provided scratch dir for generated artifacts consumed by this crate.
     let out_dir = env::var("OUT_DIR").unwrap();

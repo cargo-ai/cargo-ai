@@ -2,11 +2,9 @@ use reqwest;
 use futures::future::join_all;
 mod args;
 
-use std::io::stdin;
 
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
-use std::process::Command;
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
@@ -45,43 +43,13 @@ async fn main() {
     }
     // End: Argument assignments
 
-
-   // Testingout Out Actions 
-   println!("Here are the actions: {:?}", actions());
-    
-    // let mut prompt = String::new();
-
-    // println!("Enter a prompt for {model}!"); // Request to use for input
-
-    // stdin().read_line(&mut prompt).expect("Failed to read line"); // Captures user input into prompt String
-
     let prompt = prompt();
 
     if let Some(_) = cmd_args.subcommand_matches("json-sample-response") {
 
-        println!("JSON Sample Mode");
-
         let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
         
         let resources = resource_urls();
-        println!("Resources: {:#?}", resources);
-
-        if !resources.is_empty() {
-            let urls: Vec<&str> = resources.iter().map(|r| r.url).collect();
-            match fetch_resources_parallel(&urls).await {
-                Ok(results) => {
-                    println!("Fetched Resource Contents:");
-                    for (res, content) in resources.iter().zip(results.iter()) {
-                        println!("Description: {}", res.description);
-                        println!("URL: {}", res.url);
-                        println!("Content:\n{}", content);
-                    }
-                }
-                Err(e) => {
-                    println!("Failed to fetch resources: {}", e);
-                }
-            }
-        }
 
         // Build data block for LLM context
         let mut data_block = String::from("Here are some resources to aid in your response:\n");
@@ -94,15 +62,12 @@ async fn main() {
             }
         }
         let context = format!("{}\n\n{}", static_context, data_block);
-        println!("LLM Context:\n{}", context);
 
         let mut ai_cargo = cargo_ai::Cargo::<Output>::new(prompt.clone(), context);
 
-        println!("Cargo Contents: {ai_cargo:#?}");
 
         let structured_prompt = ai_cargo.prompt();
         
-        println!("Structured Prompt: {structured_prompt}");
 
         let mut response = String::new(); // Holds the LLM response
 
@@ -141,22 +106,22 @@ async fn main() {
             };
         }
 
-        println!("{server} Response: {response}");
+        // println!("{server} Response: {response}");
         
         ai_cargo.set_response(response.clone());
 
 
         // Get Output 
         let output: Output = ai_cargo.get_response().unwrap();
-        println!("Output: {:?}", output);
+        // println!("Output: {:?}", output);
 
         // Get Actions
         let actions = actions();
-        println!("Actions {:?}", actions);
+        // println!("Actions {:?}", actions);
 
         apply_actions(&output, &actions);
 
-        println!("AI Cargo: {ai_cargo:#?}");
+        // println!("AI Cargo: {ai_cargo:#?}");
 
     } else {
         let mut response = String::new(); // Holds the LLM response
@@ -199,13 +164,13 @@ pub async fn fetch_resources_parallel(urls: &[&str]) -> Result<Vec<String>, reqw
 
 pub fn apply_actions(output: &Output, actions: &[Action]) {
 
-    println!("DEBUG: Applying actions -> {:?}", actions);
+    // println!("DEBUG: Applying actions -> {:?}", actions);
 
     let data = serde_json::to_value(output).unwrap();
 
     for action in actions {
         if let Ok(result) = apply(&action.logic, &data) {
-            println!("Action Loop: {:?}", action);
+            // println!("Action Loop: {:?}", action);
             if result.as_bool() == Some(true) {
                 for step in &action.run {
                     println!("Running '{}': {} {:?}", action.name, step.program, step.args);
