@@ -132,6 +132,24 @@ async fn main() {
             .expect("project name is required")
             .to_lowercase();
         println!("Build new cargo agent: {new_project_name}");
+        
+        // Execute the command
+        let status = std::process::Command::new("cargo")
+            .args(["new", &new_project_name])
+            .status();
+
+        match status {
+            Ok(status) if status.success() => {
+                println!("Project {new_project_name} bult.");
+            }
+            Ok(status) => {
+                println!("Command `new` exited with status: {}", status);
+            }
+            Err(err) => {
+                println!("Failed to execute `new` command: {}", err);
+            }
+        }
+
     } else {
         println!("Provide subcommand.");
     }
