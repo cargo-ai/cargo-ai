@@ -14,8 +14,8 @@ include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 async fn main() {
 
     let cmd_args = args::build_cli();
-
     // Begin: Argument assignments
+
     let mut server = String::new();
     if let Some(server_arg) = cmd_args.get_one::<String>("server") {
         server.push_str(&server_arg.to_lowercase());
@@ -38,14 +38,16 @@ async fn main() {
         .parse::<u64>()
         .expect("Expected unsigned int, u64");
 
-    if !(server == "ollama" || server == "openai") {
-        panic!("Unknown AI Server")
-    }
+
     // End: Argument assignments
 
     let prompt = prompt();
 
     if let Some(_) = cmd_args.subcommand_matches("json-sample-response") {
+
+        if !(server == "ollama" || server == "openai") {
+            panic!("Unknown AI Server")
+        }
 
         let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
         
@@ -124,8 +126,12 @@ async fn main() {
         // println!("AI Cargo: {ai_cargo:#?}");
 
 
-    } else if let Some(_) = cmd_args.subcommand_matches("new") {
-        println!("Build new cargo agent");
+    } else if let Some(sub_m) = cmd_args.subcommand_matches("new") {
+        let new_project_name = sub_m
+            .get_one::<String>("name")
+            .expect("project name is required")
+            .to_lowercase();
+        println!("Build new cargo agent: {new_project_name}");
     } else {
         println!("Provide subcommand.");
     }
