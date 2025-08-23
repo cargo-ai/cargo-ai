@@ -123,26 +123,11 @@ async fn main() {
 
         // println!("AI Cargo: {ai_cargo:#?}");
 
+
+    } else if let Some(_) = cmd_args.subcommand_matches("new") {
+        println!("Build new cargo agent");
     } else {
-        let mut response = String::new(); // Holds the LLM response
-        if server == "ollama" {
-            // Send request to Ollama and `await` the LLM response
-            match cargo_ai::ollama_send_request(&model, &prompt, timeout_in_sec, json_schema_value()).await {
-                Ok(r) => response.push_str(&r),
-                Err(e) => {
-                    println!("We have an error {}", e);
-                }
-            };
-        } else if server == "openai" {
-            // Send request to OpenAI and `await` the LLM response
-            match cargo_ai::openai_send_request(&model, &prompt, timeout_in_sec, &token, json_schema_value()).await {
-                Ok(r) => response.push_str(&r),
-                Err(e) => {
-                    println!("We have an error {}", e);
-                }
-            };
-        }
-        println!("{server} Response: {response}");
+        println!("Provide subcommand.");
     }
 }
 
