@@ -16,7 +16,7 @@ pub fn build_cli() -> ArgMatches {
 
     Command::new("cargo-ai")
         .bin_name(bin_name)
-        .subcommand(Command::new("json-sample-response").about("JSON Sample Mode"))
+        .subcommand(Command::new("hatch").about("Create Agent from Config File"))
         .subcommand(
             Command::new("new")
                 .about("Create New Agent Project")

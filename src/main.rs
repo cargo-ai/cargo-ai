@@ -5,7 +5,6 @@ mod args;
 
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
-use tokio::fs;
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
@@ -48,7 +47,7 @@ async fn main() {
 
     let prompt = prompt();
 
-    if let Some(_) = cmd_args.subcommand_matches("json-sample-response") {
+    if let Some(_) = cmd_args.subcommand_matches("hatch") {
 
         if !(server == "ollama" || server == "openai") {
             panic!("Unknown AI Server")
