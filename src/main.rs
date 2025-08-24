@@ -5,8 +5,13 @@ mod args;
 
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
+use tokio::fs;
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
+
+const BUILD_RS_TEMPLATE: &str = include_str!("templates/build.rs");
+const AGENTCFG_TEMPLATE: &str = include_str!("templates/.agentcfg");
+
 
 // Initialize Tokio runtime macro
 // Executor: Responsible for polling and running to completion
@@ -133,7 +138,7 @@ async fn main() {
             .to_lowercase();
         println!("Build new cargo agent: {new_project_name}");
         
-        // Execute the command
+        // Execute the command: `cargo new <name>`
         let status = std::process::Command::new("cargo")
             .args(["new", &new_project_name])
             .status();
@@ -149,6 +154,13 @@ async fn main() {
                 println!("Failed to execute `new` command: {}", err);
             }
         }
+
+        // Execute the command: `cargo new <name>`
+        let build_rs_path = format!("{new_project_name}/build.rs");
+        std::fs::write(build_rs_path, BUILD_RS_TEMPLATE).expect("Can not write build file to project.");
+
+        let agentcfg_path = format!("{new_project_name}/.agentcfg");
+        std::fs::write(agentcfg_path, AGENTCFG_TEMPLATE).expect("Can not write starter config file to project.");
 
     } else {
         println!("Provide subcommand.");
