@@ -71,10 +71,8 @@ async fn main() {
 
         let mut ai_cargo = cargo_ai::Cargo::<Output>::new(prompt.clone(), context);
 
-
         let structured_prompt = ai_cargo.prompt();
         
-
         let mut response = String::new(); // Holds the LLM response
 
         if server == "ollama" {
@@ -136,15 +134,20 @@ async fn main() {
             .expect("project name is required")
             .to_lowercase();
         println!("Build new cargo agent: {new_project_name}");
+
+        let mut new_agent_project_build_path = String::from(".cargo-ai/");
+            
+        new_agent_project_build_path.push_str(&new_project_name);
         
         // Execute the command: `cargo new <name>`
         let status = std::process::Command::new("cargo")
-            .args(["new", &new_project_name])
+            .args(["new", &new_agent_project_build_path, "--vcs", "none"])
+            // .args(["new", &new_project_name])
             .status();
 
         match status {
             Ok(status) if status.success() => {
-                println!("Project {new_project_name} bult.");
+                println!("Project {new_agent_project_build_path} bult.");
             }
             Ok(status) => {
                 println!("Command `new` exited with status: {}", status);
@@ -155,10 +158,10 @@ async fn main() {
         }
 
         // Execute the command: `cargo new <name>`
-        let build_rs_path = format!("{new_project_name}/build.rs");
+        let build_rs_path = format!("{new_agent_project_build_path}/build.rs");
         std::fs::write(build_rs_path, BUILD_RS_TEMPLATE).expect("Can not write build file to project.");
 
-        let agentcfg_path = format!("{new_project_name}/.agentcfg");
+        let agentcfg_path = format!("{new_agent_project_build_path}/.agentcfg");
         std::fs::write(agentcfg_path, AGENTCFG_TEMPLATE).expect("Can not write starter config file to project.");
 
     } else {
