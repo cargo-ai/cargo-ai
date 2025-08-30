@@ -2,6 +2,7 @@ use reqwest;
 use futures::future::join_all;
 mod args;
 
+mod agent_builder;
 
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
@@ -129,40 +130,46 @@ async fn main() {
 
 
     } else if let Some(sub_m) = cmd_args.subcommand_matches("new") {
+
         let new_project_name = sub_m
             .get_one::<String>("name")
             .expect("project name is required")
             .to_lowercase();
         println!("Build new cargo agent: {new_project_name}");
 
-        let mut new_agent_project_build_path = String::from(".cargo-ai/");
-            
-        new_agent_project_build_path.push_str(&new_project_name);
-        
-        // Execute the command: `cargo new <name>`
-        let status = std::process::Command::new("cargo")
-            .args(["new", &new_agent_project_build_path, "--vcs", "none"])
-            // .args(["new", &new_project_name])
-            .status();
-
-        match status {
-            Ok(status) if status.success() => {
-                println!("Project {new_agent_project_build_path} bult.");
-            }
-            Ok(status) => {
-                println!("Command `new` exited with status: {}", status);
-            }
-            Err(err) => {
-                println!("Failed to execute `new` command: {}", err);
-            }
+        match agent_builder::project::create_new_agent_project(&new_project_name) {
+            Ok(_) => println!("Created project"),
+            Err(e) =>  println!("Project Not created, bec: {e}") 
         }
 
-        // Execute the command: `cargo new <name>`
-        let build_rs_path = format!("{new_agent_project_build_path}/build.rs");
-        std::fs::write(build_rs_path, BUILD_RS_TEMPLATE).expect("Can not write build file to project.");
+        // let mut new_agent_project_build_path = String::from(".cargo-ai/");
+            
+        // new_agent_project_build_path.push_str(&new_project_name);
+        
+        // // Execute the command: `cargo new <name>`
+        // let status = std::process::Command::new("cargo")
+        //     .args(["new", &new_agent_project_build_path, "--vcs", "none"])
+        //     // .args(["new", &new_project_name])
+        //     .status();
 
-        let agentcfg_path = format!("{new_agent_project_build_path}/.agentcfg");
-        std::fs::write(agentcfg_path, AGENTCFG_TEMPLATE).expect("Can not write starter config file to project.");
+        // match status {
+        //     Ok(status) if status.success() => {
+        //         println!("Project {new_agent_project_build_path} bult.");
+        //     }
+        //     Ok(status) => {
+        //         println!("Command `new` exited with status: {}", status);
+        //     }
+        //     Err(err) => {
+        //         println!("Failed to execute `new` command: {}", err);
+        //     }
+        // }
+
+        // // Execute the command: `cargo new <name>`
+        // let build_rs_path = format!("{new_agent_project_build_path}/build.rs");
+        // std::fs::write(build_rs_path, BUILD_RS_TEMPLATE).expect("Can not write build file to project.");
+
+        // let agentcfg_path = format!("{new_agent_project_build_path}/.agentcfg");
+        // std::fs::write(agentcfg_path, AGENTCFG_TEMPLATE).expect("Can not write starter config file to project.");
 
     } else {
         println!("Provide subcommand.");
