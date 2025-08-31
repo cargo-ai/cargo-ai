@@ -35,7 +35,11 @@ fn load_agent_workspace(agent_name: &str) -> Result<(), Error> {
     let base_path = agent_workspace_path(agent_name); 
     for (file_name, template) in  TEMPLATES {
         let file_path = base_path.join(file_name);
-        fs::write(file_path, template)?;
+
+        // Replace any {{agent_name}} placeholders in the template
+        let processed = template.replace("{{agent_name}}", agent_name);
+
+        fs::write(file_path, processed)?;
     }
     Ok(())
 }
