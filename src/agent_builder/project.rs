@@ -12,7 +12,7 @@ pub fn create_new_agent_project(agent_name: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn get_agent_workspace_director_path(agent_name: &str) -> PathBuf {
+fn workspace_director(agent_name: &str) -> PathBuf {
     let agent_workspace_directory = format!("{AGENTS_WORKSPACE_DIRECTORY}/{agent_name}");
 
     PathBuf::from_str(&agent_workspace_directory).expect("Unable to create agent path buffer.")
@@ -20,7 +20,7 @@ fn get_agent_workspace_director_path(agent_name: &str) -> PathBuf {
 
 fn create_agent_workspace(agent_name: &str) -> Result<(), Error> {
 
-    let agent_workspace_directory = get_agent_workspace_director_path(agent_name);
+    let agent_workspace_directory = workspace_director(agent_name);
 
     if !agent_workspace_directory.exists() {
         fs::create_dir_all(agent_workspace_directory)?;
@@ -31,15 +31,15 @@ fn create_agent_workspace(agent_name: &str) -> Result<(), Error> {
 
 fn load_agent_workspace(agent_name: &str) -> Result<(), Error> {
 
-   let agent_workspace_directory_path = get_agent_workspace_director_path(agent_name); 
+    let base_path = workspace_director(agent_name); 
 
-   let mut build_rs_path = agent_workspace_directory_path.clone();
-   build_rs_path.push(BUILD_RS_NAME);
-   std::fs::write(build_rs_path, BUILD_RS_TEMPLATE)?;
-
-   let mut agentcfg_path = agent_workspace_directory_path.clone();
-    agentcfg_path.push(AGENTCFG_NAME);
-    std::fs::write(agentcfg_path, AGENTCFG_TEMPLATE)?;
+    for (file_name, template) in [
+        (BUILD_RS_NAME, BUILD_RS_TEMPLATE),
+        (AGENTCFG_NAME, AGENTCFG_TEMPLATE),
+        ] {
+        let file_path = base_path.join(file_name);
+        fs::write(file_path, template)?;
+   }
 
     Ok(())
 }
