@@ -36,6 +36,11 @@ fn load_agent_workspace(agent_name: &str) -> Result<(), Error> {
     for (file_name, template) in  TEMPLATES {
         let file_path = base_path.join(file_name);
 
+        // Create parent directories if needed
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
         // Replace any {{agent_name}} placeholders in the template
         let processed = template.replace("{{agent_name}}", agent_name);
 

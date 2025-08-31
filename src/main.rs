@@ -9,10 +9,6 @@ use jsonlogic::apply;
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
-const BUILD_RS_TEMPLATE: &str = include_str!("templates/build.rs");
-const AGENTCFG_TEMPLATE: &str = include_str!("templates/.agentcfg");
-
-
 // Initialize Tokio runtime macro
 // Executor: Responsible for polling and running to completion
 #[tokio::main]
