@@ -42,7 +42,14 @@ fn load_agent_workspace(agent_name: &str) -> Result<(), Error> {
         }
 
         // Replace any {{agent_name}} placeholders in the template
-        let processed = template.replace("{{agent_name}}", agent_name);
+        // let processed = template.replace("{{agent_name}}", agent_name);
+
+        // TODO: Verify This implmentation.
+        let processed = template
+            .replace("cargo-ai", agent_name)
+            .replace("cargo_ai", agent_name);
+
+        // Replace cargo_ai with agent name for some 
 
         fs::write(file_path, processed)?;
     }

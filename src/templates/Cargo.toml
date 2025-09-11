@@ -1,5 +1,5 @@
 [package]
-name = "{{agent_name}}"
+name = "cargo-ai"
 version = "0.1.0"
 edition = "2024"
 build = "build.rs"
