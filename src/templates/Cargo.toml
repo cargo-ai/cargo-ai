@@ -1,9 +1,7 @@
 [package]
 name = "cargo-ai"
-version = "0.0.5"
-edition = "2021"
-license = "MIT"
-description = "Ship AI Data the right way with Rust."
+version = "0.1.0"
+edition = "2024"
 build = "build.rs"
 
 [dependencies]

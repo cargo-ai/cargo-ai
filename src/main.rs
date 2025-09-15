@@ -1,7 +1,8 @@
 use reqwest;
 use futures::future::join_all;
 mod args;
-
+mod templates;
+mod agent_builder;
 
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
@@ -14,8 +15,8 @@ include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 async fn main() {
 
     let cmd_args = args::build_cli();
-
     // Begin: Argument assignments
+
     let mut server = String::new();
     if let Some(server_arg) = cmd_args.get_one::<String>("server") {
         server.push_str(&server_arg.to_lowercase());
@@ -38,14 +39,16 @@ async fn main() {
         .parse::<u64>()
         .expect("Expected unsigned int, u64");
 
-    if !(server == "ollama" || server == "openai") {
-        panic!("Unknown AI Server")
-    }
+
     // End: Argument assignments
 
     let prompt = prompt();
 
-    if let Some(_) = cmd_args.subcommand_matches("json-sample-response") {
+    if let Some(_) = cmd_args.subcommand_matches("hatch") {
+
+        if !(server == "ollama" || server == "openai") {
+            panic!("Unknown AI Server")
+        }
 
         let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
         
@@ -65,10 +68,8 @@ async fn main() {
 
         let mut ai_cargo = cargo_ai::Cargo::<Output>::new(prompt.clone(), context);
 
-
         let structured_prompt = ai_cargo.prompt();
         
-
         let mut response = String::new(); // Holds the LLM response
 
         if server == "ollama" {
@@ -123,26 +124,51 @@ async fn main() {
 
         // println!("AI Cargo: {ai_cargo:#?}");
 
-    } else {
-        let mut response = String::new(); // Holds the LLM response
-        if server == "ollama" {
-            // Send request to Ollama and `await` the LLM response
-            match cargo_ai::ollama_send_request(&model, &prompt, timeout_in_sec, json_schema_value()).await {
-                Ok(r) => response.push_str(&r),
-                Err(e) => {
-                    println!("We have an error {}", e);
-                }
-            };
-        } else if server == "openai" {
-            // Send request to OpenAI and `await` the LLM response
-            match cargo_ai::openai_send_request(&model, &prompt, timeout_in_sec, &token, json_schema_value()).await {
-                Ok(r) => response.push_str(&r),
-                Err(e) => {
-                    println!("We have an error {}", e);
-                }
-            };
+
+    } else if let Some(sub_m) = cmd_args.subcommand_matches("new") {
+
+        let new_project_name = sub_m
+            .get_one::<String>("name")
+            .expect("project name is required")
+            .to_lowercase();
+        println!("Build new cargo agent: {new_project_name}");
+
+        match agent_builder::project::create_new_agent_project(&new_project_name) {
+            Ok(_) => println!("Created project"),
+            Err(e) =>  println!("Project Not created, bec: {e}") 
         }
-        println!("{server} Response: {response}");
+
+        // let mut new_agent_project_build_path = String::from(".cargo-ai/");
+            
+        // new_agent_project_build_path.push_str(&new_project_name);
+        
+        // // Execute the command: `cargo new <name>`
+        // let status = std::process::Command::new("cargo")
+        //     .args(["new", &new_agent_project_build_path, "--vcs", "none"])
+        //     // .args(["new", &new_project_name])
+        //     .status();
+
+        // match status {
+        //     Ok(status) if status.success() => {
+        //         println!("Project {new_agent_project_build_path} bult.");
+        //     }
+        //     Ok(status) => {
+        //         println!("Command `new` exited with status: {}", status);
+        //     }
+        //     Err(err) => {
+        //         println!("Failed to execute `new` command: {}", err);
+        //     }
+        // }
+
+        // // Execute the command: `cargo new <name>`
+        // let build_rs_path = format!("{new_agent_project_build_path}/build.rs");
+        // std::fs::write(build_rs_path, BUILD_RS_TEMPLATE).expect("Can not write build file to project.");
+
+        // let agentcfg_path = format!("{new_agent_project_build_path}/.agentcfg");
+        // std::fs::write(agentcfg_path, AGENTCFG_TEMPLATE).expect("Can not write starter config file to project.");
+
+    } else {
+        println!("Provide subcommand.");
     }
 }
 

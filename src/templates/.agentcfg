@@ -1,0 +1,52 @@
+{
+  "version": "0.0.5",
+  "prompt": "Will it rain tomorrow between 9am and 5pm? (Consider true if over 40%, 40, for any give hour period.)",
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "raining": {
+        "type": "boolean",
+        "description": "Indicates whether it is raining."
+      }
+    }
+  },
+  "resource_urls": [
+    {
+      "url": "https://worldtimeapi.org/api/timezone/etc/utc",
+
+      "description": "Current UTC date and time."
+    },
+    {
+      "url": "https://api.open-meteo.com/v1/forecast?latitude=39.10&longitude=-84.51&hourly=precipitation_probability",
+      "description": "Hourly precipitation probability for Cincinnati, which my area."
+    }
+  ],
+  "actions": [
+    {
+      "name": "umbrella_hint_exec",
+      "logic": {
+        "==": [ { "var": "raining" }, true ]
+      },
+      "run": [
+        {
+          "kind": "exec",
+          "program": "echo",
+          "args": ["bring an umbrella"]
+        }
+      ]
+    },
+  {
+    "name": "sunglasses_hint_exec",
+    "logic": {
+      "==": [ { "var": "raining" }, false ]
+    },
+    "run": [
+      {
+        "kind": "exec",
+        "program": "echo",
+        "args": ["bring sunglasses"]
+      }
+    ]
+  }
+  ]
+}
