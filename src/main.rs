@@ -44,7 +44,7 @@ async fn main() {
 
     let prompt = prompt();
 
-    if let Some(_) = cmd_args.subcommand_matches("hatch") {
+    if let Some(_) = cmd_args.subcommand_matches("preflight") {
 
         if !(server == "ollama" || server == "openai") {
             panic!("Unknown AI Server")
@@ -125,7 +125,7 @@ async fn main() {
         // println!("AI Cargo: {ai_cargo:#?}");
 
 
-    } else if let Some(sub_m) = cmd_args.subcommand_matches("new") {
+    } else if let Some(sub_m) = cmd_args.subcommand_matches("hatch") {
 
         let new_project_name = sub_m
             .get_one::<String>("name")
