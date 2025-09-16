@@ -145,6 +145,11 @@ async fn main() {
             Err(e) =>  println!("❌ Build failed: {e}") 
         }
 
+        match agent_builder::export::export_binary(&new_project_name){
+            Ok(_) => println!("✅ Project binary exported successfully."),
+            Err(e) =>  println!("❌ Export failed: {e}") 
+        }
+        
     } else {
         println!("Provide subcommand.");
     }
