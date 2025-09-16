@@ -136,8 +136,13 @@ async fn main() {
         let agentcfg: Option<&str> = sub_m.get_one::<String>("config").map(String::as_str);
 
         match agent_builder::project::create_new_agent_project(&new_project_name, agentcfg) {
-            Ok(_) => println!("Created project"),
-            Err(e) =>  println!("Project Not created, bec: {e}") 
+            Ok(_) => println!("✅ Project created successfully."),
+            Err(e) =>  println!("❌ Failed to create project: {e}") 
+        }
+
+        match agent_builder::build::build_agent_project(&new_project_name) {
+            Ok(_) => println!("✅ Project built successfully."),
+            Err(e) =>  println!("❌ Build failed: {e}") 
         }
 
     } else {
