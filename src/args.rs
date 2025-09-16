@@ -25,6 +25,14 @@ pub fn build_cli() -> ArgMatches {
                         .help("Name of the new agent project")
                         .required(true)
                 )
+                .arg(
+                    Arg::new("config")
+                        .long("config")
+                        .short('c')
+                        .help("Path to agent configuration file (.agentcfg) to use")
+                        .value_name("FILE")
+                        .num_args(1)
+                )
         )
         .arg(
             Arg::new("server")
