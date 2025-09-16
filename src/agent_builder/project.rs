@@ -10,9 +10,9 @@ use crate::templates::*;
 const AGENTS_WORKSPACE_DIRECTORY: &str = ".cargo-ai/agents";
 
 /// Creates a new agent project directory and initializes required files.
-pub fn create_new_agent_project(agent_name: &str) -> Result<(), Error> {
+pub fn create_new_agent_project(agent_name: &str, agentcfg: Option<&str>) -> Result<(), Error> {
     create_agent_workspace(agent_name)?;
-    load_agent_workspace(agent_name)?;
+    load_agent_workspace(agent_name, agentcfg)?;
     Ok(())
 }
 
@@ -31,27 +31,32 @@ fn create_agent_workspace(agent_name: &str) -> Result<(), Error> {
 }
 
 /// Writes template files (`build.rs`, `.agentcfg`) to the agent workspace.
-fn load_agent_workspace(agent_name: &str) -> Result<(), Error> {
+fn load_agent_workspace(agent_name: &str, agentcfg: Option<&str>) -> Result<(), Error> {
     let base_path = agent_workspace_path(agent_name); 
-    for (file_name, template) in  TEMPLATES {
+    for (file_name, file_contents) in  TEMPLATES {
         let file_path = base_path.join(file_name);
 
         // Create parent directories if needed
         if let Some(parent) = file_path.parent() {
             fs::create_dir_all(parent)?;
         }
+        
+        // Handle custom .agentcfg file
+        if file_name == ".agentcfg" {
+            if let Some(path) = agentcfg {
+                let contents = fs::read_to_string(path)?;
+                fs::write(file_path, contents)?;
+                continue;
+            }
+        }
 
-        // Replace any {{agent_name}} placeholders in the template
-        // let processed = template.replace("{{agent_name}}", agent_name);
-
-        // TODO: Verify This implmentation.
-        let processed = template
+        let file_contents = file_contents
             .replace("cargo-ai", agent_name)
             .replace("cargo_ai", agent_name);
 
         // Replace cargo_ai with agent name for some 
 
-        fs::write(file_path, processed)?;
+        fs::write(file_path, file_contents)?;
     }
     Ok(())
 }
