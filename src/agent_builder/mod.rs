@@ -4,5 +4,8 @@ pub mod project;
 // Handles automatically building
 pub mod build;
 
-// Handles exporting build
+// Handles exporting after build
 pub mod export;
+
+// Handles cleaup after export
+pub mod cleanup;
