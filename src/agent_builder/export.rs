@@ -1,7 +1,7 @@
 //! Handles exporting the compiled agent binary to the current working directory.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::io::{self, ErrorKind};
 
 /// Copies the built binary from `.cargo-ai/agents/{agent}/target/debug/{agent}`
