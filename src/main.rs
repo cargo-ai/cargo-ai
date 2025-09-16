@@ -44,7 +44,7 @@ async fn main() {
 
     let prompt = prompt();
 
-    if let Some(_) = cmd_args.subcommand_matches("hatch") {
+    if let Some(_) = cmd_args.subcommand_matches("preflight") {
 
         if !(server == "ollama" || server == "openai") {
             panic!("Unknown AI Server")
@@ -125,7 +125,7 @@ async fn main() {
         // println!("AI Cargo: {ai_cargo:#?}");
 
 
-    } else if let Some(sub_m) = cmd_args.subcommand_matches("new") {
+    } else if let Some(sub_m) = cmd_args.subcommand_matches("hatch") {
 
         let new_project_name = sub_m
             .get_one::<String>("name")
@@ -136,8 +136,23 @@ async fn main() {
         let agentcfg: Option<&str> = sub_m.get_one::<String>("config").map(String::as_str);
 
         match agent_builder::project::create_new_agent_project(&new_project_name, agentcfg) {
-            Ok(_) => println!("Created project"),
-            Err(e) =>  println!("Project Not created, bec: {e}") 
+            Ok(_) => println!("✅ Project created successfully."),
+            Err(e) =>  println!("❌ Failed to create project: {e}") 
+        }
+
+        match agent_builder::build::build_agent_project(&new_project_name) {
+            Ok(_) => println!("✅ Project built successfully."),
+            Err(e) =>  println!("❌ Build failed: {e}") 
+        }
+
+        match agent_builder::export::export_binary(&new_project_name){
+            Ok(_) => println!("✅ Project binary exported successfully."),
+            Err(e) =>  println!("❌ Export failed: {e}") 
+        }
+
+        match agent_builder::cleanup::delete_agent_workspace(&new_project_name) {
+            Ok(_) => println!("🧼 Agent workspace removed."),
+            Err(e) => println!("⚠️ Failed to clean up workspace: {e}"),
         }
 
     } else {

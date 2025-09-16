@@ -41,8 +41,6 @@ async fn main() {
 
     // End: Argument assignments
 
-    println!("Ready to hatch!");
-
     let prompt = prompt();
 
     if !(server == "ollama" || server == "openai") {
