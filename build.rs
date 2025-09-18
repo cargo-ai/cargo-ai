@@ -263,58 +263,54 @@ pub fn actions() -> Vec<Action> {{
     // Write to file
     write!(file, "{}", generated_code)?;
 
-    // // Stable output path: overwrite templates_generated.rs in source tree
-    // let out_path = Path::new("src/agent_builder/templates_generated.rs");
-    // fs::create_dir_all(out_path.parent().unwrap())?;
-    // let mut file = File::create(out_path)?;
+     // New code: write templates_generated.rs into OUT_DIR
+    let templates_path = Path::new(&out_dir).join("templates_generated.rs");
+    let mut templates_file = File::create(&templates_path)?;
 
-    // // Write the generated code from .agentcfg
-    // write!(file, "{}", generated_code)?;
+    // Use CARGO_MANIFEST_DIR to resolve templates directory
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let templates_dir = Path::new(&manifest_dir).join("src/templates");
 
-    // // Define the destination file path where the generated templates will go
-    // let dest_path = Path::new("src/agent_builder/templates_generated.rs");
+    // Only proceed if the templates directory exists
+    if templates_dir.exists() {
+        // Define all template files: (logical name, path to file)
+        let template_files = vec![
+            ("build.rs", templates_dir.join("build.rs")),
+            (".agentcfg", templates_dir.join(".agentcfg")),
+            ("Cargo.toml", templates_dir.join("Cargo.toml")),
+            ("src/main.rs", templates_dir.join("src/main.rs")),
+            ("src/args.rs", templates_dir.join("src/args.rs")),
+            ("src/cargo.rs", templates_dir.join("src/cargo.rs")),
+            ("src/lib.rs", templates_dir.join("src/lib.rs")),
+            ("src/ollama_api_client.rs", templates_dir.join("src/ollama_api_client.rs")),
+            ("src/openai_api_client.rs", templates_dir.join("src/openai_api_client.rs")),
+        ];
 
-    // // Ensure the directory exists
-    // fs::create_dir_all("src/agent_builder")?;
+        // Write the beginning of the templates() function
+        writeln!(templates_file, "pub fn templates() -> &'static [(&'static str, &'static str)] {{")?;
+        writeln!(templates_file, "    &[")?;
 
-    // // Create or overwrite the destination file
-    // let mut file = File::create(&dest_path)?;
+        // Iterate through each template file
+        for (logical_name, path) in &template_files {
+            // Read the file content and escape it for Rust string literals
+            let content = fs::read_to_string(path)
+                .unwrap_or_else(|_| panic!("Failed to read {}", path.display()))
+                .replace('\\', "\\\\")
+                .replace('\"', "\\\"")
+                .replace('\r', "\\r")
+                .replace('\n', "\\n");
 
-    // // Only proceed if the templates directory exists
-    // if Path::new("src/templates").exists() {
-    //     // Define all template files: (logical name, path to file)
-    //     let template_files = vec![
-    //         ("build.rs", "src/templates/build.rs"),
-    //         (".agentcfg", "src/templates/.agentcfg"),
-    //         ("Cargo.toml", "src/templates/Cargo.toml"),
-    //         ("src/main.rs", "src/templates/src/main.rs"),
-    //         ("src/args.rs", "src/templates/src/args.rs"),
-    //         ("src/cargo.rs", "src/templates/src/cargo.rs"),
-    //         ("src/lib.rs", "src/templates/src/lib.rs"),
-    //         ("src/ollama_api_client.rs", "src/templates/src/ollama_api_client.rs"),
-    //         ("src/openai_api_client.rs", "src/templates/src/openai_api_client.rs"),
-    //     ];
+            // Write each file as a string entry in the slice
+            writeln!(templates_file, "        (\"{}\", \"{}\"),", logical_name, content)?;
+        }
 
-    //     // Write the beginning of the TEMPLATES const array
-    //     writeln!(file, "pub const TEMPLATES: [(&str, &str); {}] = [", template_files.len())?;
-
-    //     // Iterate through each template file
-    //     for (logical_name, path) in &template_files {
-    //         // Read the file content and escape it for Rust string literals
-    //         let content = fs::read_to_string(path)
-    //             .unwrap_or_else(|_| panic!("Failed to read {}", path))
-    //             .replace('\\', "\\\\")
-    //             .replace('\"', "\\\"")
-    //             .replace('\r', "\\r")
-    //             .replace('\n', "\\n");
-
-    //         // Write each file as a string entry in the array
-    //         writeln!(file, "    (\"{}\", \"{}\"),", logical_name, content)?;
-    //     }
-
-    //     // Close the array declaration
-    //     writeln!(file, "];")?;
-    // }
+        // Close the slice and function
+        writeln!(templates_file, "    ]")?;
+        writeln!(templates_file, "}}")?;
+    } else {
+        // Write fallback templates() function returning empty slice
+        writeln!(templates_file, "pub fn templates() -> &'static [(&'static str, &'static str)] {{ &[] }}")?;
+    }
 
     Ok(())
 }

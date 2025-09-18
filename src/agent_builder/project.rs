@@ -5,8 +5,10 @@
 
 use std::{fs, io::Error, path::PathBuf};
 
-use crate::agent_builder::templates_generated;
-use templates_generated::TEMPLATES;
+// use crate::agent_builder::templates_generated;
+// use templates_generated::TEMPLATES;
+
+include!(concat!(env!("OUT_DIR"), "/templates_generated.rs"));
 
 const AGENTS_WORKSPACE_DIRECTORY: &str = ".cargo-ai/agents";
 
@@ -33,8 +35,9 @@ fn create_agent_workspace(agent_name: &str) -> Result<(), Error> {
 
 /// Writes template files (`build.rs`, `.agentcfg`) to the agent workspace.
 fn load_agent_workspace(agent_name: &str, agentcfg: Option<&str>) -> Result<(), Error> {
+    // let templates = templates();
     let base_path = agent_workspace_path(agent_name); 
-    for (file_name, file_contents) in  TEMPLATES {
+    for (file_name, file_contents) in  templates() {
         let file_path = base_path.join(file_name);
 
         // Create parent directories if needed
@@ -43,7 +46,7 @@ fn load_agent_workspace(agent_name: &str, agentcfg: Option<&str>) -> Result<(), 
         }
         
         // Handle custom .agentcfg file
-        if file_name == ".agentcfg" {
+        if *file_name == ".agentcfg" {
             if let Some(path) = agentcfg {
                 let contents = fs::read_to_string(path)?;
                 fs::write(file_path, contents)?;
@@ -61,5 +64,3 @@ fn load_agent_workspace(agent_name: &str, agentcfg: Option<&str>) -> Result<(), 
     }
     Ok(())
 }
-
-

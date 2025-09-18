@@ -5,6 +5,13 @@ edition = "2021"
 license = "MIT"
 description = "Ship AI Data the right way with Rust."
 build = "build.rs"
+include = [
+    "src/**",
+    "build.rs",
+    "Cargo.toml",
+    ".agentcfg",
+    "src/templates/**",
+]
 
 [dependencies]
 clap = "4.5.35"
