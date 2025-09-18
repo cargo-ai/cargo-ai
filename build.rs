@@ -263,5 +263,58 @@ pub fn actions() -> Vec<Action> {{
     // Write to file
     write!(file, "{}", generated_code)?;
 
+    // // Stable output path: overwrite templates_generated.rs in source tree
+    // let out_path = Path::new("src/agent_builder/templates_generated.rs");
+    // fs::create_dir_all(out_path.parent().unwrap())?;
+    // let mut file = File::create(out_path)?;
+
+    // // Write the generated code from .agentcfg
+    // write!(file, "{}", generated_code)?;
+
+    // // Define the destination file path where the generated templates will go
+    // let dest_path = Path::new("src/agent_builder/templates_generated.rs");
+
+    // // Ensure the directory exists
+    // fs::create_dir_all("src/agent_builder")?;
+
+    // // Create or overwrite the destination file
+    // let mut file = File::create(&dest_path)?;
+
+    // // Only proceed if the templates directory exists
+    // if Path::new("src/templates").exists() {
+    //     // Define all template files: (logical name, path to file)
+    //     let template_files = vec![
+    //         ("build.rs", "src/templates/build.rs"),
+    //         (".agentcfg", "src/templates/.agentcfg"),
+    //         ("Cargo.toml", "src/templates/Cargo.toml"),
+    //         ("src/main.rs", "src/templates/src/main.rs"),
+    //         ("src/args.rs", "src/templates/src/args.rs"),
+    //         ("src/cargo.rs", "src/templates/src/cargo.rs"),
+    //         ("src/lib.rs", "src/templates/src/lib.rs"),
+    //         ("src/ollama_api_client.rs", "src/templates/src/ollama_api_client.rs"),
+    //         ("src/openai_api_client.rs", "src/templates/src/openai_api_client.rs"),
+    //     ];
+
+    //     // Write the beginning of the TEMPLATES const array
+    //     writeln!(file, "pub const TEMPLATES: [(&str, &str); {}] = [", template_files.len())?;
+
+    //     // Iterate through each template file
+    //     for (logical_name, path) in &template_files {
+    //         // Read the file content and escape it for Rust string literals
+    //         let content = fs::read_to_string(path)
+    //             .unwrap_or_else(|_| panic!("Failed to read {}", path))
+    //             .replace('\\', "\\\\")
+    //             .replace('\"', "\\\"")
+    //             .replace('\r', "\\r")
+    //             .replace('\n', "\\n");
+
+    //         // Write each file as a string entry in the array
+    //         writeln!(file, "    (\"{}\", \"{}\"),", logical_name, content)?;
+    //     }
+
+    //     // Close the array declaration
+    //     writeln!(file, "];")?;
+    // }
+
     Ok(())
 }

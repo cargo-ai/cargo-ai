@@ -9,3 +9,6 @@ pub mod export;
 
 // Handles cleaup after export
 pub mod cleanup;
+
+// Area for generated templates
+pub mod templates_generated;
