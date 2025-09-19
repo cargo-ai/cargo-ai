@@ -145,15 +145,15 @@ async fn main() {
             Err(e) =>  println!("❌ Build failed: {e}") 
         }
 
-        match agent_builder::export::export_binary(&new_project_name){
-            Ok(_) => println!("✅ Project binary exported successfully."),
-            Err(e) =>  println!("❌ Export failed: {e}") 
-        }
+        // match agent_builder::export::export_binary(&new_project_name){
+        //     Ok(_) => println!("✅ Project binary exported successfully."),
+        //     Err(e) =>  println!("❌ Export failed: {e}") 
+        // }
 
-        match agent_builder::cleanup::delete_agent_workspace(&new_project_name) {
-            Ok(_) => println!("🧼 Agent workspace removed."),
-            Err(e) => println!("⚠️ Failed to clean up workspace: {e}"),
-        }
+        // match agent_builder::cleanup::delete_agent_workspace(&new_project_name) {
+        //     Ok(_) => println!("🧼 Agent workspace removed."),
+        //     Err(e) => println!("⚠️ Failed to clean up workspace: {e}"),
+        // }
 
     } else {
         println!("Provide subcommand.");
