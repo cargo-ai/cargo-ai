@@ -5,9 +5,6 @@
 
 use std::{fs, io::Error, path::PathBuf};
 
-// use crate::agent_builder::templates_generated;
-// use templates_generated::TEMPLATES;
-
 include!(concat!(env!("OUT_DIR"), "/templates_generated.rs"));
 
 const AGENTS_WORKSPACE_DIRECTORY: &str = ".cargo-ai/agents";

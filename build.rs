@@ -269,7 +269,7 @@ pub fn actions() -> Vec<Action> {{
 
     // Use CARGO_MANIFEST_DIR to resolve templates directory
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let templates_dir = Path::new(&manifest_dir).join("src/templates");
+    let templates_dir = Path::new(&manifest_dir).join("../templates");
 
     // Only proceed if the templates directory exists
     if templates_dir.exists() {
