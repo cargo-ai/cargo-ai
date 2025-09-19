@@ -27,7 +27,7 @@ fn main() -> std::io::Result<()> {
     println!("cargo:rerun-if-changed=.agentcfg");
     println!("cargo:rerun-if-changed=templates");
     println!("cargo:rerun-if-changed=build.rs");
-    
+
     // Step 1: Read .agentcfg into memory and parse as JSON.
     // For now, this build script only supports JSON; future versions may support TOML/YAML.
     let json_str = fs::read_to_string(".agentcfg")
@@ -278,7 +278,7 @@ pub fn actions() -> Vec<Action> {{
 pub const TEMPLATES: [(&str, &str); 9] = [
     ("build.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/templates/build.rs"))),
     (".agentcfg", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/templates/.agentcfg"))),
-    ("Cargo.toml", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/templates/Cargo.toml"))),
+    ("Cargo.toml", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/templates/Targo.toml"))),
     ("src/main.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/templates/src/main.rs"))),
     ("src/args.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/templates/src/args.rs"))),
     ("src/cargo.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/templates/src/cargo.rs"))),
