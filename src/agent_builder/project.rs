@@ -5,9 +5,9 @@
 
 use std::{fs, io::Error, path::PathBuf};
 
-use crate::templates::*;
-
 const AGENTS_WORKSPACE_DIRECTORY: &str = ".cargo-ai/agents";
+
+include!(concat!(env!("OUT_DIR"), "/.generated_templates.rs"));
 
 /// Creates a new agent project directory and initializes required files.
 pub fn create_new_agent_project(agent_name: &str, agentcfg: Option<&str>) -> Result<(), Error> {
