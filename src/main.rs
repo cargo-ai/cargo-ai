@@ -15,36 +15,35 @@ include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 async fn main() {
 
     let cmd_args = args::build_cli();
-    // Begin: Argument assignments
-
-    let mut server = String::new();
-    if let Some(server_arg) = cmd_args.get_one::<String>("server") {
-        server.push_str(&server_arg.to_lowercase());
-    }
-
-    let mut token = String::new();
-    if let Some(cmd_token) = cmd_args.get_one::<String>("token") {
-        token.push_str(cmd_token);
-    }
-
-    let mut model = String::new();
-    if let Some(model_arg) = cmd_args.get_one::<String>("model") {
-        model.push_str(model_arg);
-    }
-
-    // cmd_args timeout_in_sec default to 60
-    let timeout_in_sec = cmd_args
-        .get_one::<String>("timeout_in_sec")
-        .expect("Timeout value expected")
-        .parse::<u64>()
-        .expect("Expected unsigned int, u64");
-
-
-    // End: Argument assignments
 
     let prompt = prompt();
 
-    if let Some(_) = cmd_args.subcommand_matches("preflight") {
+    if let Some(sub_m) = cmd_args.subcommand_matches("preflight") {
+        
+        // Begin: Argument assignments
+        let mut server = String::new();
+        if let Some(server_arg) = sub_m.get_one::<String>("server") {
+            server.push_str(&server_arg.to_lowercase());
+        }
+
+        let mut token = String::new();
+        if let Some(cmd_token) = sub_m.get_one::<String>("token") {
+            token.push_str(cmd_token);
+        }
+
+        let mut model = String::new();
+        if let Some(model_arg) = sub_m.get_one::<String>("model") {
+            model.push_str(model_arg);
+        }
+
+        // sub_m timeout_in_sec default to 60
+        let timeout_in_sec = sub_m
+            .get_one::<String>("timeout_in_sec")
+            .expect("Timeout value expected")
+            .parse::<u64>()
+            .expect("Expected unsigned int, u64");
+
+        // End: Argument assignments
 
         if !(server == "ollama" || server == "openai") {
             panic!("Unknown AI Server")
