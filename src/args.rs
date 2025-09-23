@@ -16,7 +16,38 @@ pub fn build_cli() -> ArgMatches {
 
     Command::new("cargo-ai")
         .bin_name(bin_name)
-        .subcommand(Command::new("preflight").about("Testing Agent from Config File"))
+        .subcommand(
+            Command::new("preflight")
+                .about("Internal: test agent config file")
+                .hide(true)
+                    .arg(
+                        Arg::new("server")
+                            .long("server")
+                            .short('s')
+                            .value_name("CLIENT")
+                            .help("Client Type - Ollama or OpenAI"),
+                    )
+                    .arg(
+                        Arg::new("model")
+                            .long("model")
+                            .short('m')
+                            .value_name("MODEL")
+                            .help("LLM model to use"),
+                    )
+                    .arg(
+                        Arg::new("token")
+                            .long("token")
+                            .value_name("TOKEN")
+                            .help("API token"),
+                    )
+                    .arg(
+                        Arg::new("timeout_in_sec")
+                            .long("timeout_in_sec")
+                            .value_name("SECONDS")
+                            .help("Client timeout request")
+                            .default_value("60"),
+                    )
+        )
         .subcommand(
             Command::new("hatch")
                 .about("Create New Agent Project")
@@ -33,33 +64,6 @@ pub fn build_cli() -> ArgMatches {
                         .value_name("FILE")
                         .num_args(1)
                 )
-        )
-        .arg(
-            Arg::new("server")
-                .long("server")
-                .short('s')
-                .help("Client Type - Ollama or OpenAI")
-                .global(true),
-        )
-        .arg(
-            Arg::new("model")
-                .long("model")
-                .short('m')
-                .help("LLM model to use")
-                .global(true),
-        )
-        .arg(
-            Arg::new("token")
-                .long("token")
-                .help("API token")
-                .global(true),
-        )
-        .arg(
-            Arg::new("timeout_in_sec")
-                .long("timeout_in_sec")
-                .help("Client timeout request")
-                .default_value("60")
-                .global(true),
         )
         .get_matches_from(args)
 }
