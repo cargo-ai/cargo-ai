@@ -16,7 +16,11 @@ pub fn build_cli() -> ArgMatches {
 
     Command::new("cargo-ai")
         .bin_name(bin_name)
-        .subcommand(Command::new("preflight").about("Testing Agent from Config File"))
+        .subcommand(
+            Command::new("preflight")
+                .about("Internal: test agent config file")
+                .hide(true)
+        )
         .subcommand(
             Command::new("hatch")
                 .about("Create New Agent Project")
