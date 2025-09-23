@@ -1,13 +1,16 @@
 //! Handles exporting the compiled agent binary to the current working directory.
 
 use std::fs;
-use std::path::PathBuf;
 use std::io::{self, ErrorKind};
 
 /// Copies the built binary from `.cargo-ai/agents/{agent}/target/debug/{agent}`
 /// into the directory where the `cargo-ai` command was invoked.
 pub fn export_binary(agent_name: &str) -> io::Result<()> {
-    let source_path = PathBuf::from(format!(".cargo-ai/agents/{}/target/debug/{}", agent_name, agent_name));
+    let project_path = super::agent_workspace_path(agent_name);
+    let source_path = project_path
+        .join("target")
+        .join("debug") 
+        .join(agent_name);
     if !source_path.exists() {
         return Err(io::Error::new(ErrorKind::NotFound, format!("Expected binary not found at {:?}", source_path)));
     }
