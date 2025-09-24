@@ -61,7 +61,7 @@
 
    Example (AdderAgent with GPT-4o):  
    ```bash
-   ./AdderAgent -s openai -m gpt-4o --token <your_api_token>
+     ./AdderAgent -s openai -m gpt-4o --token sk-ABCD1234...
    ```
 
 ## ⚙️ CLI Usage
