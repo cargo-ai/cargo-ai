@@ -97,10 +97,117 @@ Options:
   -h, --help                  Print help
 ```
 
-## 🤖 Create Your Own Agent with JSON
+## 🌦️🤖 Create Your Own Weather Agent with JSON
+
+We’ll walk through a WeatherAgent.json example step-by-step—prompt, expected response schema, optional resource URLs, and actions.
 
 To define a custom agent, you’ll use a JSON file that specifies:
-- The **prompt** to send to the AI/transformer server  
-- The **expected response schema** (properties returned)  
-- (Optional) **Resource URLs** provided to the server alongside the prompt  
-- A set of **actions** to run, depending on the agent’s response  
+1. The **prompt** to send to the AI/transformer server  
+2. The **expected response schema** (properties returned)  
+3. (Optional) **Resource URLs** provided to the server alongside the prompt  
+4. A set of **actions** to run, depending on the agent’s response  
+
+### 1) Define the Prompt
+
+  The `prompt` is the natural language instruction or question you send to the AI/transformer server.  
+  It frames what the agent is supposed to do. You can phrase it as a question, a request, or a directive.
+
+  Example from `WeatherAgent.json`:
+
+  ```json
+  "prompt": "Will it rain tomorrow between 9am and 5pm? (Consider true if over 40% for any given hour period.)"
+  ```
+
+  You can edit the text to suit your agent’s purpose—for example, summarizing an article, checking stock prices, or answering domain-specific questions.
+
+### 2) Define the Response Schema
+
+  The `agent_schema` describes the shape of the response you expect from the AI/transformer server.  
+  Behind the scenes, this schema is also used to generate the corresponding Rust structures.  
+
+  You can define fields as:
+  - `boolean` → true/false values  
+  - `string` → text values  
+  - `number` → floating-point numbers (f64)  
+  - `integer` → whole numbers (i64)  
+
+  Example from `WeatherAgent.json`:
+
+  ```json
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "raining": {
+        "type": "boolean",
+        "description": "Indicates whether it is raining."
+      }
+    }
+  }
+
+### 3) Define Resource URLs
+
+  The `resource_urls` section lists optional external data sources your agent can use.  
+  Each entry includes:
+  - `url`: the API endpoint or resource location  
+  - `description`: a short explanation of what the resource provides  
+
+  These URLs are passed to the AI/transformer server alongside the prompt, giving the agent more context to work with.  
+
+  Example from `WeatherAgent.json`:
+
+  ```json
+  "resource_urls": [
+    {
+      "url": "https://worldtimeapi.org/api/timezone/etc/utc",
+      "description": "Current UTC date and time."
+    },
+    {
+      "url": "https://api.open-meteo.com/v1/forecast?latitude=39.10&longitude=-84.51&hourly=precipitation_probability",
+      "description": "Hourly precipitation probability for Cincinnati, which is my area."
+    }
+  ]
+
+### 4) Define Actions
+
+The `actions` section specifies what the agent should do based on the response.  
+It follows the [JSON Logic](http://jsonlogic.com/) format for conditions.  
+
+Currently, actions can run a command-line executable (`exec`).  
+Future versions will support additional action types.
+
+Example from `WeatherAgent.json`:
+
+```json
+"actions": [
+  {
+    "name": "umbrella_hint_exec",
+    "logic": {
+      "==": [ { "var": "raining" }, true ]
+    },
+    "run": [
+      {
+        "kind": "exec",
+        "program": "echo",
+        "args": ["bring an umbrella"]
+      }
+    ]
+  },
+  {
+    "name": "sunglasses_hint_exec",
+    "logic": {
+      "==": [ { "var": "raining" }, false ]
+    },
+    "run": [
+      {
+        "kind": "exec",
+        "program": "echo",
+        "args": ["bring sunglasses"]
+      }
+    ]
+  }
+]
+```
+
+In this example:
+- If `raining` is true, the agent prints “bring an umbrella.”
+- If `raining` is false, the agent prints “bring sunglasses.”
