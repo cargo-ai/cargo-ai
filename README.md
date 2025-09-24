@@ -38,7 +38,7 @@
 
 ### Create a Sample Agent
 
-1. **Hatch a Sample Agent** (AdderAgent – a sample “Hello World” style agent that adds 2 + 2):  
+1. **Hatch a Sample Agent** (AgentAdder – a sample “Hello World” style agent that adds 2 + 2):  
 
    Generic form:  
    ```bash
@@ -47,7 +47,7 @@
 
    Example:  
    ```bash
-   cargo ai hatch AdderAgent
+   cargo ai hatch AgentAdder
    ```
 
 ### Run the Sample Agent
@@ -59,15 +59,35 @@
    ./<YourAgentName> -s <server> -m <model> --token <your_api_token>
    ```
 
-   Example (AdderAgent with GPT-4o):  
+   Example (AgentAdder with GPT-4o):  
    ```bash
-     ./AdderAgent -s openai -m gpt-4o --token sk-ABCD1234...
+     ./AgentAdder -s openai -m gpt-4o --token sk-ABCD1234...
    ```
 
 ## ⚙️ CLI Usage
 
+### Cargo AI Commands
+
+The base `cargo ai` command provides subcommands for managing agents:
+
 ```bash
-Usage: cargo ai [OPTIONS] --server <server> --model <model>
+Usage: cargo ai [COMMAND]
+
+Commands:
+  hatch    Hatch a new AI agent project
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help   Print help
+```
+
+### Agent Commands
+
+Once hatched, your agent is compiled as a standalone binary.  
+Example with `AgentAdder` (binary name: `AgentAdder`):
+
+```bash
+Usage: AgentAdder [OPTIONS]
 
 Options:
   -s, --server <server>       Client Type – Ollama or OpenAI
