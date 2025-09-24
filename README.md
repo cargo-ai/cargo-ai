@@ -31,10 +31,10 @@
    cargo install cargo-ai
    ```
 
-Verify installation:  
-```bash
-cargo ai --help
-```
+    Verify installation:  
+    ```bash
+    cargo ai --help
+    ```
 
 ## ⚙️ CLI Usage
 
