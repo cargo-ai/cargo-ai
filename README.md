@@ -99,7 +99,7 @@ Options:
 
 ## 🌦️🤖 Create Your Own Weather Agent with JSON
 
-We’ll walk through a WeatherAgent.json example step-by-step—prompt, expected response schema, optional resource URLs, and actions.
+We’ll walk through a [WeatherAgent.json](./WeatherAgent.json) example step-by-step—prompt, expected response schema, optional resource URLs, and actions.
 
 To define a custom agent, you’ll use a JSON file that specifies:
 1. The **prompt** to send to the AI/transformer server  
@@ -111,7 +111,7 @@ Below indicates the steps to create the WeatherAgent, but once defined, running 
 
 ```bash
 # 1. Hatch your WeatherAgent from a JSON config
-cargo ai hatch WeatherAgent WeatherAgent.json
+cargo ai hatch WeatherAgent [WeatherAgent.json](./WeatherAgent.json)
 
 # 2. Run your WeatherAgent with a server, model, and token
 ./WeatherAgent -s openai -m gpt-4o --token sk-ABCD1234...
@@ -125,7 +125,7 @@ cargo ai hatch WeatherAgent WeatherAgent.json
   The `prompt` is the natural language instruction or question you send to the AI/transformer server.  
   It frames what the agent is supposed to do. You can phrase it as a question, a request, or a directive.
 
-  Example from `WeatherAgent.json`:
+  Example from [WeatherAgent.json](./WeatherAgent.json):
 
   ```json
   "prompt": "Will it rain tomorrow between 9am and 5pm? (Consider true if over 40% for any given hour period.)"
@@ -144,7 +144,7 @@ cargo ai hatch WeatherAgent WeatherAgent.json
   - `number` → floating-point numbers (f64)  
   - `integer` → whole numbers (i64)  
 
-  Example from `WeatherAgent.json`:
+  Example from [WeatherAgent.json](./WeatherAgent.json):
 
   ```json
   "agent_schema": {
@@ -167,7 +167,7 @@ cargo ai hatch WeatherAgent WeatherAgent.json
 
   These URLs are passed to the AI/transformer server alongside the prompt, giving the agent more context to work with.  
 
-  Example from `WeatherAgent.json`:
+  Example from [WeatherAgent.json](./WeatherAgent.json):
 
   ```json
   "resource_urls": [
@@ -192,7 +192,7 @@ It follows the [JSON Logic](http://jsonlogic.com/) format for conditions.
 Currently, actions can run a command-line executable (`exec`).  
 Future versions will support additional action types.
 
-Example from `WeatherAgent.json`:
+Example from [WeatherAgent.json](./WeatherAgent.json):
 
 ```json
 "actions": [
