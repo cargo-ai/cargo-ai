@@ -107,7 +107,7 @@ To define a custom agent, you’ll use a JSON file that specifies:
 3. (Optional) **Resource URLs** provided to the server alongside the prompt  
 4. A set of **actions** to run, depending on the agent’s response  
 
-Below indicates the steps to create the WeatherAgent, but once defined, running it is as simple as:
+The steps below show how to create the WeatherAgent, but once defined, running it is as simple as:
 
 ```bash
 # 1. Hatch your WeatherAgent from a JSON config
