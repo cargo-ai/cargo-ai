@@ -36,9 +36,9 @@
     cargo ai --help
     ```
 
-### Create an Agent
+### Create a Sample Agent
 
-1. **Hatch a Hello World agent** (AdderAgent adds 2 + 2 by default):  
+1. **Hatch a Sample Agent** (AdderAgent – a sample “Hello World” style agent that adds 2 + 2):  
 
    Generic form:  
    ```bash
