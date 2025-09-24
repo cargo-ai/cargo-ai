@@ -50,7 +50,7 @@ pub fn build_cli() -> ArgMatches {
         )
         .subcommand(
             Command::new("hatch")
-                .about("Create New Agent Project")
+                .about("Hatch a new AI agent from a JSON config")
                 .arg(
                     Arg::new("name")
                         .help("Name of the new agent project")
