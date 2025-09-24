@@ -50,6 +50,20 @@
    cargo ai hatch AdderAgent
    ```
 
+### Run the Sample Agent
+
+2. **Run the compiled agent** with OpenAI GPT:  
+
+   Generic form:  
+   ```bash
+   ./<YourAgentName> -s openai -m <model> --token <your_api_token>
+   ```
+
+   Example (AdderAgent with GPT-4o):  
+   ```bash
+   ./AdderAgent -s openai -m gpt-4o --token <your_api_token>
+   ```
+
 ## ⚙️ CLI Usage
 
 ```bash
