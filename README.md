@@ -36,6 +36,20 @@
     cargo ai --help
     ```
 
+### Create an Agent
+
+1. **Hatch a Hello World agent** (AdderAgent adds 2 + 2 by default):  
+
+   Generic form:  
+   ```bash
+   cargo ai hatch <YourAgentName>
+   ```
+
+   Example:  
+   ```bash
+   cargo ai hatch AdderAgent
+   ```
+
 ## ⚙️ CLI Usage
 
 ```bash
