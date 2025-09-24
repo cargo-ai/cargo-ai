@@ -4,7 +4,7 @@
 [![Warning: Under Active Development](https://img.shields.io/badge/Warning-Under_Active_Development-yellow)](https://github.com/analyzer1/cargo-ai)
 
 ## 🌐 Overview
-`cargo-ai` is a lightweight, Rust-based framework for building **no-code AI agents** using clean, declarative JSON configs. Agents compile into fast, secure binaries—perfect for local machines, servers, and embedded Linux devices, with broader embedded support planned.  
+`cargo-ai` is a lightweight, Rust-based framework for building **no-code AI agents** using clean, declarative, JSON configs. Agents compile into fast, secure binaries—perfect for local machines, servers, and embedded Linux devices, with broader embedded support planned.  
 
 *Lightweight AI agents. Built in Rust. Declared in JSON.*
 
@@ -38,7 +38,7 @@
 
 ### Create a Sample Agent
 
-1. **Hatch a Sample Agent** (AgentAdder – a sample “Hello World” style agent that adds 2 + 2):  
+1. **Hatch a Sample Agent** (AdderAgent – a sample “Hello World” style agent that adds 2 + 2):  
 
    Generic form:  
    ```bash
@@ -47,7 +47,7 @@
 
    Example:  
    ```bash
-   cargo ai hatch AgentAdder
+   cargo ai hatch AdderAgent
    ```
 
 ### Run the Sample Agent
@@ -59,9 +59,9 @@
    ./<YourAgentName> -s <server> -m <model> --token <your_api_token>
    ```
 
-   Example (AgentAdder with GPT-4o):  
+   Example (AdderAgent with GPT-4o):  
    ```bash
-     ./AgentAdder -s openai -m gpt-4o --token sk-ABCD1234...
+     ./AdderAgent -s openai -m gpt-4o --token sk-ABCD1234...
    ```
 
 ## ⚙️ CLI Usage
@@ -84,10 +84,10 @@ Options:
 ### Agent Commands
 
 Once hatched, your agent is compiled as a standalone binary.  
-Example with `AgentAdder` (binary name: `AgentAdder`):
+Example with `AdderAgent` (binary name: `AdderAgent`):
 
 ```bash
-Usage: AgentAdder [OPTIONS]
+Usage: AdderAgent [OPTIONS]
 
 Options:
   -s, --server <server>       Client Type – Ollama or OpenAI
@@ -106,6 +106,19 @@ To define a custom agent, you’ll use a JSON file that specifies:
 2. The **expected response schema** (properties returned)  
 3. (Optional) **Resource URLs** provided to the server alongside the prompt  
 4. A set of **actions** to run, depending on the agent’s response  
+
+Below indicates the steps to create the WeatherAgent, but once defined, running it is as simple as:
+
+```bash
+# 1. Hatch your WeatherAgent from a JSON config
+cargo ai hatch WeatherAgent WeatherAgent.json
+
+# 2. Run your WeatherAgent with a server, model, and token
+./WeatherAgent -s openai -m gpt-4o --token sk-ABCD1234...
+
+# Expected output if raining tomorrow:
+# bring an umbrella
+```
 
 ### 1) Define the Prompt
 
@@ -168,6 +181,8 @@ To define a custom agent, you’ll use a JSON file that specifies:
     }
   ]
   ```
+
+  *Note: The weather forecast URL in the example is configured for Cincinnati (latitude/longitude values). Update these values and the description to match your own location.*
 
 ### 4) Define Actions
 
