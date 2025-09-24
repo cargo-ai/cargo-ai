@@ -96,3 +96,11 @@ Options:
   --timeout_in_sec <timeout>  Client timeout request [default: 60]
   -h, --help                  Print help
 ```
+
+## 🤖 Create Your Own Agent with JSON
+
+To define a custom agent, you’ll use a JSON file that specifies:
+- The **prompt** to send to the AI/transformer server  
+- The **expected response schema** (properties returned)  
+- (Optional) **Resource URLs** provided to the server alongside the prompt  
+- A set of **actions** to run, depending on the agent’s response  
