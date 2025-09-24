@@ -143,6 +143,7 @@ To define a custom agent, you’ll use a JSON file that specifies:
       }
     }
   }
+   ```
 
 ### 3) Define Resource URLs
 
@@ -166,6 +167,7 @@ To define a custom agent, you’ll use a JSON file that specifies:
       "description": "Hourly precipitation probability for Cincinnati, which is my area."
     }
   ]
+  ```
 
 ### 4) Define Actions
 
