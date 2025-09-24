@@ -56,7 +56,7 @@
 
    Generic form:  
    ```bash
-   ./<YourAgentName> -s openai -m <model> --token <your_api_token>
+   ./<YourAgentName> -s <server> -m <model> --token <your_api_token>
    ```
 
    Example (AdderAgent with GPT-4o):  
