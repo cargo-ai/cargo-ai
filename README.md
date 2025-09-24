@@ -4,29 +4,36 @@
 [![Warning: Under Active Development](https://img.shields.io/badge/Warning-Under_Active_Development-yellow)](https://github.com/analyzer1/cargo-ai)
 
 ## 🌐 Overview
-`cargo-ai` is a Cargo subcommand and Rust library for integrating AI models into your workflow.
+`cargo-ai` is a lightweight, Rust-based framework for building **no-code AI agents** using clean, declarative JSON configs. Agents compile into fast, secure binaries—perfect for local machines, servers, and embedded Linux devices, with broader embedded support planned.  
+
+*Lightweight AI agents. Built in Rust. Declared in JSON.*
 
 ## ✨ Features
 
-- CLI and library for interacting with AI models in Rust
+- **Declarative, No-Code Agents** – Define agent logic in JSON  
+- **Rust-Powered** – Safe, fast, and portable across environments  
+- **Compile-Time Safety** – Minimal runtime overhead; standalone binaries  
+- **Fully Local & Secure** – All logic executes client-side (no phoning home)  
+- **Embedded-Ready** – Agents compile into binaries suitable for servers and embedded Linux devices, with broader embedded support planned  
+- **Composable CLI** – Scaffold, build, and run agents via `cargo ai` commands  
 
 ## 📦 Installation
 
-**Prerequisites**: Ollama server running on its default local IP address and the Mistral open-source model available.
+### Base Install
 
-Install the CLI and library from source:
+1. **Install Rust & Cargo**  
+   Follow the official guide:  
+   [Install Rust & Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html)
 
+2. **Install cargo-ai**  
+   Once Cargo is available, install `cargo-ai` from source:  
+   ```bash
+   cargo install cargo-ai
+   ```
+
+Verify installation:  
 ```bash
-cargo install cargo-ai
-cargo ai --server ollama --model mistral
-```
-
-Sample output:
-
-```text
-Enter a prompt for mistral!
-4+5
-ollama Response: 9
+cargo ai --help
 ```
 
 ## ⚙️ CLI Usage
