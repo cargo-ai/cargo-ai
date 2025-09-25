@@ -81,6 +81,21 @@ Options:
   -h, --help   Print help
 ```
 
+#### Hatch Command
+
+The `hatch` command creates a new AI agent from a JSON config:
+
+```bash
+Usage: cargo ai hatch [OPTIONS] <name>
+
+Arguments:
+  <name>  Name of the new agent project
+
+Options:
+  -c, --config <FILE>  Path to the agent configuration file (JSON format)
+  -h, --help           Print help
+```
+
 ### Agent Commands
 
 Once hatched, your agent is compiled as a standalone binary.  
