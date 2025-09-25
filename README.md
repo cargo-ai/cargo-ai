@@ -42,12 +42,12 @@
 
    Generic form:  
    ```bash
-   cargo ai hatch <YourAgentName>
+   cargo ai hatch <YourAgentName> -c <config_file>
    ```
 
    Example:  
    ```bash
-   cargo ai hatch AdderAgent
+   cargo ai hatch AdderAgent -c AdderAgent.json
    ```
 
 ### Run the Sample Agent
@@ -111,7 +111,7 @@ The steps below show how to create the WeatherAgent, but once defined, running i
 
 ```bash
 # 1. Hatch your WeatherAgent from a JSON config
-cargo ai hatch WeatherAgent [WeatherAgent.json](./WeatherAgent.json)
+cargo ai hatch WeatherAgent --config [WeatherAgent.json](./WeatherAgent.json)
 
 # 2. Run your WeatherAgent with a server, model, and token
 ./WeatherAgent -s openai -m gpt-4o --token sk-ABCD1234...

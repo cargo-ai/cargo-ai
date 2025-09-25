@@ -60,7 +60,7 @@ pub fn build_cli() -> ArgMatches {
                     Arg::new("config")
                         .long("config")
                         .short('c')
-                        .help("Path to agent configuration file (.agentcfg) to use")
+                        .help("Path to the agent configuration file (JSON format)")
                         .value_name("FILE")
                         .num_args(1)
                 )
