@@ -51,3 +51,7 @@ pub use ollama_api_client::send_request as ollama_send_request;
 /// - `timeout_in_sec`: Timeout in seconds for the request.
 /// - `token`: Your OpenAI API token.
 pub use openai_api_client::send_request as openai_send_request;
+
+/// Default temperature used for model requests when not specified.
+/// Kept low (0.0) for consistent, deterministic outputs in schema-bound agents.
+pub const DEFAULT_TEMPERATURE: f64 = 0.0;

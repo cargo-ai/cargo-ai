@@ -39,7 +39,7 @@ pub async fn send_request(
         prompt: prompt.clone(),
         format: format.clone(),
         stream: false,
-        options: Options { temperature: 0.75 }
+        options: Options { temperature: crate::DEFAULT_TEMPERATURE}
     };
 
     let client = ClientBuilder::new()
