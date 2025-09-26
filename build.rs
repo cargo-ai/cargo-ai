@@ -41,11 +41,6 @@ fn main() -> std::io::Result<()> {
         .get("properties")
         .and_then(|p| p.as_object())
         .expect("Expected `agent_schema.properties` to be an object");
-    let required: Vec<String> = schema
-        .get("required")
-        .and_then(|r| r.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-        .unwrap_or_else(|| Vec::new());
 
     // Build struct fields from schema
     let mut struct_fields = String::new();
