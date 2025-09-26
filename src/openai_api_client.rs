@@ -54,7 +54,11 @@ pub async fn send_request(
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()?; // 30 sec Default too short for some requests.
 
-    let temperature = crate::DEFAULT_TEMPERATURE;
+    let temperature = if model.starts_with("gpt-5") {
+        1.0
+    } else {
+        crate::DEFAULT_TEMPERATURE
+    };
 
     let role = String::from("user");
 
@@ -73,6 +77,9 @@ pub async fn send_request(
         temperature,
         response_format: response_format.clone(),
     };
+
+    // Print the request JSON before sending
+    // println!("OpenAI request JSON:\n{}", serde_json::to_string_pretty(&request)?);
 
     let http_resp = client
         .post("https://api.openai.com/v1/chat/completions")
