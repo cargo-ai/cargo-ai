@@ -41,11 +41,6 @@ fn main() -> std::io::Result<()> {
         .get("properties")
         .and_then(|p| p.as_object())
         .expect("Expected `agent_schema.properties` to be an object");
-    let required: Vec<String> = schema
-        .get("required")
-        .and_then(|r| r.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-        .unwrap_or_else(|| Vec::new());
 
     // Build struct fields from schema
     let mut struct_fields = String::new();
@@ -74,9 +69,7 @@ fn main() -> std::io::Result<()> {
             }
             _ => "serde_json::Value".to_string(),
         };
-        let is_required = required.iter().any(|r| r == key);
-        let rust_ty = if is_required { base_ty } else { format!("Option<{}>", base_ty) };
-        struct_fields.push_str(&format!("    pub {}: {},\n", key, rust_ty));
+        struct_fields.push_str(&format!("    pub {}: {},\n", key, base_ty));
     }
 
     let prompt = json["prompt"]
