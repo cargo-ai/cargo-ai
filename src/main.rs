@@ -1,7 +1,6 @@
 use reqwest;
 use futures::future::join_all;
 mod args;
-// mod templates;
 mod agent_builder;
 
 use serde::{Deserialize, Serialize};

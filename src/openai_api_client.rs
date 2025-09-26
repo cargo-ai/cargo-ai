@@ -74,6 +74,8 @@ pub async fn send_request(
         response_format: response_format.clone(),
     };
 
+    println!("Request: {request:?}");
+
     let http_resp = client
         .post("https://api.openai.com/v1/chat/completions")
         .header("Authorization", format!("Bearer {}", token))
