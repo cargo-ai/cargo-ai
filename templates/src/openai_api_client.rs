@@ -54,7 +54,11 @@ pub async fn send_request(
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()?; // 30 sec Default too short for some requests.
 
-    let temperature: f64 = 1.0;
+    let temperature = if model.starts_with("gpt-5") {
+        1.0
+    } else {
+        crate::DEFAULT_TEMPERATURE
+    };
 
     let role = String::from("user");
 
@@ -74,6 +78,9 @@ pub async fn send_request(
         response_format: response_format.clone(),
     };
 
+    // Print the request JSON before sending
+    // println!("OpenAI request JSON:\n{}", serde_json::to_string_pretty(&request)?);
+
     let http_resp = client
         .post("https://api.openai.com/v1/chat/completions")
         .header("Authorization", format!("Bearer {}", token))
@@ -84,7 +91,7 @@ pub async fn send_request(
 
     // TEMP: print raw server response (without consuming parse-ability)
     let body_bytes = http_resp.bytes().await?;
-    // println!("Raw OpenAI response:\n{}", String::from_utf8_lossy(&body_bytes));
+    //println!("Raw OpenAI response:\n{}", String::from_utf8_lossy(&body_bytes));
 
     // Parse as usual from the captured bytes
     let response: Response = serde_json::from_slice(&body_bytes)?;
