@@ -127,8 +127,8 @@ async fn main() {
 
         let new_project_name = sub_m
             .get_one::<String>("name")
-            .expect("project name is required")
-            .to_lowercase();
+            .expect("project name is required");
+        
         println!("Build new cargo agent: {new_project_name}");
 
         let agentcfg: Option<&str> = sub_m.get_one::<String>("config").map(String::as_str);
