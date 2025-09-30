@@ -21,27 +21,35 @@ pub fn build_cli() -> ArgMatches {
                 .long("server")
                 .short('s')
                 .help("Client Type - Ollama or OpenAI")
-                .global(true),
+                .global(true)
         )
         .arg(
             Arg::new("model")
                 .long("model")
                 .short('m')
                 .help("LLM model to use")
-                .global(true),
+                .global(true)
         )
         .arg(
             Arg::new("token")
                 .long("token")
                 .help("API token")
-                .global(true),
+                .global(true)
         )
         .arg(
             Arg::new("timeout_in_sec")
                 .long("timeout_in_sec")
                 .help("Client timeout request")
                 .default_value("60")
-                .global(true),
+                .global(true)
+        )
+        .arg(
+            Arg::new("prompt")
+                .long("prompt")
+                .short('p')
+                .help("Prompt to provide to the agent at runtime")
+                .value_name("TEXT")
+                .num_args(1)
         )
         .get_matches_from(args)
 }

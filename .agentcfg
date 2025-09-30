@@ -13,7 +13,7 @@
   "resource_urls": [],
   "actions": [
     {
-      "name": "check_answer",
+      "name": "is_4",
       "logic": {
         "==": [ { "var": "answer" }, 4 ]
       },
@@ -21,12 +21,12 @@
         {
           "kind": "exec",
           "program": "echo",
-          "args": ["Correct! 2 + 2 does equal 4."]
+          "args": ["Value return is equal to 4."]
         }
       ]
     },
     {
-      "name": "wrong_answer",
+      "name": "is_not_4",
       "logic": {
         "!=": [ { "var": "answer" }, 4 ]
       },
@@ -34,7 +34,7 @@
         {
           "kind": "exec",
           "program": "echo",
-          "args": ["Incorrect. 2 + 2 does not equal that."]
+          "args": ["Value return is not equal to 4."]
         }
       ]
     }

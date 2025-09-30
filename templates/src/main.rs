@@ -38,10 +38,13 @@ async fn main() {
         .parse::<u64>()
         .expect("Expected unsigned int, u64");
 
+    let prompt = if let Some(cli_prompt) = cmd_args.get_one::<String>("prompt") {
+        cli_prompt.to_string()
+    } else {
+        prompt() // JSON default.
+    };
 
     // End: Argument assignments
-
-    let prompt = prompt();
 
     if !(server == "ollama" || server == "openai") {
         panic!("Unknown AI Server")
