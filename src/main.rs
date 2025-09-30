@@ -15,10 +15,14 @@ async fn main() {
 
     let cmd_args = args::build_cli();
 
-    let prompt = prompt();
-
     if let Some(sub_m) = cmd_args.subcommand_matches("preflight") {
-        
+
+        let prompt = if let Some(cli_prompt) = sub_m.get_one::<String>("prompt") {
+            cli_prompt.to_string()
+        } else {
+            prompt() // JSON default.
+        };
+
         // Begin: Argument assignments
         let mut server = String::new();
         if let Some(server_arg) = sub_m.get_one::<String>("server") {
@@ -128,7 +132,7 @@ async fn main() {
         let new_project_name = sub_m
             .get_one::<String>("name")
             .expect("project name is required");
-        
+
         println!("Build new cargo agent: {new_project_name}");
 
         let agentcfg: Option<&str> = sub_m.get_one::<String>("config").map(String::as_str);
