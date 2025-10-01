@@ -157,7 +157,7 @@ The steps below show how to create the weather_agent, but once defined, running 
 
 ```bash
 # 1. Hatch your weather_agent from a JSON config
-cargo ai hatch weather_agent --config [weather_agent.json](./weather_agent.json)
+cargo ai hatch weather_agent --config weather_agent.json
 
 # 2. Run your weather_agent with a server, model, and token
 ./weather_agent -s openai -m gpt-4o --token sk-ABCD1234...
