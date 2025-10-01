@@ -38,31 +38,61 @@
 
 ### Create a Sample Agent
 
-1. **Hatch a Sample Agent** (AdderAgent – a sample “Hello World” style agent that adds 2 + 2):  
+1. **Hatch a Sample Agent**  
 
-   Generic form:  
+   By default, if you don’t provide a config file, `cargo-ai` will hatch a sample “Hello World” style agent (`adder_agent`) that simply adds 2 + 2.
+
+   Default example:  
    ```bash
-   cargo ai hatch <YourAgentName> -c <config_file>
+   cargo ai hatch adder_agent
    ```
 
-   Example:  
+   Generic form (using your own config file):  
    ```bash
-   cargo ai hatch AdderAgent -c AdderAgent.json
+   cargo ai hatch <YourAgentName> -c <config_file>
    ```
 
 ### Run the Sample Agent
 
 2. **Run the compiled agent** with OpenAI GPT:  
 
-   Generic form:  
-   ```bash
-   ./<YourAgentName> -s <server> -m <model> --token <your_api_token>
-   ```
+    Generic form:  
+    ```bash
+    ./<YourAgentName> -s <server> -m <model> --token <your_api_token>
+    ```
 
-   Example (AdderAgent with GPT-4o):  
-   ```bash
-     ./AdderAgent -s openai -m gpt-4o --token sk-ABCD1234...
-   ```
+    Example (adder_agent with GPT-4o):  
+    ```bash
+    ./adder_agent -s openai -m gpt-4o --token sk-ABCD1234...
+    ```
+
+    #### Override the Default Prompt
+
+    By default, the `adder_agent` runs with the prompt `"2+2"`. You can override this at runtime using the `--prompt` flag.
+
+    Default run (prompt = "2+2"):  
+    ```bash
+    ./adder_agent -s openai -m gpt-4o --token sk-ABCD1234...
+    ```
+
+    Expected output:
+    ```
+    Running 'is_4': echo ["Value return is equal to 4."]
+    Value return is equal to 4.
+    Command completed successfully.
+    ```
+
+    Overridden run (prompt = "2+3"):  
+    ```bash
+    ./adder_agent -s openai -m gpt-4o --token sk-ABCD1234... --prompt "2+3"
+    ```
+
+    Expected output:
+    ```
+    Running 'is_not_4': echo ["Value return is not equal to 4."]
+    Value return is not equal to 4.
+    Command completed successfully.
+    ```
 
 ## ⚙️ CLI Usage
 
@@ -99,22 +129,23 @@ Options:
 ### Agent Commands
 
 Once hatched, your agent is compiled as a standalone binary.  
-Example with `AdderAgent` (binary name: `AdderAgent`):
+Example with `adder_agent` (binary name: `adder_agent`):
 
 ```bash
-Usage: AdderAgent [OPTIONS]
+Usage: adder_agent [OPTIONS]
 
 Options:
   -s, --server <server>       Client Type – Ollama or OpenAI
   -m, --model <model>         LLM model to use
   --token <token>             API token
   --timeout_in_sec <timeout>  Client timeout request [default: 60]
+  -p, --prompt <TEXT>                    Prompt to provide to the agent at runtime
   -h, --help                  Print help
 ```
 
 ## 🌦️🤖 Create Your Own Weather Agent with JSON
 
-We’ll walk through a [WeatherAgent.json](./WeatherAgent.json) example step-by-step—prompt, expected response schema, optional resource URLs, and actions.
+We’ll walk through a [weather_agent.json](./weather_agent.json) example step-by-step—prompt, expected response schema, optional resource URLs, and actions.
 
 To define a custom agent, you’ll use a JSON file that specifies:
 1. The **prompt** to send to the AI/transformer server  
@@ -122,14 +153,14 @@ To define a custom agent, you’ll use a JSON file that specifies:
 3. (Optional) **Resource URLs** provided to the server alongside the prompt  
 4. A set of **actions** to run, depending on the agent’s response  
 
-The steps below show how to create the WeatherAgent, but once defined, running it is as simple as:
+The steps below show how to create the weather_agent, but once defined, running it is as simple as:
 
 ```bash
-# 1. Hatch your WeatherAgent from a JSON config
-cargo ai hatch WeatherAgent --config [WeatherAgent.json](./WeatherAgent.json)
+# 1. Hatch your weather_agent from a JSON config
+cargo ai hatch weather_agent --config [weather_agent.json](./weather_agent.json)
 
-# 2. Run your WeatherAgent with a server, model, and token
-./WeatherAgent -s openai -m gpt-4o --token sk-ABCD1234...
+# 2. Run your weather_agent with a server, model, and token
+./weather_agent -s openai -m gpt-4o --token sk-ABCD1234...
 
 # Expected output if raining tomorrow:
 # bring an umbrella
@@ -140,7 +171,7 @@ cargo ai hatch WeatherAgent --config [WeatherAgent.json](./WeatherAgent.json)
   The `prompt` is the natural language instruction or question you send to the AI/transformer server.  
   It frames what the agent is supposed to do. You can phrase it as a question, a request, or a directive.
 
-  Example from [WeatherAgent.json](./WeatherAgent.json):
+  Example from [weather_agent.json](./weather_agent.json):
 
   ```json
   "prompt": "Will it rain tomorrow between 9am and 5pm? (Consider true if over 40% for any given hour period.)"
@@ -159,7 +190,7 @@ cargo ai hatch WeatherAgent --config [WeatherAgent.json](./WeatherAgent.json)
   - `number` → floating-point numbers (f64)  
   - `integer` → whole numbers (i64)  
 
-  Example from [WeatherAgent.json](./WeatherAgent.json):
+  Example from [weather_agent.json](./weather_agent.json):
 
   ```json
   "agent_schema": {
@@ -182,7 +213,7 @@ cargo ai hatch WeatherAgent --config [WeatherAgent.json](./WeatherAgent.json)
 
   These URLs are passed to the AI/transformer server alongside the prompt, giving the agent more context to work with.  
 
-  Example from [WeatherAgent.json](./WeatherAgent.json):
+  Example from [weather_agent.json](./weather_agent.json):
 
   ```json
   "resource_urls": [
@@ -207,7 +238,7 @@ It follows the [JSON Logic](http://jsonlogic.com/) format for conditions.
 Currently, actions can run a command-line executable (`exec`).  
 Future versions will support additional action types.
 
-Example from [WeatherAgent.json](./WeatherAgent.json):
+Example from [weather_agent.json](./weather_agent.json):
 
 ```json
 "actions": [
