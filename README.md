@@ -139,7 +139,7 @@ Options:
   -m, --model <model>         LLM model to use
   --token <token>             API token
   --timeout_in_sec <timeout>  Client timeout request [default: 60]
-  -p, --prompt <TEXT>                    Prompt to provide to the agent at runtime
+  -p, --prompt <TEXT>         Prompt to provide to the agent at runtime
   -h, --help                  Print help
 ```
 
