@@ -6,18 +6,30 @@ use std::io::{self, ErrorKind};
 /// Copies the built binary from `.cargo-ai/agents/{agent}/target/debug/{agent}`
 /// into the directory where the `cargo-ai` command was invoked.
 pub fn export_binary(agent_name: &str) -> io::Result<()> {
+
     let project_path = super::agent_workspace_path(agent_name);
-    let source_path = project_path
+
+    #[allow(unused_mut)]
+    let mut source_path = project_path
         .join("target")
         .join("debug") 
         .join(agent_name);
+
+    #[cfg(windows)]
+    source_path.set_extension("exe");
+
     if !source_path.exists() {
         return Err(io::Error::new(ErrorKind::NotFound, format!("Expected binary not found at {:?}", source_path)));
     }
 
     let dest_dir = std::env::current_dir()?;
-    let dest_path = dest_dir.join(agent_name);
 
+    #[allow(unused_mut)]
+    let mut dest_path = dest_dir.join(agent_name);
+    
+    #[cfg(windows)]
+    dest_path.set_extension("exe");
+    
     fs::copy(&source_path, &dest_path)?;
 
     println!("✅ Exported binary to: {:?}", dest_path);
