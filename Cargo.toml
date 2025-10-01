@@ -3,7 +3,19 @@ name = "cargo-ai"
 version = "0.0.6"
 edition = "2021"
 license = "MIT"
-description = "Ship AI Data the right way with Rust."
+description = "Build lightweight AI agents with Cargo. Powered by Rust. Declared in JSON."
+repository = "https://github.com/analyzer1/cargo-ai"
+# homepage = "https://cargo-ai.org"
+readme = "README.md"
+documentation = "https://docs.rs/cargo-ai"
+keywords = ["ai", "agents", "automation", "llm", "cli"]
+categories = [
+  "command-line-utilities",
+  "data-processing",
+  "science::artificial-intelligence",
+  "development-tools::build-utils",
+  "automation"
+]
 build = "build.rs"
 
 [dependencies]
@@ -11,12 +23,14 @@ clap = "4.5.35"
 dirs = "6.0.0"
 futures = "0.3.31"
 jsonlogic = "0.5.1"
-mockito = "1.7.0"
 reqwest = { version = "0.12.15", features = ["json"] }
 schemars = { version = "1.0.4", features = ["derive"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 tokio = { version = "1.44.1", features = ["full"] }
+
+[dev-dependencies]
+mockito = "1.7.0"
 
 [build-dependencies]
 serde_json = "1.0"
