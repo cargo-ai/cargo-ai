@@ -16,6 +16,11 @@ pub fn build_cli() -> ArgMatches {
 
     Command::new("cargo-ai")
         .bin_name(bin_name)
+        .version(env!("CARGO_PKG_VERSION"))
+        .subcommand(
+            Command::new("version")
+                .about("Print version information")
+        )
         .subcommand(
             Command::new("preflight")
                 .about("Internal: test agent config file")
