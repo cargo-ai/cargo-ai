@@ -13,7 +13,6 @@ categories = [
     "command-line-utilities",
     "development-tools",
     "development-tools::build-utils",
-    "science::ai"
 ]
 build = "build.rs"
 
