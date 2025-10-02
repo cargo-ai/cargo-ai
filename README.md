@@ -93,6 +93,10 @@
     Value return is not equal to 4.
     Command completed successfully.
     ```
+    > **Note for Windows users:**  
+    > On Windows, the agent binary will be created with a `.exe` extension (e.g., `adder_agent.exe`).  
+    > You can run it by simply typing `adder_agent` in PowerShell or Command Prompt (the `.exe` is implied).  
+    > On macOS and Linux, run the binary from the current directory using `./adder_agent`.
 
 ## ⚙️ CLI Usage
 
@@ -165,6 +169,8 @@ cargo ai hatch weather_agent --config weather_agent.json
 # Expected output if raining tomorrow:
 # bring an umbrella
 ```
+> **Note for Windows users:**  
+> Use `weather_agent` (or `weather_agent.exe`) instead of `./weather_agent`.
 
 ### 1) Define the Prompt
 
