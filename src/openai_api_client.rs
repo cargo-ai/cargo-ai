@@ -94,7 +94,13 @@ pub async fn send_request(
     // println!("Raw OpenAI response:\n{}", String::from_utf8_lossy(&body_bytes));
 
     // Parse as usual from the captured bytes
-    let response: Response = serde_json::from_slice(&body_bytes)?;
+    let response: Response = match serde_json::from_slice(&body_bytes) {
+        Ok(resp) => resp,
+        Err(e) => {
+            let raw = String::from_utf8_lossy(&body_bytes);
+            return Err(format!("Failed to parse JSON: {}\nRaw response:\n{}", e, raw).into());
+        }
+    };
 
     let response_content = response
         .choices

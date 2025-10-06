@@ -50,13 +50,27 @@ pub async fn send_request(
     let api_url = env::var("OLLAMA_API_URL")
         .unwrap_or_else(|_| "http://localhost:11434/api/generate".to_string());
 
-    let reply = client
+    let http_resp = client
         .post(&api_url)
         .json(&request)
         .send()
-        .await?
-        .json::<Response>()
         .await?;
+
+    let status = http_resp.status();
+    let body_bytes = http_resp.bytes().await?;
+
+    if !status.is_success() {
+        let raw = String::from_utf8_lossy(&body_bytes);
+        return Err(format!("HTTP error {}: {}", status, raw).into());
+    }
+
+    let reply: Response = match serde_json::from_slice(&body_bytes) {
+        Ok(resp) => resp,
+        Err(e) => {
+            let raw = String::from_utf8_lossy(&body_bytes);
+            return Err(format!("Failed to parse JSON: {}\nRaw response:\n{}", e, raw).into());
+        }
+    };
 
     Ok(reply.response)
 }
