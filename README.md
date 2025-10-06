@@ -11,11 +11,11 @@
 ## ✨ Features
 
 - **Declarative, No-Code Agents** – Define agent logic in JSON  
+- **Portable JSON Configs** – Share agent definitions as JSON; others can "hatch" and run them on their own systems
+- **Full CLI Integration** – Run any command-line program or chain additional agents directly from JSON configs
 - **Rust-Powered** – Safe, fast, and portable across environments  
-- **Compile-Time Safety** – Minimal runtime overhead; standalone binaries  
 - **Fully Local & Secure** – All logic executes client-side (no phoning home)  
 - **Embedded-Ready** – Agents compile into binaries suitable for servers and embedded Linux devices, with broader embedded support planned  
-- **Composable CLI** – Scaffold, build, and run agents via `cargo ai` commands  
 
 ## 📦 Installation
 
