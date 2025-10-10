@@ -44,3 +44,19 @@ jobs:
             ./agent_adder -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }}
           fi
         shell: bash
+
+      - name: Validate agent_adder output
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            OUTPUT=$(./agent_adder.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }})
+          else
+            OUTPUT=$(./agent_adder -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }})
+          fi
+
+          echo "$OUTPUT"
+
+          echo "$OUTPUT" | grep -q "Value return is equal to 4." || {
+            echo "❌ Expected output not found"
+            exit 1
+          }
+        shell: bash
