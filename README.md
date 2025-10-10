@@ -1,7 +1,7 @@
 # cargo-ai
 
 [![Audit Status](https://github.com/analyzer1/cargo-ai/actions/workflows/security-audit.yml/badge.svg)](https://github.com/analyzer1/cargo-ai/actions/workflows/security-audit.yml)
-[![Multi-OS Test](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-test.yml/badge.svg)](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-test.yml)
+[![Multi-OS CI](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml/badge.svg)](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml)
 [![Warning: Under Active Development](https://img.shields.io/badge/Warning-Under_Active_Development-yellow)](https://github.com/analyzer1/cargo-ai)
 
 ## 🌐 Overview
