@@ -71,7 +71,7 @@ jobs:
 
           echo "$OUTPUT"
 
-          echo "$OUTPUT" | grep -q "Value return is not equal to 4." || {
+          echo "$OUTPUT" | grep -q "Value return is equal to 4." || {
             echo "❌ Expected output for overridden prompt not found"
             exit 1
           }
