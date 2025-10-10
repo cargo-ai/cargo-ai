@@ -76,3 +76,20 @@ jobs:
             exit 1
           }
         shell: bash
+
+  cross-compile-pi:
+    name: Cross-compile for Raspberry Pi (ARMv7)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross
+        run: cargo install cross
+
+      - name: Cross-compile for armv7-unknown-linux-gnueabihf
+        run: cross build --target armv7-unknown-linux-gnueabihf --release
