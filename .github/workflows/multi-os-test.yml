@@ -1,0 +1,77 @@
+name: Multi OS Test
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:  # allows manual ad hoc runs from GitHub UI
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build project
+        run: cargo build --verbose
+
+      - name: Install CLI for cargo-ai
+        run: cargo install --path .
+
+      - name: Run smoke test via installed CLI
+        run: cargo ai hatch agent_adder
+
+      - name: Set OPENAI_API_KEY environment variable
+        run: echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> $GITHUB_ENV
+
+      - name: Run agent_adder with OpenAI token
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            ./agent_adder.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }}
+          else
+            ./agent_adder -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }}
+          fi
+        shell: bash
+
+      - name: Validate agent_adder output with default prompt
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            OUTPUT=$(./agent_adder.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }})
+          else
+            OUTPUT=$(./agent_adder -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }})
+          fi
+
+          echo "$OUTPUT"
+
+          echo "$OUTPUT" | grep -q "Value return is equal to 4." || {
+            echo "❌ Expected output not found"
+            exit 1
+          }
+        shell: bash
+
+      - name: Validate agent_adder output with overridden prompt
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            OUTPUT=$(./agent_adder.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --prompt "2+3")
+          else
+            OUTPUT=$(./agent_adder -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --prompt "2+3")
+          fi
+
+          echo "$OUTPUT"
+
+          echo "$OUTPUT" | grep -q "Value return is not equal to 4." || {
+            echo "❌ Expected output for overridden prompt not found"
+            exit 1
+          }
+        shell: bash
