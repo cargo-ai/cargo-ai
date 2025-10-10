@@ -32,3 +32,15 @@ jobs:
 
       - name: Run smoke test via installed CLI
         run: cargo ai hatch agent_adder
+
+      - name: Set OPENAI_API_KEY environment variable
+        run: echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> $GITHUB_ENV
+
+      - name: Run agent_adder with OpenAI token
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            ./agent_adder.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }}
+          else
+            ./agent_adder -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }}
+          fi
+        shell: bash
