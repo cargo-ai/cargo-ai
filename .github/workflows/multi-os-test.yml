@@ -24,8 +24,11 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build
+      - name: Build project
         run: cargo build --verbose
 
-      - name: Smoke test `cargo ai hatch`
-        run: cargo run -- hatch adder_agent
+      - name: Install CLI for cargo-ai
+        run: cargo install --path .
+
+      - name: Run smoke test via installed CLI
+        run: cargo ai hatch agent_adder
