@@ -45,7 +45,7 @@ jobs:
           fi
         shell: bash
 
-      - name: Validate agent_adder output
+      - name: Validate agent_adder output with default prompt
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             OUTPUT=$(./agent_adder.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }})
@@ -57,6 +57,22 @@ jobs:
 
           echo "$OUTPUT" | grep -q "Value return is equal to 4." || {
             echo "❌ Expected output not found"
+            exit 1
+          }
+        shell: bash
+
+      - name: Validate agent_adder output with overridden prompt
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            OUTPUT=$(./agent_adder.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --prompt "2+3")
+          else
+            OUTPUT=$(./agent_adder -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --prompt "2+3")
+          fi
+
+          echo "$OUTPUT"
+
+          echo "$OUTPUT" | grep -q "Value return is not equal to 4." || {
+            echo "❌ Expected output for overridden prompt not found"
             exit 1
           }
         shell: bash
