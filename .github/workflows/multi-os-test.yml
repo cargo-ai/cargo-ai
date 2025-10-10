@@ -26,3 +26,6 @@ jobs:
 
       - name: Build
         run: cargo build --verbose
+
+      - name: Smoke test `cargo ai hatch`
+        run: cargo run -- hatch adder_agent
