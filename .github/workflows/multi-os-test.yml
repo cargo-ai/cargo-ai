@@ -1,0 +1,27 @@
+name: Multi OS Test
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:  # allows manual ad hoc runs from GitHub UI
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --verbose
