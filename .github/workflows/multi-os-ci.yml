@@ -1,4 +1,4 @@
-name: Multi OS Test
+name: Multi-OS CI
 
 on:
   push:
