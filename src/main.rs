@@ -6,6 +6,9 @@ mod agent_builder;
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
 
+use std::{fs, env};
+use std::io::{Error, ErrorKind};
+
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
 // Initialize Tokio runtime macro
@@ -137,24 +140,28 @@ async fn main() {
 
         let agentcfg: Option<&str> = sub_m.get_one::<String>("config").map(String::as_str);
 
-        match agent_builder::project::create_new_agent_project(&new_project_name, agentcfg) {
-            Ok(_) => println!("✅ Project created successfully."),
-            Err(e) =>  println!("❌ Failed to create project: {e}") 
-        }
+        if let Some(path) = agentcfg {
+            let file_contents = config_contents(path);
 
-        match agent_builder::build::build_agent_project(&new_project_name) {
-            Ok(_) => println!("✅ Project built successfully."),
-            Err(e) =>  println!("❌ Build failed: {e}") 
-        }
+            match agent_builder::project::create_new_agent_project(&new_project_name, file_contents) {
+                Ok(_) => println!("✅ Project created successfully."),
+                Err(e) =>  println!("❌ Failed to create project: {e}") 
+            }
 
-        match agent_builder::export::export_binary(&new_project_name){
-            Ok(_) => println!("✅ Project binary exported successfully."),
-            Err(e) =>  println!("❌ Export failed: {e}") 
-        }
+            match agent_builder::build::build_agent_project(&new_project_name) {
+                Ok(_) => println!("✅ Project built successfully."),
+                Err(e) =>  println!("❌ Build failed: {e}") 
+            }
 
-        match agent_builder::cleanup::delete_agent_workspace(&new_project_name) {
-            Ok(_) => println!("🧼 Agent workspace removed."),
-            Err(e) => println!("⚠️ Failed to clean up workspace: {e}"),
+            match agent_builder::export::export_binary(&new_project_name){
+                Ok(_) => println!("✅ Project binary exported successfully."),
+                Err(e) =>  println!("❌ Export failed: {e}") 
+            }
+
+            match agent_builder::cleanup::delete_agent_workspace(&new_project_name) {
+                Ok(_) => println!("🧼 Agent workspace removed."),
+                Err(e) => println!("⚠️ Failed to clean up workspace: {e}"),
+            }
         }
 
     } else {
@@ -214,4 +221,37 @@ pub fn apply_actions(output: &Output, actions: &[Action]) {
         }
     }
 
+}
+
+fn config_contents(path: &str) -> Result<String, std::io::Error> {
+    if path.contains('.') {
+        // Local file path
+        fs::read_to_string(path)
+    } else {
+        // Fetch from Cargo-AI registry
+        fetch_from_registry(path)
+    }
+}
+
+fn fetch_from_registry(name: &str) -> Result<String, Error> {
+    let url = "https://api.cargo-ai.org/public";
+    let client = reqwest::blocking::Client::new();
+
+    let body = serde_json::json!({ "request": name });
+
+    let resp = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .map_err(|e| Error::new(ErrorKind::Other, format!("network error: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err(Error::new(
+            ErrorKind::Other,
+            format!("HTTP {} for {url}", resp.status()),
+        ));
+    }
+
+    resp.text().map_err(|e| Error::new(ErrorKind::Other, e.to_string()))
 }

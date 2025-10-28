@@ -4,12 +4,12 @@
 //! with the necessary config and build files.
 
 use std::{fs, env};
-use std::io::{Error, ErrorKind};
+use std::io::{Error};
 
 include!(concat!(env!("OUT_DIR"), "/.generated_templates.rs"));
 
 /// Creates a new agent project directory and initializes required files.
-pub fn create_new_agent_project(agent_name: &str, agentcfg: Option<&str>) -> Result<(), Error> {
+pub fn create_new_agent_project(agent_name: &str, agentcfg: Result<String, Error>) -> Result<(), Error> {
     create_agent_workspace(agent_name)?;
     load_agent_workspace(agent_name, agentcfg)?;
     Ok(())
@@ -25,7 +25,7 @@ fn create_agent_workspace(agent_name: &str) -> Result<(), Error> {
 }
 
 /// Writes template files (`build.rs`, `.agentcfg`) to the agent workspace.
-fn load_agent_workspace(agent_name: &str, agentcfg: Option<&str>) -> Result<(), Error> {
+fn load_agent_workspace(agent_name: &str, agentcfg: Result<String, Error>) -> Result<(), Error> {
     let base_path = super::agent_workspace_path(agent_name); 
     for (file_name, file_contents) in  TEMPLATES {
         let file_path = base_path.join(file_name);
@@ -37,8 +37,7 @@ fn load_agent_workspace(agent_name: &str, agentcfg: Option<&str>) -> Result<(), 
         
         // Handle custom .agentcfg file
         if file_name == ".agentcfg" {
-            if let Some(path) = agentcfg {
-                let contents = config_contents(path)?;
+            if let Ok(ref contents) = agentcfg {
                 fs::write(file_path, contents)?;
                 continue;
             }
@@ -53,37 +52,4 @@ fn load_agent_workspace(agent_name: &str, agentcfg: Option<&str>) -> Result<(), 
         fs::write(file_path, file_contents)?;
     }
     Ok(())
-}
-
-fn config_contents(path: &str) -> Result<String, std::io::Error> {
-    if path.contains('.') {
-        // Local file path
-        fs::read_to_string(path)
-    } else {
-        // Fetch from Cargo-AI registry
-        fetch_from_registry(path)
-    }
-}
-
-fn fetch_from_registry(name: &str) -> Result<String, std::io::Error> {
-    let url = "https://api.cargo-ai.org/public";
-    let client = reqwest::blocking::Client::new();
-
-    let body = serde_json::json!({ "request": name });
-
-    let resp = client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .map_err(|e| Error::new(ErrorKind::Other, format!("network error: {e}")))?;
-
-    if !resp.status().is_success() {
-        return Err(Error::new(
-            ErrorKind::Other,
-            format!("HTTP {} for {url}", resp.status()),
-        ));
-    }
-
-    resp.text().map_err(|e| Error::new(ErrorKind::Other, e.to_string()))
 }
