@@ -3,7 +3,8 @@
 //! It creates the `.cargo-ai/agents/{agent_name}` folder and populates it
 //! with the necessary config and build files.
 
-use std::{fs, io::Error, env};
+use std::{fs, env};
+use std::io::{Error, ErrorKind};
 
 include!(concat!(env!("OUT_DIR"), "/.generated_templates.rs"));
 
@@ -37,7 +38,7 @@ fn load_agent_workspace(agent_name: &str, agentcfg: Option<&str>) -> Result<(), 
         // Handle custom .agentcfg file
         if file_name == ".agentcfg" {
             if let Some(path) = agentcfg {
-                let contents = fs::read_to_string(path)?;
+                let contents = config_contents(path)?;
                 fs::write(file_path, contents)?;
                 continue;
             }
@@ -52,4 +53,37 @@ fn load_agent_workspace(agent_name: &str, agentcfg: Option<&str>) -> Result<(), 
         fs::write(file_path, file_contents)?;
     }
     Ok(())
+}
+
+fn config_contents(path: &str) -> Result<String, std::io::Error> {
+    if path.contains('.') {
+        // Local file path
+        fs::read_to_string(path)
+    } else {
+        // Fetch from Cargo-AI registry
+        fetch_from_registry(path)
+    }
+}
+
+fn fetch_from_registry(name: &str) -> Result<String, std::io::Error> {
+    let url = "https://api.cargo-ai.org/public";
+    let client = reqwest::blocking::Client::new();
+
+    let body = serde_json::json!({ "request": name });
+
+    let resp = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .map_err(|e| Error::new(ErrorKind::Other, format!("network error: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err(Error::new(
+            ErrorKind::Other,
+            format!("HTTP {} for {url}", resp.status()),
+        ));
+    }
+
+    resp.text().map_err(|e| Error::new(ErrorKind::Other, e.to_string()))
 }
