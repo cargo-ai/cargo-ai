@@ -138,30 +138,36 @@ async fn main() {
 
         println!("Build new cargo agent: {new_project_name}");
 
-        let agentcfg: Option<&str> = sub_m.get_one::<String>("config").map(String::as_str);
+        // Determine config source: use flag if provided, otherwise default to project name
+        let agentcfg: &str = sub_m
+            .get_one::<String>("config")
+            .map(String::as_str)
+            .unwrap_or(new_project_name);
 
-        if let Some(path) = agentcfg {
-            let file_contents = config_contents(path);
+        if sub_m.get_one::<String>("config").is_none() {
+            println!("🌐 No --config flag detected. Fetching default template '{agentcfg}' from Cargo-AI registry...");
+        }
 
-            match agent_builder::project::create_new_agent_project(&new_project_name, file_contents) {
-                Ok(_) => println!("✅ Project created successfully."),
-                Err(e) =>  println!("❌ Failed to create project: {e}") 
-            }
+        let file_contents = config_contents(agentcfg);
 
-            match agent_builder::build::build_agent_project(&new_project_name) {
-                Ok(_) => println!("✅ Project built successfully."),
-                Err(e) =>  println!("❌ Build failed: {e}") 
-            }
+        match agent_builder::project::create_new_agent_project(&new_project_name, file_contents) {
+            Ok(_) => println!("✅ Project created successfully."),
+            Err(e) =>  println!("❌ Failed to create project: {e}") 
+        }
 
-            match agent_builder::export::export_binary(&new_project_name){
-                Ok(_) => println!("✅ Project binary exported successfully."),
-                Err(e) =>  println!("❌ Export failed: {e}") 
-            }
+        match agent_builder::build::build_agent_project(&new_project_name) {
+            Ok(_) => println!("✅ Project built successfully."),
+            Err(e) =>  println!("❌ Build failed: {e}") 
+        }
 
-            match agent_builder::cleanup::delete_agent_workspace(&new_project_name) {
-                Ok(_) => println!("🧼 Agent workspace removed."),
-                Err(e) => println!("⚠️ Failed to clean up workspace: {e}"),
-            }
+        match agent_builder::export::export_binary(&new_project_name){
+            Ok(_) => println!("✅ Project binary exported successfully."),
+            Err(e) =>  println!("❌ Export failed: {e}") 
+        }
+
+        match agent_builder::cleanup::delete_agent_workspace(&new_project_name) {
+            Ok(_) => println!("🧼 Agent workspace removed."),
+            Err(e) => println!("⚠️ Failed to clean up workspace: {e}"),
         }
 
     } else {
