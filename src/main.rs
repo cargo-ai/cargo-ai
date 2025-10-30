@@ -1,6 +1,6 @@
 use reqwest;
-use futures::future::join_all;
 mod args;
+mod web_resources;
 mod agent_builder;
 
 use serde::{Deserialize, Serialize};
@@ -60,15 +60,10 @@ async fn main() {
         let resources = resource_urls();
 
         // Build data block for LLM context
-        let mut data_block = String::from("Here are some resources to aid in your response:\n");
-        if !resources.is_empty() {
-            let urls: Vec<&str> = resources.iter().map(|r| r.url).collect();
-            if let Ok(results) = fetch_resources_parallel(&urls).await {
-                for (res, content) in resources.iter().zip(results.iter()) {
-                    data_block.push_str(&format!("- {} ({}): {}\n", res.description, res.url, content.trim()));
-                }
-            }
-        }
+        let data_block = web_resources::build_data_block(&resources)
+            .await
+            .expect("Failed to fetch required web resources");
+
         let context = format!("{}\n\n{}", static_context, data_block);
 
         let mut ai_cargo = cargo_ai::Cargo::<Output>::new(prompt.clone(), context);
@@ -173,22 +168,6 @@ async fn main() {
     } else {
         println!("Provide subcommand.");
     }
-}
-
-// TEMPORARY TEST FUNCTION: Fetch resources in parallel; will be relocated later.
-pub async fn fetch_resources_parallel(urls: &[&str]) -> Result<Vec<String>, reqwest::Error> {
-    let client = reqwest::Client::new();
-
-    let futures = urls.iter().map(|&url| {
-        let client = client.clone();
-        async move {
-            let res = client.get(url).send().await?;
-            res.text().await
-        }
-    });
-
-    let results = join_all(futures).await;
-    results.into_iter().collect()
 }
 
 pub fn apply_actions(output: &Output, actions: &[Action]) {
