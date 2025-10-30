@@ -3,12 +3,13 @@
 //! It creates the `.cargo-ai/agents/{agent_name}` folder and populates it
 //! with the necessary config and build files.
 
-use std::{fs, io::Error, env};
+use std::{fs, env};
+use std::io::{Error};
 
 include!(concat!(env!("OUT_DIR"), "/.generated_templates.rs"));
 
 /// Creates a new agent project directory and initializes required files.
-pub fn create_new_agent_project(agent_name: &str, agentcfg: Option<&str>) -> Result<(), Error> {
+pub fn create_new_agent_project(agent_name: &str, agentcfg: Result<String, Error>) -> Result<(), Error> {
     create_agent_workspace(agent_name)?;
     load_agent_workspace(agent_name, agentcfg)?;
     Ok(())
@@ -24,7 +25,7 @@ fn create_agent_workspace(agent_name: &str) -> Result<(), Error> {
 }
 
 /// Writes template files (`build.rs`, `.agentcfg`) to the agent workspace.
-fn load_agent_workspace(agent_name: &str, agentcfg: Option<&str>) -> Result<(), Error> {
+fn load_agent_workspace(agent_name: &str, agentcfg: Result<String, Error>) -> Result<(), Error> {
     let base_path = super::agent_workspace_path(agent_name); 
     for (file_name, file_contents) in  TEMPLATES {
         let file_path = base_path.join(file_name);
@@ -36,8 +37,7 @@ fn load_agent_workspace(agent_name: &str, agentcfg: Option<&str>) -> Result<(), 
         
         // Handle custom .agentcfg file
         if file_name == ".agentcfg" {
-            if let Some(path) = agentcfg {
-                let contents = fs::read_to_string(path)?;
+            if let Ok(ref contents) = agentcfg {
                 fs::write(file_path, contents)?;
                 continue;
             }

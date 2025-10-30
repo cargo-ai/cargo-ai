@@ -6,6 +6,9 @@ mod agent_builder;
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
 
+use std::{fs, env};
+use std::io::{Error, ErrorKind};
+
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
 // Initialize Tokio runtime macro
@@ -135,9 +138,19 @@ async fn main() {
 
         println!("Build new cargo agent: {new_project_name}");
 
-        let agentcfg: Option<&str> = sub_m.get_one::<String>("config").map(String::as_str);
+        // Determine config source: use flag if provided, otherwise default to project name
+        let agentcfg: &str = sub_m
+            .get_one::<String>("config")
+            .map(String::as_str)
+            .unwrap_or(new_project_name);
 
-        match agent_builder::project::create_new_agent_project(&new_project_name, agentcfg) {
+        if sub_m.get_one::<String>("config").is_none() {
+            println!("🌐 No --config flag detected. Fetching default template '{agentcfg}' from Cargo-AI registry...");
+        }
+
+        let file_contents = config_contents(agentcfg);
+
+        match agent_builder::project::create_new_agent_project(&new_project_name, file_contents) {
             Ok(_) => println!("✅ Project created successfully."),
             Err(e) =>  println!("❌ Failed to create project: {e}") 
         }
@@ -214,4 +227,37 @@ pub fn apply_actions(output: &Output, actions: &[Action]) {
         }
     }
 
+}
+
+fn config_contents(path: &str) -> Result<String, std::io::Error> {
+    if path.contains('.') {
+        // Local file path
+        fs::read_to_string(path)
+    } else {
+        // Fetch from Cargo-AI registry
+        fetch_from_registry(path)
+    }
+}
+
+fn fetch_from_registry(name: &str) -> Result<String, Error> {
+    let url = "https://api.cargo-ai.org/public";
+    let client = reqwest::blocking::Client::new();
+
+    let body = serde_json::json!({ "request": name });
+
+    let resp = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .map_err(|e| Error::new(ErrorKind::Other, format!("network error: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err(Error::new(
+            ErrorKind::Other,
+            format!("HTTP {} for {url}", resp.status()),
+        ));
+    }
+
+    resp.text().map_err(|e| Error::new(ErrorKind::Other, e.to_string()))
 }

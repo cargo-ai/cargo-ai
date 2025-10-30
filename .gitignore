@@ -1,3 +1,4 @@
 /target
 # for agent creation
 /.cargo-ai 
+.tmp.*
