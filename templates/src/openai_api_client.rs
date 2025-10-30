@@ -79,7 +79,7 @@ pub async fn send_request(
     };
 
     // Print the request JSON before sending
-    println!("OpenAI request JSON:\n{}", serde_json::to_string_pretty(&request)?);
+    // println!("OpenAI request JSON:\n{}", serde_json::to_string_pretty(&request)?);
 
     let http_resp = client
         .post("https://api.openai.com/v1/chat/completions")
@@ -91,7 +91,7 @@ pub async fn send_request(
 
     // TEMP: print raw server response (without consuming parse-ability)
     let body_bytes = http_resp.bytes().await?;
-    println!("Raw OpenAI response:\n{}", String::from_utf8_lossy(&body_bytes));
+    // println!("Raw OpenAI response:\n{}", String::from_utf8_lossy(&body_bytes));
 
     // Parse as usual from the captured bytes
     let response: Response = match serde_json::from_slice(&body_bytes) {
