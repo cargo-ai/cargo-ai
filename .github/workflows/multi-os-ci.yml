@@ -32,7 +32,7 @@ jobs:
         run: cargo install --path .
 
       - name: Run smoke test via installed CLI
-        run: cargo ai hatch agent_adder
+        run: cargo ai hatch adder_test
 
       - name: Set OPENAI_API_KEY environment variable
         run: echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> $GITHUB_ENV
@@ -40,18 +40,18 @@ jobs:
       - name: Run agent_adder with OpenAI token
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            ./agent_adder.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }}
+            ./adder_test.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }}
           else
-            ./agent_adder -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }}
+            ./adder_test -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }}
           fi
         shell: bash
 
       - name: Validate agent_adder output with default prompt
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            OUTPUT=$(./agent_adder.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }})
+            OUTPUT=$(./adder_test.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }})
           else
-            OUTPUT=$(./agent_adder -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }})
+            OUTPUT=$(./adder_test -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }})
           fi
 
           echo "$OUTPUT"
@@ -65,9 +65,9 @@ jobs:
       - name: Validate agent_adder output with overridden prompt
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            OUTPUT=$(./agent_adder.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --prompt "2+3")
+            OUTPUT=$(./adder_test.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --prompt "2+3")
           else
-            OUTPUT=$(./agent_adder -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --prompt "2+3")
+            OUTPUT=$(./adder_test -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --prompt "2+3")
           fi
 
           echo "$OUTPUT"
