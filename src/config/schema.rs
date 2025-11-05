@@ -10,6 +10,9 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub profile: Vec<Profile>,
+
+    #[serde(default)]
+    pub cargo_ai_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
