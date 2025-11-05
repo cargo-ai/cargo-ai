@@ -5,9 +5,9 @@
 
 #![allow(dead_code)]
 
-use serde::Deserialize;
+use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub profile: Vec<Profile>,
 
@@ -15,7 +15,7 @@ pub struct Config {
     pub cargo_ai_token: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Profile {
     pub name: String,
     pub server: String,

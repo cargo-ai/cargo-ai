@@ -11,6 +11,9 @@ use std::{fs, env};
 use std::io::{Error, ErrorKind};
 
 use config::loader::{load_config, find_profile};
+use config::adder::add_profile;
+use config::remover::remove_profile;
+use config::schema::Profile;
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
@@ -180,6 +183,60 @@ async fn main() {
             } else {
                 println!("No config file found.");
             }
+        } else if let Some(add_m) = sub_m.subcommand_matches("add") {
+            let name = add_m.get_one::<String>("name").expect("Profile name is required");
+            let server = add_m.get_one::<String>("server").expect("Server is required");
+            let model = add_m.get_one::<String>("model").expect("Model is required");
+            let token = add_m.get_one::<String>("token").map(String::as_str).unwrap_or("(none)");
+            let description = add_m.get_one::<String>("description").map(String::as_str).unwrap_or("(none)");
+
+            println!("Adding profile:");
+            println!("  Name: {}", name);
+            println!("  Server: {}", server);
+            println!("  Model: {}", model);
+            println!("  Token: {}", token);
+            println!("  Description: {}", description);
+
+
+            let new_profile = Profile {
+                name: name.to_string(),
+                server: server.to_string(),
+                model: model.to_string(),
+                token: if token == "(none)" { None } else { Some(token.to_string()) },
+                timeout_in_sec: 60, // default for now
+                description: if description == "(none)" { None } else { Some(description.to_string()) },
+            };
+
+            if let Err(e) = add_profile(new_profile, false) {
+                eprintln!("Failed to add profile: {}", e);
+            }
+        } else if let Some(remove_m) = sub_m.subcommand_matches("remove") {
+            if let Some(name) = remove_m.get_one::<String>("name") {
+                if let Some(cfg) = load_config() {
+                    if cfg.profile.iter().any(|p| p.name == *name) {
+                        use std::io::{self, Write};
+                        print!("Are you sure you want to remove profile '{}'? [y/N]: ", name);
+                        io::stdout().flush().unwrap();
+
+                        let mut input = String::new();
+                        io::stdin().read_line(&mut input).unwrap();
+
+                        if input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes") {
+                            if let Err(e) = remove_profile(name) {
+                                eprintln!("Failed to remove profile '{}': {}", name, e);
+                            }
+                        } else {
+                            println!("Operation canceled.");
+                        }
+                    } else {
+                        println!("Profile '{}' not found.", name);
+                    }
+                } else {
+                    println!("No config file found.");
+                }
+            } else {
+                println!("Please provide a profile name to remove. Example: cargo ai profile remove openai-prod");
+            }
         } else if let Some(show_m) = sub_m.subcommand_matches("show") {
             if let Some(name) = show_m.get_one::<String>("name") {
                 if let Some(cfg) = load_config() {
@@ -207,8 +264,7 @@ async fn main() {
         } else {
             println!("No profile subcommand found. Try 'cargo ai profile list'.");
         }
-    } else {
-        println!("Provide subcommand.");
+    } else { println!("Provide subcommand.");
     }
 }
 
