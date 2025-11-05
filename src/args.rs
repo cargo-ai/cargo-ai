@@ -78,5 +78,23 @@ pub fn build_cli() -> ArgMatches {
                         .num_args(1)
                 )
         )
+        .subcommand(
+            Command::new("profile")
+                .about("Manage connection profiles in the Cargo-AI config file")
+                .subcommand(
+                    Command::new("list")
+                        .about("List all configured profiles")
+                )
+                .subcommand(
+                    Command::new("show")
+                        .about("Show detailed information for a specific profile")
+                        .arg(
+                            Arg::new("name")
+                                .help("Name of the profile to display")
+                                .required(true)
+                                .value_name("NAME")
+                        )
+                )
+        )
         .get_matches_from(args)
 }

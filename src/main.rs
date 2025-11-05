@@ -23,17 +23,6 @@ async fn main() {
 
     if let Some(sub_m) = cmd_args.subcommand_matches("preflight") {
 
-        // TESTING CONFIG LOAD
-        if let Some(cfg) = load_config() {
-            if let Some(profile) = find_profile(&cfg, "openai-test") {
-                println!("Loaded profile: {:?}", profile);
-            } else {
-                println!("Profile not found.");
-            }
-        } else {
-            println!("No config file found.");
-        }
-
         let prompt = if let Some(cli_prompt) = sub_m.get_one::<String>("prompt") {
             cli_prompt.to_string()
         } else {
@@ -179,6 +168,45 @@ async fn main() {
             Err(e) => println!("⚠️ Failed to clean up workspace: {e}"),
         }
 
+    } else if let Some(sub_m) = cmd_args.subcommand_matches("profile") {
+        if let Some(_) = sub_m.subcommand_matches("list") {
+            if let Some(cfg) = load_config() {
+                println!("Configured profiles:");
+                println!("{:<20} {:<10} {}", "Name", "Server", "Model");
+                println!("{:-<45}", "");
+                for profile in cfg.profile {
+                    println!("{:<20} {:<10} {}", profile.name, profile.server, profile.model);
+                }
+            } else {
+                println!("No config file found.");
+            }
+        } else if let Some(show_m) = sub_m.subcommand_matches("show") {
+            if let Some(name) = show_m.get_one::<String>("name") {
+                if let Some(cfg) = load_config() {
+                    if let Some(p) = find_profile(&cfg, name) {
+                        println!("Profile: {}", p.name);
+                        println!("Server:  {}", p.server);
+                        println!("Model:   {}", p.model);
+                        println!(
+                            "Token:   {}",
+                            p.token.as_ref().map(|_| "***********").unwrap_or("(none)")
+                        );
+                        println!("Timeout: {}", p.timeout_in_sec);
+                        if let Some(desc) = &p.description {
+                            println!("Description: {}", desc);
+                        }
+                    } else {
+                        println!("Profile '{}' not found.", name);
+                    }
+                } else {
+                    println!("No config file found.");
+                }
+            } else {
+                println!("Please provide a profile name. Example: cargo ai profile show openai-prod");
+            }
+        } else {
+            println!("No profile subcommand found. Try 'cargo ai profile list'.");
+        }
     } else {
         println!("Provide subcommand.");
     }
