@@ -2,12 +2,15 @@ use reqwest;
 mod args;
 mod web_resources;
 mod agent_builder;
+mod config;
 
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
 
 use std::{fs, env};
 use std::io::{Error, ErrorKind};
+
+use config::loader::{load_config, find_profile};
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
@@ -19,6 +22,17 @@ async fn main() {
     let cmd_args = args::build_cli();
 
     if let Some(sub_m) = cmd_args.subcommand_matches("preflight") {
+
+        // TESTING CONFIG LOAD
+        if let Some(cfg) = load_config() {
+            if let Some(profile) = find_profile(&cfg, "openai-test") {
+                println!("Loaded profile: {:?}", profile);
+            } else {
+                println!("Profile not found.");
+            }
+        } else {
+            println!("No config file found.");
+        }
 
         let prompt = if let Some(cli_prompt) = sub_m.get_one::<String>("prompt") {
             cli_prompt.to_string()
