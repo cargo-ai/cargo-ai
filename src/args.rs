@@ -26,6 +26,14 @@ pub fn build_cli() -> ArgMatches {
                 .about("Internal: test agent config file")
                 .hide(true)
                     .arg(
+                        Arg::new("profile")
+                            .long("profile")
+                            .short('P')
+                            .help("Use a saved connection profile instead of manual flags")
+                            .required(false)
+                            .value_name("PROFILE")
+                    )
+                    .arg(
                         Arg::new("server")
                             .long("server")
                             .short('s')

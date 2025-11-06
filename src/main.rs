@@ -34,26 +34,43 @@ async fn main() {
 
         // Begin: Argument assignments
         let mut server = String::new();
-        if let Some(server_arg) = sub_m.get_one::<String>("server") {
-            server.push_str(&server_arg.to_lowercase());
-        }
-
-        let mut token = String::new();
-        if let Some(cmd_token) = sub_m.get_one::<String>("token") {
-            token.push_str(cmd_token);
-        }
-
         let mut model = String::new();
-        if let Some(model_arg) = sub_m.get_one::<String>("model") {
-            model.push_str(model_arg);
+        let mut token = String::new();
+        let mut timeout_in_sec: u64 = 60; // Default
+
+        // 1️⃣ If profile is set, load values from config
+        if let Some(profile_name) = sub_m.get_one::<String>("profile") {
+            if let Some(cfg) = load_config() {
+                if let Some(profile) = find_profile(&cfg, profile_name) {
+                    server = profile.server.clone();
+                    model = profile.model.clone();
+                    token = profile.token.clone().unwrap_or_default();
+                    timeout_in_sec = profile.timeout_in_sec;
+                    println!("Using profile '{}'", profile_name);
+                } else {
+                    eprintln!("Profile '{}' not found.", profile_name);
+                }
+            } else {
+                eprintln!("No config file found.");
+            }
         }
 
-        // sub_m timeout_in_sec default to 60
-        let timeout_in_sec = sub_m
-            .get_one::<String>("timeout_in_sec")
-            .expect("Timeout value expected")
-            .parse::<u64>()
-            .expect("Expected unsigned int, u64");
+        // 2️⃣ Allow command-line args to override profile values
+        if let Some(server_arg) = sub_m.get_one::<String>("server") {
+            server = server_arg.to_lowercase();
+        }
+
+        if let Some(model_arg) = sub_m.get_one::<String>("model") {
+            model = model_arg.to_string();
+        }
+
+        if let Some(cmd_token) = sub_m.get_one::<String>("token") {
+            token = cmd_token.to_string();
+        }
+
+        if let Some(timeout_arg) = sub_m.get_one::<String>("timeout_in_sec") {
+            timeout_in_sec = timeout_arg.parse::<u64>().unwrap_or(60);
+        }
 
         // End: Argument assignments
 
