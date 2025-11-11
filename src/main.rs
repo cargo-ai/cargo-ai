@@ -42,7 +42,7 @@ async fn main() {
         if let Some(profile_name) = sub_m.get_one::<String>("profile") {
             if let Some(cfg) = load_config() {
                 if let Some(profile) = find_profile(&cfg, profile_name) {
-                    server = profile.server.clone();
+                    server = profile.server.clone().to_lowercase();
                     model = profile.model.clone();
                     token = profile.token.clone().unwrap_or_default();
                     timeout_in_sec = profile.timeout_in_sec;
@@ -75,6 +75,7 @@ async fn main() {
         // End: Argument assignments
 
         if !(server == "ollama" || server == "openai") {
+            println!("{server}");
             panic!("Unknown AI Server")
         }
 

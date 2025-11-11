@@ -25,7 +25,16 @@ const OLLAMA_API_CLIENT_RS_TEMPLATE: &str = include_str!("src/ollama_api_client.
 const OPENAI_API_CLIENT_RS_NAME: &str = "src/openai_api_client.rs";
 const OPENAI_API_CLIENT_RS_TEMPLATE: &str = include_str!("src/openai_api_client.rs");
 
-pub const TEMPLATES: [(&str, &str); 9] = [
+const CONFIG_LOADER_RS_NAME: &str = "src/config/loader.rs";
+const CONFIG_LOADER_RS_TEMPLATE: &str = include_str!("src/config/loader.rs");
+
+const CONFIG_MOD_RS_NAME: &str = "src/config/mod.rs";
+const CONFIG_MOD_RS_TEMPLATE: &str = include_str!("src/config/mod.rs");
+
+const CONFIG_SCHEMA_RS_NAME: &str = "src/config/schema.rs";
+const CONFIG_SCHEMA_RS_TEMPLATE: &str = include_str!("src/config/schema.rs");
+
+pub const TEMPLATES: [(&str, &str); 12] = [
     (BUILD_RS_NAME, BUILD_RS_TEMPLATE),
     (AGENTCFG_NAME, AGENTCFG_TEMPLATE),
     (MANIFEST_NAME, MANIFEST_TEMPLATE),
@@ -35,4 +44,7 @@ pub const TEMPLATES: [(&str, &str); 9] = [
     (LIB_RS_NAME, LIB_RS_TEMPLATE),
     (OLLAMA_API_CLIENT_RS_NAME, OLLAMA_API_CLIENT_RS_TEMPLATE),
     (OPENAI_API_CLIENT_RS_NAME, OPENAI_API_CLIENT_RS_TEMPLATE),
+    (CONFIG_LOADER_RS_NAME, CONFIG_LOADER_RS_TEMPLATE),
+    (CONFIG_MOD_RS_NAME, CONFIG_MOD_RS_TEMPLATE),
+    (CONFIG_SCHEMA_RS_NAME, CONFIG_SCHEMA_RS_TEMPLATE),
 ];
