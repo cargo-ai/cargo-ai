@@ -1,8 +1,11 @@
 mod args;
 mod web_resources;
+mod config;
 
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
+
+use config::loader::{load_config, find_profile};
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
@@ -14,35 +17,69 @@ async fn main() {
     let cmd_args = args::build_cli();
 
     // Begin: Argument assignments
-
     let mut server = String::new();
-    if let Some(server_arg) = cmd_args.get_one::<String>("server") {
-        server.push_str(&server_arg.to_lowercase());
-    }
-
-    let mut token = String::new();
-    if let Some(cmd_token) = cmd_args.get_one::<String>("token") {
-        token.push_str(cmd_token);
-    }
-
     let mut model = String::new();
-    if let Some(model_arg) = cmd_args.get_one::<String>("model") {
-        model.push_str(model_arg);
+    let mut token = String::new();
+    let mut timeout_in_sec: u64 = 60; // Default
+    let mut prompt = String::new();
+
+    // 1️⃣ If profile is set, load values from config
+    if let Some(profile_name) = cmd_args.get_one::<String>("profile") {
+        if let Some(cfg) = load_config() {
+            if let Some(profile) = find_profile(&cfg, profile_name) {
+                server = profile.server.clone();
+                model = profile.model.clone();
+                token = profile.token.clone().unwrap_or_default();
+                timeout_in_sec = profile.timeout_in_sec;
+                println!("Using profile '{}'", profile_name);
+            } else {
+                eprintln!("Profile '{}' not found.", profile_name);
+            }
+        } else {
+            eprintln!("No config file found.");
+        }
     }
 
-    // cmd_args timeout_in_sec default to 60
-    let timeout_in_sec = cmd_args
-        .get_one::<String>("timeout_in_sec")
-        .expect("Timeout value expected")
-        .parse::<u64>()
-        .expect("Expected unsigned int, u64");
+    // Default profile if no explicit profile was provided
+    //
+    // If no --profile flag is provided, attempt to use the configured default profile.
+    //
+    // Precedence order:
+    //   CLI args > explicit --profile > default_profile (from config) > empty values
+    if server.is_empty() {
+        if let Some(cfg) = load_config() {
+            if let Some(ref default_profile_name) = cfg.default_profile {
+                if let Some(profile) = find_profile(&cfg, default_profile_name) {
+                    server = profile.server.clone().to_lowercase();
+                    model = profile.model.clone();
+                    token = profile.token.clone().unwrap_or_default();
+                    timeout_in_sec = profile.timeout_in_sec;
+                    println!("Using default profile '{}'", default_profile_name);
+                }
+            }
+        }
+    }
 
-    let prompt = if let Some(cli_prompt) = cmd_args.get_one::<String>("prompt") {
-        cli_prompt.to_string()
-    } else {
-        prompt() // JSON default.
-    };
+    // 2️⃣ Allow command-line args to override profile values
+    if let Some(server_arg) = cmd_args.get_one::<String>("server") {
+        server = server_arg.to_lowercase();
+    }
 
+    if let Some(model_arg) = cmd_args.get_one::<String>("model") {
+        model = model_arg.to_string();
+    }
+
+    if let Some(cmd_token) = cmd_args.get_one::<String>("token") {
+        token = cmd_token.to_string();
+    }
+
+    if let Some(timeout_arg) = cmd_args.get_one::<String>("timeout_in_sec") {
+        timeout_in_sec = timeout_arg.parse::<u64>().unwrap_or(60);
+    }
+
+    if let Some(prompt_arg) = cmd_args.get_one::<String>("prompt") {
+        prompt = prompt_arg.to_string();
+    }
     // End: Argument assignments
 
     if !(server == "ollama" || server == "openai") {

@@ -17,6 +17,14 @@ pub fn build_cli() -> ArgMatches {
     Command::new("cargo-ai")
         .bin_name(bin_name)
         .arg(
+            Arg::new("profile")
+                .long("profile")
+                .short('P')
+                .help("Use a saved connection profile instead of manual flags")
+                .required(false)
+                .value_name("PROFILE")
+        )
+        .arg(
             Arg::new("server")
                 .long("server")
                 .short('s')

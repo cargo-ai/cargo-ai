@@ -43,6 +43,12 @@ fn load_agent_workspace(agent_name: &str, agentcfg: Result<String, Error>) -> Re
             }
         }
 
+        // Skip replacements for loader.rs so config paths remain shared
+        if file_name.ends_with("loader.rs") {
+            fs::write(file_path, file_contents)?;
+            continue;
+        }
+
         let file_contents = file_contents
             .replace("cargo-ai", agent_name)
             .replace("cargo_ai", agent_name);
