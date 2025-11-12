@@ -13,6 +13,9 @@ pub struct Config {
 
     #[serde(default)]
     pub cargo_ai_token: Option<String>,
+
+    #[serde(default)]
+    pub default_profile: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

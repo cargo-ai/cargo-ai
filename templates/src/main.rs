@@ -40,6 +40,26 @@ async fn main() {
         }
     }
 
+    // Default profile if no explicit profile was provided
+    //
+    // If no --profile flag is provided, attempt to use the configured default profile.
+    //
+    // Precedence order:
+    //   CLI args > explicit --profile > default_profile (from config) > empty values
+    if server.is_empty() {
+        if let Some(cfg) = load_config() {
+            if let Some(ref default_profile_name) = cfg.default_profile {
+                if let Some(profile) = find_profile(&cfg, default_profile_name) {
+                    server = profile.server.clone().to_lowercase();
+                    model = profile.model.clone();
+                    token = profile.token.clone().unwrap_or_default();
+                    timeout_in_sec = profile.timeout_in_sec;
+                    println!("Using default profile '{}'", default_profile_name);
+                }
+            }
+        }
+    }
+
     // 2️⃣ Allow command-line args to override profile values
     if let Some(server_arg) = cmd_args.get_one::<String>("server") {
         server = server_arg.to_lowercase();

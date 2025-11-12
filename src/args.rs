@@ -143,6 +143,12 @@ pub fn build_cli() -> ArgMatches {
                                 .required(false)
                                 .value_name("TEXT")
                         )
+                        .arg(
+                            Arg::new("default")
+                                .long("default")
+                                .help("Set this profile as the default")
+                                .action(clap::ArgAction::SetTrue)
+                        )
                 )
                 .subcommand(
                     Command::new("remove")
