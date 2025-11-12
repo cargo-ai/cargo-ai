@@ -21,7 +21,6 @@ async fn main() {
     let mut model = String::new();
     let mut token = String::new();
     let mut timeout_in_sec: u64 = 60; // Default
-    let mut prompt = String::new();
 
     // 1️⃣ If profile is set, load values from config
     if let Some(profile_name) = cmd_args.get_one::<String>("profile") {
@@ -77,9 +76,11 @@ async fn main() {
         timeout_in_sec = timeout_arg.parse::<u64>().unwrap_or(60);
     }
 
-    if let Some(prompt_arg) = cmd_args.get_one::<String>("prompt") {
-        prompt = prompt_arg.to_string();
-    }
+    let prompt = if let Some(prompt_arg) = cmd_args.get_one::<String>("prompt") {
+        prompt_arg.to_string()
+    } else {
+        prompt() // fallback to default JSON-defined prompt
+    };
     // End: Argument assignments
 
     if !(server == "ollama" || server == "openai") {
