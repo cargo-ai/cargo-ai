@@ -14,11 +14,11 @@
 //! # async {
 //! // For the Ollama API:
 //! // Provide the model name, prompt, and a timeout (in seconds).
-//! let ollama_response = ollama_send_request("model_name", "Your prompt here", 60).await;
+//! let ollama_response = ollama_send_request("url", "model_name", "Your prompt here", 60).await;
 //!
 //! // For the OpenAI API:
 //! // Provide the model name, prompt, timeout (in seconds), and your API token.
-//! let openai_response = openai_send_request("model_name", "Your prompt here", 60, "your_token_here").await;
+//! let openai_response = openai_send_request("url", "model_name", "Your prompt here", 60, "your_token_here").await;
 //! # };
 //! ```
 //!

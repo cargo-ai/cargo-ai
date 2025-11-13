@@ -48,6 +48,13 @@ pub fn build_cli() -> ArgMatches {
                             .help("LLM model to use")
                     )
                     .arg(
+                        Arg::new("url")
+                            .long("url")
+                            .help("Custom transformer server URL (HTTPS preferred)")
+                            .required(false)
+                            .value_name("URL")
+                    )
+                    .arg(
                         Arg::new("token")
                             .long("token")
                             .value_name("TOKEN")
@@ -127,6 +134,13 @@ pub fn build_cli() -> ArgMatches {
                                 .help("LLM model identifier (e.g., gpt-4o, mistral)")
                                 .required(true)
                                 .value_name("MODEL")
+                        )
+                        .arg(
+                            Arg::new("url")
+                                .long("url")
+                                .help("Custom transformer server URL (HTTPS preferred)")
+                                .required(false)
+                                .value_name("URL")
                         )
                         .arg(
                             Arg::new("token")

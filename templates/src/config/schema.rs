@@ -25,6 +25,9 @@ pub struct Profile {
     pub model: String,
 
     #[serde(default)]
+    pub url: Option<String>, 
+
+    #[serde(default)]
     pub token: Option<String>,
 
     #[serde(default = "default_timeout")]

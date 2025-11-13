@@ -35,6 +35,7 @@ async fn main() {
         // Begin: Argument assignments
         let mut server = String::new();
         let mut model = String::new();
+        let mut url = String::new();
         let mut token = String::new();
         let mut timeout_in_sec: u64 = 60; // Default
 
@@ -46,6 +47,8 @@ async fn main() {
                     model = profile.model.clone();
                     token = profile.token.clone().unwrap_or_default();
                     timeout_in_sec = profile.timeout_in_sec;
+                    // Updated URL assignment logic:
+                    url = profile.url.clone().unwrap_or_default();
                     println!("Using profile '{}'", profile_name);
                 } else {
                     eprintln!("Profile '{}' not found.", profile_name);
@@ -69,6 +72,7 @@ async fn main() {
                         model = profile.model.clone();
                         token = profile.token.clone().unwrap_or_default();
                         timeout_in_sec = profile.timeout_in_sec;
+                        url = profile.url.clone().unwrap_or_default();
                         println!("Using default profile '{}'", default_profile_name);
                     }
                 }
@@ -90,6 +94,17 @@ async fn main() {
 
         if let Some(timeout_arg) = sub_m.get_one::<String>("timeout_in_sec") {
             timeout_in_sec = timeout_arg.parse::<u64>().unwrap_or(60);
+        }
+
+        // Final URL fallback based on resolved server
+        if url.is_empty() {
+            url = if server == "ollama" {
+                "http://localhost:11434/api/generate".to_string()
+            } else if server == "openai" {
+                "https://api.openai.com/v1/chat/completions".to_string()
+            } else {
+                String::new()
+            };
         }
 
         // End: Argument assignments
@@ -118,7 +133,7 @@ async fn main() {
 
         if server == "ollama" {
             // Send request to Ollama and `await` the LLM response
-            match cargo_ai::ollama_send_request(&model, &structured_prompt, timeout_in_sec, json_schema_value()).await {
+            match cargo_ai::ollama_send_request(&url, &model, &structured_prompt, timeout_in_sec, json_schema_value()).await {
                 Ok(r) => {
                     response.push_str(&r);
                 },
@@ -143,7 +158,7 @@ async fn main() {
         });
 
             // Send request to OpenAI and `await` the LLM response
-            match cargo_ai::openai_send_request(&model, &structured_prompt, timeout_in_sec, &token, fmt).await {
+            match cargo_ai::openai_send_request(&url, &model, &structured_prompt, timeout_in_sec, &token, fmt).await {
                 Ok(r) => response.push_str(&r),
                 Err(e) => {
                     println!("We have an error {}", e);
@@ -225,6 +240,7 @@ async fn main() {
             let name = add_m.get_one::<String>("name").expect("Profile name is required");
             let server = add_m.get_one::<String>("server").expect("Server is required");
             let model = add_m.get_one::<String>("model").expect("Model is required");
+            let url = add_m.get_one::<String>("url").map(String::as_str).unwrap_or("(none)");
             let token = add_m.get_one::<String>("token").map(String::as_str).unwrap_or("(none)");
             let description = add_m.get_one::<String>("description").map(String::as_str).unwrap_or("(none)");
 
@@ -232,6 +248,7 @@ async fn main() {
             println!("  Name: {}", name);
             println!("  Server: {}", server);
             println!("  Model: {}", model);
+            println!("  URL: {}", url);
             println!("  Token: {}", token);
             println!("  Description: {}", description);
 
@@ -240,6 +257,7 @@ async fn main() {
                 name: name.to_string(),
                 server: server.to_string(),
                 model: model.to_string(),
+                url: if url == "(none)" { None } else { Some(url.to_string()) },
                 token: if token == "(none)" { None } else { Some(token.to_string()) },
                 timeout_in_sec: 60, // default for now
                 description: if description == "(none)" { None } else { Some(description.to_string()) },

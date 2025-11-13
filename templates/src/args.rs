@@ -39,6 +39,13 @@ pub fn build_cli() -> ArgMatches {
                 .global(true)
         )
         .arg(
+            Arg::new("url")
+                .long("url")
+                .help("Custom transformer server URL (HTTPS preferred)")
+                .global(true)
+                .value_name("URL")
+        )
+        .arg(
             Arg::new("token")
                 .long("token")
                 .help("API token")
