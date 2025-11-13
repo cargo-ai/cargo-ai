@@ -1,7 +1,6 @@
 // External Crates
 use reqwest::ClientBuilder; // HTTP client builder
 use serde::{Deserialize, Serialize}; // Data format (e.g.,JSON, TOML) (de)serialization
-use std::env;
 use std::time::Duration; // Duration for timeout handling // for overriding the API URL in tests
 
 // Request as per Ollama API Guide
@@ -29,11 +28,13 @@ struct Response {
 }
 
 pub async fn send_request(
+    url: &String,
     model: &String,
     prompt: &String,
     timeout_in_sec: u64,
     format: serde_json::Value,
 ) -> Result<String, Box<dyn std::error::Error>> {
+
     let request = Request {
         model: model.clone(),
         prompt: prompt.clone(),
@@ -46,12 +47,8 @@ pub async fn send_request(
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()?; // 30 sec Default too short for some LLMs.
 
-    // Allow overriding Ollama API URL in tests via OLLAMA_API_URL env var
-    let api_url = env::var("OLLAMA_API_URL")
-        .unwrap_or_else(|_| "http://localhost:11434/api/generate".to_string());
-
     let http_resp = client
-        .post(&api_url)
+        .post(url)
         .json(&request)
         .send()
         .await?;
@@ -110,6 +107,7 @@ mod tests {
 
         // Execute the client against the mock
         let result = send_request(
+            &format!("{}{}", server.url().to_string(), mock_path),
             &"test-model".to_string(),
             &"test prompt".to_string(),
             5,

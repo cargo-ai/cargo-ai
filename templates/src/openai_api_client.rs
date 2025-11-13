@@ -44,6 +44,7 @@ pub struct Usage {
 }
 
 pub async fn send_request(
+    url: &String,
     model: &String,
     prompt: &String,
     timeout_in_sec: u64,
@@ -82,7 +83,7 @@ pub async fn send_request(
     // println!("OpenAI request JSON:\n{}", serde_json::to_string_pretty(&request)?);
 
     let http_resp = client
-        .post("https://api.openai.com/v1/chat/completions")
+        .post(url)
         .header("Authorization", format!("Bearer {}", token))
         .header("Content-Type", "application/json")
         .json(&request)

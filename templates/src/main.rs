@@ -19,6 +19,7 @@ async fn main() {
     // Begin: Argument assignments
     let mut server = String::new();
     let mut model = String::new();
+    let mut url = String::new();
     let mut token = String::new();
     let mut timeout_in_sec: u64 = 60; // Default
 
@@ -68,12 +69,26 @@ async fn main() {
         model = model_arg.to_string();
     }
 
+    if let Some(url_arg) = cmd_args.get_one::<String>("url") {
+        url = url_arg.to_string();
+    }
+
     if let Some(cmd_token) = cmd_args.get_one::<String>("token") {
         token = cmd_token.to_string();
     }
 
     if let Some(timeout_arg) = cmd_args.get_one::<String>("timeout_in_sec") {
         timeout_in_sec = timeout_arg.parse::<u64>().unwrap_or(60);
+    }
+
+    if url.is_empty() {
+        url = if server == "ollama" {
+            "http://localhost:11434/api/generate".to_string()
+        } else if server == "openai" {
+            "https://api.openai.com/v1/chat/completions".to_string()
+        } else {
+            String::new()
+        };
     }
 
     let prompt = if let Some(prompt_arg) = cmd_args.get_one::<String>("prompt") {
@@ -106,7 +121,7 @@ async fn main() {
 
     if server == "ollama" {
         // Send request to Ollama and `await` the LLM response
-        match cargo_ai::ollama_send_request(&model, &structured_prompt, timeout_in_sec, json_schema_value()).await {
+        match cargo_ai::ollama_send_request(&url, &model, &structured_prompt, timeout_in_sec, json_schema_value()).await {
             Ok(r) => {
                 response.push_str(&r);
             },
@@ -131,7 +146,7 @@ async fn main() {
     });
 
         // Send request to OpenAI and `await` the LLM response
-        match cargo_ai::openai_send_request(&model, &structured_prompt, timeout_in_sec, &token, fmt).await {
+        match cargo_ai::openai_send_request(&url, &model, &structured_prompt, timeout_in_sec, &token, fmt).await {
             Ok(r) => response.push_str(&r),
             Err(e) => {
                 println!("We have an error {}", e);
