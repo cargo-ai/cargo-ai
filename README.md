@@ -76,11 +76,11 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 
 1. **Hatch a Sample Agent**  
 
-   By default, if you don’t provide a config file, `cargo-ai` will hatch a sample “Hello World” style agent (`adder_agent`) that simply adds 2 + 2.
+   By default, if you don’t provide a config file, `cargo-ai` will hatch a sample “Hello World” style agent (`adder_test`) that simply adds 2 + 2.
 
    Default example:  
    ```bash
-   cargo ai hatch adder_agent
+   cargo ai hatch adder_test
    ```
 
    Generic form (using your own config file):  
@@ -97,18 +97,18 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
     ./<YourAgentName> -s <server> -m <model> --token <your_api_token>
     ```
 
-    Example (adder_agent with GPT-4o):  
+    Example (adder_test with GPT-4o):  
     ```bash
-    ./adder_agent -s openai -m gpt-4o --token sk-ABCD1234...
+    ./adder_test -s openai -m gpt-4o --token sk-ABCD1234...
     ```
 
     #### Override the Default Prompt
 
-    By default, the `adder_agent` runs with the prompt `"2+2"`. You can override this at runtime using the `--prompt` flag.
+    By default, the `adder_test` runs with the prompt `"2+2"`. You can override this at runtime using the `--prompt` flag.
 
     Default run (prompt = "2+2"):  
     ```bash
-    ./adder_agent -s openai -m gpt-4o --token sk-ABCD1234...
+    ./adder_test -s openai -m gpt-4o --token sk-ABCD1234...
     ```
 
     Expected output:
@@ -120,7 +120,7 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 
     Overridden run (prompt = "2+3"):  
     ```bash
-    ./adder_agent -s openai -m gpt-4o --token sk-ABCD1234... --prompt "2+3"
+    ./adder_test -s openai -m gpt-4o --token sk-ABCD1234... --prompt "2+3"
     ```
 
     Expected output:
@@ -130,9 +130,9 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
     Command completed successfully.
     ```
     > **Note for Windows users:**  
-    > On Windows, the agent binary will be created with a `.exe` extension (e.g., `adder_agent.exe`).  
-    > You can run it by simply typing `adder_agent` in PowerShell or Command Prompt (the `.exe` is implied).  
-    > On macOS and Linux, run the binary from the current directory using `./adder_agent`.
+    > On Windows, the agent binary will be created with a `.exe` extension (e.g., `adder_test.exe`).  
+    > You can run it by simply typing `adder_test` in PowerShell or Command Prompt (the `.exe` is implied).  
+    > On macOS and Linux, run the binary from the current directory using `./adder_test`.
 
 ## ⚙️ CLI Usage
 
@@ -169,10 +169,10 @@ Options:
 ### Agent Commands
 
 Once hatched, your agent is compiled as a standalone binary.  
-Example with `adder_agent` (binary name: `adder_agent`):
+Example with `adder_test` (binary name: `adder_test`):
 
 ```bash
-Usage: adder_agent [OPTIONS]
+Usage: adder_test [OPTIONS]
 
 Options:
   -s, --server <server>       Client Type – Ollama or OpenAI
