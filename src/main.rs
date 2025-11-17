@@ -202,9 +202,17 @@ async fn main() {
             println!("🌐 No --config flag detected. Fetching default template '{agentcfg}' from Cargo-AI registry...");
         }
 
-        let file_contents = config_contents(agentcfg);
+        let file_contents = match config_contents(agentcfg) {
+            Ok(contents) => contents,
+            Err(e) => {
+                println!("❌ Failed to fetch agent configuration for '{agentcfg}'.");
+                println!("Reason: {e}");
+                println!("Hint: Ensure the agent name exists in the Cargo-AI registry or provide a local .json file.");
+                return;
+            }
+        };
 
-        match agent_builder::project::create_new_agent_project(&new_project_name, file_contents) {
+        match agent_builder::project::create_new_agent_project(&new_project_name, Ok(file_contents)) {
             Ok(_) => println!("✅ Project created successfully."),
             Err(e) =>  println!("❌ Failed to create project: {e}") 
         }
@@ -406,5 +414,20 @@ fn fetch_from_registry(name: &str) -> Result<String, Error> {
         ));
     }
 
-    resp.text().map_err(|e| Error::new(ErrorKind::Other, e.to_string()))
+    let text = resp
+        .text()
+        .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?;
+
+    // If the registry returns a JSON object with an `error` field,
+    // treat it as an error instead of passing it through as config.
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+        if let Some(err_msg) = val.get("error").and_then(|e| e.as_str()) {
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!("registry error for '{name}': {err_msg}"),
+            ));
+        }
+    }
+
+    Ok(text)
 }
