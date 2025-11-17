@@ -8,6 +8,8 @@
 ## 🌐 Overview
 `cargo-ai` is a lightweight, Rust-based framework for building **no-code AI agents** using clean, declarative, JSON configs. Agents compile into fast, secure binaries—perfect for local machines, servers, and with broader embedded device support planned.
 
+Supports both **OpenAI‑API‑compatible servers** and **Ollama**.
+
 *Lightweight AI agents. Built in Rust. Declared in JSON.*
 
 ## ✨ Features
