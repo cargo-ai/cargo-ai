@@ -140,22 +140,20 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
   
   The schema is compiled into Rust types, guaranteeing that the agent will always receive data in the expected shape.
 
-    ```json
-    {
-      ...
-      "prompt": "What is 2 + 2? Return the answer as a number.",
-      "agent_schema": {
-        "type": "object",
-        "properties": {
-          "answer": {
-            "type": "integer",
-            "description": "The result of the math problem."
-          }
+  ```json
+  {
+    "prompt": "What is 2 + 2? Return the answer as a number.",
+    "agent_schema": {
+      "type": "object",
+      "properties": {
+        "answer": {
+          "type": "integer",
+          "description": "The result of the math problem."
         }
-      },
-      ...
-    }
-    ```
+      }
+    },
+  }
+  ```
 
   In this example, the agent declares that it requires an integer field named `answer`.  
 
@@ -169,38 +167,36 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
   Here, the logic expression checks whether `answer` equals `4`.  
   If true, one command runs; if false, another:
 
-    ```json
-    ...
-      "actions": [
-          {
-            "name": "is_4",
-            "logic": {
-              "==": [ { "var": "answer" }, 4 ]
-            },
-            "run": [
-              {
-                "kind": "exec",
-                "program": "echo",
-                "args": ["Value return is equal to 4."]
-              }
-            ]
+  ```json
+    "actions": [
+        {
+          "name": "is_4",
+          "logic": {
+            "==": [ { "var": "answer" }, 4 ]
           },
-          {
-            "name": "is_not_4",
-            "logic": {
-              "!=": [ { "var": "answer" }, 4 ]
-            },
-            "run": [
-              {
-                "kind": "exec",
-                "program": "echo",
-                "args": ["Value return is not equal to 4."]
-              }
-            ]
-          }
-        ]
-    ...
-    ```
+          "run": [
+            {
+              "kind": "exec",
+              "program": "echo",
+              "args": ["Value return is equal to 4."]
+            }
+          ]
+        },
+        {
+          "name": "is_not_4",
+          "logic": {
+            "!=": [ { "var": "answer" }, 4 ]
+          },
+          "run": [
+            {
+              "kind": "exec",
+              "program": "echo",
+              "args": ["Value return is not equal to 4."]
+            }
+          ]
+        }
+      ]
+  ```
 
 ### Why This Matters
 
