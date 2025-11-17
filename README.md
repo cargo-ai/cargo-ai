@@ -50,6 +50,8 @@ Supports both **OpenAI‑API‑compatible servers** and **Ollama**.
     cargo ai --help
     ```
 
+## ⚡ Quick Start
+
 ### Configure an LLM Profile (Recommended)
 
 Before hatching or running agents, it is recommended to set up a default LLM connection profile.  
@@ -113,54 +115,101 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
    > You can run it by simply typing `adder_test` in PowerShell or Command Prompt (the `.exe` is implied).  
    > On macOS and Linux, run the binary from the current directory using `./adder_test`.
 
-## ⚙️ CLI Usage
+### 🧠 Understanding the Sample Agent
 
-### Cargo AI Commands
+  ```
+  To better understand how agents are created, you can hatch an agent using the generic form of the command:
 
-The base `cargo ai` command provides subcommands for managing agents:
+  ```bash
+  cargo ai hatch <AgentName> --config <path_to_json>
+  ```
 
-```bash
-Usage: cargo ai [COMMAND]
+  You can also hatch an agent directly from a local JSON file instead of pulling it from the Cargo‑AI repo.  
+  For example, using the same `adder_test.json` stored locally:
+  > **Note:** If the file path you provide does *not* end in `.json`, Cargo‑AI will treat the name as a remote agent request and attempt to fetch it from the Cargo‑AI repo.
 
-Commands:
-  hatch    Hatch a new AI agent project
-  help     Print this message or the help of the given subcommand(s)
+  ```bash
+  cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json
+  ```
 
-Options:
-  -h, --help   Print help
-```
+  This will create a new agent project named `adder_test2` using the contents of your local JSON file.
+  ```
 
-#### Hatch Command
+  To understand what is happening behind the scenes, we can look at the internal structure of the sample agent JSON.  
+  The full file is located in the Cargo‑AI repo here:  
+  [`adder_test.json`](./adder_test.json)
 
-The `hatch` command creates a new AI agent from a JSON config:
+  ### 1. Prompt and Guaranteed Typed Response
 
-```bash
-Usage: cargo ai hatch [OPTIONS] <name>
+    Each agent defines a natural‑language **prompt** together with a strongly‑typed **response schema**.  
+    The schema is compiled into Rust types, guaranteeing that the agent will always receive data in the expected shape.
 
-Arguments:
-  <name>  Name of the new agent project
+    ```json
+    {
+      "prompt": "What is 2 + 2? Return the answer as a number.",
+      "agent_schema": {
+        "type": "object",
+        "properties": {
+          "answer": {
+            "type": "integer",
+            "description": "The result of the math problem."
+          }
+        }
+      },
+      ...
+    }
+    ```
 
-Options:
-  -c, --config <FILE>  Path to the agent configuration file (JSON format)
-  -h, --help           Print help
-```
+  In this example, the agent declares that it requires an integer field named `answer`.  
+  Because the schema is enforced at compile time, the LLM’s response must supply a valid integer — eliminating ambiguity at runtime.
 
-### Agent Commands
+  ### 2. JSON Logic for Conditional Actions
 
-Once hatched, your agent is compiled as a standalone binary.  
-Example with `adder_test` (binary name: `adder_test`):
+    After receiving the typed response, the agent applies **JSON Logic** rules to determine which actions to run.  
+    (See: https://jsonlogic.com/)
 
-```bash
-Usage: adder_test [OPTIONS]
+    ```json
+    {
+      "actions": [
+        {
+          "name": "is_4",
+          "logic": { "==": [ { "var": "answer" }, 4 ] },
+          "run": [
+            { "kind": "exec", "program": "echo", "args": ["Value return is equal to 4."] }
+          ]
+        },
+        ...
+      ]
+    }
+    ```
 
-Options:
-  -s, --server <server>       Client Type – Ollama or OpenAI
-  -m, --model <model>         LLM model to use
-  --token <token>             API token
-  --timeout_in_sec <timeout>  Client timeout request [default: 60]
-  -p, --prompt <TEXT>         Prompt to provide to the agent at runtime
-  -h, --help                  Print help
-```
+    Here, the logic expression checks whether `answer` equals `4`.  
+    If true, one command runs; if false, another:
+
+    ```json
+    {
+      "name": "is_not_4",
+      "logic": { "!=": [ { "var": "answer" }, 4 ] },
+      "run": [
+        { "kind": "exec", "program": "echo", "args": ["Value return is not equal to 4."] }
+      ]
+    }
+    ```
+
+### Why This Matters
+
+Cargo‑AI gives you two powerful guarantees:
+
+1. **Typed responses from any LLM**  
+   Responses can include integers, booleans, strings, or any structure you define — all enforced at compile time.
+
+2. **Full expressive power of JSON Logic**  
+   Perform comparisons, branching, variable evaluation, and complex decision logic to drive arbitrary command‑line actions.
+
+In short:  
+**Typed outputs in; logic‑driven actions out.**
+
+
 
 ## 🌦️🤖 Create Your Own Weather Agent with JSON
 
