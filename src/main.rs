@@ -228,10 +228,16 @@ async fn main() {
         if let Some(_) = sub_m.subcommand_matches("list") {
             if let Some(cfg) = load_config() {
                 println!("Configured profiles:");
-                println!("{:<20} {:<10} {}", "Name", "Server", "Model");
-                println!("{:-<45}", "");
+                println!("{:<20} {:<10} {:<15} {}", "Name", "Server", "Model", "Default");
+                println!("{:-<65}", "");
+
+                let default_name = cfg.default_profile.clone();
+
                 for profile in cfg.profile {
-                    println!("{:<20} {:<10} {}", profile.name, profile.server, profile.model);
+                    let is_default = default_name.as_ref().map(|d| d == &profile.name).unwrap_or(false);
+                    let mark = if is_default { "✓" } else { "" };
+
+                    println!("{:<20} {:<10} {:<15} {}", profile.name, profile.server, profile.model, mark);
                 }
             } else {
                 println!("No config file found.");
@@ -300,6 +306,12 @@ async fn main() {
                 if let Some(cfg) = load_config() {
                     if let Some(p) = find_profile(&cfg, name) {
                         println!("Profile: {}", p.name);
+                        let is_default = cfg.default_profile.as_ref().map(|d| d == &p.name).unwrap_or(false);
+                        if is_default {
+                            println!("Default: Yes");
+                        } else {
+                            println!("Default: No");
+                        }
                         println!("Server:  {}", p.server);
                         println!("Model:   {}", p.model);
                         println!(
