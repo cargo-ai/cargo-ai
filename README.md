@@ -311,34 +311,36 @@ Future versions will support additional action types.
 Example from [weather_agent.json](./weather_agent.json):
 
 ```json
-"actions": [
-  {
-    "name": "umbrella_hint_exec",
-    "logic": {
-      "==": [ { "var": "raining" }, true ]
-    },
-    "run": [
+  ...
+  "actions": [
       {
-        "kind": "exec",
-        "program": "echo",
-        "args": ["bring an umbrella"]
+        "name": "is_4",
+        "logic": {
+          "==": [ { "var": "answer" }, 4 ]
+        },
+        "run": [
+          {
+            "kind": "exec",
+            "program": "echo",
+            "args": ["Value return is equal to 4."]
+          }
+        ]
+      },
+      {
+        "name": "is_not_4",
+        "logic": {
+          "!=": [ { "var": "answer" }, 4 ]
+        },
+        "run": [
+          {
+            "kind": "exec",
+            "program": "echo",
+            "args": ["Value return is not equal to 4."]
+          }
+        ]
       }
     ]
-  },
-  {
-    "name": "sunglasses_hint_exec",
-    "logic": {
-      "==": [ { "var": "raining" }, false ]
-    },
-    "run": [
-      {
-        "kind": "exec",
-        "program": "echo",
-        "args": ["bring sunglasses"]
-      }
-    ]
-  }
-]
+  ...
 ```
 
 In this example:
