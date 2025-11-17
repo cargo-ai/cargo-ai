@@ -48,6 +48,28 @@
     cargo ai --help
     ```
 
+### Configure an LLM Profile (Recommended)
+
+Before hatching or running agents, it is recommended to set up a default LLM connection profile.  
+This allows `cargo-ai` to run agents without requiring server, model, or token flags each time.
+
+#### Add a Default OpenAI Profile
+
+Example (using OpenAI GPT 4o):
+
+```bash
+cargo ai profile add openai \
+    --server openai \
+    --model gpt-4o \
+    --token sk-*** \
+    --default
+```
+
+You may also change the URL to point to any OpenAI-compatible LLM server using:
+```bash
+--url <custom_llm_endpoint>
+```
+
 ### Create a Sample Agent
 
 1. **Hatch a Sample Agent**  
