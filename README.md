@@ -117,16 +117,15 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 
 ### 🧠 Understanding the Sample Agent
 
-  ```
   To better understand how agents are created, you can hatch an agent using the generic form of the command:
 
   ```bash
   cargo ai hatch <AgentName> --config <path_to_json>
   ```
 
-  You can also hatch an agent directly from a local JSON file instead of pulling it from the Cargo‑AI repo.  
+  You can also hatch an agent by specifying a configuration file directly.  
+  This allows you to leverage either the Cargo‑AI repo or a local `.json` file.  
   For example, using the same `adder_test.json` stored locally:
-  > **Note:** If the file path you provide does *not* end in `.json`, Cargo‑AI will treat the name as a remote agent request and attempt to fetch it from the Cargo‑AI repo.
 
   ```bash
   cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json
@@ -146,6 +145,7 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 
     ```json
     {
+      ...
       "prompt": "What is 2 + 2? Return the answer as a number.",
       "agent_schema": {
         "type": "object",
@@ -168,6 +168,9 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
     After receiving the typed response, the agent applies **JSON Logic** rules to determine which actions to run.  
     (See: https://jsonlogic.com/)
 
+    Here, the logic expression checks whether `answer` equals `4`.  
+    If true, one command runs; if false, another:
+
     ```json
     {
       "actions": [
@@ -182,9 +185,6 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
       ]
     }
     ```
-
-    Here, the logic expression checks whether `answer` equals `4`.  
-    If true, one command runs; if false, another:
 
     ```json
     {
@@ -201,14 +201,13 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 Cargo‑AI gives you two powerful guarantees:
 
 1. **Typed responses from any LLM**  
-   Responses can include integers, booleans, strings, or any structure you define — all enforced at compile time.
+   Responses can include one or many integers, booleans, strings — all enforced at compile time.
 
 2. **Full expressive power of JSON Logic**  
    Perform comparisons, branching, variable evaluation, and complex decision logic to drive arbitrary command‑line actions.
 
 In short:  
-**Typed outputs in; logic‑driven actions out.**
-
+**Now you can create sophisticated, predictable, atomic Rust agents — with no code.**
 
 
 ## 🌦️🤖 Create Your Own Weather Agent with JSON
