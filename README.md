@@ -136,8 +136,8 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 
   ### 1. Prompt and Guaranteed Typed Response
 
-    Each agent defines a natural‑language **prompt** together with a strongly‑typed **response schema**.  
-    The schema is compiled into Rust types, guaranteeing that the agent will always receive data in the expected shape.
+  Each agent defines a natural‑language **prompt** together with a strongly‑typed **response schema**.  
+  The schema is compiled into Rust types, guaranteeing that the agent will always receive data in the expected shape.
 
     ```json
     {
