@@ -87,49 +87,31 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 
 ### Run the Sample Agent
 
-2. **Run the compiled agent** with OpenAI GPT:  
+2. **Run the compiled agent** using your default profile:
 
-    Generic form:  
-    ```bash
-    ./<YourAgentName> -s <server> -m <model> --token <your_api_token>
-    ```
+   ```bash
+   ./adder_test
+   ```
 
-    Example (adder_test with GPT-4o):  
-    ```bash
-    ./adder_test -s openai -m gpt-4o --token sk-ABCD1234...
-    ```
+   Example output:
 
-    #### Override the Default Prompt
+   ```
+   Using default profile 'openai'
+   Running 'is_4': echo ["Value return is equal to 4."]
+   Value return is equal to 4.
+   Command completed successfully.
+   ```
 
-    By default, the `adder_test` runs with the prompt `"2+2"`. You can override this at runtime using the `--prompt` flag.
+   You can override any part of the default profile at runtime using command‑line flags.  
+   For a full listing of options, run:
 
-    Default run (prompt = "2+2"):  
-    ```bash
-    ./adder_test -s openai -m gpt-4o --token sk-ABCD1234...
-    ```
-
-    Expected output:
-    ```
-    Running 'is_4': echo ["Value return is equal to 4."]
-    Value return is equal to 4.
-    Command completed successfully.
-    ```
-
-    Overridden run (prompt = "2+3"):  
-    ```bash
-    ./adder_test -s openai -m gpt-4o --token sk-ABCD1234... --prompt "2+3"
-    ```
-
-    Expected output:
-    ```
-    Running 'is_not_4': echo ["Value return is not equal to 4."]
-    Value return is not equal to 4.
-    Command completed successfully.
-    ```
-    > **Note for Windows users:**  
-    > On Windows, the agent binary will be created with a `.exe` extension (e.g., `adder_test.exe`).  
-    > You can run it by simply typing `adder_test` in PowerShell or Command Prompt (the `.exe` is implied).  
-    > On macOS and Linux, run the binary from the current directory using `./adder_test`.
+   ```bash
+   ./adder_test --help
+   ```
+   > **Note for Windows users:**  
+   > On Windows, the agent binary will be created with a `.exe` extension (e.g., `adder_test.exe`).  
+   > You can run it by simply typing `adder_test` in PowerShell or Command Prompt (the `.exe` is implied).  
+   > On macOS and Linux, run the binary from the current directory using `./adder_test`.
 
 ## ⚙️ CLI Usage
 
