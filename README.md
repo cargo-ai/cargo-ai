@@ -14,10 +14,17 @@
 
 - **Declarative, No-Code Agents** – Define agent logic in JSON  
 - **Portable JSON Configs** – Share agent definitions as JSON; others can "hatch" and run them on their own systems
+- **Remote Agent Fetching** – Hatch agents directly from the Cargo-AI repository without needing local JSON files
 - **Full CLI Integration** – Run any command-line program or chain additional agents directly from JSON configs
 - **Rust-Powered** – Safe, fast, and portable across environments  
 - **Fully Local & Secure** – All logic executes client-side (no phoning home)  
+- **LLM Connection Profiles** – Store reusable settings for servers, models, tokens, and timeouts so you don't re-enter them each run
 - **Embedded-Ready** – Agents compile into binaries suitable for servers and embedded Linux devices, with broader embedded support planned  
+
+## 🚀 Upcoming Features
+
+- **User Repositories (Public & Private)** – Publish agents to your own hosted repository and share them publicly or privately with collaborators.
+- **Email Actions** – Enable agents to send automated emails as action outputs, expanding beyond command-line execution.
 
 ## 📦 Installation
 
@@ -28,7 +35,7 @@
    [Install Rust & Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html)
 
 2. **Install cargo-ai**  
-   Once Cargo is available, install `cargo-ai` from source:  
+   Once Cargo is available, install `cargo-ai`:  
    ```bash
    cargo install cargo-ai
    ```
