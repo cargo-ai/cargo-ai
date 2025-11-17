@@ -137,6 +137,7 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
   ### 1. Prompt and Guaranteed Typed Response
 
   Each agent defines a natural‑language **prompt** together with a strongly‑typed **response schema**.  
+  
   The schema is compiled into Rust types, guaranteeing that the agent will always receive data in the expected shape.
 
     ```json
@@ -157,18 +158,20 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
     ```
 
   In this example, the agent declares that it requires an integer field named `answer`.  
+
   Because the schema is enforced at compile time, the LLM’s response must supply a valid integer — eliminating ambiguity at runtime.
 
   ### 2. JSON Logic for Conditional Actions
 
-    After receiving the typed response, the agent applies **JSON Logic** rules to determine which actions to run.  
-    (See: https://jsonlogic.com/)
+  After receiving the typed response, the agent applies **JSON Logic** rules to determine which actions to run.  
+  (See: https://jsonlogic.com/)
 
-    Here, the logic expression checks whether `answer` equals `4`.  
-    If true, one command runs; if false, another:
+  Here, the logic expression checks whether `answer` equals `4`.  
+  If true, one command runs; if false, another:
 
     ```json
     {
+      ...
       "actions": [
         {
           "name": "is_4",
@@ -184,11 +187,13 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 
     ```json
     {
+      ...
       "name": "is_not_4",
       "logic": { "!=": [ { "var": "answer" }, 4 ] },
       "run": [
         { "kind": "exec", "program": "echo", "args": ["Value return is not equal to 4."] }
       ]
+      ...
     }
     ```
 
@@ -197,7 +202,7 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 Cargo‑AI gives you two powerful guarantees:
 
 1. **Typed responses from any LLM**  
-   Responses can include one or many integers, booleans, strings — all enforced at compile time.
+   Responses can include integers, booleans, strings, numbers, and arrays of these types — all enforced at compile time.
 
 2. **Full expressive power of JSON Logic**  
    Perform comparisons, branching, variable evaluation, and complex decision logic to drive arbitrary command‑line actions.
