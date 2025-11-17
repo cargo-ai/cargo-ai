@@ -8,16 +8,28 @@
 ## 🌐 Overview
 `cargo-ai` is a lightweight, Rust-based framework for building **no-code AI agents** using clean, declarative, JSON configs. Agents compile into fast, secure binaries—perfect for local machines, servers, and with broader embedded device support planned.
 
+Supports both **OpenAI‑API‑compatible servers** and **Ollama**.
+
 *Lightweight AI agents. Built in Rust. Declared in JSON.*
 
 ## ✨ Features
 
 - **Declarative, No-Code Agents** – Define agent logic in JSON  
 - **Portable JSON Configs** – Share agent definitions as JSON; others can "hatch" and run them on their own systems
-- **Full CLI Integration** – Run any command-line program or chain additional agents directly from JSON configs
+- **Full CLI Integration** – Conformed agent outputs can run an arbitrary command-line program
 - **Rust-Powered** – Safe, fast, and portable across environments  
 - **Fully Local & Secure** – All logic executes client-side (no phoning home)  
-- **Embedded-Ready** – Agents compile into binaries suitable for servers and embedded Linux devices, with broader embedded support planned  
+- **LLM Connection Profiles** – Store reusable settings for servers, models, tokens, and timeouts so you don't re-enter them each run
+- **Repository Integration** – Download JSON configurations directly from Cargo-AI and hatch agents without needing local files
+- **Cross‑Platform Support** – Runs on any Linux, macOS, or Windows device
+
+## 🚀 Upcoming Features
+
+- **User Repositories (Public & Private)** – Publish agents to your own hosted repository and share them publicly or privately with collaborators.
+- **Email Actions** – Enable agents to send automated emails as action outputs, expanding beyond command-line execution.
+
+## 🔮 Future Features
+- **Microcontroller Support** – Planned support for ultra‑lightweight environments, expanding beyond standard servers to microcontroller‑class devices
 
 ## 📦 Installation
 
@@ -28,7 +40,7 @@
    [Install Rust & Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html)
 
 2. **Install cargo-ai**  
-   Once Cargo is available, install `cargo-ai` from source:  
+   Once Cargo is available, install `cargo-ai`:  
    ```bash
    cargo install cargo-ai
    ```
@@ -38,116 +50,167 @@
     cargo ai --help
     ```
 
+## ⚡ Quick Start
+
+### Configure an LLM Profile (Recommended)
+
+Before hatching or running agents, it is recommended to set up a default LLM connection profile.  
+This allows `cargo-ai` to run agents without requiring server, model, or token flags each time.
+
+#### Add a Default OpenAI Profile
+
+Example (using OpenAI GPT 4o):
+
+```bash
+cargo ai profile add openai \
+    --server openai \
+    --model gpt-4o \
+    --token sk-*** \
+    --default
+```
+
+Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change the default URL, use:
+```bash
+--url <custom_llm_endpoint>
+```
+
 ### Create a Sample Agent
 
 1. **Hatch a Sample Agent**  
 
-   By default, if you don’t provide a config file, `cargo-ai` will hatch a sample “Hello World” style agent (`adder_agent`) that simply adds 2 + 2.
+   By default, if you don’t provide a config file, `cargo-ai` will hatch a sample “Hello World” style agent (`adder_test`) that simply adds 2 + 2.
 
    Default example:  
    ```bash
-   cargo ai hatch adder_agent
+   cargo ai hatch adder_test
    ```
 
-   Generic form (using your own config file):  
-   ```bash
-   cargo ai hatch <YourAgentName> -c <config_file>
-   ```
+   To hatch your own custom agent from a JSON file, see the section **Create Your Own Weather Agent with JSON** below.
 
 ### Run the Sample Agent
 
-2. **Run the compiled agent** with OpenAI GPT:  
+2. **Run the compiled agent** using your default profile:
 
-    Generic form:  
-    ```bash
-    ./<YourAgentName> -s <server> -m <model> --token <your_api_token>
-    ```
+   ```bash
+   ./adder_test
+   ```
 
-    Example (adder_agent with GPT-4o):  
-    ```bash
-    ./adder_agent -s openai -m gpt-4o --token sk-ABCD1234...
-    ```
+   Example output:
 
-    #### Override the Default Prompt
+   ```
+   Using default profile 'openai'
+   Running 'is_4': echo ["Value return is equal to 4."]
+   Value return is equal to 4.
+   Command completed successfully.
+   ```
 
-    By default, the `adder_agent` runs with the prompt `"2+2"`. You can override this at runtime using the `--prompt` flag.
+   You can override any part of the default profile at runtime using command‑line flags.  
+   For a full listing of options, run:
 
-    Default run (prompt = "2+2"):  
-    ```bash
-    ./adder_agent -s openai -m gpt-4o --token sk-ABCD1234...
-    ```
+   ```bash
+   ./adder_test --help
+   ```
+   > **Note for Windows users:**  
+   > On Windows, the agent binary will be created with a `.exe` extension (e.g., `adder_test.exe`).  
+   > You can run it by simply typing `adder_test` in PowerShell or Command Prompt (the `.exe` is implied).  
+   > On macOS and Linux, run the binary from the current directory using `./adder_test`.
 
-    Expected output:
-    ```
-    Running 'is_4': echo ["Value return is equal to 4."]
-    Value return is equal to 4.
-    Command completed successfully.
-    ```
+### 🧠 Understanding the Sample Agent
 
-    Overridden run (prompt = "2+3"):  
-    ```bash
-    ./adder_agent -s openai -m gpt-4o --token sk-ABCD1234... --prompt "2+3"
-    ```
+  To better understand how agents are created, you can hatch an agent using the generic form of the command:
 
-    Expected output:
-    ```
-    Running 'is_not_4': echo ["Value return is not equal to 4."]
-    Value return is not equal to 4.
-    Command completed successfully.
-    ```
-    > **Note for Windows users:**  
-    > On Windows, the agent binary will be created with a `.exe` extension (e.g., `adder_agent.exe`).  
-    > You can run it by simply typing `adder_agent` in PowerShell or Command Prompt (the `.exe` is implied).  
-    > On macOS and Linux, run the binary from the current directory using `./adder_agent`.
+  ```bash
+  cargo ai hatch <AgentName> --config <path_to_json>
+  ```
+ 
+  This allows you to leverage either the Cargo‑AI repo or a local `.json` file.  
+  For example, using the same `adder_test.json` stored locally:
 
-## ⚙️ CLI Usage
+  ```bash
+  cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json
+  ```
 
-### Cargo AI Commands
+  This will create a new agent project named `adder_test2` using the contents of your local JSON file.
 
-The base `cargo ai` command provides subcommands for managing agents:
+  To understand what is happening behind the scenes, we can look at the internal structure of the sample agent JSON file, [`adder_test.json`](./adder_test.json). 
 
-```bash
-Usage: cargo ai [COMMAND]
+  ### 1. Prompt and Guaranteed Typed Response
 
-Commands:
-  hatch    Hatch a new AI agent project
-  help     Print this message or the help of the given subcommand(s)
+  Each agent defines a natural‑language **prompt** together with a strongly‑typed **response schema**.  
+  
+  The schema is compiled into Rust types, guaranteeing that the agent will always receive data in the expected shape.
 
-Options:
-  -h, --help   Print help
-```
+  ```json
+  {
+    "prompt": "What is 2 + 2? Return the answer as a number.",
+    "agent_schema": {
+      "type": "object",
+      "properties": {
+        "answer": {
+          "type": "integer",
+          "description": "The result of the math problem."
+        }
+      }
+    },
+  }
+  ```
 
-#### Hatch Command
+  In this example, the agent declares that it requires an integer field named `answer`.  
 
-The `hatch` command creates a new AI agent from a JSON config:
+  Because the schema is enforced at compile time, the LLM’s response must supply a valid integer — eliminating ambiguity at runtime.
 
-```bash
-Usage: cargo ai hatch [OPTIONS] <name>
+  ### 2. JSON Logic for Conditional Actions
 
-Arguments:
-  <name>  Name of the new agent project
+  After receiving the typed response, the agent applies **JSON Logic** rules to determine which actions to run.  
+  (See: https://jsonlogic.com/)
 
-Options:
-  -c, --config <FILE>  Path to the agent configuration file (JSON format)
-  -h, --help           Print help
-```
+  Here, the logic expression checks whether `answer` equals `4`.  
+  If true, one command runs; if false, another:
 
-### Agent Commands
+  ```json
+    "actions": [
+        {
+          "name": "is_4",
+          "logic": {
+            "==": [ { "var": "answer" }, 4 ]
+          },
+          "run": [
+            {
+              "kind": "exec",
+              "program": "echo",
+              "args": ["Value return is equal to 4."]
+            }
+          ]
+        },
+        {
+          "name": "is_not_4",
+          "logic": {
+            "!=": [ { "var": "answer" }, 4 ]
+          },
+          "run": [
+            {
+              "kind": "exec",
+              "program": "echo",
+              "args": ["Value return is not equal to 4."]
+            }
+          ]
+        }
+      ]
+  ```
 
-Once hatched, your agent is compiled as a standalone binary.  
-Example with `adder_agent` (binary name: `adder_agent`):
+### Why This Matters
 
-```bash
-Usage: adder_agent [OPTIONS]
+Cargo‑AI gives you two powerful guarantees:
 
-Options:
-  -s, --server <server>       Client Type – Ollama or OpenAI
-  -m, --model <model>         LLM model to use
-  --token <token>             API token
-  --timeout_in_sec <timeout>  Client timeout request [default: 60]
-  -p, --prompt <TEXT>         Prompt to provide to the agent at runtime
-  -h, --help                  Print help
-```
+1. **Typed responses from any LLM**  
+   Responses can include integers, booleans, strings, numbers, and arrays of these types — all enforced at compile time.
+
+2. **Full expressive power of JSON Logic**  
+   Perform comparisons, branching, variable evaluation, and complex decision logic to drive arbitrary command‑line actions.
+
+In short:  
+**Now you can create sophisticated, predictable, atomic Rust agents — with no code.**
+
 
 ## 🌦️🤖 Create Your Own Weather Agent with JSON
 
@@ -165,7 +228,9 @@ The steps below show how to create the weather_agent, but once defined, running 
 # 1. Hatch your weather_agent from a JSON config
 cargo ai hatch weather_agent --config weather_agent.json
 
-# 2. Run your weather_agent with a server, model, and token
+# 2. Run your weather_agent using either your default profile or explicit flags
+./weather_agent
+# or override the defaults:
 ./weather_agent -s openai -m gpt-4o --token sk-ABCD1234...
 
 # Expected output if raining tomorrow:
