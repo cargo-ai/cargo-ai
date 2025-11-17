@@ -67,7 +67,7 @@ cargo ai profile add openai \
     --default
 ```
 
-You may also change the URL to point to any OpenAI-compatible LLM server using:
+Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change the default URL, use:
 ```bash
 --url <custom_llm_endpoint>
 ```
