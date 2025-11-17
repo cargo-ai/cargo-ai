@@ -83,10 +83,7 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
    cargo ai hatch adder_test
    ```
 
-   Generic form (using your own config file):  
-   ```bash
-   cargo ai hatch <YourAgentName> -c <config_file>
-   ```
+   To hatch your own custom agent from a JSON file, see the section **Create Your Own Weather Agent with JSON** below.
 
 ### Run the Sample Agent
 
