@@ -122,8 +122,7 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
   ```bash
   cargo ai hatch <AgentName> --config <path_to_json>
   ```
-
-  You can also hatch an agent by specifying a configuration file directly.  
+ 
   This allows you to leverage either the Cargo‑AI repo or a local `.json` file.  
   For example, using the same `adder_test.json` stored locally:
 
@@ -132,7 +131,6 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
   ```
 
   This will create a new agent project named `adder_test2` using the contents of your local JSON file.
-  ```
 
   To understand what is happening behind the scenes, we can look at the internal structure of the sample agent JSON.  
   The full file is located in the Cargo‑AI repo here:  
