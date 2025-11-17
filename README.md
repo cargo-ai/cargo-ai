@@ -132,9 +132,7 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 
   This will create a new agent project named `adder_test2` using the contents of your local JSON file.
 
-  To understand what is happening behind the scenes, we can look at the internal structure of the sample agent JSON.  
-  The full file is located in the Cargo‑AI repo here:  
-  [`adder_test.json`](./adder_test.json)
+  To understand what is happening behind the scenes, we can look at the internal structure of the sample agent JSON file, [`adder_test.json`](./adder_test.json). 
 
   ### 1. Prompt and Guaranteed Typed Response
 
