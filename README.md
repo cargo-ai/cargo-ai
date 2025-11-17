@@ -170,31 +170,36 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
   If true, one command runs; if false, another:
 
     ```json
-    {
-      ...
+    ...
       "actions": [
-        {
-          "name": "is_4",
-          "logic": { "==": [ { "var": "answer" }, 4 ] },
-          "run": [
-            { "kind": "exec", "program": "echo", "args": ["Value return is equal to 4."] }
-          ]
-        },
-        ...
-      ]
-    }
-    ```
-
-    ```json
-    {
-      ...
-      "name": "is_not_4",
-      "logic": { "!=": [ { "var": "answer" }, 4 ] },
-      "run": [
-        { "kind": "exec", "program": "echo", "args": ["Value return is not equal to 4."] }
-      ]
-      ...
-    }
+          {
+            "name": "is_4",
+            "logic": {
+              "==": [ { "var": "answer" }, 4 ]
+            },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["Value return is equal to 4."]
+              }
+            ]
+          },
+          {
+            "name": "is_not_4",
+            "logic": {
+              "!=": [ { "var": "answer" }, 4 ]
+            },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["Value return is not equal to 4."]
+              }
+            ]
+          }
+        ]
+    ...
     ```
 
 ### Why This Matters
@@ -311,36 +316,34 @@ Future versions will support additional action types.
 Example from [weather_agent.json](./weather_agent.json):
 
 ```json
-  ...
-  "actions": [
+"actions": [
+  {
+    "name": "umbrella_hint_exec",
+    "logic": {
+      "==": [ { "var": "raining" }, true ]
+    },
+    "run": [
       {
-        "name": "is_4",
-        "logic": {
-          "==": [ { "var": "answer" }, 4 ]
-        },
-        "run": [
-          {
-            "kind": "exec",
-            "program": "echo",
-            "args": ["Value return is equal to 4."]
-          }
-        ]
-      },
-      {
-        "name": "is_not_4",
-        "logic": {
-          "!=": [ { "var": "answer" }, 4 ]
-        },
-        "run": [
-          {
-            "kind": "exec",
-            "program": "echo",
-            "args": ["Value return is not equal to 4."]
-          }
-        ]
+        "kind": "exec",
+        "program": "echo",
+        "args": ["bring an umbrella"]
       }
     ]
-  ...
+  },
+  {
+    "name": "sunglasses_hint_exec",
+    "logic": {
+      "==": [ { "var": "raining" }, false ]
+    },
+    "run": [
+      {
+        "kind": "exec",
+        "program": "echo",
+        "args": ["bring sunglasses"]
+      }
+    ]
+  }
+]
 ```
 
 In this example:
