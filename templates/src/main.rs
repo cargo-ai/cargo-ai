@@ -154,14 +154,21 @@ async fn main() {
         };
     }
 
-    // println!("{server} Response: {response}");
-    
-    ai_cargo.set_response(response.clone());
+            // Attempt to conform the LLM response to the Output schema
+        if !ai_cargo.set_response(response.clone()) {
+            eprintln!("❌ LLM output did NOT conform to the required JSON schema.");
+            eprintln!("Raw output received from server:\n{}\n", response);
+            return; // Stop execution cleanly — do NOT continue to unwrap
+        }
 
-
-    // Get Output 
-    let output: Output = ai_cargo.get_response().unwrap();
-    // println!("Output: {:?}", output);
+        let output = match ai_cargo.get_response() {
+            Some(o) => o,
+            None => {
+                eprintln!("❌ Internal error: response was expected but missing.");
+                eprintln!("Raw output received from server:\n{}\n", response);
+                return;
+            }
+        };
 
     // Get Actions
     let actions = actions();
