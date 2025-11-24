@@ -138,7 +138,9 @@ async fn main() {
                     response.push_str(&r);
                 },
                 Err(e) => {
-                    println!("We have an error {}", e);
+                    eprintln!("Error communicating with Ollama: {}", e);
+                    eprintln!("Make sure Ollama is running at {}", url);
+                    std::process::exit(1);
                 }
             }
         } else if server == "openai" {
@@ -161,18 +163,23 @@ async fn main() {
             match cargo_ai::openai_send_request(&url, &model, &structured_prompt, timeout_in_sec, &token, fmt).await {
                 Ok(r) => response.push_str(&r),
                 Err(e) => {
-                    println!("We have an error {}", e);
+                    eprintln!("Error communicating with OpenAI: {}", e);
+                    std::process::exit(1);
                 }
             };
         }
 
         // println!("{server} Response: {response}");
-        
-        ai_cargo.set_response(response.clone());
+
+        if !ai_cargo.set_response(response.clone()) {
+            eprintln!("Error: Failed to parse LLM response as valid JSON");
+            eprintln!("Response was: {}", response);
+            std::process::exit(1);
+        }
 
 
-        // Get Output 
-        let output: Output = ai_cargo.get_response().unwrap();
+        // Get Output
+        let output: Output = ai_cargo.get_response().expect("Failed to get parsed response");
         // println!("Output: {:?}", output);
 
         // Get Actions
