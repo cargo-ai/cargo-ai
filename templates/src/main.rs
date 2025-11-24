@@ -126,7 +126,9 @@ async fn main() {
                 response.push_str(&r);
             },
             Err(e) => {
-                println!("We have an error {}", e);
+                eprintln!("❌ Issue communicating with the AI server (Ollama).");
+                eprintln!("Reason: {}\n", e);
+                return;
             }
         }
     } else if server == "openai" {
@@ -149,7 +151,9 @@ async fn main() {
         match cargo_ai::openai_send_request(&url, &model, &structured_prompt, timeout_in_sec, &token, fmt).await {
             Ok(r) => response.push_str(&r),
             Err(e) => {
-                println!("We have an error {}", e);
+                eprintln!("❌ Issue communicating with the AI server (OpenAI).");
+                eprintln!("Reason: {}\n", e);
+                return;
             }
         };
     }
