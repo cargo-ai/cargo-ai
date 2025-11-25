@@ -10,6 +10,7 @@ struct Request {
     prompt: String,
     format: serde_json::Value,
     stream: bool,
+    think: bool,
     options: Options,
 }
 
@@ -25,6 +26,7 @@ struct Response {
     created_at: String,
     response: String,
     done: bool,
+    thinking: Option<String>,
 }
 
 pub async fn send_request(
@@ -40,6 +42,7 @@ pub async fn send_request(
         prompt: prompt.clone(),
         format: format.clone(),
         stream: false,
+        think: false,
         options: Options { temperature: crate::DEFAULT_TEMPERATURE}
     };
 
@@ -52,7 +55,7 @@ pub async fn send_request(
         .json(&request)
         .send()
         .await?;
-
+    
     let status = http_resp.status();
     let body_bytes = http_resp.bytes().await?;
 
@@ -69,7 +72,19 @@ pub async fn send_request(
         }
     };
 
-    Ok(reply.response)
+    // NOTE: Some Ollama "thinking" models may incorrectly place final output in the `thinking` field
+    // instead of the `response` field, even when `think` is set to false. This appears to be an
+    // Ollama-side issue. The logic below first checks `response`, and if empty, falls back to
+    // `thinking` to support current behavior.
+    let final_output = if !reply.response.is_empty() {
+        reply.response
+    } else if let Some(t) = reply.thinking {
+        t
+    } else {
+        return Err("Ollama returned neither response nor thinking fields.".into());
+    };
+
+    Ok(final_output)
 }
 
 #[cfg(test)]

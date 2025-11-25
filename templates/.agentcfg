@@ -1,5 +1,5 @@
 {
-  "version": "0.0.9",
+  "version": "0.0.10",
   "prompt": "What is 2 + 2? Return the answer as a number.",
   "agent_schema": {
     "type": "object",

@@ -138,7 +138,9 @@ async fn main() {
                     response.push_str(&r);
                 },
                 Err(e) => {
-                    println!("We have an error {}", e);
+                    eprintln!("❌ Issue communicating with the AI server (Ollama).");
+                    eprintln!("Reason: {}\n", e);
+                    return;
                 }
             }
         } else if server == "openai" {
@@ -161,19 +163,28 @@ async fn main() {
             match cargo_ai::openai_send_request(&url, &model, &structured_prompt, timeout_in_sec, &token, fmt).await {
                 Ok(r) => response.push_str(&r),
                 Err(e) => {
-                    println!("We have an error {}", e);
+                    eprintln!("❌ Issue communicating with the AI server (OpenAI).");
+                    eprintln!("Reason: {}\n", e);
+                    return;
                 }
             };
         }
 
-        // println!("{server} Response: {response}");
-        
-        ai_cargo.set_response(response.clone());
+        // Attempt to conform the LLM response to the Output schema
+        if !ai_cargo.set_response(response.clone()) {
+            eprintln!("❌ LLM output did NOT conform to the required JSON schema.");
+            eprintln!("Raw output received from server:\n{}\n", response);
+            return; // Stop execution cleanly — do NOT continue to unwrap
+        }
 
-
-        // Get Output 
-        let output: Output = ai_cargo.get_response().unwrap();
-        // println!("Output: {:?}", output);
+        let output = match ai_cargo.get_response() {
+            Some(o) => o,
+            None => {
+                eprintln!("❌ Internal error: response was expected but missing.");
+                eprintln!("Raw output received from server:\n{}\n", response);
+                return;
+            }
+        };
 
         // Get Actions
         let actions = actions();
