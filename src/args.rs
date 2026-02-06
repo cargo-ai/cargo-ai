@@ -175,5 +175,19 @@ pub fn build_cli() -> ArgMatches {
                         )
                 )
         )
+        .subcommand(
+            Command::new("account")
+                .about("Manage account lifecycle")
+                .subcommand(
+                    Command::new("register")
+                        .about("Register a new account by email")
+                        .arg(
+                            Arg::new("email")
+                                .help("Email address to register")
+                                .required(true)
+                                .value_name("EMAIL")
+                        )
+                )
+        )
         .get_matches_from(args)
 }
