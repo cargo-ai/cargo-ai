@@ -243,6 +243,19 @@ async fn main() {
             Err(e) => println!("⚠️ Failed to clean up workspace: {e}"),
         }
 
+    } else if let Some(sub_m) = cmd_args.subcommand_matches("account") {
+
+        if let Some(reg_m) = sub_m.subcommand_matches("register") {
+
+            let email = reg_m
+                .get_one::<String>("email")
+                .expect("email is required");
+
+            println!("✅ account register (stub): {}", email);
+        } else {
+            println!("No account subcommand found. Try 'cargo ai account register <email>'.");
+        }
+
     } else if let Some(sub_m) = cmd_args.subcommand_matches("profile") {
         if let Some(_) = sub_m.subcommand_matches("list") {
             if let Some(cfg) = load_config() {
