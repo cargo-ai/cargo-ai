@@ -3,6 +3,7 @@ mod args;
 mod web_resources;
 mod agent_builder;
 mod config;
+mod infra_api;
 
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
@@ -251,7 +252,16 @@ async fn main() {
                 .get_one::<String>("email")
                 .expect("email is required");
 
-            println!("✅ account register (stub): {}", email);
+            let base_url = "https://api.cargo-ai.org";
+
+            match infra_api::account::register::register_email(base_url, email).await {
+                Ok(()) => {
+                    println!("✅ Registration started. Check your email for the temporary password.");
+                }
+                Err(e) => {
+                    eprintln!("❌ Registration failed: {e:?}");
+                }
+            }
         } else {
             println!("No account subcommand found. Try 'cargo ai account register <email>'.");
         }
