@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
 
 use std::{fs, env};
-use std::io::{Error, ErrorKind};
+use std::io::{self, Error, ErrorKind, Write};
 
 use config::loader::{load_config, find_profile};
-use config::adder::add_profile;
+use config::adder::{add_profile, set_account_email};
 use config::remover::remove_profile;
 use config::schema::Profile;
 
@@ -252,14 +252,52 @@ async fn main() {
                 .get_one::<String>("email")
                 .expect("email is required");
 
+            // If an account email is already configured and differs, confirm before proceeding.
+            if let Some(cfg) = load_config() {
+                if let Some(acct) = cfg.account.as_ref() {
+                    if let Some(existing_email) = acct.email.as_ref() {
+                        if existing_email != email {
+                            print!(
+                                "Account email is already set to '{}'. Replace with '{}'? [y/N]: ",
+                                existing_email, email
+                            );
+                            io::stdout().flush().unwrap();
+
+                            let mut input = String::new();
+                            io::stdin().read_line(&mut input).unwrap();
+
+                            if !input.trim().eq_ignore_ascii_case("y") {
+                                println!("Operation canceled.");
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
             let base_url = "https://api.cargo-ai.org";
 
             match infra_api::account::register::register_email(base_url, email).await {
-                Ok(()) => {
-                    println!("✅ Registration started. Check your email for the temporary password.");
+                Ok(json) => {
+                    match serde_json::to_string_pretty(&json) {
+                        Ok(pretty) => println!("{pretty}"),
+                        Err(_) => println!("{json:?}"),
+                    }
+
+                    // Persist the active account email locally only on successful registration.
+                    if json
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.eq_ignore_ascii_case("success"))
+                        .unwrap_or(false)
+                    {
+                        if let Err(e) = set_account_email(email.to_string(), true) {
+                            eprintln!("⚠️ Failed to save account email to config: {e}");
+                        }
+                    }
                 }
                 Err(e) => {
-                    eprintln!("❌ Registration failed: {e:?}");
+                    eprintln!("❌ Request failed: {e:?}");
                 }
             }
         } else {

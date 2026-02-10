@@ -11,11 +11,15 @@ use serde::{Serialize, Deserialize};
 pub struct Config {
     pub profile: Vec<Profile>,
 
+    // Reserved for future install or account identification and management (currently unused).
     #[serde(default)]
     pub cargo_ai_token: Option<String>,
 
     #[serde(default)]
     pub default_profile: Option<String>,
+
+    #[serde(default)]
+    pub account: Option<Account>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,6 +39,12 @@ pub struct Profile {
 
     #[serde(default)]
     pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Account {
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 fn default_timeout() -> u64 {

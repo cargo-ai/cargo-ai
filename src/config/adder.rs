@@ -1,5 +1,5 @@
-use crate::config::schema::{Config, Profile};
-use crate::config::loader::{load_config, config_path};
+use crate::config::schema::{Account, Config, Profile};
+use crate::config::loader::{config_path, load_config};
 use std::fs;
 use std::io::{self, Write};
 
@@ -8,6 +8,7 @@ pub fn add_profile(new_profile: Profile, overwrite: bool, set_as_default: bool) 
         profile: Vec::new(), 
         cargo_ai_token: None,
         default_profile: None,
+        account: None,
     });
 
     if let Some(existing) = cfg.profile.iter().position(|p| p.name == new_profile.name) {
@@ -41,6 +42,49 @@ pub fn add_profile(new_profile: Profile, overwrite: bool, set_as_default: bool) 
         let profile_name = cfg.profile.last().unwrap().name.clone();
         cfg.default_profile = Some(profile_name.clone());
         println!("Profile '{}' set as default (first profile added).", profile_name);
+    }
+
+    let serialized = toml::to_string_pretty(&cfg)?;
+    fs::write(config_path(), serialized)?;
+    Ok(())
+}
+
+pub fn set_account_email(email: String, overwrite: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let mut cfg = load_config().unwrap_or(Config {
+        profile: Vec::new(),
+        cargo_ai_token: None,
+        default_profile: None,
+        account: None,
+    });
+
+    let existing_email = cfg.account.as_ref().and_then(|a| a.email.clone());
+
+    match existing_email {
+        None => {
+            cfg.account = Some(Account { email: Some(email.clone()) });
+            println!("Account email set to '{}'.", email);
+        }
+        Some(ref old_email) if old_email == &email => {
+            println!("Account email already set to '{}'.", email);
+            return Ok(());
+        }
+        Some(ref old_email) => {
+            if overwrite {
+                println!("Overwriting existing account email '{}'.", old_email);
+                cfg.account = Some(Account { email: Some(email.clone()) });
+            } else {
+                print!("Account email is already set to '{}'. Replace with '{}'? [y/N]: ", old_email, email);
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if input.trim().to_lowercase() == "y" {
+                    cfg.account = Some(Account { email: Some(email.clone()) });
+                } else {
+                    println!("Operation canceled.");
+                    return Ok(());
+                }
+            }
+        }
     }
 
     let serialized = toml::to_string_pretty(&cfg)?;
