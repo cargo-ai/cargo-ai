@@ -5,6 +5,8 @@ mod agent_builder;
 mod config;
 mod infra_api;
 
+const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
+
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
 
@@ -12,7 +14,7 @@ use std::{fs, env};
 use std::io::{self, Error, ErrorKind, Write};
 
 use config::loader::{load_config, find_profile};
-use config::adder::{add_profile, set_account_email};
+use config::adder::{add_profile, set_account_email, set_account_tokens};
 use config::remover::remove_profile;
 use config::schema::Profile;
 
@@ -275,9 +277,7 @@ async fn main() {
                 }
             }
 
-            let base_url = "https://api.cargo-ai.org";
-
-            match infra_api::account::register::register_email(base_url, email).await {
+            match infra_api::account::register::register_email(INFRA_BASE_URL, email).await {
                 Ok(json) => {
                     match serde_json::to_string_pretty(&json) {
                         Ok(pretty) => println!("{pretty}"),
@@ -300,8 +300,73 @@ async fn main() {
                     eprintln!("❌ Request failed: {e:?}");
                 }
             }
+        } else if let Some(conf_m) = sub_m.subcommand_matches("confirm") {
+
+            let code = conf_m
+                .get_one::<String>("code")
+                .expect("code is required");
+
+            // Load the configured account email (set during registration)
+            let email = match load_config()
+                .and_then(|cfg| cfg.account)
+                .and_then(|acct| acct.email)
+            {
+                Some(e) => e,
+                None => {
+                    eprintln!("❌ No account email found in config. Run `cargo ai account register <email>` first.");
+                    return;
+                }
+            };
+
+            match infra_api::account::confirm::confirm_email(INFRA_BASE_URL, &email, code).await {
+                Ok(json) => {
+                    match serde_json::to_string_pretty(&json) {
+                        Ok(pretty) => println!("{pretty}"),
+                        Err(_) => println!("{json:?}"),
+                    }
+
+                    // Persist tokens locally only on successful confirmation.
+                    if json
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.eq_ignore_ascii_case("success"))
+                        .unwrap_or(false)
+                    {
+                        let creds = json.get("credentials");
+
+                        let access_token = creds
+                            .and_then(|c| c.get("access_token"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
+                        let refresh_token = creds
+                            .and_then(|c| c.get("refresh_token"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
+                        let expires_in = creds
+                            .and_then(|c| c.get("expires_in"))
+                            .and_then(|v| v.as_i64())
+                            .map(|n| n as i32);
+
+                        match (access_token, refresh_token, expires_in) {
+                            (Some(at), Some(rt), Some(ex)) => {
+                                if let Err(e) = set_account_tokens(at, rt, ex) {
+                                    eprintln!("⚠️ Failed to save account tokens to config: {e}");
+                                }
+                            }
+                            _ => {
+                                eprintln!("⚠️ Confirmation succeeded, but expected credentials were missing from the response.");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("❌ Request failed: {e:?}");
+                }
+            }
         } else {
-            println!("No account subcommand found. Try 'cargo ai account register <email>'.");
+            println!("No account subcommand found. Try 'cargo ai account register <email>' or 'cargo ai account confirm <code>'.");
         }
 
     } else if let Some(sub_m) = cmd_args.subcommand_matches("profile") {
