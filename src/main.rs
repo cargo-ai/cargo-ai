@@ -484,7 +484,6 @@ async fn main() {
 
             if is_expired_error && !used_refresh {
                 if let Some(rt) = refresh_token.map(|s| s.as_str()) {
-                    used_refresh = true;
                     match infra_api::account::status::fetch_status(
                         INFRA_BASE_URL,
                         access_token_owned.as_str(),
