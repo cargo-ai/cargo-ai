@@ -365,6 +365,92 @@ async fn main() {
                     eprintln!("❌ Request failed: {e:?}");
                 }
             }
+        } else if let Some(status_m) = sub_m.subcommand_matches("status") {
+            // Account status: check and optionally refresh tokens, print status.
+            // 1. Load config
+            let cfg = match load_config() {
+                Some(cfg) => cfg,
+                None => {
+                    eprintln!("❌ No config file found. Run `cargo ai account register <email>` first.");
+                    return;
+                }
+            };
+            // 2. Extract account
+            let acct = match cfg.account.as_ref() {
+                Some(acct) => acct,
+                None => {
+                    eprintln!("❌ No account found in config. You must confirm your account first.");
+                    return;
+                }
+            };
+            // 3. Extract tokens and token metadata
+            let access_token = match acct.access_token.as_ref() {
+                Some(t) => t,
+                None => {
+                    eprintln!("❌ No access token found in config. Run `cargo ai account confirm <code>` first.");
+                    return;
+                }
+            };
+            let refresh_token = acct.refresh_token.as_ref();
+            // Compute token expiration using consistent integer types:
+            let issued_at = acct.access_token_issued_at.unwrap_or(0);        // i64 unix timestamp
+            let expires_in = acct.access_token_expires_in.unwrap_or(0) as i64; // duration in seconds
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+
+            // Token is expired if issued_at + expires_in is in the past.
+            let token_expired = issued_at + expires_in <= now;
+            // 6. Build status request payload
+            //    Always include access_token.
+            //    Include refresh_token only if the token appears expired (based on local timestamps) and a refresh_token exists.
+            let refresh_token_opt = if token_expired && refresh_token.is_some() {
+                refresh_token.map(|s| s.as_str())
+            } else {
+                None
+            };
+            // 7. Call infra_api::account::status::fetch_status
+            match infra_api::account::status::fetch_status(
+                INFRA_BASE_URL,
+                access_token,
+                refresh_token_opt
+            ).await {
+                Ok(response) => {
+                    // 8. Print the returned JSON
+                    match serde_json::to_string_pretty(&response) {
+                        Ok(pretty) => println!("{pretty}"),
+                        Err(_) => println!("{response:?}"),
+                    }
+                    // 9. Persist refreshed access token if present in response.
+                    if let Some(session) = response.get("session") {
+                        if let Some(new_access_token) = session.get("access_token").and_then(|v| v.as_str()) {
+                            // Only update if changed
+                            let new_refresh_token = refresh_token.cloned().unwrap_or_else(String::new);
+                            let expires_in_val: i32 = session
+                                .get("expires_in")
+                                .and_then(|v| v.as_i64())
+                                .and_then(|n| i32::try_from(n).ok())
+                                .unwrap_or(expires_in as i32);
+                            if new_access_token != access_token {
+                                if let Err(e) = set_account_tokens(
+                                    new_access_token.to_string(),
+                                    new_refresh_token,
+                                    expires_in_val
+                                ) {
+                                    eprintln!("⚠️ Failed to update account tokens in config: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("❌ Request failed: {e:?}");
+                }
+            }
+            // 10. Comments:
+            // - Refresh is avoided unless the access token appears expired based on locally stored issued_at + expires_in.
+            // - Status is the refresh mechanism used by other authenticated commands when a token renewal is needed.
         } else {
             println!("No account subcommand found. Try 'cargo ai account register <email>' or 'cargo ai account confirm <code>'.");
         }
