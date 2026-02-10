@@ -188,6 +188,16 @@ pub fn build_cli() -> ArgMatches {
                                 .value_name("EMAIL")
                         )
                 )
+                .subcommand(
+                    Command::new("confirm")
+                        .about("Confirm an account using the temporary code")
+                        .arg(
+                            Arg::new("code")
+                                .help("Temporary confirmation code from email")
+                                .required(true)
+                                .value_name("CODE")
+                        )
+                )
         )
         .get_matches_from(args)
 }
