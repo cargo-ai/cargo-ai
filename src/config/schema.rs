@@ -45,6 +45,19 @@ pub struct Profile {
 pub struct Account {
     #[serde(default)]
     pub email: Option<String>,
+
+    #[serde(default)]
+    pub access_token: Option<String>,
+
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+
+    #[serde(default)]
+    pub access_token_expires_in: Option<i32>,
+
+    // Unix epoch seconds when the access token was last obtained.
+    #[serde(default)]
+    pub access_token_issued_at: Option<i64>,
 }
 
 fn default_timeout() -> u64 {
