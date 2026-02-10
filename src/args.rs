@@ -198,6 +198,10 @@ pub fn build_cli() -> ArgMatches {
                                 .value_name("CODE")
                         )
                 )
+                .subcommand(
+                    Command::new("status")
+                        .about("Show account status")
+                )
         )
         .get_matches_from(args)
 }
