@@ -61,7 +61,13 @@ pub fn set_account_email(email: String, overwrite: bool) -> Result<(), Box<dyn s
 
     match existing_email {
         None => {
-            cfg.account = Some(Account { email: Some(email.clone()) });
+            cfg.account = Some(Account {
+                email: Some(email.clone()),
+                access_token: None,
+                refresh_token: None,
+                access_token_expires_in: None,
+                access_token_issued_at: None,
+            });
             println!("Account email set to '{}'.", email);
         }
         Some(ref old_email) if old_email == &email => {
@@ -71,20 +77,62 @@ pub fn set_account_email(email: String, overwrite: bool) -> Result<(), Box<dyn s
         Some(ref old_email) => {
             if overwrite {
                 println!("Overwriting existing account email '{}'.", old_email);
-                cfg.account = Some(Account { email: Some(email.clone()) });
+                cfg.account = Some(Account {
+                    email: Some(email.clone()),
+                    access_token: None,
+                    refresh_token: None,
+                    access_token_expires_in: None,
+                    access_token_issued_at: None,
+                });
             } else {
                 print!("Account email is already set to '{}'. Replace with '{}'? [y/N]: ", old_email, email);
                 io::stdout().flush()?;
                 let mut input = String::new();
                 io::stdin().read_line(&mut input)?;
                 if input.trim().to_lowercase() == "y" {
-                    cfg.account = Some(Account { email: Some(email.clone()) });
+                    cfg.account = Some(Account {
+                        email: Some(email.clone()),
+                        access_token: None,
+                        refresh_token: None,
+                        access_token_expires_in: None,
+                        access_token_issued_at: None,
+                    });
                 } else {
                     println!("Operation canceled.");
                     return Ok(());
                 }
             }
         }
+    }
+
+    let serialized = toml::to_string_pretty(&cfg)?;
+    fs::write(config_path(), serialized)?;
+    Ok(())
+}
+
+pub fn set_account_tokens(
+    access_token: String,
+    refresh_token: String,
+    access_token_expires_in: i32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut cfg = load_config().unwrap_or(Config {
+        profile: Vec::new(),
+        cargo_ai_token: None,
+        default_profile: None,
+        account: None,
+    });
+
+    let issued_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+
+    if let Some(account) = cfg.account.as_mut() {
+        account.access_token = Some(access_token);
+        account.refresh_token = Some(refresh_token);
+        account.access_token_expires_in = Some(access_token_expires_in);
+        account.access_token_issued_at = Some(issued_at);
+    } else {
+        return Err(Box::<dyn std::error::Error>::from("No account configured. Run `cargo ai account register <email>` first."));
     }
 
     let serialized = toml::to_string_pretty(&cfg)?;
