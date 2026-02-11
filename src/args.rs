@@ -202,6 +202,18 @@ pub fn build_cli() -> ArgMatches {
                     Command::new("status")
                         .about("Show account status")
                 )
+                .subcommand(
+                    Command::new("handle")
+                        .about("Get or set account handle")
+                        .arg(
+                            Arg::new("set")
+                                .long("set")
+                                .help("Set a new handle (if omitted, returns current handle)")
+                                .required(false)
+                                .value_name("HANDLE")
+                                .num_args(1)
+                        )
+                )
         )
         .get_matches_from(args)
 }
