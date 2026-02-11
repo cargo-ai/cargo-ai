@@ -17,6 +17,7 @@ use config::loader::{load_config, find_profile};
 use config::adder::{add_profile, set_account_email, set_account_tokens};
 use config::remover::remove_profile;
 use config::schema::Profile;
+use config::setup::{config_path, ensure_config_file_exists};
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
@@ -254,6 +255,14 @@ async fn main() {
                 .get_one::<String>("email")
                 .expect("email is required");
 
+            if let Err(e) = ensure_config_file_exists() {
+                eprintln!(
+                    "❌ Failed to initialize local config at '{}': {e}",
+                    config_path().display()
+                );
+                return;
+            }
+
             // If an account email is already configured and differs, confirm before proceeding.
             if let Some(cfg) = load_config() {
                 if let Some(acct) = cfg.account.as_ref() {
@@ -312,11 +321,19 @@ async fn main() {
                 .get_one::<String>("code")
                 .expect("code is required");
 
+            let cfg = match load_config() {
+                Some(cfg) => cfg,
+                None => {
+                    eprintln!(
+                        "❌ No local config file found at '{}'. Run `cargo ai account register <email>` on this machine, or copy your config from another machine.",
+                        config_path().display()
+                    );
+                    return;
+                }
+            };
+
             // Load the configured account email (set during registration)
-            let email = match load_config()
-                .and_then(|cfg| cfg.account)
-                .and_then(|acct| acct.email)
-            {
+            let email = match cfg.account.and_then(|acct| acct.email) {
                 Some(e) => e,
                 None => {
                     eprintln!("❌ No account email found in config. Run `cargo ai account register <email>` first.");
@@ -385,7 +402,10 @@ async fn main() {
             let cfg = match load_config() {
                 Some(cfg) => cfg,
                 None => {
-                    eprintln!("❌ No config file found. Run `cargo ai account register <email>` first.");
+                    eprintln!(
+                        "❌ No local config file found at '{}'. Run `cargo ai account register <email>` on this machine, or copy your config from another machine.",
+                        config_path().display()
+                    );
                     return;
                 }
             };
