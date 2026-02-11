@@ -779,16 +779,16 @@ async fn main() {
                     .expect("name is required")
                     .to_string();
                 let definition_path = push_m
-                    .get_one::<String>("definition_path")
+                    .get_one::<String>("path")
                     .map(|s| s.to_string());
                 let definition_json_raw = push_m
-                    .get_one::<String>("definition_json")
-                    .expect("definition_json is required");
+                    .get_one::<String>("json")
+                    .expect("json is required");
 
                 let definition_json = match serde_json::from_str::<serde_json::Value>(definition_json_raw) {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!("❌ Invalid JSON for --definition-json: {e}");
+                        eprintln!("❌ Invalid JSON for --json: {e}");
                         return;
                     }
                 };
@@ -808,7 +808,7 @@ async fn main() {
                         .get_one::<String>("owner_handle")
                         .map(|s| s.to_string()),
                     definition_path: pull_m
-                        .get_one::<String>("definition_path")
+                        .get_one::<String>("path")
                         .map(|s| s.to_string()),
                 }
             } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
@@ -818,7 +818,7 @@ async fn main() {
                         .expect("name is required")
                         .to_string(),
                     definition_path: visibility_m
-                        .get_one::<String>("definition_path")
+                        .get_one::<String>("path")
                         .map(|s| s.to_string()),
                     is_public: visibility_m.get_flag("public"),
                     public_from: visibility_m
@@ -835,7 +835,7 @@ async fn main() {
                         .expect("name is required")
                         .to_string(),
                     definition_path: archive_m
-                        .get_one::<String>("definition_path")
+                        .get_one::<String>("path")
                         .map(|s| s.to_string()),
                     is_archived: archive_m.get_flag("archive"),
                 }
