@@ -10,6 +10,8 @@
 
 use serde::Serialize;
 use serde_json::Value;
+use std::error::Error;
+use std::fmt;
 
 #[derive(Debug, Serialize)]
 struct RegisterRequest<'a> {
@@ -26,6 +28,24 @@ pub enum RegisterError {
 impl From<reqwest::Error> for RegisterError {
     fn from(e: reqwest::Error) -> Self {
         Self::Http(e)
+    }
+}
+
+impl fmt::Display for RegisterError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Http(e) => write!(f, "HTTP request error: {e}"),
+            Self::Parse(e) => write!(f, "Failed to parse response JSON: {e}"),
+        }
+    }
+}
+
+impl Error for RegisterError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Http(e) => Some(e),
+            Self::Parse(_) => None,
+        }
     }
 }
 

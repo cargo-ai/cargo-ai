@@ -312,7 +312,7 @@ async fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("❌ Request failed: {e:?}");
+                    eprintln!("❌ Request failed: {e}");
                 }
             }
         } else if let Some(conf_m) = sub_m.subcommand_matches("confirm") {
