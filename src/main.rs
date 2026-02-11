@@ -560,8 +560,75 @@ async fn main() {
                     }
                 }
             }
+        } else if let Some(handle_m) = sub_m.subcommand_matches("handle") {
+            // Account handle: get current handle or set a new one.
+            //
+            // Behavior:
+            // - `cargo ai account handle` => GET current handle
+            // - `cargo ai account handle --set <HANDLE>` => SET handle
+
+            // 1. Load config
+            let cfg = match load_config() {
+                Some(cfg) => cfg,
+                None => {
+                    eprintln!(
+                        "❌ No local config file found at '{}'. Run `cargo ai account register <email>` on this machine, or copy your config from another machine.",
+                        config_path().display()
+                    );
+                    return;
+                }
+            };
+
+            // 2. Extract account
+            let acct = match cfg.account.as_ref() {
+                Some(acct) => acct,
+                None => {
+                    eprintln!("❌ No account found in config. You must confirm your account first.");
+                    return;
+                }
+            };
+
+            // 3. Extract access token
+            let access_token = match acct.access_token.as_ref() {
+                Some(t) => t,
+                None => {
+                    eprintln!("❌ No access token found in config. Run `cargo ai account confirm <code>` first.");
+                    return;
+                }
+            };
+
+            // 4. Route GET vs SET
+            let response = if let Some(new_handle) = handle_m.get_one::<String>("set") {
+                match infra_api::account::handle::set_handle(
+                    INFRA_BASE_URL,
+                    access_token,
+                    new_handle,
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("❌ Request failed: {e:?}");
+                        return;
+                    }
+                }
+            } else {
+                match infra_api::account::handle::fetch_handle(INFRA_BASE_URL, access_token).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("❌ Request failed: {e:?}");
+                        return;
+                    }
+                }
+            };
+
+            // 5. Print returned JSON
+            match serde_json::to_string_pretty(&response) {
+                Ok(pretty) => println!("{pretty}"),
+                Err(_) => println!("{response:?}"),
+            }
         } else {
-            println!("No account subcommand found. Try 'cargo ai account register <email>' or 'cargo ai account confirm <code>'.");
+            println!("No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', or 'cargo ai account handle [--set <handle>]'.");
         }
 
     } else if let Some(sub_m) = cmd_args.subcommand_matches("profile") {
