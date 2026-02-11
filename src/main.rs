@@ -442,6 +442,7 @@ async fn main() {
             };
 
             // 4. First attempt: access token only (unless local expiry suggests refresh)
+            // This keeps refresh traffic low and makes token rotation explicit on demand.
             // NOTE: avoid an async closure here to keep lifetimes simple.
             let mut used_refresh = false;
 
