@@ -7,3 +7,4 @@ pub mod register;
 pub mod confirm;
 pub mod status;
 pub mod handle;
+pub mod agents;
