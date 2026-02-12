@@ -295,9 +295,11 @@ async fn main() {
 
             match infra_api::account::register::register_email(INFRA_BASE_URL, email).await {
                 Ok(json) => {
-                    match serde_json::to_string_pretty(&json) {
-                        Ok(pretty) => println!("{pretty}"),
-                        Err(_) => println!("{json:?}"),
+                    if !ui::account_status::render_backend_ui(&json) {
+                        match serde_json::to_string_pretty(&json) {
+                            Ok(pretty) => println!("{pretty}"),
+                            Err(_) => println!("{json:?}"),
+                        }
                     }
 
                     // Persist the active account email locally only on successful registration.
