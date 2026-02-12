@@ -3,17 +3,21 @@ mod args;
 mod web_resources;
 mod agent_builder;
 mod config;
+mod infra_api;
+
+const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
 
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
 
 use std::{fs, env};
-use std::io::{Error, ErrorKind};
+use std::io::{self, Error, ErrorKind, Write};
 
 use config::loader::{load_config, find_profile};
-use config::adder::add_profile;
+use config::adder::{add_profile, set_account_email, set_account_tokens};
 use config::remover::remove_profile;
 use config::schema::Profile;
+use config::setup::{config_path, ensure_config_file_exists};
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
@@ -241,6 +245,916 @@ async fn main() {
         match agent_builder::cleanup::delete_agent_workspace(&new_project_name) {
             Ok(_) => println!("🧼 Agent workspace removed."),
             Err(e) => println!("⚠️ Failed to clean up workspace: {e}"),
+        }
+
+    } else if let Some(sub_m) = cmd_args.subcommand_matches("account") {
+
+        if let Some(reg_m) = sub_m.subcommand_matches("register") {
+
+            let email = reg_m
+                .get_one::<String>("email")
+                .expect("email is required");
+
+            if let Err(e) = ensure_config_file_exists() {
+                eprintln!(
+                    "❌ Failed to initialize local config at '{}': {e}",
+                    config_path().display()
+                );
+                return;
+            }
+
+            // If an account email is already configured and differs, confirm before proceeding.
+            if let Some(cfg) = load_config() {
+                if let Some(acct) = cfg.account.as_ref() {
+                    if let Some(existing_email) = acct.email.as_ref() {
+                        if existing_email != email {
+                            print!(
+                                "Account email is already set to '{}'. Replace with '{}'? [y/N]: ",
+                                existing_email, email
+                            );
+                            if let Err(e) = io::stdout().flush() {
+                                eprintln!("⚠️ Failed to flush stdout: {e}");
+                                return;
+                            }
+
+                            let mut input = String::new();
+                            if let Err(e) = io::stdin().read_line(&mut input) {
+                                eprintln!("⚠️ Failed to read input: {e}");
+                                return;
+                            }
+
+                            if !input.trim().eq_ignore_ascii_case("y") {
+                                println!("Operation canceled.");
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
+            match infra_api::account::register::register_email(INFRA_BASE_URL, email).await {
+                Ok(json) => {
+                    match serde_json::to_string_pretty(&json) {
+                        Ok(pretty) => println!("{pretty}"),
+                        Err(_) => println!("{json:?}"),
+                    }
+
+                    // Persist the active account email locally only on successful registration.
+                    if json
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.eq_ignore_ascii_case("success"))
+                        .unwrap_or(false)
+                    {
+                        if let Err(e) = set_account_email(email.to_string(), true) {
+                            eprintln!("⚠️ Failed to save account email to config: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("❌ Request failed: {e}");
+                }
+            }
+        } else if let Some(conf_m) = sub_m.subcommand_matches("confirm") {
+
+            let code = conf_m
+                .get_one::<String>("code")
+                .expect("code is required");
+
+            let cfg = match load_config() {
+                Some(cfg) => cfg,
+                None => {
+                    eprintln!(
+                        "❌ No local config file found at '{}'. Run `cargo ai account register <email>` on this machine, or copy your config from another machine.",
+                        config_path().display()
+                    );
+                    return;
+                }
+            };
+
+            // Load the configured account email (set during registration)
+            let email = match cfg.account.and_then(|acct| acct.email) {
+                Some(e) => e,
+                None => {
+                    eprintln!("❌ No account email found in config. Run `cargo ai account register <email>` first.");
+                    return;
+                }
+            };
+
+            match infra_api::account::confirm::confirm_email(INFRA_BASE_URL, &email, code).await {
+                Ok(json) => {
+                    match serde_json::to_string_pretty(&json) {
+                        Ok(pretty) => println!("{pretty}"),
+                        Err(_) => println!("{json:?}"),
+                    }
+
+                    // Persist tokens locally only on successful confirmation.
+                    if json
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.eq_ignore_ascii_case("success"))
+                        .unwrap_or(false)
+                    {
+                        let creds = json.get("credentials");
+
+                        let access_token = creds
+                            .and_then(|c| c.get("access_token"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
+                        let refresh_token = creds
+                            .and_then(|c| c.get("refresh_token"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
+                        let expires_in = creds
+                            .and_then(|c| c.get("expires_in"))
+                            .and_then(|v| v.as_i64())
+                            .map(|n| n as i32);
+
+                        match (access_token, refresh_token, expires_in) {
+                            (Some(at), Some(rt), Some(ex)) => {
+                                if let Err(e) = set_account_tokens(at, rt, ex) {
+                                    eprintln!("⚠️ Failed to save account tokens to config: {e}");
+                                }
+                            }
+                            _ => {
+                                eprintln!("⚠️ Confirmation succeeded, but expected credentials were missing from the response.");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("❌ Request failed: {e:?}");
+                }
+            }
+        } else if let Some(_status_m) = sub_m.subcommand_matches("status") {
+            // Account status: check and optionally refresh tokens, print status.
+            //
+            // Behavior:
+            // - Prefer using ONLY the access token.
+            // - If local timestamps indicate the token is expired (or near expiry), include refresh_token.
+            // - If the server still reports `access_token_expired`, retry once with refresh_token.
+            //
+            // NOTE: We avoid refreshing unless needed for security reasons.
+
+            // 1. Load config
+            let cfg = match load_config() {
+                Some(cfg) => cfg,
+                None => {
+                    eprintln!(
+                        "❌ No local config file found at '{}'. Run `cargo ai account register <email>` on this machine, or copy your config from another machine.",
+                        config_path().display()
+                    );
+                    return;
+                }
+            };
+
+            // 2. Extract account
+            let acct = match cfg.account.as_ref() {
+                Some(acct) => acct,
+                None => {
+                    eprintln!("❌ No account found in config. You must confirm your account first.");
+                    return;
+                }
+            };
+
+            // 3. Extract tokens and token metadata
+            let access_token = match acct.access_token.as_ref() {
+                Some(t) => t,
+                None => {
+                    eprintln!("❌ No access token found in config. Run `cargo ai account confirm <code>` first.");
+                    return;
+                }
+            };
+
+            let refresh_token = acct.refresh_token.as_ref();
+            if refresh_token.is_none() {
+                eprintln!("⚠️ No refresh token found in config. Status will work only while the access token remains valid.");
+            }
+
+            // Compute token expiration using consistent integer types.
+            //
+            // access_token_issued_at: unix timestamp (seconds)
+            // access_token_expires_in: duration in seconds
+            //
+            // We use a small safety buffer so we refresh slightly *before* expiry when needed.
+            const EXPIRY_SAFETY_BUFFER_SEC: i64 = 30;
+
+            let issued_at = acct.access_token_issued_at.unwrap_or(0); // i64 unix timestamp
+            let expires_in_i64 = acct
+                .access_token_expires_in
+                .map(|n| n as i64)
+                .unwrap_or(0);
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+
+            // If we don't have timestamps yet, do NOT pre-emptively refresh; let the server decide.
+            let have_local_expiry = issued_at > 0 && expires_in_i64 > 0;
+            let token_expired_or_near = if have_local_expiry {
+                (issued_at + expires_in_i64 - EXPIRY_SAFETY_BUFFER_SEC) <= now
+            } else {
+                false
+            };
+
+            // 4. First attempt: access token only (unless local expiry suggests refresh)
+            // This keeps refresh traffic low and makes token rotation explicit on demand.
+            // NOTE: avoid an async closure here to keep lifetimes simple.
+            let mut used_refresh = false;
+
+            // Own the tokens so any futures we create don't borrow locals with tricky lifetimes.
+            let access_token_owned = access_token.clone();
+            let refresh_token_owned: Option<String> = refresh_token.cloned();
+
+            let first_refresh_token_opt: Option<&str> = if token_expired_or_near {
+                used_refresh = refresh_token_owned.is_some();
+                refresh_token_owned.as_deref()
+            } else {
+                None
+            };
+
+            let mut response = match infra_api::account::status::fetch_status(
+                INFRA_BASE_URL,
+                access_token_owned.as_str(),
+                first_refresh_token_opt,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("❌ Request failed: {e:?}");
+                    return;
+                }
+            };
+
+            // 5. Retry once with refresh token if the server reports expired and we didn't already refresh.
+            let is_expired_error = response
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| s.eq_ignore_ascii_case("error"))
+                .unwrap_or(false)
+                && response
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .map(|t| t == "access_token_expired")
+                    .unwrap_or(false);
+
+            if is_expired_error && !used_refresh {
+                if let Some(rt) = refresh_token.map(|s| s.as_str()) {
+                    match infra_api::account::status::fetch_status(
+                        INFRA_BASE_URL,
+                        access_token_owned.as_str(),
+                        Some(rt),
+                    )
+                    .await
+                    {
+                        Ok(r) => response = r,
+                        Err(e) => {
+                            eprintln!("❌ Request failed: {e:?}");
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // 6. Print the returned JSON
+            match serde_json::to_string_pretty(&response) {
+                Ok(pretty) => println!("{pretty}"),
+                Err(_) => println!("{response:?}"),
+            }
+
+            // 7. Persist refreshed access token if present in response.
+            //
+            // Infra contract: when refresh occurred (and return_refreshed_access_token=true), response includes:
+            //   session: { refreshed: true, access_token: "...", expires_in_seconds: 123 }
+            if let Some(session) = response.get("session") {
+                let new_access_token = session
+                    .get("access_token")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
+
+                let new_expires_in_seconds: Option<i32> = session
+                    .get("expires_in_seconds")
+                    .and_then(|v| v.as_i64())
+                    .and_then(|n| i32::try_from(n).ok());
+
+                if let (Some(at), Some(expires_in)) = (new_access_token, new_expires_in_seconds) {
+                    // We only update if the access token actually changed.
+                    if at != access_token {
+                        let rt = match refresh_token {
+                            Some(rt) => rt.clone(),
+                            None => {
+                                // Shouldn't happen in the refresh scenario, but don't clobber anything.
+                                eprintln!("⚠️ Refreshed access token returned, but no refresh token exists in config to persist alongside it.");
+                                return;
+                            }
+                        };
+
+                        if let Err(e) = set_account_tokens(at.to_string(), rt, expires_in) {
+                            eprintln!("⚠️ Failed to update account tokens in config: {e}");
+                        }
+                    }
+                }
+            }
+        } else if let Some(handle_m) = sub_m.subcommand_matches("handle") {
+            // Account handle: get current handle or set a new one.
+            //
+            // Behavior:
+            // - `cargo ai account handle` => GET current handle
+            // - `cargo ai account handle --set <HANDLE>` => SET handle
+
+            // 1. Load config
+            let cfg = match load_config() {
+                Some(cfg) => cfg,
+                None => {
+                    eprintln!(
+                        "❌ No local config file found at '{}'. Run `cargo ai account register <email>` on this machine, or copy your config from another machine.",
+                        config_path().display()
+                    );
+                    return;
+                }
+            };
+
+            // 2. Extract account
+            let acct = match cfg.account.as_ref() {
+                Some(acct) => acct,
+                None => {
+                    eprintln!("❌ No account found in config. You must confirm your account first.");
+                    return;
+                }
+            };
+
+            // 3. Extract access token
+            let access_token = match acct.access_token.as_ref() {
+                Some(t) => t,
+                None => {
+                    eprintln!("❌ No access token found in config. Run `cargo ai account confirm <code>` first.");
+                    return;
+                }
+            };
+            let refresh_token = acct.refresh_token.as_ref();
+
+            // 4. Route GET vs SET (first attempt with current access token)
+            let access_token_owned = access_token.clone();
+            let new_handle_opt = handle_m
+                .get_one::<String>("set")
+                .map(|s| s.to_string());
+
+            let mut response = if let Some(new_handle) = new_handle_opt.as_deref() {
+                match infra_api::account::handle::set_handle(
+                    INFRA_BASE_URL,
+                    access_token_owned.as_str(),
+                    new_handle,
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("❌ Request failed: {e:?}");
+                        return;
+                    }
+                }
+            } else {
+                match infra_api::account::handle::fetch_handle(
+                    INFRA_BASE_URL,
+                    access_token_owned.as_str(),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("❌ Request failed: {e:?}");
+                        return;
+                    }
+                }
+            };
+
+            // 5. If access token is expired, refresh via status and retry handle once.
+            let is_expired_error = response
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(|t| t == "access_token_expired")
+                .unwrap_or(false);
+
+            if is_expired_error {
+                let rt = match refresh_token {
+                    Some(rt) => rt,
+                    None => {
+                        eprintln!("⚠️ Access token expired, and no refresh token exists in config. Run `cargo ai account status` or re-confirm account.");
+                        match serde_json::to_string_pretty(&response) {
+                            Ok(pretty) => println!("{pretty}"),
+                            Err(_) => println!("{response:?}"),
+                        }
+                        return;
+                    }
+                };
+
+                let refresh_response = match infra_api::account::status::fetch_status(
+                    INFRA_BASE_URL,
+                    access_token_owned.as_str(),
+                    Some(rt.as_str()),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("❌ Request failed while refreshing session: {e:?}");
+                        return;
+                    }
+                };
+
+                let refreshed_access_token = refresh_response
+                    .get("session")
+                    .and_then(|s| s.get("access_token"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+
+                let refreshed_expires_in: Option<i32> = refresh_response
+                    .get("session")
+                    .and_then(|s| s.get("expires_in_seconds"))
+                    .and_then(|v| v.as_i64())
+                    .and_then(|n| i32::try_from(n).ok());
+
+                let retry_access_token = match refreshed_access_token {
+                    Some(ref at) => {
+                        if let Some(expires_in) = refreshed_expires_in {
+                            if let Err(e) =
+                                set_account_tokens(at.to_string(), rt.clone(), expires_in)
+                            {
+                                eprintln!("⚠️ Failed to update account tokens in config: {e}");
+                            }
+                        }
+                        at.clone()
+                    }
+                    None => {
+                        eprintln!("⚠️ Session refresh did not return a new access token. Cannot retry handle request.");
+                        match serde_json::to_string_pretty(&refresh_response) {
+                            Ok(pretty) => println!("{pretty}"),
+                            Err(_) => println!("{refresh_response:?}"),
+                        }
+                        return;
+                    }
+                };
+
+                response = if let Some(new_handle) = new_handle_opt.as_deref() {
+                    match infra_api::account::handle::set_handle(
+                        INFRA_BASE_URL,
+                        retry_access_token.as_str(),
+                        new_handle,
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            return;
+                        }
+                    }
+                } else {
+                    match infra_api::account::handle::fetch_handle(
+                        INFRA_BASE_URL,
+                        retry_access_token.as_str(),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            return;
+                        }
+                    }
+                };
+            }
+
+            // 6. Print returned JSON
+            match serde_json::to_string_pretty(&response) {
+                Ok(pretty) => println!("{pretty}"),
+                Err(_) => println!("{response:?}"),
+            }
+        } else if let Some(agents_m) = sub_m.subcommand_matches("agents") {
+            enum AgentsCommand {
+                List {
+                    owner_handle: Option<String>,
+                    include_archived: bool,
+                },
+                Push {
+                    name: String,
+                    definition_path: Option<String>,
+                    definition_json: serde_json::Value,
+                },
+                Pull {
+                    name: String,
+                    owner_handle: Option<String>,
+                    definition_path: Option<String>,
+                },
+                Visibility {
+                    name: String,
+                    definition_path: Option<String>,
+                    is_public: bool,
+                    public_from: Option<String>,
+                    public_until: Option<String>,
+                },
+                Archive {
+                    name: String,
+                    definition_path: Option<String>,
+                    is_archived: bool,
+                },
+            }
+
+            let agents_command = if let Some(list_m) = agents_m.subcommand_matches("list") {
+                AgentsCommand::List {
+                    owner_handle: list_m
+                        .get_one::<String>("owner_handle")
+                        .map(|s| s.to_string()),
+                    include_archived: list_m.get_flag("include_archived"),
+                }
+            } else if let Some(push_m) = agents_m.subcommand_matches("push") {
+                let name = push_m
+                    .get_one::<String>("name")
+                    .expect("name is required")
+                    .to_string();
+                let definition_path = push_m
+                    .get_one::<String>("path")
+                    .map(|s| s.to_string());
+                let definition_json_raw = push_m
+                    .get_one::<String>("json")
+                    .expect("json is required");
+
+                let definition_json = match serde_json::from_str::<serde_json::Value>(definition_json_raw) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("❌ Invalid JSON for --json: {e}");
+                        return;
+                    }
+                };
+
+                AgentsCommand::Push {
+                    name,
+                    definition_path,
+                    definition_json,
+                }
+            } else if let Some(pull_m) = agents_m.subcommand_matches("pull") {
+                AgentsCommand::Pull {
+                    name: pull_m
+                        .get_one::<String>("name")
+                        .expect("name is required")
+                        .to_string(),
+                    owner_handle: pull_m
+                        .get_one::<String>("owner_handle")
+                        .map(|s| s.to_string()),
+                    definition_path: pull_m
+                        .get_one::<String>("path")
+                        .map(|s| s.to_string()),
+                }
+            } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
+                AgentsCommand::Visibility {
+                    name: visibility_m
+                        .get_one::<String>("name")
+                        .expect("name is required")
+                        .to_string(),
+                    definition_path: visibility_m
+                        .get_one::<String>("path")
+                        .map(|s| s.to_string()),
+                    is_public: visibility_m.get_flag("public"),
+                    public_from: visibility_m
+                        .get_one::<String>("public_from")
+                        .map(|s| s.to_string()),
+                    public_until: visibility_m
+                        .get_one::<String>("public_until")
+                        .map(|s| s.to_string()),
+                }
+            } else if let Some(archive_m) = agents_m.subcommand_matches("archive") {
+                AgentsCommand::Archive {
+                    name: archive_m
+                        .get_one::<String>("name")
+                        .expect("name is required")
+                        .to_string(),
+                    definition_path: archive_m
+                        .get_one::<String>("path")
+                        .map(|s| s.to_string()),
+                    is_archived: archive_m.get_flag("archive"),
+                }
+            } else {
+                println!(
+                    "No agents subcommand found. Try 'cargo ai account agents list|push|pull|visibility|archive'."
+                );
+                return;
+            };
+
+            // 1. Load config
+            let cfg = match load_config() {
+                Some(cfg) => cfg,
+                None => {
+                    eprintln!(
+                        "❌ No local config file found at '{}'. Run `cargo ai account register <email>` on this machine, or copy your config from another machine.",
+                        config_path().display()
+                    );
+                    return;
+                }
+            };
+
+            // 2. Extract account
+            let acct = match cfg.account.as_ref() {
+                Some(acct) => acct,
+                None => {
+                    eprintln!("❌ No account found in config. You must confirm your account first.");
+                    return;
+                }
+            };
+
+            // 3. Extract access token
+            let access_token = match acct.access_token.as_ref() {
+                Some(t) => t,
+                None => {
+                    eprintln!("❌ No access token found in config. Run `cargo ai account confirm <code>` first.");
+                    return;
+                }
+            };
+            let refresh_token = acct.refresh_token.as_ref();
+
+            // 4. Execute first attempt using current access token.
+            let access_token_owned = access_token.clone();
+            let mut response = match &agents_command {
+                AgentsCommand::List {
+                    owner_handle,
+                    include_archived,
+                } => match infra_api::account::agents::list_agents(
+                    INFRA_BASE_URL,
+                    access_token_owned.as_str(),
+                    owner_handle.as_deref(),
+                    *include_archived,
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("❌ Request failed: {e:?}");
+                        return;
+                    }
+                },
+                AgentsCommand::Push {
+                    name,
+                    definition_path,
+                    definition_json,
+                } => match infra_api::account::agents::push_agent(
+                    INFRA_BASE_URL,
+                    access_token_owned.as_str(),
+                    name,
+                    definition_path.as_deref(),
+                    definition_json.clone(),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("❌ Request failed: {e:?}");
+                        return;
+                    }
+                },
+                AgentsCommand::Pull {
+                    name,
+                    owner_handle,
+                    definition_path,
+                } => match infra_api::account::agents::pull_agent(
+                    INFRA_BASE_URL,
+                    access_token_owned.as_str(),
+                    name,
+                    owner_handle.as_deref(),
+                    definition_path.as_deref(),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("❌ Request failed: {e:?}");
+                        return;
+                    }
+                },
+                AgentsCommand::Visibility {
+                    name,
+                    definition_path,
+                    is_public,
+                    public_from,
+                    public_until,
+                } => match infra_api::account::agents::set_agent_visibility(
+                    INFRA_BASE_URL,
+                    access_token_owned.as_str(),
+                    name,
+                    definition_path.as_deref(),
+                    *is_public,
+                    public_from.as_deref(),
+                    public_until.as_deref(),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("❌ Request failed: {e:?}");
+                        return;
+                    }
+                },
+                AgentsCommand::Archive {
+                    name,
+                    definition_path,
+                    is_archived,
+                } => match infra_api::account::agents::set_agent_archive(
+                    INFRA_BASE_URL,
+                    access_token_owned.as_str(),
+                    name,
+                    definition_path.as_deref(),
+                    *is_archived,
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("❌ Request failed: {e:?}");
+                        return;
+                    }
+                },
+            };
+
+            // 5. If access token is expired, refresh via status and retry agents once.
+            let is_expired_error = response
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(|t| t == "access_token_expired")
+                .unwrap_or(false);
+
+            if is_expired_error {
+                let rt = match refresh_token {
+                    Some(rt) => rt,
+                    None => {
+                        eprintln!("⚠️ Access token expired, and no refresh token exists in config. Run `cargo ai account status` or re-confirm account.");
+                        match serde_json::to_string_pretty(&response) {
+                            Ok(pretty) => println!("{pretty}"),
+                            Err(_) => println!("{response:?}"),
+                        }
+                        return;
+                    }
+                };
+
+                let refresh_response = match infra_api::account::status::fetch_status(
+                    INFRA_BASE_URL,
+                    access_token_owned.as_str(),
+                    Some(rt.as_str()),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("❌ Request failed while refreshing session: {e:?}");
+                        return;
+                    }
+                };
+
+                let refreshed_access_token = refresh_response
+                    .get("session")
+                    .and_then(|s| s.get("access_token"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+
+                let refreshed_expires_in: Option<i32> = refresh_response
+                    .get("session")
+                    .and_then(|s| s.get("expires_in_seconds"))
+                    .and_then(|v| v.as_i64())
+                    .and_then(|n| i32::try_from(n).ok());
+
+                let retry_access_token = match refreshed_access_token {
+                    Some(ref at) => {
+                        if let Some(expires_in) = refreshed_expires_in {
+                            if let Err(e) =
+                                set_account_tokens(at.to_string(), rt.clone(), expires_in)
+                            {
+                                eprintln!("⚠️ Failed to update account tokens in config: {e}");
+                            }
+                        }
+                        at.clone()
+                    }
+                    None => {
+                        eprintln!("⚠️ Session refresh did not return a new access token. Cannot retry agents request.");
+                        match serde_json::to_string_pretty(&refresh_response) {
+                            Ok(pretty) => println!("{pretty}"),
+                            Err(_) => println!("{refresh_response:?}"),
+                        }
+                        return;
+                    }
+                };
+
+                response = match &agents_command {
+                    AgentsCommand::List {
+                        owner_handle,
+                        include_archived,
+                    } => match infra_api::account::agents::list_agents(
+                        INFRA_BASE_URL,
+                        retry_access_token.as_str(),
+                        owner_handle.as_deref(),
+                        *include_archived,
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            return;
+                        }
+                    },
+                    AgentsCommand::Push {
+                        name,
+                        definition_path,
+                        definition_json,
+                    } => match infra_api::account::agents::push_agent(
+                        INFRA_BASE_URL,
+                        retry_access_token.as_str(),
+                        name,
+                        definition_path.as_deref(),
+                        definition_json.clone(),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            return;
+                        }
+                    },
+                    AgentsCommand::Pull {
+                        name,
+                        owner_handle,
+                        definition_path,
+                    } => match infra_api::account::agents::pull_agent(
+                        INFRA_BASE_URL,
+                        retry_access_token.as_str(),
+                        name,
+                        owner_handle.as_deref(),
+                        definition_path.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            return;
+                        }
+                    },
+                    AgentsCommand::Visibility {
+                        name,
+                        definition_path,
+                        is_public,
+                        public_from,
+                        public_until,
+                    } => match infra_api::account::agents::set_agent_visibility(
+                        INFRA_BASE_URL,
+                        retry_access_token.as_str(),
+                        name,
+                        definition_path.as_deref(),
+                        *is_public,
+                        public_from.as_deref(),
+                        public_until.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            return;
+                        }
+                    },
+                    AgentsCommand::Archive {
+                        name,
+                        definition_path,
+                        is_archived,
+                    } => match infra_api::account::agents::set_agent_archive(
+                        INFRA_BASE_URL,
+                        retry_access_token.as_str(),
+                        name,
+                        definition_path.as_deref(),
+                        *is_archived,
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            return;
+                        }
+                    },
+                };
+            }
+
+            // 6. Print returned JSON
+            match serde_json::to_string_pretty(&response) {
+                Ok(pretty) => println!("{pretty}"),
+                Err(_) => println!("{response:?}"),
+            }
+        } else {
+            println!("No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', 'cargo ai account handle [--set <handle>]', or 'cargo ai account agents <list|push|pull|visibility|archive>'.");
         }
 
     } else if let Some(sub_m) = cmd_args.subcommand_matches("profile") {

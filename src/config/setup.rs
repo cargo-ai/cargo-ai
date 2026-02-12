@@ -1,0 +1,46 @@
+use crate::config::schema::Config;
+use std::env;
+use std::fs;
+use std::io;
+use std::path::PathBuf;
+
+pub fn cargo_home() -> PathBuf {
+    if let Ok(path) = env::var("CARGO_HOME") {
+        PathBuf::from(path)
+    } else {
+        dirs::home_dir()
+            .expect("could not find home directory")
+            .join(".cargo")
+    }
+}
+
+pub fn cargo_ai_root() -> PathBuf {
+    cargo_home().join(".cargo-ai")
+}
+
+pub fn config_path() -> PathBuf {
+    cargo_ai_root().join("config.toml")
+}
+
+pub fn ensure_config_dir_exists() -> io::Result<()> {
+    fs::create_dir_all(cargo_ai_root())
+}
+
+pub fn ensure_config_file_exists() -> Result<(), Box<dyn std::error::Error>> {
+    ensure_config_dir_exists()?;
+
+    let path = config_path();
+    if !path.exists() {
+        let cfg = Config {
+            profile: Vec::new(),
+            cargo_ai_token: None,
+            default_profile: None,
+            account: None,
+        };
+
+        let serialized = toml::to_string_pretty(&cfg)?;
+        fs::write(path, serialized)?;
+    }
+
+    Ok(())
+}
