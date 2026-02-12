@@ -346,9 +346,11 @@ async fn main() {
 
             match infra_api::account::confirm::confirm_email(INFRA_BASE_URL, &email, code).await {
                 Ok(json) => {
-                    match serde_json::to_string_pretty(&json) {
-                        Ok(pretty) => println!("{pretty}"),
-                        Err(_) => println!("{json:?}"),
+                    if !ui::account_status::render_backend_ui(&json) {
+                        match serde_json::to_string_pretty(&json) {
+                            Ok(pretty) => println!("{pretty}"),
+                            Err(_) => println!("{json:?}"),
+                        }
                     }
 
                     // Persist tokens locally only on successful confirmation.
