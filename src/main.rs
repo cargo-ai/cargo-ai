@@ -1151,10 +1151,12 @@ async fn main() {
                 };
             }
 
-            // 6. Print returned JSON
-            match serde_json::to_string_pretty(&response) {
-                Ok(pretty) => println!("{pretty}"),
-                Err(_) => println!("{response:?}"),
+            // 6. Render backend-provided UI when available, fallback to raw JSON.
+            if !ui::account_status::render_backend_ui(&response) {
+                match serde_json::to_string_pretty(&response) {
+                    Ok(pretty) => println!("{pretty}"),
+                    Err(_) => println!("{response:?}"),
+                }
             }
         } else {
             println!("No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', 'cargo ai account handle [--set <handle>]', or 'cargo ai account agents <list|push|pull|visibility|archive>'.");

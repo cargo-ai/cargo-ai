@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-pub fn render_account_status_ui(response: &Value) -> bool {
+pub fn render_backend_ui(response: &Value) -> bool {
     let ui = match response.get("ui") {
         Some(v) => v,
         None => return false,
@@ -85,6 +85,10 @@ pub fn render_account_status_ui(response: &Value) -> bool {
     }
 
     true
+}
+
+pub fn render_account_status_ui(response: &Value) -> bool {
+    render_backend_ui(response)
 }
 
 fn render_section(section: &Value) {
