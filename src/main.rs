@@ -4,6 +4,7 @@ mod web_resources;
 mod agent_builder;
 mod config;
 mod infra_api;
+mod ui;
 
 const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
 
@@ -521,10 +522,12 @@ async fn main() {
                 }
             }
 
-            // 6. Print the returned JSON
-            match serde_json::to_string_pretty(&response) {
-                Ok(pretty) => println!("{pretty}"),
-                Err(_) => println!("{response:?}"),
+            // 6. Render backend-provided UI when available, fallback to raw JSON.
+            if !ui::account_status::render_account_status_ui(&response) {
+                match serde_json::to_string_pretty(&response) {
+                    Ok(pretty) => println!("{pretty}"),
+                    Err(_) => println!("{response:?}"),
+                }
             }
 
             // 7. Persist refreshed access token if present in response.
