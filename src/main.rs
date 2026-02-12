@@ -652,9 +652,11 @@ async fn main() {
                     Some(rt) => rt,
                     None => {
                         eprintln!("⚠️ Access token expired, and no refresh token exists in config. Run `cargo ai account status` or re-confirm account.");
-                        match serde_json::to_string_pretty(&response) {
-                            Ok(pretty) => println!("{pretty}"),
-                            Err(_) => println!("{response:?}"),
+                        if !ui::account_status::render_backend_ui(&response) {
+                            match serde_json::to_string_pretty(&response) {
+                                Ok(pretty) => println!("{pretty}"),
+                                Err(_) => println!("{response:?}"),
+                            }
                         }
                         return;
                     }
@@ -700,9 +702,11 @@ async fn main() {
                     }
                     None => {
                         eprintln!("⚠️ Session refresh did not return a new access token. Cannot retry handle request.");
-                        match serde_json::to_string_pretty(&refresh_response) {
-                            Ok(pretty) => println!("{pretty}"),
-                            Err(_) => println!("{refresh_response:?}"),
+                        if !ui::account_status::render_backend_ui(&refresh_response) {
+                            match serde_json::to_string_pretty(&refresh_response) {
+                                Ok(pretty) => println!("{pretty}"),
+                                Err(_) => println!("{refresh_response:?}"),
+                            }
                         }
                         return;
                     }
@@ -738,10 +742,12 @@ async fn main() {
                 };
             }
 
-            // 6. Print returned JSON
-            match serde_json::to_string_pretty(&response) {
-                Ok(pretty) => println!("{pretty}"),
-                Err(_) => println!("{response:?}"),
+            // 6. Render backend-provided UI when available, fallback to raw JSON.
+            if !ui::account_status::render_backend_ui(&response) {
+                match serde_json::to_string_pretty(&response) {
+                    Ok(pretty) => println!("{pretty}"),
+                    Err(_) => println!("{response:?}"),
+                }
             }
         } else if let Some(agents_m) = sub_m.subcommand_matches("agents") {
             enum AgentsCommand {
