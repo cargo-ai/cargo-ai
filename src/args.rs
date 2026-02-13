@@ -246,8 +246,9 @@ pub fn build_cli() -> ArgMatches {
                                 .arg(
                                     Arg::new("name")
                                         .long("name")
-                                        .help("Agent name")
-                                        .required(true)
+                                        .help("Agent name (defaults to JSON file name when --json-file is used)")
+                                        .required(false)
+                                        .required_unless_present("json_file")
                                         .value_name("NAME")
                                         .num_args(1)
                                 )

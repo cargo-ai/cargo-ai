@@ -11,7 +11,7 @@ const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
 
-use std::{fs, env};
+use std::{env, fs, path::Path};
 use std::io::{self, Error, ErrorKind, Write};
 
 use config::loader::{load_config, find_profile};
@@ -787,16 +787,65 @@ async fn main() {
                     include_archived: list_m.get_flag("include_archived"),
                 }
             } else if let Some(push_m) = agents_m.subcommand_matches("push") {
-                let name = push_m
-                    .get_one::<String>("name")
-                    .expect("name is required")
-                    .to_string();
+                let json_file_path = push_m
+                    .get_one::<String>("json_file")
+                    .map(|s| s.to_string());
+
+                let is_valid_inferred_name = |candidate: &str| {
+                    let normalized = candidate.trim().to_lowercase();
+                    if normalized.len() < 3 || normalized.len() > 32 {
+                        return false;
+                    }
+
+                    let mut chars = normalized.chars();
+                    match chars.next() {
+                        Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
+                        _ => return false,
+                    }
+
+                    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+                };
+
+                let name = if let Some(name) = push_m.get_one::<String>("name") {
+                    name.to_string()
+                } else if let Some(file_path) = json_file_path.as_deref() {
+                    let stem = match Path::new(file_path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        Some(s) => s,
+                        None => {
+                            eprintln!(
+                                "❌ Could not infer agent name from file '{}'. Use --name explicitly.",
+                                file_path
+                            );
+                            return;
+                        }
+                    };
+
+                    if !is_valid_inferred_name(stem) {
+                        eprintln!(
+                            "❌ Inferred agent name '{}' from '{}' is invalid. Use --name explicitly.",
+                            stem, file_path
+                        );
+                        return;
+                    }
+
+                    println!("ℹ️ Using inferred agent name from file: {}", stem);
+                    stem.to_string()
+                } else {
+                    eprintln!("❌ Missing agent name. Provide --name or use --json-file.");
+                    return;
+                };
+
                 let definition_path = push_m
                     .get_one::<String>("path")
                     .map(|s| s.to_string());
                 let definition_json_raw = if let Some(raw) = push_m.get_one::<String>("json") {
                     raw.to_string()
-                } else if let Some(file_path) = push_m.get_one::<String>("json_file") {
+                } else if let Some(file_path) = json_file_path.as_deref() {
                     match fs::read_to_string(file_path) {
                         Ok(contents) => contents,
                         Err(e) => {
