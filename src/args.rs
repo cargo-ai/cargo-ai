@@ -236,6 +236,8 @@ pub fn build_cli() -> ArgMatches {
                                 )
                         )
                         .subcommand(
+                            // TODO: Add shortcut forms after command surface is stable:
+                            // - example: `cargo ai account agents push <file>`
                             Command::new("push")
                                 .about("Upload or overwrite an agent definition")
                                 .group(

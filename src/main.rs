@@ -787,6 +787,8 @@ async fn main() {
                     include_archived: list_m.get_flag("include_archived"),
                 }
             } else if let Some(push_m) = agents_m.subcommand_matches("push") {
+                // TODO: Keep future push shortcuts routed through this branch so
+                // name inference, validation, and request payload stay consistent.
                 let json_file_path = push_m
                     .get_one::<String>("json_file")
                     .map(|s| s.to_string());
