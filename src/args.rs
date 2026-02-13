@@ -236,13 +236,21 @@ pub fn build_cli() -> ArgMatches {
                                 )
                         )
                         .subcommand(
+                            // TODO: Add shortcut forms after command surface is stable:
+                            // - example: `cargo ai account agents push <file>`
                             Command::new("push")
                                 .about("Upload or overwrite an agent definition")
+                                .group(
+                                    ArgGroup::new("push_input")
+                                        .args(["json", "json_file"])
+                                        .required(true)
+                                )
                                 .arg(
                                     Arg::new("name")
                                         .long("name")
-                                        .help("Agent name")
-                                        .required(true)
+                                        .help("Agent name (defaults to JSON file name when --json-file is used)")
+                                        .required(false)
+                                        .required_unless_present("json_file")
                                         .value_name("NAME")
                                         .num_args(1)
                                 )
@@ -258,8 +266,16 @@ pub fn build_cli() -> ArgMatches {
                                     Arg::new("json")
                                         .long("json")
                                         .help("Agent definition JSON (raw JSON string)")
-                                        .required(true)
+                                        .required(false)
                                         .value_name("JSON")
+                                        .num_args(1)
+                                )
+                                .arg(
+                                    Arg::new("json_file")
+                                        .long("json-file")
+                                        .help("Path to agent definition JSON file")
+                                        .required(false)
+                                        .value_name("FILE")
                                         .num_args(1)
                                 )
                         )
