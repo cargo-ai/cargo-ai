@@ -203,6 +203,30 @@ pub fn build_cli() -> ArgMatches {
                         .about("Show account status")
                 )
                 .subcommand(
+                    Command::new("mail")
+                        .about("Send account mail")
+                        .subcommand(
+                            Command::new("test")
+                                .about("Send a test email to your account email")
+                                .arg(
+                                    Arg::new("subject")
+                                        .long("subject")
+                                        .help("Optional subject override for the test email")
+                                        .required(false)
+                                        .value_name("TEXT")
+                                        .num_args(1)
+                                )
+                                .arg(
+                                    Arg::new("text")
+                                        .long("text")
+                                        .help("Optional body override for the test email")
+                                        .required(false)
+                                        .value_name("TEXT")
+                                        .num_args(1)
+                                )
+                        )
+                )
+                .subcommand(
                     Command::new("handle")
                         .about("Get or set account handle")
                         .arg(
