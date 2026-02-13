@@ -794,14 +794,25 @@ async fn main() {
                 let definition_path = push_m
                     .get_one::<String>("path")
                     .map(|s| s.to_string());
-                let definition_json_raw = push_m
-                    .get_one::<String>("json")
-                    .expect("json is required");
+                let definition_json_raw = if let Some(raw) = push_m.get_one::<String>("json") {
+                    raw.to_string()
+                } else if let Some(file_path) = push_m.get_one::<String>("json_file") {
+                    match fs::read_to_string(file_path) {
+                        Ok(contents) => contents,
+                        Err(e) => {
+                            eprintln!("❌ Failed to read JSON file '{}': {e}", file_path);
+                            return;
+                        }
+                    }
+                } else {
+                    eprintln!("❌ Missing required input: provide either --json or --json-file.");
+                    return;
+                };
 
-                let definition_json = match serde_json::from_str::<serde_json::Value>(definition_json_raw) {
+                let definition_json = match serde_json::from_str::<serde_json::Value>(&definition_json_raw) {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!("❌ Invalid JSON for --json: {e}");
+                        eprintln!("❌ Invalid JSON provided for agent definition: {e}");
                         return;
                     }
                 };

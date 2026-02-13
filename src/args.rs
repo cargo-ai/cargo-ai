@@ -238,6 +238,11 @@ pub fn build_cli() -> ArgMatches {
                         .subcommand(
                             Command::new("push")
                                 .about("Upload or overwrite an agent definition")
+                                .group(
+                                    ArgGroup::new("push_input")
+                                        .args(["json", "json_file"])
+                                        .required(true)
+                                )
                                 .arg(
                                     Arg::new("name")
                                         .long("name")
@@ -258,8 +263,16 @@ pub fn build_cli() -> ArgMatches {
                                     Arg::new("json")
                                         .long("json")
                                         .help("Agent definition JSON (raw JSON string)")
-                                        .required(true)
+                                        .required(false)
                                         .value_name("JSON")
+                                        .num_args(1)
+                                )
+                                .arg(
+                                    Arg::new("json_file")
+                                        .long("json-file")
+                                        .help("Path to agent definition JSON file")
+                                        .required(false)
+                                        .value_name("FILE")
                                         .num_args(1)
                                 )
                         )
