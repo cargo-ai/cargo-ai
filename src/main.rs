@@ -4,6 +4,7 @@ mod web_resources;
 mod agent_builder;
 mod config;
 mod infra_api;
+mod ui;
 
 const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
 
@@ -294,9 +295,11 @@ async fn main() {
 
             match infra_api::account::register::register_email(INFRA_BASE_URL, email).await {
                 Ok(json) => {
-                    match serde_json::to_string_pretty(&json) {
-                        Ok(pretty) => println!("{pretty}"),
-                        Err(_) => println!("{json:?}"),
+                    if !ui::account_status::render_backend_ui(&json) {
+                        match serde_json::to_string_pretty(&json) {
+                            Ok(pretty) => println!("{pretty}"),
+                            Err(_) => println!("{json:?}"),
+                        }
                     }
 
                     // Persist the active account email locally only on successful registration.
@@ -343,9 +346,11 @@ async fn main() {
 
             match infra_api::account::confirm::confirm_email(INFRA_BASE_URL, &email, code).await {
                 Ok(json) => {
-                    match serde_json::to_string_pretty(&json) {
-                        Ok(pretty) => println!("{pretty}"),
-                        Err(_) => println!("{json:?}"),
+                    if !ui::account_status::render_backend_ui(&json) {
+                        match serde_json::to_string_pretty(&json) {
+                            Ok(pretty) => println!("{pretty}"),
+                            Err(_) => println!("{json:?}"),
+                        }
                     }
 
                     // Persist tokens locally only on successful confirmation.
@@ -521,10 +526,12 @@ async fn main() {
                 }
             }
 
-            // 6. Print the returned JSON
-            match serde_json::to_string_pretty(&response) {
-                Ok(pretty) => println!("{pretty}"),
-                Err(_) => println!("{response:?}"),
+            // 6. Render backend-provided UI when available, fallback to raw JSON.
+            if !ui::account_status::render_account_status_ui(&response) {
+                match serde_json::to_string_pretty(&response) {
+                    Ok(pretty) => println!("{pretty}"),
+                    Err(_) => println!("{response:?}"),
+                }
             }
 
             // 7. Persist refreshed access token if present in response.
@@ -645,9 +652,11 @@ async fn main() {
                     Some(rt) => rt,
                     None => {
                         eprintln!("⚠️ Access token expired, and no refresh token exists in config. Run `cargo ai account status` or re-confirm account.");
-                        match serde_json::to_string_pretty(&response) {
-                            Ok(pretty) => println!("{pretty}"),
-                            Err(_) => println!("{response:?}"),
+                        if !ui::account_status::render_backend_ui(&response) {
+                            match serde_json::to_string_pretty(&response) {
+                                Ok(pretty) => println!("{pretty}"),
+                                Err(_) => println!("{response:?}"),
+                            }
                         }
                         return;
                     }
@@ -693,9 +702,11 @@ async fn main() {
                     }
                     None => {
                         eprintln!("⚠️ Session refresh did not return a new access token. Cannot retry handle request.");
-                        match serde_json::to_string_pretty(&refresh_response) {
-                            Ok(pretty) => println!("{pretty}"),
-                            Err(_) => println!("{refresh_response:?}"),
+                        if !ui::account_status::render_backend_ui(&refresh_response) {
+                            match serde_json::to_string_pretty(&refresh_response) {
+                                Ok(pretty) => println!("{pretty}"),
+                                Err(_) => println!("{refresh_response:?}"),
+                            }
                         }
                         return;
                     }
@@ -731,10 +742,12 @@ async fn main() {
                 };
             }
 
-            // 6. Print returned JSON
-            match serde_json::to_string_pretty(&response) {
-                Ok(pretty) => println!("{pretty}"),
-                Err(_) => println!("{response:?}"),
+            // 6. Render backend-provided UI when available, fallback to raw JSON.
+            if !ui::account_status::render_backend_ui(&response) {
+                match serde_json::to_string_pretty(&response) {
+                    Ok(pretty) => println!("{pretty}"),
+                    Err(_) => println!("{response:?}"),
+                }
             }
         } else if let Some(agents_m) = sub_m.subcommand_matches("agents") {
             enum AgentsCommand {
@@ -991,9 +1004,11 @@ async fn main() {
                     Some(rt) => rt,
                     None => {
                         eprintln!("⚠️ Access token expired, and no refresh token exists in config. Run `cargo ai account status` or re-confirm account.");
-                        match serde_json::to_string_pretty(&response) {
-                            Ok(pretty) => println!("{pretty}"),
-                            Err(_) => println!("{response:?}"),
+                        if !ui::account_status::render_backend_ui(&response) {
+                            match serde_json::to_string_pretty(&response) {
+                                Ok(pretty) => println!("{pretty}"),
+                                Err(_) => println!("{response:?}"),
+                            }
                         }
                         return;
                     }
@@ -1039,9 +1054,11 @@ async fn main() {
                     }
                     None => {
                         eprintln!("⚠️ Session refresh did not return a new access token. Cannot retry agents request.");
-                        match serde_json::to_string_pretty(&refresh_response) {
-                            Ok(pretty) => println!("{pretty}"),
-                            Err(_) => println!("{refresh_response:?}"),
+                        if !ui::account_status::render_backend_ui(&refresh_response) {
+                            match serde_json::to_string_pretty(&refresh_response) {
+                                Ok(pretty) => println!("{pretty}"),
+                                Err(_) => println!("{refresh_response:?}"),
+                            }
                         }
                         return;
                     }
@@ -1148,10 +1165,12 @@ async fn main() {
                 };
             }
 
-            // 6. Print returned JSON
-            match serde_json::to_string_pretty(&response) {
-                Ok(pretty) => println!("{pretty}"),
-                Err(_) => println!("{response:?}"),
+            // 6. Render backend-provided UI when available, fallback to raw JSON.
+            if !ui::account_status::render_backend_ui(&response) {
+                match serde_json::to_string_pretty(&response) {
+                    Ok(pretty) => println!("{pretty}"),
+                    Err(_) => println!("{response:?}"),
+                }
             }
         } else {
             println!("No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', 'cargo ai account handle [--set <handle>]', or 'cargo ai account agents <list|push|pull|visibility|archive>'.");
