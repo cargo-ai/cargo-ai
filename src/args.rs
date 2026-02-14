@@ -211,7 +211,7 @@ pub fn build_cli() -> ArgMatches {
                                 .arg(
                                     Arg::new("subject")
                                         .long("subject")
-                                        .help("Optional subject override for the test email")
+                                        .help("Optional subject override (quote values with spaces)")
                                         .required(false)
                                         .value_name("TEXT")
                                         .num_args(1)
@@ -219,7 +219,7 @@ pub fn build_cli() -> ArgMatches {
                                 .arg(
                                     Arg::new("text")
                                         .long("text")
-                                        .help("Optional body override for the test email")
+                                        .help("Optional body override (quote values with spaces)")
                                         .required(false)
                                         .value_name("TEXT")
                                         .num_args(1)
