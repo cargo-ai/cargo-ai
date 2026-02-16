@@ -68,7 +68,6 @@ pub fn set_account_email(email: String, overwrite: bool) -> Result<(), Box<dyn s
                 access_token_expires_in: None,
                 access_token_issued_at: None,
             });
-            println!("Account email set to '{}'.", email);
         }
         Some(ref old_email) if old_email == &email => {
             return Ok(());
