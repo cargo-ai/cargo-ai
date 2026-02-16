@@ -71,7 +71,6 @@ pub fn set_account_email(email: String, overwrite: bool) -> Result<(), Box<dyn s
             println!("Account email set to '{}'.", email);
         }
         Some(ref old_email) if old_email == &email => {
-            println!("Account email already set to '{}'.", email);
             return Ok(());
         }
         Some(ref old_email) => {
