@@ -264,7 +264,7 @@ async fn main() {
                 return;
             }
 
-            // Phase 1 guard: if local session is already valid for this email, skip register.
+            // Guard: skip register when local session is already valid for the requested email.
             if let Some(cfg) = load_config() {
                 if let Some(acct) = cfg.account.as_ref() {
                     if let (Some(_existing_email), Some(access_token)) =
