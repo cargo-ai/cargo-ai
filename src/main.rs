@@ -264,15 +264,44 @@ async fn main() {
                 return;
             }
 
-            // If an account email is already configured and differs, confirm before proceeding.
+            // Guard: skip register when local session is already valid for the requested email.
             if let Some(cfg) = load_config() {
                 if let Some(acct) = cfg.account.as_ref() {
+                    if let (Some(_existing_email), Some(access_token)) =
+                        (acct.email.as_deref(), acct.access_token.as_deref())
+                    {
+                        let status_response = fetch_status_for_register_guard(
+                            access_token,
+                            acct.refresh_token.as_deref(),
+                        )
+                        .await;
+
+                        if let Some(active_email) = extract_status_account_email(&status_response) {
+                            if active_email.eq_ignore_ascii_case(email) {
+                                println!(
+                                    "✅ You are already signed in as '{}'. Registration is not needed.",
+                                    active_email
+                                );
+                                return;
+                            }
+                        }
+                    }
+
+                    // If an account email is already configured and differs, confirm before proceeding.
                     if let Some(existing_email) = acct.email.as_ref() {
-                        if existing_email != email {
-                            print!(
-                                "Account email is already set to '{}'. Replace with '{}'? [y/N]: ",
-                                existing_email, email
+                        if !existing_email.eq_ignore_ascii_case(email) {
+                            println!(
+                                "⚠️ Local account is currently configured as '{}'.",
+                                existing_email
                             );
+                            println!(
+                                "Continuing will replace local account email and tokens on this machine."
+                            );
+                            println!(
+                                "If you need the current local state, back up '{}'.",
+                                config_path().display()
+                            );
+                            print!("Continue and switch to '{}'? [y/N]: ", email);
                             if let Err(e) = io::stdout().flush() {
                                 eprintln!("⚠️ Failed to flush stdout: {e}");
                                 return;
@@ -284,7 +313,8 @@ async fn main() {
                                 return;
                             }
 
-                            if !input.trim().eq_ignore_ascii_case("y") {
+                            let input = input.trim();
+                            if !(input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes")) {
                                 println!("Operation canceled.");
                                 return;
                             }
@@ -1599,4 +1629,59 @@ fn fetch_from_registry(name: &str) -> Result<String, Error> {
     }
 
     Ok(text)
+}
+
+async fn fetch_status_for_register_guard(
+    access_token: &str,
+    refresh_token: Option<&str>,
+) -> serde_json::Value {
+    let first_response =
+        match infra_api::account::status::fetch_status(INFRA_BASE_URL, access_token, None).await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("⚠️ Could not validate local session before register: {e:?}");
+                return serde_json::Value::Null;
+            }
+        };
+
+    let is_expired_error = first_response
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(|t| t == "access_token_expired")
+        .unwrap_or(false);
+
+    if !is_expired_error {
+        return first_response;
+    }
+
+    let rt = match refresh_token {
+        Some(rt) => rt,
+        None => return first_response,
+    };
+
+    match infra_api::account::status::fetch_status(INFRA_BASE_URL, access_token, Some(rt)).await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("⚠️ Could not refresh local session before register: {e:?}");
+            serde_json::Value::Null
+        }
+    }
+}
+
+fn extract_status_account_email(status_response: &serde_json::Value) -> Option<String> {
+    let is_success = status_response
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.eq_ignore_ascii_case("success"))
+        .unwrap_or(false);
+
+    if !is_success {
+        return None;
+    }
+
+    status_response
+        .get("account")
+        .and_then(|v| v.get("email"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
