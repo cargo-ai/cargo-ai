@@ -290,10 +290,18 @@ async fn main() {
                     // If an account email is already configured and differs, confirm before proceeding.
                     if let Some(existing_email) = acct.email.as_ref() {
                         if !existing_email.eq_ignore_ascii_case(email) {
-                            print!(
-                                "Account email is already set to '{}'. Replace with '{}'? [y/N]: ",
-                                existing_email, email
+                            println!(
+                                "⚠️ Local account is currently configured as '{}'.",
+                                existing_email
                             );
+                            println!(
+                                "Continuing will replace local account email and tokens on this machine."
+                            );
+                            println!(
+                                "If you need the current local state, back up '{}'.",
+                                config_path().display()
+                            );
+                            print!("Continue and switch to '{}'? [y/N]: ", email);
                             if let Err(e) = io::stdout().flush() {
                                 eprintln!("⚠️ Failed to flush stdout: {e}");
                                 return;
@@ -305,7 +313,8 @@ async fn main() {
                                 return;
                             }
 
-                            if !input.trim().eq_ignore_ascii_case("y") {
+                            let input = input.trim();
+                            if !(input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes")) {
                                 println!("Operation canceled.");
                                 return;
                             }
