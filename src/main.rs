@@ -1081,11 +1081,21 @@ async fn main() {
                     definition_json,
                 }
             } else if let Some(pull_m) = agents_m.subcommand_matches("pull") {
+                let name = pull_m
+                    .get_one::<String>("name")
+                    .or_else(|| pull_m.get_one::<String>("name_positional"))
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        eprintln!("❌ Missing agent name. Provide positional NAME or --name <NAME>.");
+                        String::new()
+                    });
+                if name.is_empty() {
+                    return;
+                }
+
                 AgentsCommand::Pull {
-                    name: pull_m
-                        .get_one::<String>("name")
-                        .expect("name is required")
-                        .to_string(),
+                    name,
                     owner_handle: pull_m
                         .get_one::<String>("owner_handle")
                         .map(|s| s.to_string()),
