@@ -330,6 +330,28 @@ pub fn build_cli() -> ArgMatches {
                                         .value_name("PATH")
                                         .num_args(1)
                                 )
+                                .arg(
+                                    Arg::new("json_file")
+                                        .long("json-file")
+                                        .help("Write pulled definition JSON to this file (defaults to ./<name>.json)")
+                                        .required(false)
+                                        .value_name("FILE")
+                                        .num_args(1)
+                                )
+                                .arg(
+                                    Arg::new("stdout")
+                                        .long("stdout")
+                                        .help("Print pulled definition_json to stdout")
+                                        .required(false)
+                                        .action(clap::ArgAction::SetTrue)
+                                )
+                                .arg(
+                                    Arg::new("force")
+                                        .long("force")
+                                        .help("Overwrite output file if it already exists")
+                                        .required(false)
+                                        .action(clap::ArgAction::SetTrue)
+                                )
                         )
                         .subcommand(
                             Command::new("visibility")

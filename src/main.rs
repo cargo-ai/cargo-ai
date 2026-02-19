@@ -957,6 +957,9 @@ async fn main() {
                     name: String,
                     owner_handle: Option<String>,
                     definition_path: Option<String>,
+                    json_file: Option<String>,
+                    stdout: bool,
+                    force: bool,
                 },
                 Visibility {
                     name: String,
@@ -1078,6 +1081,11 @@ async fn main() {
                     definition_path: pull_m
                         .get_one::<String>("path")
                         .map(|s| s.to_string()),
+                    json_file: pull_m
+                        .get_one::<String>("json_file")
+                        .map(|s| s.to_string()),
+                    stdout: pull_m.get_flag("stdout"),
+                    force: pull_m.get_flag("force"),
                 }
             } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
                 AgentsCommand::Visibility {
@@ -1188,6 +1196,7 @@ async fn main() {
                     name,
                     owner_handle,
                     definition_path,
+                    ..
                 } => match infra_api::account::agents::pull_agent(
                     INFRA_BASE_URL,
                     access_token_owned.as_str(),
@@ -1360,6 +1369,7 @@ async fn main() {
                         name,
                         owner_handle,
                         definition_path,
+                        ..
                     } => match infra_api::account::agents::pull_agent(
                         INFRA_BASE_URL,
                         retry_access_token.as_str(),
@@ -1418,6 +1428,83 @@ async fn main() {
                         }
                     },
                 };
+            }
+
+            let mut pull_stdout_payload: Option<String> = None;
+            if let AgentsCommand::Pull {
+                name,
+                json_file,
+                stdout,
+                force,
+                ..
+            } = &agents_command
+            {
+                let is_pull_success = response
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .map(|t| t == "account_agents_pull_succeeded")
+                    .unwrap_or(false);
+
+                if is_pull_success {
+                    let definition_json = match response.get("definition_json") {
+                        Some(value) => value,
+                        None => {
+                            eprintln!(
+                                "❌ Pull succeeded but response did not include 'definition_json'."
+                            );
+                            return;
+                        }
+                    };
+
+                    let pretty_definition = match serde_json::to_string_pretty(definition_json) {
+                        Ok(pretty) => pretty,
+                        Err(e) => {
+                            eprintln!("❌ Failed to serialize pulled definition JSON: {e}");
+                            return;
+                        }
+                    };
+
+                    let output_path = if let Some(path) = json_file {
+                        Some(path.clone())
+                    } else if *stdout {
+                        None
+                    } else {
+                        Some(format!("{}.json", name))
+                    };
+
+                    if let Some(path) = output_path {
+                        if Path::new(&path).exists() && !*force {
+                            eprintln!(
+                                "❌ Output file '{}' already exists. Use --force to overwrite or --json-file <FILE> to choose another path.",
+                                path
+                            );
+                            return;
+                        }
+
+                        if let Err(e) = fs::write(&path, format!("{pretty_definition}\n")) {
+                            eprintln!(
+                                "❌ Failed to write pulled definition JSON to '{}': {e}",
+                                path
+                            );
+                            return;
+                        }
+
+                        if *stdout {
+                            eprintln!("ℹ️ Saved pulled definition to '{}'.", path);
+                        } else {
+                            println!("✅ Saved pulled definition to '{}'.", path);
+                        }
+                    }
+
+                    if *stdout {
+                        pull_stdout_payload = Some(pretty_definition);
+                    }
+                }
+            }
+
+            if let Some(pretty_definition) = pull_stdout_payload {
+                println!("{pretty_definition}");
+                return;
             }
 
             // 6. Render backend-provided UI when available, fallback to raw JSON.
