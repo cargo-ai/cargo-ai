@@ -303,7 +303,7 @@ pub fn build_cli() -> ArgMatches {
                                         .num_args(1)
                                 )
                                 .after_help(
-                                    "Notes:\n  - Required: --name unless --json-file is provided (name inferred from file name).\n  - Input precedence: --json, then --json-file, then auto-discovered ./<name>.json.\n  - Auto-discovery uses exact ./<name>.json only (no wildcard scanning)."
+                                    "Notes:\n  - Required: --name unless --json-file is provided (name inferred from file name).\n  - Input precedence: --json, then --json-file, then auto-discovered ./<name>.json.\n  - Auto-discovery uses exact ./<name>.json only (no wildcard scanning).\n  - If --name looks like a file path, use --json-file <FILE> instead."
                                 )
                         )
                         .subcommand(

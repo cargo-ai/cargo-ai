@@ -1003,9 +1003,28 @@ async fn main() {
 
                     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
                 };
+                let looks_like_file_path = |candidate: &str| {
+                    let trimmed = candidate.trim();
+                    let normalized = trimmed.to_lowercase();
+
+                    trimmed.starts_with("~/")
+                        || trimmed.starts_with("./")
+                        || trimmed.starts_with("../")
+                        || trimmed.contains('/')
+                        || trimmed.contains('\\')
+                        || normalized.ends_with(".json")
+                };
 
                 let name = if let Some(name) = push_m.get_one::<String>("name") {
-                    name.to_string()
+                    let trimmed_name = name.trim();
+                    if looks_like_file_path(trimmed_name) {
+                        eprintln!(
+                            "❌ The value passed to --name ('{}') looks like a file path. Use --json-file <FILE> for file input and keep --name for the agent name.",
+                            name
+                        );
+                        return;
+                    }
+                    trimmed_name.to_string()
                 } else if let Some(file_path) = json_file_path.as_deref() {
                     let stem = match Path::new(file_path)
                         .file_stem()
