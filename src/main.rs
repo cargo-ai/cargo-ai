@@ -4,6 +4,7 @@ mod web_resources;
 mod agent_builder;
 mod config;
 mod infra_api;
+mod shipyard_ui;
 mod ui;
 
 const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
@@ -229,6 +230,11 @@ async fn main() {
         };
 
         run_hatch_pipeline(new_project_name, file_contents);
+
+    } else if cmd_args.subcommand_matches("shipyard").is_some() {
+        if let Err(e) = shipyard_ui::launch() {
+            eprintln!("❌ Failed to launch Shipyard UI: {e}");
+        }
 
     } else if let Some(sub_m) = cmd_args.subcommand_matches("account") {
 

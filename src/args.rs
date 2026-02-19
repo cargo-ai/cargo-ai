@@ -94,6 +94,10 @@ pub fn build_cli() -> ArgMatches {
                 )
         )
         .subcommand(
+            Command::new("shipyard")
+                .about("Launch Shipyard desktop UI (exploratory)")
+        )
+        .subcommand(
             Command::new("profile")
                 .about("Manage connection profiles in the Cargo-AI config file")
                 .subcommand(
