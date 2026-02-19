@@ -957,6 +957,9 @@ async fn main() {
                     name: String,
                     owner_handle: Option<String>,
                     definition_path: Option<String>,
+                    json_file: Option<String>,
+                    stdout: bool,
+                    force: bool,
                 },
                 Visibility {
                     name: String,
@@ -984,7 +987,12 @@ async fn main() {
                 // name inference, validation, and request payload stay consistent.
                 let json_file_path = push_m
                     .get_one::<String>("json_file")
-                    .map(|s| s.to_string());
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        push_m
+                            .get_one::<String>("input_file")
+                            .map(|s| s.to_string())
+                    });
 
                 let is_valid_inferred_name = |candidate: &str| {
                     let normalized = candidate.trim().to_lowercase();
@@ -1000,9 +1008,28 @@ async fn main() {
 
                     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
                 };
+                let looks_like_file_path = |candidate: &str| {
+                    let trimmed = candidate.trim();
+                    let normalized = trimmed.to_lowercase();
+
+                    trimmed.starts_with("~/")
+                        || trimmed.starts_with("./")
+                        || trimmed.starts_with("../")
+                        || trimmed.contains('/')
+                        || trimmed.contains('\\')
+                        || normalized.ends_with(".json")
+                };
 
                 let name = if let Some(name) = push_m.get_one::<String>("name") {
-                    name.to_string()
+                    let trimmed_name = name.trim();
+                    if looks_like_file_path(trimmed_name) {
+                        eprintln!(
+                            "❌ The value passed to --name ('{}') looks like a file path. Use --json-file <FILE> for file input and keep --name for the agent name.",
+                            name
+                        );
+                        return;
+                    }
+                    trimmed_name.to_string()
                 } else if let Some(file_path) = json_file_path.as_deref() {
                     let stem = match Path::new(file_path)
                         .file_stem()
@@ -1031,7 +1058,7 @@ async fn main() {
                     println!("ℹ️ Using inferred agent name from file: {}", stem);
                     stem.to_string()
                 } else {
-                    eprintln!("❌ Missing agent name. Provide --name or use --json-file.");
+                    eprintln!("❌ Missing agent name. Provide --name or use --json-file <FILE> (or positional FILE).");
                     return;
                 };
 
@@ -1049,7 +1076,7 @@ async fn main() {
                         }
                     }
                 } else {
-                    eprintln!("❌ Missing required input: provide either --json or --json-file.");
+                    eprintln!("❌ Missing required input: provide --json, --json-file <FILE>, or positional FILE.");
                     return;
                 };
 
@@ -1078,6 +1105,11 @@ async fn main() {
                     definition_path: pull_m
                         .get_one::<String>("path")
                         .map(|s| s.to_string()),
+                    json_file: pull_m
+                        .get_one::<String>("json_file")
+                        .map(|s| s.to_string()),
+                    stdout: pull_m.get_flag("stdout"),
+                    force: pull_m.get_flag("force"),
                 }
             } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
                 AgentsCommand::Visibility {
@@ -1188,6 +1220,7 @@ async fn main() {
                     name,
                     owner_handle,
                     definition_path,
+                    ..
                 } => match infra_api::account::agents::pull_agent(
                     INFRA_BASE_URL,
                     access_token_owned.as_str(),
@@ -1360,6 +1393,7 @@ async fn main() {
                         name,
                         owner_handle,
                         definition_path,
+                        ..
                     } => match infra_api::account::agents::pull_agent(
                         INFRA_BASE_URL,
                         retry_access_token.as_str(),
@@ -1418,6 +1452,83 @@ async fn main() {
                         }
                     },
                 };
+            }
+
+            let mut pull_stdout_payload: Option<String> = None;
+            if let AgentsCommand::Pull {
+                name,
+                json_file,
+                stdout,
+                force,
+                ..
+            } = &agents_command
+            {
+                let is_pull_success = response
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .map(|t| t == "account_agents_pull_succeeded")
+                    .unwrap_or(false);
+
+                if is_pull_success {
+                    let definition_json = match response.get("definition_json") {
+                        Some(value) => value,
+                        None => {
+                            eprintln!(
+                                "❌ Pull succeeded but response did not include 'definition_json'."
+                            );
+                            return;
+                        }
+                    };
+
+                    let pretty_definition = match serde_json::to_string_pretty(definition_json) {
+                        Ok(pretty) => pretty,
+                        Err(e) => {
+                            eprintln!("❌ Failed to serialize pulled definition JSON: {e}");
+                            return;
+                        }
+                    };
+
+                    let output_path = if let Some(path) = json_file {
+                        Some(path.clone())
+                    } else if *stdout {
+                        None
+                    } else {
+                        Some(format!("{}.json", name))
+                    };
+
+                    if let Some(path) = output_path {
+                        if Path::new(&path).exists() && !*force {
+                            eprintln!(
+                                "❌ Output file '{}' already exists. Use --force to overwrite or --json-file <FILE> to choose another path.",
+                                path
+                            );
+                            return;
+                        }
+
+                        if let Err(e) = fs::write(&path, format!("{pretty_definition}\n")) {
+                            eprintln!(
+                                "❌ Failed to write pulled definition JSON to '{}': {e}",
+                                path
+                            );
+                            return;
+                        }
+
+                        if *stdout {
+                            eprintln!("ℹ️ Saved pulled definition to '{}'.", path);
+                        } else {
+                            println!("✅ Saved pulled definition to '{}'.", path);
+                        }
+                    }
+
+                    if *stdout {
+                        pull_stdout_payload = Some(pretty_definition);
+                    }
+                }
+            }
+
+            if let Some(pretty_definition) = pull_stdout_payload {
+                println!("{pretty_definition}");
+                return;
             }
 
             // 6. Render backend-provided UI when available, fallback to raw JSON.

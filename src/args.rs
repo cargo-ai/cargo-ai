@@ -260,21 +260,19 @@ pub fn build_cli() -> ArgMatches {
                                 )
                         )
                         .subcommand(
-                            // TODO: Add shortcut forms after command surface is stable:
-                            // - example: `cargo ai account agents push <file>`
                             Command::new("push")
                                 .about("Upload or overwrite an agent definition")
                                 .group(
                                     ArgGroup::new("push_input")
-                                        .args(["json", "json_file"])
+                                        .args(["json", "json_file", "input_file"])
                                         .required(true)
                                 )
                                 .arg(
                                     Arg::new("name")
                                         .long("name")
-                                        .help("Agent name (defaults to JSON file name when --json-file is used)")
+                                        .help("Agent name (defaults to file name when --json-file or positional FILE is used)")
                                         .required(false)
-                                        .required_unless_present("json_file")
+                                        .required_unless_present_any(["json_file", "input_file"])
                                         .value_name("NAME")
                                         .num_args(1)
                                 )
@@ -289,7 +287,7 @@ pub fn build_cli() -> ArgMatches {
                                 .arg(
                                     Arg::new("json")
                                         .long("json")
-                                        .help("Agent definition JSON (raw JSON string)")
+                                        .help("Agent definition JSON (raw JSON string; highest input precedence)")
                                         .required(false)
                                         .value_name("JSON")
                                         .num_args(1)
@@ -297,10 +295,22 @@ pub fn build_cli() -> ArgMatches {
                                 .arg(
                                     Arg::new("json_file")
                                         .long("json-file")
-                                        .help("Path to agent definition JSON file")
+                                        .help("Path to agent definition JSON file (used when --json is not provided)")
                                         .required(false)
                                         .value_name("FILE")
                                         .num_args(1)
+                                )
+                                .arg(
+                                    Arg::new("input_file")
+                                        .help("Shortcut file input (equivalent to --json-file <FILE>)")
+                                        .required(false)
+                                        .value_name("FILE")
+                                        .num_args(1)
+                                        .index(1)
+                                        .conflicts_with_all(["json", "json_file"])
+                                )
+                                .after_help(
+                                    "Notes:\n  - Required input: provide one of --json, --json-file, or positional FILE.\n  - Name is required for --json, and inferred from file name for --json-file/FILE when omitted.\n  - Input precedence: --json, then --json-file, then positional FILE.\n  - If --name looks like a file path, use --json-file <FILE> or positional FILE instead."
                                 )
                         )
                         .subcommand(
@@ -329,6 +339,31 @@ pub fn build_cli() -> ArgMatches {
                                         .required(false)
                                         .value_name("PATH")
                                         .num_args(1)
+                                )
+                                .arg(
+                                    Arg::new("json_file")
+                                        .long("json-file")
+                                        .help("Write pulled definition JSON to this file (defaults to ./<name>.json)")
+                                        .required(false)
+                                        .value_name("FILE")
+                                        .num_args(1)
+                                )
+                                .arg(
+                                    Arg::new("stdout")
+                                        .long("stdout")
+                                        .help("Print pulled definition_json to stdout (no default file write unless --json-file is also set)")
+                                        .required(false)
+                                        .action(clap::ArgAction::SetTrue)
+                                )
+                                .arg(
+                                    Arg::new("force")
+                                        .long("force")
+                                        .help("Overwrite output file if it already exists")
+                                        .required(false)
+                                        .action(clap::ArgAction::SetTrue)
+                                )
+                                .after_help(
+                                    "Notes:\n  - Required: --name.\n  - Default output: ./<name>.json (when --json-file is omitted and --stdout is not set).\n  - --force applies only when writing to a file."
                                 )
                         )
                         .subcommand(
