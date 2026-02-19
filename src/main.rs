@@ -228,25 +228,7 @@ async fn main() {
             }
         };
 
-        match agent_builder::project::create_new_agent_project(&new_project_name, Ok(file_contents)) {
-            Ok(_) => println!("✅ Project created successfully."),
-            Err(e) =>  println!("❌ Failed to create project: {e}") 
-        }
-
-        match agent_builder::build::build_agent_project(&new_project_name) {
-            Ok(_) => println!("✅ Project built successfully."),
-            Err(e) =>  println!("❌ Build failed: {e}") 
-        }
-
-        match agent_builder::export::export_binary(&new_project_name){
-            Ok(_) => println!("✅ Project binary exported successfully."),
-            Err(e) =>  println!("❌ Export failed: {e}") 
-        }
-
-        match agent_builder::cleanup::delete_agent_workspace(&new_project_name) {
-            Ok(_) => println!("🧼 Agent workspace removed."),
-            Err(e) => println!("⚠️ Failed to clean up workspace: {e}"),
-        }
+        run_hatch_pipeline(new_project_name, file_contents);
 
     } else if let Some(sub_m) = cmd_args.subcommand_matches("account") {
 
@@ -961,6 +943,11 @@ async fn main() {
                     stdout: bool,
                     force: bool,
                 },
+                Hatch {
+                    name: String,
+                    owner_handle: Option<String>,
+                    definition_path: Option<String>,
+                },
                 Visibility {
                     name: String,
                     definition_path: Option<String>,
@@ -1111,6 +1098,29 @@ async fn main() {
                     stdout: pull_m.get_flag("stdout"),
                     force: pull_m.get_flag("force"),
                 }
+            } else if let Some(hatch_m) = agents_m.subcommand_matches("hatch") {
+                let name = hatch_m
+                    .get_one::<String>("name")
+                    .or_else(|| hatch_m.get_one::<String>("name_positional"))
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        eprintln!("❌ Missing agent name. Provide positional NAME or --name <NAME>.");
+                        String::new()
+                    });
+                if name.is_empty() {
+                    return;
+                }
+
+                AgentsCommand::Hatch {
+                    name,
+                    owner_handle: hatch_m
+                        .get_one::<String>("owner_handle")
+                        .map(|s| s.to_string()),
+                    definition_path: hatch_m
+                        .get_one::<String>("path")
+                        .map(|s| s.to_string()),
+                }
             } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
                 AgentsCommand::Visibility {
                     name: visibility_m
@@ -1141,7 +1151,7 @@ async fn main() {
                 }
             } else {
                 println!(
-                    "No agents subcommand found. Try 'cargo ai account agents list|push|pull|visibility|archive'."
+                    "No agents subcommand found. Try 'cargo ai account agents list|push|pull|hatch|visibility|archive'."
                 );
                 return;
             };
@@ -1221,6 +1231,25 @@ async fn main() {
                     owner_handle,
                     definition_path,
                     ..
+                } => match infra_api::account::agents::pull_agent(
+                    INFRA_BASE_URL,
+                    access_token_owned.as_str(),
+                    name,
+                    owner_handle.as_deref(),
+                    definition_path.as_deref(),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("❌ Request failed: {e:?}");
+                        return;
+                    }
+                },
+                AgentsCommand::Hatch {
+                    name,
+                    owner_handle,
+                    definition_path,
                 } => match infra_api::account::agents::pull_agent(
                     INFRA_BASE_URL,
                     access_token_owned.as_str(),
@@ -1409,6 +1438,25 @@ async fn main() {
                             return;
                         }
                     },
+                    AgentsCommand::Hatch {
+                        name,
+                        owner_handle,
+                        definition_path,
+                    } => match infra_api::account::agents::pull_agent(
+                        INFRA_BASE_URL,
+                        retry_access_token.as_str(),
+                        name,
+                        owner_handle.as_deref(),
+                        definition_path.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            return;
+                        }
+                    },
                     AgentsCommand::Visibility {
                         name,
                         definition_path,
@@ -1531,6 +1579,49 @@ async fn main() {
                 return;
             }
 
+            if let AgentsCommand::Hatch {
+                name,
+                owner_handle,
+                definition_path,
+            } = &agents_command
+            {
+                let is_pull_success = response
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .map(|t| t == "account_agents_pull_succeeded")
+                    .unwrap_or(false);
+
+                if is_pull_success {
+                    let definition_json = match response.get("definition_json") {
+                        Some(value) => value,
+                        None => {
+                            eprintln!(
+                                "❌ Hatch could not continue because response did not include 'definition_json'."
+                            );
+                            return;
+                        }
+                    };
+
+                    let definition_json_str = match serde_json::to_string_pretty(definition_json) {
+                        Ok(pretty) => pretty,
+                        Err(e) => {
+                            eprintln!("❌ Failed to serialize pulled definition JSON: {e}");
+                            return;
+                        }
+                    };
+
+                    let owner_label = owner_handle.as_deref().unwrap_or("self");
+                    let path_label = definition_path.as_deref().unwrap_or("/");
+                    println!(
+                        "📦 Using account agent definition: owner='{}', name='{}', path='{}'",
+                        owner_label, name, path_label
+                    );
+                    println!("Build new cargo agent: {name}");
+                    run_hatch_pipeline(name, definition_json_str);
+                    return;
+                }
+            }
+
             // 6. Render backend-provided UI when available, fallback to raw JSON.
             if !ui::account_status::render_backend_ui(&response) {
                 match serde_json::to_string_pretty(&response) {
@@ -1539,7 +1630,7 @@ async fn main() {
                 }
             }
         } else {
-            println!("No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', 'cargo ai account mail test [--subject <text>] [--text <text>]', 'cargo ai account handle [--set <handle>]', or 'cargo ai account agents <list|push|pull|visibility|archive>'.");
+            println!("No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', 'cargo ai account mail test [--subject <text>] [--text <text>]', 'cargo ai account handle [--set <handle>]', or 'cargo ai account agents <list|push|pull|hatch|visibility|archive>'.");
         }
 
     } else if let Some(sub_m) = cmd_args.subcommand_matches("profile") {
@@ -1692,6 +1783,28 @@ pub fn apply_actions(output: &Output, actions: &[Action]) {
         }
     }
 
+}
+
+fn run_hatch_pipeline(new_project_name: &str, file_contents: String) {
+    match agent_builder::project::create_new_agent_project(new_project_name, Ok(file_contents)) {
+        Ok(_) => println!("✅ Project created successfully."),
+        Err(e) => println!("❌ Failed to create project: {e}"),
+    }
+
+    match agent_builder::build::build_agent_project(new_project_name) {
+        Ok(_) => println!("✅ Project built successfully."),
+        Err(e) => println!("❌ Build failed: {e}"),
+    }
+
+    match agent_builder::export::export_binary(new_project_name) {
+        Ok(_) => println!("✅ Project binary exported successfully."),
+        Err(e) => println!("❌ Export failed: {e}"),
+    }
+
+    match agent_builder::cleanup::delete_agent_workspace(new_project_name) {
+        Ok(_) => println!("🧼 Agent workspace removed."),
+        Err(e) => println!("⚠️ Failed to clean up workspace: {e}"),
+    }
 }
 
 fn config_contents(path: &str) -> Result<String, std::io::Error> {

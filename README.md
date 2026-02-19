@@ -132,6 +132,30 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 
   This will create a new agent project named `adder_test2` using the contents of your local JSON file.
 
+### Hatch from Account Agents
+
+When you are signed in, you can hatch an agent directly from account-hosted definitions:
+
+```bash
+# Hatch your own account agent (path defaults to "/")
+cargo ai account agents hatch weather_agent
+
+# Equivalent explicit form
+cargo ai account agents hatch --name weather_agent
+```
+
+To hatch a public agent from another owner:
+
+```bash
+cargo ai account agents hatch weather_agent --owner-handle alice
+```
+
+To select a non-root definition path:
+
+```bash
+cargo ai account agents hatch weather_agent --path /team/ops
+```
+
   To understand what is happening behind the scenes, we can look at the internal structure of the sample agent JSON file, [`adder_test.json`](./adder_test.json). 
 
   ### 1. Prompt and Guaranteed Typed Response

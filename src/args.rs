@@ -367,6 +367,51 @@ pub fn build_cli() -> ArgMatches {
                                 )
                         )
                         .subcommand(
+                            Command::new("hatch")
+                                .about("Build an executable from an account agent definition")
+                                .group(
+                                    ArgGroup::new("hatch_name")
+                                        .args(["name", "name_positional"])
+                                        .required(true)
+                                )
+                                .arg(
+                                    Arg::new("name")
+                                        .long("name")
+                                        .help("Agent name (explicit alias for positional NAME)")
+                                        .required(false)
+                                        .value_name("NAME")
+                                        .num_args(1)
+                                )
+                                .arg(
+                                    Arg::new("name_positional")
+                                        .help("Agent name")
+                                        .required(false)
+                                        .value_name("NAME")
+                                        .num_args(1)
+                                        .index(1)
+                                        .conflicts_with("name")
+                                )
+                                .arg(
+                                    Arg::new("owner_handle")
+                                        .long("owner-handle")
+                                        .help("Owner handle to hatch from (omit to hatch your own)")
+                                        .required(false)
+                                        .value_name("HANDLE")
+                                        .num_args(1)
+                                )
+                                .arg(
+                                    Arg::new("path")
+                                        .long("path")
+                                        .help("Path namespace (defaults to '/')")
+                                        .required(false)
+                                        .value_name("PATH")
+                                        .num_args(1)
+                                )
+                                .after_help(
+                                    "Notes:\n  - Name can be provided as positional NAME or via --name.\n  - Owner defaults to your authenticated account when --owner-handle is omitted.\n  - Path defaults to '/'."
+                                )
+                        )
+                        .subcommand(
                             Command::new("visibility")
                                 .about("Set public visibility for an agent")
                                 .group(
