@@ -1052,8 +1052,28 @@ async fn main() {
                         }
                     }
                 } else {
-                    eprintln!("❌ Missing required input: provide either --json or --json-file.");
-                    return;
+                    let auto_file_path = format!("{}.json", name);
+                    if Path::new(&auto_file_path).exists() {
+                        match fs::read_to_string(&auto_file_path) {
+                            Ok(contents) => {
+                                println!("ℹ️ Using auto-discovered JSON file: {}", auto_file_path);
+                                contents
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "❌ Failed to read auto-discovered JSON file '{}': {e}",
+                                    auto_file_path
+                                );
+                                return;
+                            }
+                        }
+                    } else {
+                        eprintln!(
+                            "❌ Missing required input: provide either --json or --json-file. No auto-discovered JSON file found at '{}'.",
+                            auto_file_path
+                        );
+                        return;
+                    }
                 };
 
                 let definition_json = match serde_json::from_str::<serde_json::Value>(&definition_json_raw) {

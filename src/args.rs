@@ -267,7 +267,7 @@ pub fn build_cli() -> ArgMatches {
                                 .group(
                                     ArgGroup::new("push_input")
                                         .args(["json", "json_file"])
-                                        .required(true)
+                                        .required(false)
                                 )
                                 .arg(
                                     Arg::new("name")
@@ -289,7 +289,7 @@ pub fn build_cli() -> ArgMatches {
                                 .arg(
                                     Arg::new("json")
                                         .long("json")
-                                        .help("Agent definition JSON (raw JSON string)")
+                                        .help("Agent definition JSON (raw JSON string; highest input precedence)")
                                         .required(false)
                                         .value_name("JSON")
                                         .num_args(1)
@@ -297,10 +297,13 @@ pub fn build_cli() -> ArgMatches {
                                 .arg(
                                     Arg::new("json_file")
                                         .long("json-file")
-                                        .help("Path to agent definition JSON file")
+                                        .help("Path to agent definition JSON file (used when --json is not provided)")
                                         .required(false)
                                         .value_name("FILE")
                                         .num_args(1)
+                                )
+                                .after_help(
+                                    "Notes:\n  - Required: --name unless --json-file is provided (name inferred from file name).\n  - Input precedence: --json, then --json-file, then auto-discovered ./<name>.json.\n  - Auto-discovery uses exact ./<name>.json only (no wildcard scanning)."
                                 )
                         )
                         .subcommand(
@@ -341,7 +344,7 @@ pub fn build_cli() -> ArgMatches {
                                 .arg(
                                     Arg::new("stdout")
                                         .long("stdout")
-                                        .help("Print pulled definition_json to stdout")
+                                        .help("Print pulled definition_json to stdout (no default file write unless --json-file is also set)")
                                         .required(false)
                                         .action(clap::ArgAction::SetTrue)
                                 )
@@ -351,6 +354,9 @@ pub fn build_cli() -> ArgMatches {
                                         .help("Overwrite output file if it already exists")
                                         .required(false)
                                         .action(clap::ArgAction::SetTrue)
+                                )
+                                .after_help(
+                                    "Notes:\n  - Required: --name.\n  - Default output: ./<name>.json (when --json-file is omitted and --stdout is not set).\n  - --force applies only when writing to a file."
                                 )
                         )
                         .subcommand(
