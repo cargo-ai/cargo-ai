@@ -987,7 +987,12 @@ async fn main() {
                 // name inference, validation, and request payload stay consistent.
                 let json_file_path = push_m
                     .get_one::<String>("json_file")
-                    .map(|s| s.to_string());
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        push_m
+                            .get_one::<String>("input_file")
+                            .map(|s| s.to_string())
+                    });
 
                 let is_valid_inferred_name = |candidate: &str| {
                     let normalized = candidate.trim().to_lowercase();
@@ -1053,7 +1058,7 @@ async fn main() {
                     println!("ℹ️ Using inferred agent name from file: {}", stem);
                     stem.to_string()
                 } else {
-                    eprintln!("❌ Missing agent name. Provide --name or use --json-file.");
+                    eprintln!("❌ Missing agent name. Provide --name or use --json-file <FILE> (or positional FILE).");
                     return;
                 };
 
@@ -1071,28 +1076,8 @@ async fn main() {
                         }
                     }
                 } else {
-                    let auto_file_path = format!("{}.json", name);
-                    if Path::new(&auto_file_path).exists() {
-                        match fs::read_to_string(&auto_file_path) {
-                            Ok(contents) => {
-                                println!("ℹ️ Using auto-discovered JSON file: {}", auto_file_path);
-                                contents
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "❌ Failed to read auto-discovered JSON file '{}': {e}",
-                                    auto_file_path
-                                );
-                                return;
-                            }
-                        }
-                    } else {
-                        eprintln!(
-                            "❌ Missing required input: provide either --json or --json-file. No auto-discovered JSON file found at '{}'.",
-                            auto_file_path
-                        );
-                        return;
-                    }
+                    eprintln!("❌ Missing required input: provide --json, --json-file <FILE>, or positional FILE.");
+                    return;
                 };
 
                 let definition_json = match serde_json::from_str::<serde_json::Value>(&definition_json_raw) {

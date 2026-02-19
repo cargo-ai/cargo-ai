@@ -260,21 +260,19 @@ pub fn build_cli() -> ArgMatches {
                                 )
                         )
                         .subcommand(
-                            // TODO: Add shortcut forms after command surface is stable:
-                            // - example: `cargo ai account agents push <file>`
                             Command::new("push")
                                 .about("Upload or overwrite an agent definition")
                                 .group(
                                     ArgGroup::new("push_input")
-                                        .args(["json", "json_file"])
-                                        .required(false)
+                                        .args(["json", "json_file", "input_file"])
+                                        .required(true)
                                 )
                                 .arg(
                                     Arg::new("name")
                                         .long("name")
-                                        .help("Agent name (defaults to JSON file name when --json-file is used)")
+                                        .help("Agent name (defaults to file name when --json-file or positional FILE is used)")
                                         .required(false)
-                                        .required_unless_present("json_file")
+                                        .required_unless_present_any(["json_file", "input_file"])
                                         .value_name("NAME")
                                         .num_args(1)
                                 )
@@ -302,8 +300,17 @@ pub fn build_cli() -> ArgMatches {
                                         .value_name("FILE")
                                         .num_args(1)
                                 )
+                                .arg(
+                                    Arg::new("input_file")
+                                        .help("Shortcut file input (equivalent to --json-file <FILE>)")
+                                        .required(false)
+                                        .value_name("FILE")
+                                        .num_args(1)
+                                        .index(1)
+                                        .conflicts_with_all(["json", "json_file"])
+                                )
                                 .after_help(
-                                    "Notes:\n  - Required: --name unless --json-file is provided (name inferred from file name).\n  - Input precedence: --json, then --json-file, then auto-discovered ./<name>.json.\n  - Auto-discovery uses exact ./<name>.json only (no wildcard scanning).\n  - If --name looks like a file path, use --json-file <FILE> instead."
+                                    "Notes:\n  - Required input: provide one of --json, --json-file, or positional FILE.\n  - Name is required for --json, and inferred from file name for --json-file/FILE when omitted.\n  - Input precedence: --json, then --json-file, then positional FILE.\n  - If --name looks like a file path, use --json-file <FILE> or positional FILE instead."
                                 )
                         )
                         .subcommand(
