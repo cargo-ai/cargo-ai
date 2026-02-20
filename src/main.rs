@@ -1937,14 +1937,24 @@ fn apply_agents_list_display_limit(
 
         if let Some(sections) = ui.get_mut("sections").and_then(|v| v.as_array_mut()) {
             for section in sections.iter_mut() {
-                let section_type = section.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                if section_type == "list" {
+                let is_list_section = section
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == "list")
+                    .unwrap_or(false);
+                let is_kv_section = section
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == "kv")
+                    .unwrap_or(false);
+
+                if is_list_section {
                     if let Some(items) = section.get_mut("items").and_then(|v| v.as_array_mut()) {
                         items.truncate(limit);
                     }
                 }
 
-                if section_type == "kv" {
+                if is_kv_section {
                     if let Some(items) = section.get_mut("items").and_then(|v| v.as_array_mut()) {
                         for item in items.iter_mut() {
                             let is_count = item
