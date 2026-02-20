@@ -135,30 +135,30 @@ slint::slint! {
                     y: 0px;
                     text: "Account Setup";
                     color: rgb(42, 47, 55);
-                    font-size: 56px;
+                    font-size: 34px;
                     font-weight: 700;
                 }
 
                 Text {
                     x: 0px;
-                    y: 66px;
+                    y: 44px;
                     text: root.account_status_text;
                     color: rgb(177, 54, 54);
-                    font-size: 30px;
+                    font-size: 18px;
                     font-weight: 600;
                 }
 
                 Text {
                     x: 0px;
-                    y: 112px;
+                    y: 74px;
                     text: "Set up your Cargo AI account directly from Shipyard using explicit CLI flows.";
                     color: rgb(93, 101, 112);
-                    font-size: 26px;
+                    font-size: 14px;
                 }
 
                 Rectangle {
                     x: 0px;
-                    y: 160px;
+                    y: 106px;
                     width: parent.width;
                     height: 1px;
                     background: rgb(212, 215, 222);
@@ -166,27 +166,27 @@ slint::slint! {
 
                 Text {
                     x: 0px;
-                    y: 188px;
+                    y: 124px;
                     text: "1) Register Email";
                     color: rgb(31, 34, 40);
-                    font-size: 36px;
+                    font-size: 18px;
                     font-weight: 640;
                 }
 
                 LineEdit {
                     x: 0px;
-                    y: 232px;
+                    y: 152px;
                     width: parent.width;
-                    height: 42px;
+                    height: 34px;
                     text <=> root.account_email;
                     placeholder-text: "you@example.com";
                     enabled: !root.command_running;
-                    font-size: 24px;
+                    font-size: 14px;
                 }
 
                 Button {
                     x: 0px;
-                    y: 284px;
+                    y: 192px;
                     text: "Run account register";
                     enabled: !root.command_running && root.account_email != "";
                     clicked => {
@@ -196,27 +196,27 @@ slint::slint! {
 
                 Text {
                     x: 0px;
-                    y: 340px;
+                    y: 236px;
                     text: "2) Confirm Code";
                     color: rgb(31, 34, 40);
-                    font-size: 36px;
+                    font-size: 18px;
                     font-weight: 640;
                 }
 
                 LineEdit {
                     x: 0px;
-                    y: 384px;
+                    y: 264px;
                     width: parent.width;
-                    height: 42px;
+                    height: 34px;
                     text <=> root.account_code;
                     placeholder-text: "temporary code from email";
                     enabled: !root.command_running;
-                    font-size: 24px;
+                    font-size: 14px;
                 }
 
                 Button {
                     x: 0px;
-                    y: 436px;
+                    y: 304px;
                     text: "Run account confirm";
                     enabled: !root.command_running && root.account_code != "";
                     clicked => {
@@ -226,16 +226,16 @@ slint::slint! {
 
                 Text {
                     x: 0px;
-                    y: 492px;
+                    y: 348px;
                     text: "3) Verify Session";
                     color: rgb(31, 34, 40);
-                    font-size: 36px;
+                    font-size: 18px;
                     font-weight: 640;
                 }
 
                 Button {
                     x: 0px;
-                    y: 538px;
+                    y: 378px;
                     text: "Run account status";
                     enabled: !root.command_running;
                     clicked => {
