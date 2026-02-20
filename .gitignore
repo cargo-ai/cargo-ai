@@ -2,3 +2,4 @@
 # for agent creation
 /.cargo-ai 
 .tmp.*
+AGENTS.md
