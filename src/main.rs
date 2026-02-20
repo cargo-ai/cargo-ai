@@ -4,6 +4,7 @@ mod web_resources;
 mod agent_builder;
 mod config;
 mod infra_api;
+mod shipyard_ui;
 mod ui;
 
 const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
@@ -229,6 +230,27 @@ async fn main() {
         };
 
         run_hatch_pipeline(new_project_name, file_contents);
+
+    } else if let Some(sub_m) = cmd_args.subcommand_matches("shipyard") {
+        let enabled_by_flag = sub_m.get_flag("experimental");
+        let enabled_by_env = env::var("CARGO_AI_ENABLE_SHIPYARD")
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false);
+
+        if !(enabled_by_flag || enabled_by_env) {
+            eprintln!("⚠️ Shipyard is experimental and currently hidden.");
+            eprintln!(
+                "To launch it, run `cargo ai shipyard --experimental` or set `CARGO_AI_ENABLE_SHIPYARD=1`."
+            );
+            return;
+        }
+
+        if let Err(e) = shipyard_ui::launch() {
+            eprintln!("❌ Failed to launch Shipyard UI: {e}");
+        }
 
     } else if let Some(sub_m) = cmd_args.subcommand_matches("account") {
 
