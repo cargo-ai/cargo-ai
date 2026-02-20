@@ -16,14 +16,6 @@ pub struct CommandPlan {
     pub display: String,
 }
 
-pub fn button_label(intent: &CommandIntent) -> &'static str {
-    match intent {
-        CommandIntent::AccountStatus => config::ACCOUNT_STATUS_INTENT_LABEL,
-        CommandIntent::AccountRegister { .. } => "Run `account register`",
-        CommandIntent::AccountConfirm { .. } => "Run `account confirm`",
-    }
-}
-
 pub fn command_plan(intent: &CommandIntent) -> CommandPlan {
     match intent {
         CommandIntent::AccountStatus => account_status_plan(),

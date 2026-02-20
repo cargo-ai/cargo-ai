@@ -1,52 +1,137 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
-use crate::shipyard_ui::assets::LoadedAssets;
+use slint::{ComponentHandle, Timer};
+
 use crate::shipyard_ui::config;
-use crate::shipyard_ui::layout;
 use crate::shipyard_ui::runtime::commands::{self, CommandIntent};
 use crate::shipyard_ui::runtime::events::{RunStatus, StreamKind, TerminalEvent};
 use crate::shipyard_ui::runtime::executor;
 use crate::shipyard_ui::state;
-use crate::shipyard_ui::widgets::account_onboarding::{AccountSetupAction, AccountSetupState};
+use crate::shipyard_ui::ui;
 
-pub struct ShipyardApp {
+#[derive(Clone, Copy)]
+enum AccountSetupState {
+    Checking,
+    NeedsSetup,
+    SignedIn,
+    Unknown,
+}
+
+impl AccountSetupState {
+    fn status_text(self) -> &'static str {
+        match self {
+            Self::Checking => "Checking account status...",
+            Self::NeedsSetup => "Account setup required (register, confirm, then status).",
+            Self::SignedIn => "Authenticated. Account is ready.",
+            Self::Unknown => "Status uncertain. Run account status to verify current session.",
+        }
+    }
+}
+
+pub fn launch() -> Result<(), String> {
+    let window = ui::ShipyardWindow::new().map_err(|error| error.to_string())?;
+    let (event_tx, event_rx) = mpsc::channel();
+
+    let controller = Rc::new(RefCell::new(ShipyardController::new(
+        window.as_weak(),
+        event_tx,
+        event_rx,
+    )));
+
+    wire_callbacks(&window, &controller);
+
+    controller.borrow_mut().sync_ui();
+    controller
+        .borrow_mut()
+        .run_intent(CommandIntent::AccountStatus);
+
+    let poll_timer = Timer::default();
+    let poll_controller = controller.clone();
+    poll_timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(config::REPAINT_INTERVAL_MS),
+        move || {
+            poll_controller.borrow_mut().flush_events();
+        },
+    );
+
+    window.run().map_err(|error| error.to_string())
+}
+
+fn wire_callbacks(window: &ui::ShipyardWindow, controller: &Rc<RefCell<ShipyardController>>) {
+    let status_controller = controller.clone();
+    window.on_run_status(move || {
+        status_controller
+            .borrow_mut()
+            .run_intent(CommandIntent::AccountStatus);
+    });
+
+    let register_controller = controller.clone();
+    window.on_run_register(move |email| {
+        let email = email.trim();
+        if email.is_empty() {
+            return;
+        }
+        register_controller
+            .borrow_mut()
+            .run_intent(CommandIntent::AccountRegister {
+                email: email.to_string(),
+            });
+    });
+
+    let confirm_controller = controller.clone();
+    window.on_run_confirm(move |code| {
+        let code = code.trim();
+        if code.is_empty() {
+            return;
+        }
+        confirm_controller
+            .borrow_mut()
+            .run_intent(CommandIntent::AccountConfirm {
+                code: code.to_string(),
+            });
+    });
+
+    let ratio_controller = controller.clone();
+    window.on_execution_panel_ratio_changed(move |ratio| {
+        ratio_controller
+            .borrow_mut()
+            .set_execution_panel_ratio(ratio);
+    });
+}
+
+struct ShipyardController {
+    window: slint::Weak<ui::ShipyardWindow>,
     output_lines: Vec<String>,
     current_run_output_lines: Vec<String>,
     status: RunStatus,
     last_command: String,
     active_intent: Option<CommandIntent>,
-    auto_started: bool,
-    execution_panel_height: Option<f32>,
-    last_saved_execution_panel_height: Option<f32>,
-    loaded_assets: Option<LoadedAssets>,
-    ui_zoom_factor: f32,
     account_setup_state: AccountSetupState,
-    account_email_input: String,
-    account_code_input: String,
+    execution_panel_ratio: f32,
     event_tx: Sender<TerminalEvent>,
     event_rx: Receiver<TerminalEvent>,
 }
 
-impl ShipyardApp {
-    pub fn new() -> Self {
-        let (event_tx, event_rx) = mpsc::channel();
-        let loaded_execution_panel_height = state::load_execution_panel_height();
-
+impl ShipyardController {
+    fn new(
+        window: slint::Weak<ui::ShipyardWindow>,
+        event_tx: Sender<TerminalEvent>,
+        event_rx: Receiver<TerminalEvent>,
+    ) -> Self {
         Self {
+            window,
             output_lines: Vec::new(),
             current_run_output_lines: Vec::new(),
             status: RunStatus::Idle,
             last_command: String::new(),
             active_intent: None,
-            auto_started: false,
-            execution_panel_height: loaded_execution_panel_height,
-            last_saved_execution_panel_height: loaded_execution_panel_height,
-            loaded_assets: None,
-            ui_zoom_factor: 1.0,
             account_setup_state: AccountSetupState::Checking,
-            account_email_input: String::new(),
-            account_code_input: String::new(),
+            execution_panel_ratio: state::load_execution_panel_ratio()
+                .unwrap_or(config::EXECUTION_PANEL_DEFAULT_RATIO),
             event_tx,
             event_rx,
         }
@@ -62,13 +147,17 @@ impl ShipyardApp {
         self.status = RunStatus::Running;
         self.current_run_output_lines.clear();
         self.active_intent = Some(intent);
-        self.output_lines.push(format!("$ {}", self.last_command));
+        self.push_output_line(format!("$ {}", self.last_command));
 
         executor::spawn_command(plan, self.event_tx.clone());
+        self.sync_ui();
     }
 
     fn flush_events(&mut self) {
+        let mut saw_update = false;
+
         while let Ok(event) = self.event_rx.try_recv() {
+            saw_update = true;
             match event {
                 TerminalEvent::Output { stream, line } => {
                     let stream_name = match stream {
@@ -77,7 +166,7 @@ impl ShipyardApp {
                     };
                     let formatted = format!("{stream_name} | {line}");
                     self.current_run_output_lines.push(formatted.clone());
-                    self.output_lines.push(formatted);
+                    self.push_output_line(formatted);
                 }
                 TerminalEvent::Finished { success, code } => {
                     self.status = if success {
@@ -94,13 +183,17 @@ impl ShipyardApp {
                     self.status = RunStatus::SpawnError(message.clone());
                     let formatted = format!("stderr | {message}");
                     self.current_run_output_lines.push(formatted.clone());
-                    self.output_lines.push(formatted);
+                    self.push_output_line(formatted);
 
                     if let Some(intent) = self.active_intent.take() {
                         self.handle_intent_finished(intent, false);
                     }
                 }
             }
+        }
+
+        if saw_update {
+            self.sync_ui();
         }
     }
 
@@ -117,7 +210,10 @@ impl ShipyardApp {
                 }
             }
             CommandIntent::AccountConfirm { .. } => {
-                self.account_code_input.clear();
+                if let Some(window) = self.window.upgrade() {
+                    window.set_account_code("".into());
+                }
+
                 if success {
                     self.run_intent(CommandIntent::AccountStatus);
                 } else {
@@ -127,110 +223,66 @@ impl ShipyardApp {
         }
     }
 
-    fn persist_panel_height_if_stable(
-        &mut self,
-        context: &eframe::egui::Context,
-        execution_panel_height: f32,
-    ) {
-        let is_pointer_down = context.input(|input_state| input_state.pointer.any_down());
-        if is_pointer_down {
+    fn set_execution_panel_ratio(&mut self, ratio: f32) {
+        let clamped = config::clamp_execution_panel_ratio(ratio);
+        if (self.execution_panel_ratio - clamped).abs() < 0.0005 {
             return;
         }
 
-        let should_write = self
-            .last_saved_execution_panel_height
-            .map(|saved| {
-                (saved - execution_panel_height).abs()
-                    >= config::EXECUTION_PANEL_PERSIST_WRITE_THRESHOLD
-            })
-            .unwrap_or(true);
-
-        if should_write && state::save_execution_panel_height(execution_panel_height).is_ok() {
-            self.last_saved_execution_panel_height = Some(execution_panel_height);
-        }
+        self.execution_panel_ratio = clamped;
+        let _ = state::save_execution_panel_ratio(clamped);
+        self.sync_ui();
     }
-}
 
-impl eframe::App for ShipyardApp {
-    fn update(&mut self, context: &eframe::egui::Context, _frame: &mut eframe::Frame) {
-        self.flush_events();
-        self.apply_zoom_for_display(context);
-
-        let viewport_height = context.screen_rect().height();
-        let panel_max_height = config::execution_panel_max_height(viewport_height);
-        let panel_default_height = self
-            .execution_panel_height
-            .unwrap_or_else(|| config::execution_panel_default_height(viewport_height));
-        let panel_default_height = clamp_panel_height(panel_default_height, viewport_height);
-
-        if !self.auto_started {
-            self.auto_started = true;
-            self.run_intent(CommandIntent::AccountStatus);
-        }
-
-        if self.status.is_running() {
-            context.request_repaint_after(Duration::from_millis(config::REPAINT_INTERVAL_MS));
-        }
-
-        let loaded_assets = self
-            .loaded_assets
-            .get_or_insert_with(|| LoadedAssets::load(context));
-
-        let result = layout::draw(
-            context,
-            &self.status,
-            commands::button_label(&CommandIntent::AccountStatus),
-            &self.last_command,
-            &self.output_lines,
-            panel_default_height,
-            panel_max_height,
-            loaded_assets.logo_color.as_ref(),
-            loaded_assets.logo_bw.as_ref(),
-            self.account_setup_state,
-            &mut self.account_email_input,
-            &mut self.account_code_input,
-        );
-
-        if let Some(observed_height) = result.execution_panel_height {
-            let clamped_height = clamp_panel_height(observed_height, viewport_height);
-            self.execution_panel_height = Some(clamped_height);
-            self.persist_panel_height_if_stable(context, clamped_height);
-        }
-
-        if let Some(action) = result.account_setup_action {
-            match action {
-                AccountSetupAction::RunStatus => self.run_intent(CommandIntent::AccountStatus),
-                AccountSetupAction::Register { email } => {
-                    self.run_intent(CommandIntent::AccountRegister { email })
-                }
-                AccountSetupAction::Confirm { code } => {
-                    self.run_intent(CommandIntent::AccountConfirm { code })
-                }
-            }
-        }
-    }
-}
-
-impl ShipyardApp {
-    fn apply_zoom_for_display(&mut self, context: &eframe::egui::Context) {
-        let pixels_per_point = context.pixels_per_point();
-        let target_zoom = if pixels_per_point < config::LOW_DPI_PPP_THRESHOLD {
-            config::LOW_DPI_ZOOM_FACTOR
-        } else {
-            1.0
+    fn sync_ui(&mut self) {
+        let Some(window) = self.window.upgrade() else {
+            return;
         };
 
-        if (self.ui_zoom_factor - target_zoom).abs() >= 0.01 {
-            context.set_zoom_factor(target_zoom);
-            self.ui_zoom_factor = target_zoom;
+        let (status_label, status_kind) = status_view(&self.status);
+
+        window.set_status_label(status_label.into());
+        window.set_status_kind(status_kind);
+        window.set_command_running(self.status.is_running());
+        window.set_last_command(self.last_command.clone().into());
+        window.set_account_status_text(self.account_setup_state.status_text().into());
+        window.set_account_ready(matches!(
+            self.account_setup_state,
+            AccountSetupState::SignedIn
+        ));
+        window.set_terminal_output(self.output_lines.join("\n").into());
+        window.set_execution_panel_ratio(self.execution_panel_ratio);
+    }
+
+    fn push_output_line(&mut self, line: String) {
+        self.output_lines.push(line);
+        if self.output_lines.len() > config::MAX_TERMINAL_LINES {
+            let overflow = self.output_lines.len() - config::MAX_TERMINAL_LINES;
+            self.output_lines.drain(0..overflow);
         }
     }
 }
 
-fn clamp_panel_height(height: f32, viewport_height: f32) -> f32 {
-    height
-        .max(config::EXECUTION_PANEL_MIN_HEIGHT)
-        .min(config::execution_panel_max_height(viewport_height))
+fn status_view(status: &RunStatus) -> (String, i32) {
+    match status {
+        RunStatus::Idle => ("idle".to_string(), 0),
+        RunStatus::Running => ("running".to_string(), 1),
+        RunStatus::Succeeded(code) => {
+            if let Some(code) = code {
+                (format!("success (exit {code})"), 2)
+            } else {
+                ("success".to_string(), 2)
+            }
+        }
+        RunStatus::Failed(code) => {
+            if let Some(code) = code {
+                (format!("failed (exit {code})"), 3)
+            } else {
+                ("failed".to_string(), 3)
+            }
+        }
+        RunStatus::SpawnError(message) => (format!("spawn error: {message}"), 4),
+    }
 }
 
 fn derive_account_setup_state(lines: &[String], success: bool) -> AccountSetupState {

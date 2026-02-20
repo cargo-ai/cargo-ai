@@ -14,7 +14,7 @@ These rules apply to work under `cargo-ai/src/shipyard_ui/`.
 - Do not spread Shipyard-specific behavior into unrelated modules unless explicitly requested.
 
 ## Architecture Expectations
-- Keep module responsibilities clear (`app`, `config`, `theme`, `layout`, `runtime`, `widgets`).
+- Keep module responsibilities clear (`app`, `ui`, `config`, `state`, `runtime`).
 - Keep tunable UI values centralized in `config.rs`.
 - Keep runtime command intents explicit and allowlisted (no free-form command execution model).
 
