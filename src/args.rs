@@ -270,6 +270,23 @@ pub fn build_cli() -> ArgMatches {
                                         .help("Include archived agents (applies to listing your own agents)")
                                         .action(clap::ArgAction::SetTrue)
                                 )
+                                .arg(
+                                    Arg::new("limit")
+                                        .long("limit")
+                                        .help("Maximum number of agents to display (default: 20)")
+                                        .required(false)
+                                        .value_name("N")
+                                        .num_args(1)
+                                        .value_parser(clap::value_parser!(u32).range(1..))
+                                        .conflicts_with("all")
+                                )
+                                .arg(
+                                    Arg::new("all")
+                                        .long("all")
+                                        .help("Display all returned agents")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .conflicts_with("limit")
+                                )
                         )
                         .subcommand(
                             Command::new("push")

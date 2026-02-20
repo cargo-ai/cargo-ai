@@ -951,6 +951,7 @@ async fn main() {
                 List {
                     owner_handle: Option<String>,
                     include_archived: bool,
+                    display_limit: Option<usize>,
                 },
                 Push {
                     name: String,
@@ -985,11 +986,18 @@ async fn main() {
             }
 
             let agents_command = if let Some(list_m) = agents_m.subcommand_matches("list") {
+                let display_limit = if list_m.get_flag("all") {
+                    None
+                } else {
+                    Some(list_m.get_one::<u32>("limit").copied().unwrap_or(20) as usize)
+                };
+
                 AgentsCommand::List {
                     owner_handle: list_m
                         .get_one::<String>("owner_handle")
                         .map(|s| s.to_string()),
                     include_archived: list_m.get_flag("include_archived"),
+                    display_limit,
                 }
             } else if let Some(push_m) = agents_m.subcommand_matches("push") {
                 // TODO: Keep future push shortcuts routed through this branch so
@@ -1225,6 +1233,7 @@ async fn main() {
                 AgentsCommand::List {
                     owner_handle,
                     include_archived,
+                    ..
                 } => match infra_api::account::agents::list_agents(
                     INFRA_BASE_URL,
                     access_token_owned.as_str(),
@@ -1417,6 +1426,7 @@ async fn main() {
                     AgentsCommand::List {
                         owner_handle,
                         include_archived,
+                        ..
                     } => match infra_api::account::agents::list_agents(
                         INFRA_BASE_URL,
                         retry_access_token.as_str(),
@@ -1654,12 +1664,26 @@ async fn main() {
                 }
             }
 
+            let list_display_truncation = match &agents_command {
+                AgentsCommand::List { display_limit, .. } => {
+                    apply_agents_list_display_limit(&mut response, *display_limit)
+                }
+                _ => None,
+            };
+
             // 6. Render backend-provided UI when available, fallback to raw JSON.
             if !ui::account_status::render_backend_ui(&response) {
                 match serde_json::to_string_pretty(&response) {
                     Ok(pretty) => println!("{pretty}"),
                     Err(_) => println!("{response:?}"),
                 }
+            }
+
+            if let Some((shown, total)) = list_display_truncation {
+                println!(
+                    "ℹ️ Showing {} of {} agents. Use --limit <N> or --all to adjust output.",
+                    shown, total
+                );
             }
         } else {
             println!("No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', 'cargo ai account mail test [--subject <text>] [--text <text>]', 'cargo ai account handle [--set <handle>]', or 'cargo ai account agents <list|push|pull|hatch|visibility|archive>'.");
@@ -1885,6 +1909,68 @@ fn fetch_from_registry(name: &str) -> Result<String, Error> {
     }
 
     Ok(text)
+}
+
+fn apply_agents_list_display_limit(
+    response: &mut serde_json::Value,
+    display_limit: Option<usize>,
+) -> Option<(usize, usize)> {
+    let limit = display_limit?;
+    let response_type = response.get("type").and_then(|v| v.as_str());
+    if response_type != Some("account_agents_list_succeeded") {
+        return None;
+    }
+
+    let agents = response.get_mut("agents").and_then(|v| v.as_array_mut())?;
+    let total = agents.len();
+    if total <= limit {
+        return None;
+    }
+
+    agents.truncate(limit);
+    let shown = agents.len();
+
+    if let Some(ui) = response.get_mut("ui") {
+        if let Some(summary) = ui.get_mut("summary") {
+            *summary = serde_json::json!(format!("Showing {shown} of {total} agents."));
+        }
+
+        if let Some(sections) = ui.get_mut("sections").and_then(|v| v.as_array_mut()) {
+            for section in sections.iter_mut() {
+                let section_type = section.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if section_type == "list" {
+                    if let Some(items) = section.get_mut("items").and_then(|v| v.as_array_mut()) {
+                        items.truncate(limit);
+                    }
+                }
+
+                if section_type == "kv" {
+                    if let Some(items) = section.get_mut("items").and_then(|v| v.as_array_mut()) {
+                        for item in items.iter_mut() {
+                            let is_count = item
+                                .get("label")
+                                .and_then(|v| v.as_str())
+                                .map(|label| label.eq_ignore_ascii_case("count"))
+                                .unwrap_or(false);
+
+                            if is_count {
+                                item["value"] = serde_json::json!(shown);
+                            }
+                        }
+                    }
+                }
+            }
+
+            sections.push(serde_json::json!({
+                "type": "notice",
+                "message": format!(
+                    "Showing {shown} of {total} agents. Use --limit <N> or --all to adjust output."
+                )
+            }));
+        }
+    }
+
+    Some((shown, total))
 }
 
 async fn fetch_status_for_register_guard(
