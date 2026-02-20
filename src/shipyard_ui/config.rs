@@ -28,6 +28,13 @@ pub const ACCOUNT_STATUS_VERBOSE_ARGS: &[&str] = &["account", "status"];
 pub const ACCOUNT_REGISTER_VERBOSE_PREFIX_ARGS: &[&str] = &["account", "register"];
 pub const ACCOUNT_CONFIRM_VERBOSE_PREFIX_ARGS: &[&str] = &["account", "confirm"];
 
+pub const ONBOARDING_TITLE_FONT_SIZE: f32 = 34.0;
+pub const ONBOARDING_STATUS_FONT_SIZE: f32 = 22.0;
+pub const ONBOARDING_SUBTITLE_FONT_SIZE: f32 = 18.0;
+pub const ONBOARDING_SECTION_FONT_SIZE: f32 = 30.0;
+pub const ONBOARDING_INPUT_FONT_SIZE: f32 = 24.0;
+pub const ONBOARDING_BUTTON_FONT_SIZE: f32 = 24.0;
+
 pub fn execution_panel_default_height(viewport_height: f32) -> f32 {
     let max_height = execution_panel_max_height(viewport_height);
     (viewport_height * EXECUTION_PANEL_DEFAULT_RATIO)

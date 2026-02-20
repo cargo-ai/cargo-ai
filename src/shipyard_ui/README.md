@@ -37,6 +37,13 @@ Adjust these in `config.rs`:
 - terminal look:
   - `TERMINAL_FONT_SIZE`
   - `TERMINAL_CORNER_RADIUS`
+- onboarding typography:
+  - `ONBOARDING_TITLE_FONT_SIZE`
+  - `ONBOARDING_STATUS_FONT_SIZE`
+  - `ONBOARDING_SUBTITLE_FONT_SIZE`
+  - `ONBOARDING_SECTION_FONT_SIZE`
+  - `ONBOARDING_INPUT_FONT_SIZE`
+  - `ONBOARDING_BUTTON_FONT_SIZE`
 
 ## Runtime Behavior
 - Shipyard uses allowlisted command intents (no free-form command entry).

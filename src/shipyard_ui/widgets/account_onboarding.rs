@@ -1,4 +1,6 @@
-use eframe::egui::{self, Color32, RichText, Ui};
+use eframe::egui::{self, Color32, FontFamily, FontId, RichText, TextStyle, Ui};
+
+use crate::shipyard_ui::config;
 
 #[derive(Clone, Copy)]
 pub enum AccountSetupState {
@@ -22,6 +24,13 @@ pub fn draw(
     is_command_running: bool,
 ) -> Option<AccountSetupAction> {
     let mut action = None;
+    let onboarding_input_style = TextStyle::Name("shipyard_onboarding_input".into());
+    let mut scoped_style = ui.style().as_ref().clone();
+    scoped_style.text_styles.insert(
+        onboarding_input_style.clone(),
+        FontId::new(config::ONBOARDING_INPUT_FONT_SIZE, FontFamily::Monospace),
+    );
+    ui.set_style(scoped_style);
 
     egui::Frame::new()
         .fill(Color32::from_rgb(248, 248, 249))
@@ -31,20 +40,25 @@ pub fn draw(
             ui.vertical(|ui| {
                 ui.label(
                     RichText::new("Account Setup")
-                        .size(24.0)
+                        .size(config::ONBOARDING_TITLE_FONT_SIZE)
                         .color(Color32::from_rgb(43, 47, 54))
                         .strong(),
                 );
 
                 let (status_text, status_color) = status_badge(account_state);
-                ui.label(RichText::new(status_text).color(status_color).strong());
+                ui.label(
+                    RichText::new(status_text)
+                        .size(config::ONBOARDING_STATUS_FONT_SIZE)
+                        .color(status_color)
+                        .strong(),
+                );
                 ui.add_space(4.0);
 
                 ui.label(
                     RichText::new(
                         "Set up your Cargo AI account directly from Shipyard using explicit CLI flows.",
                     )
-                    .size(14.0)
+                    .size(config::ONBOARDING_SUBTITLE_FONT_SIZE)
                     .color(Color32::from_rgb(86, 93, 103)),
                 );
                 ui.add_space(14.0);
@@ -52,9 +66,14 @@ pub fn draw(
                 ui.separator();
                 ui.add_space(10.0);
 
-                ui.label(RichText::new("1) Register Email").strong());
+                ui.label(
+                    RichText::new("1) Register Email")
+                        .size(config::ONBOARDING_SECTION_FONT_SIZE)
+                        .strong(),
+                );
                 ui.add(
                     egui::TextEdit::singleline(email_input)
+                        .font(onboarding_input_style.clone())
                         .hint_text("you@example.com")
                         .desired_width(f32::INFINITY),
                 );
@@ -63,6 +82,7 @@ pub fn draw(
                         !is_command_running,
                         egui::Button::new(
                             RichText::new("Run account register")
+                                .size(config::ONBOARDING_BUTTON_FONT_SIZE)
                                 .color(Color32::from_rgb(42, 47, 54)),
                         ),
                     )
@@ -78,9 +98,14 @@ pub fn draw(
 
                 ui.add_space(14.0);
 
-                ui.label(RichText::new("2) Confirm Code").strong());
+                ui.label(
+                    RichText::new("2) Confirm Code")
+                        .size(config::ONBOARDING_SECTION_FONT_SIZE)
+                        .strong(),
+                );
                 ui.add(
                     egui::TextEdit::singleline(code_input)
+                        .font(onboarding_input_style.clone())
                         .hint_text("temporary code from email")
                         .desired_width(f32::INFINITY),
                 );
@@ -89,6 +114,7 @@ pub fn draw(
                         !is_command_running,
                         egui::Button::new(
                             RichText::new("Run account confirm")
+                                .size(config::ONBOARDING_BUTTON_FONT_SIZE)
                                 .color(Color32::from_rgb(42, 47, 54)),
                         ),
                     )
@@ -104,12 +130,17 @@ pub fn draw(
                 }
 
                 ui.add_space(14.0);
-                ui.label(RichText::new("3) Verify Session").strong());
+                ui.label(
+                    RichText::new("3) Verify Session")
+                        .size(config::ONBOARDING_SECTION_FONT_SIZE)
+                        .strong(),
+                );
                 if ui
                     .add_enabled(
                         !is_command_running,
                         egui::Button::new(
                             RichText::new("Run account status")
+                                .size(config::ONBOARDING_BUTTON_FONT_SIZE)
                                 .color(Color32::from_rgb(42, 47, 54)),
                         ),
                     )
