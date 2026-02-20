@@ -24,9 +24,9 @@ Adjust these in `config.rs`:
   - `WINDOW_MIN_WIDTH`
   - `WINDOW_MIN_HEIGHT`
 - execution panel sizing:
-  - `EXECUTION_PANEL_DEFAULT_HEIGHT`
+  - `EXECUTION_PANEL_DEFAULT_RATIO`
   - `EXECUTION_PANEL_MIN_HEIGHT`
-  - `EXECUTION_PANEL_TARGET_RATIO`
+  - `EXECUTION_PANEL_MAX_RATIO`
 - update timing:
   - `REPAINT_INTERVAL_MS`
 - terminal look:
@@ -36,6 +36,7 @@ Adjust these in `config.rs`:
 ## Runtime Behavior
 - Shipyard uses allowlisted command intents (no free-form command entry).
 - Current default intent runs the verbose command `profile list`.
+- First-launch panel split is ratio-based; user resize is persisted for future launches.
 - Execution feed is read-only and shows:
   - command line
   - stdout/stderr lines
@@ -46,6 +47,7 @@ Adjust these in `config.rs`:
 - No stdin passthrough to child processes (`Stdio::null`).
 - No interactive terminal input in UI (review-only output feed).
 - Keep command intents allowlisted in `runtime/commands.rs`.
+- Persisted panel height state is stored at `$XDG_CONFIG_HOME/cargo-ai/shipyard_ui_state.json` (or platform-equivalent config directory).
 
 ## Extension Rules
 - Keep `src/args.rs` and `src/main.rs` as thin dispatch-only entrypoints.

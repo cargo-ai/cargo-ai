@@ -6,6 +6,7 @@ use crate::shipyard_ui::widgets::{execution_feed, title_bar, workspace};
 
 pub struct LayoutResult {
     pub run_default_intent: bool,
+    pub execution_panel_height: Option<f32>,
 }
 
 pub fn draw(
@@ -14,8 +15,11 @@ pub fn draw(
     command_label: &str,
     last_command: &str,
     output_lines: &[String],
+    execution_panel_default_height: f32,
+    execution_panel_max_height: f32,
 ) -> LayoutResult {
     let mut run_default_intent = false;
+    let mut execution_panel_height = None;
 
     egui::TopBottomPanel::top("shipyard_title")
         .exact_height(config::TITLE_PANEL_HEIGHT)
@@ -24,24 +28,23 @@ pub fn draw(
         });
 
     egui::TopBottomPanel::bottom("shipyard_execution")
-        .default_height(config::EXECUTION_PANEL_DEFAULT_HEIGHT)
+        .default_height(execution_panel_default_height)
         .min_height(config::EXECUTION_PANEL_MIN_HEIGHT)
+        .max_height(execution_panel_max_height)
         .resizable(true)
         .show(context, |ui| {
-            let panel_height = ui
-                .available_height()
-                .max(config::EXECUTION_PANEL_MIN_HEIGHT);
-            let target_height = panel_height * config::EXECUTION_PANEL_TARGET_RATIO;
-            ui.set_min_height(target_height.max(config::EXECUTION_PANEL_MIN_HEIGHT));
-
             let result =
                 execution_feed::draw(ui, status, command_label, last_command, output_lines);
             run_default_intent = result.run_clicked;
+            execution_panel_height = Some(ui.max_rect().height());
         });
 
     egui::CentralPanel::default().show(context, |ui| {
         workspace::draw(ui);
     });
 
-    LayoutResult { run_default_intent }
+    LayoutResult {
+        run_default_intent,
+        execution_panel_height,
+    }
 }

@@ -9,9 +9,10 @@ pub const WINDOW_MIN_HEIGHT: f32 = 560.0;
 pub const REPAINT_INTERVAL_MS: u64 = 40;
 
 pub const TITLE_PANEL_HEIGHT: f32 = 52.0;
-pub const EXECUTION_PANEL_DEFAULT_HEIGHT: f32 = 250.0;
 pub const EXECUTION_PANEL_MIN_HEIGHT: f32 = 170.0;
-pub const EXECUTION_PANEL_TARGET_RATIO: f32 = 0.33;
+pub const EXECUTION_PANEL_DEFAULT_RATIO: f32 = 0.33;
+pub const EXECUTION_PANEL_MAX_RATIO: f32 = 0.55;
+pub const EXECUTION_PANEL_PERSIST_WRITE_THRESHOLD: f32 = 1.0;
 
 pub const TERMINAL_FONT_SIZE: f32 = 12.5;
 pub const TERMINAL_CORNER_RADIUS: u8 = 8;
@@ -19,6 +20,17 @@ pub const WORKSPACE_CORNER_RADIUS: u8 = 12;
 
 pub const PROFILE_LIST_INTENT_LABEL: &str = "Run `profile list`";
 pub const PROFILE_LIST_VERBOSE_ARGS: &[&str] = &["profile", "list"];
+
+pub fn execution_panel_default_height(viewport_height: f32) -> f32 {
+    let max_height = execution_panel_max_height(viewport_height);
+    (viewport_height * EXECUTION_PANEL_DEFAULT_RATIO)
+        .max(EXECUTION_PANEL_MIN_HEIGHT)
+        .min(max_height)
+}
+
+pub fn execution_panel_max_height(viewport_height: f32) -> f32 {
+    (viewport_height * EXECUTION_PANEL_MAX_RATIO).max(EXECUTION_PANEL_MIN_HEIGHT)
+}
 
 pub fn native_options() -> eframe::NativeOptions {
     eframe::NativeOptions {
