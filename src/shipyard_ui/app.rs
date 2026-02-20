@@ -8,15 +8,21 @@ use crate::shipyard_ui::runtime::commands::{self, CommandIntent};
 use crate::shipyard_ui::runtime::events::{RunStatus, StreamKind, TerminalEvent};
 use crate::shipyard_ui::runtime::executor;
 use crate::shipyard_ui::state;
+use crate::shipyard_ui::widgets::account_onboarding::{AccountSetupAction, AccountSetupState};
 
 pub struct ShipyardApp {
     output_lines: Vec<String>,
+    current_run_output_lines: Vec<String>,
     status: RunStatus,
     last_command: String,
+    active_intent: Option<CommandIntent>,
     auto_started: bool,
     execution_panel_height: Option<f32>,
     last_saved_execution_panel_height: Option<f32>,
     loaded_assets: Option<LoadedAssets>,
+    account_setup_state: AccountSetupState,
+    account_email_input: String,
+    account_code_input: String,
     event_tx: Sender<TerminalEvent>,
     event_rx: Receiver<TerminalEvent>,
 }
@@ -28,12 +34,17 @@ impl ShipyardApp {
 
         Self {
             output_lines: Vec::new(),
+            current_run_output_lines: Vec::new(),
             status: RunStatus::Idle,
             last_command: String::new(),
+            active_intent: None,
             auto_started: false,
             execution_panel_height: loaded_execution_panel_height,
             last_saved_execution_panel_height: loaded_execution_panel_height,
             loaded_assets: None,
+            account_setup_state: AccountSetupState::Checking,
+            account_email_input: String::new(),
+            account_code_input: String::new(),
             event_tx,
             event_rx,
         }
@@ -44,9 +55,11 @@ impl ShipyardApp {
             return;
         }
 
-        let plan = commands::command_plan(intent);
+        let plan = commands::command_plan(&intent);
         self.last_command = plan.display.clone();
         self.status = RunStatus::Running;
+        self.current_run_output_lines.clear();
+        self.active_intent = Some(intent);
         self.output_lines.push(format!("$ {}", self.last_command));
 
         executor::spawn_command(plan, self.event_tx.clone());
@@ -60,7 +73,9 @@ impl ShipyardApp {
                         StreamKind::Stdout => "stdout",
                         StreamKind::Stderr => "stderr",
                     };
-                    self.output_lines.push(format!("{stream_name} | {line}"));
+                    let formatted = format!("{stream_name} | {line}");
+                    self.current_run_output_lines.push(formatted.clone());
+                    self.output_lines.push(formatted);
                 }
                 TerminalEvent::Finished { success, code } => {
                     self.status = if success {
@@ -68,65 +83,48 @@ impl ShipyardApp {
                     } else {
                         RunStatus::Failed(code)
                     };
+
+                    if let Some(intent) = self.active_intent.take() {
+                        self.handle_intent_finished(intent, success);
+                    }
                 }
                 TerminalEvent::SpawnFailed(message) => {
                     self.status = RunStatus::SpawnError(message.clone());
-                    self.output_lines.push(format!("stderr | {message}"));
+                    let formatted = format!("stderr | {message}");
+                    self.current_run_output_lines.push(formatted.clone());
+                    self.output_lines.push(formatted);
+
+                    if let Some(intent) = self.active_intent.take() {
+                        self.handle_intent_finished(intent, false);
+                    }
                 }
             }
         }
     }
-}
 
-impl eframe::App for ShipyardApp {
-    fn update(&mut self, context: &eframe::egui::Context, _frame: &mut eframe::Frame) {
-        self.flush_events();
-
-        let viewport_height = context.screen_rect().height();
-        let panel_max_height = config::execution_panel_max_height(viewport_height);
-        let panel_default_height = self
-            .execution_panel_height
-            .unwrap_or_else(|| config::execution_panel_default_height(viewport_height));
-        let panel_default_height = clamp_panel_height(panel_default_height, viewport_height);
-
-        if !self.auto_started {
-            self.auto_started = true;
-            self.run_intent(CommandIntent::ProfileList);
-        }
-
-        if self.status.is_running() {
-            context.request_repaint_after(Duration::from_millis(config::REPAINT_INTERVAL_MS));
-        }
-
-        let loaded_assets = self
-            .loaded_assets
-            .get_or_insert_with(|| LoadedAssets::load(context));
-
-        let result = layout::draw(
-            context,
-            &self.status,
-            commands::button_label(CommandIntent::ProfileList),
-            &self.last_command,
-            &self.output_lines,
-            panel_default_height,
-            panel_max_height,
-            loaded_assets.logo_color.as_ref(),
-            loaded_assets.logo_bw.as_ref(),
-        );
-
-        if let Some(observed_height) = result.execution_panel_height {
-            let clamped_height = clamp_panel_height(observed_height, viewport_height);
-            self.execution_panel_height = Some(clamped_height);
-            self.persist_panel_height_if_stable(context, clamped_height);
-        }
-
-        if result.run_default_intent {
-            self.run_intent(CommandIntent::ProfileList);
+    fn handle_intent_finished(&mut self, intent: CommandIntent, success: bool) {
+        match intent {
+            CommandIntent::AccountStatus => {
+                self.account_setup_state =
+                    derive_account_setup_state(&self.current_run_output_lines, success);
+            }
+            CommandIntent::AccountRegister { .. } => {
+                self.account_setup_state = AccountSetupState::NeedsSetup;
+                if success {
+                    self.run_intent(CommandIntent::AccountStatus);
+                }
+            }
+            CommandIntent::AccountConfirm { .. } => {
+                self.account_code_input.clear();
+                if success {
+                    self.run_intent(CommandIntent::AccountStatus);
+                } else {
+                    self.account_setup_state = AccountSetupState::Unknown;
+                }
+            }
         }
     }
-}
 
-impl ShipyardApp {
     fn persist_panel_height_if_stable(
         &mut self,
         context: &eframe::egui::Context,
@@ -151,8 +149,96 @@ impl ShipyardApp {
     }
 }
 
+impl eframe::App for ShipyardApp {
+    fn update(&mut self, context: &eframe::egui::Context, _frame: &mut eframe::Frame) {
+        self.flush_events();
+
+        let viewport_height = context.screen_rect().height();
+        let panel_max_height = config::execution_panel_max_height(viewport_height);
+        let panel_default_height = self
+            .execution_panel_height
+            .unwrap_or_else(|| config::execution_panel_default_height(viewport_height));
+        let panel_default_height = clamp_panel_height(panel_default_height, viewport_height);
+
+        if !self.auto_started {
+            self.auto_started = true;
+            self.run_intent(CommandIntent::AccountStatus);
+        }
+
+        if self.status.is_running() {
+            context.request_repaint_after(Duration::from_millis(config::REPAINT_INTERVAL_MS));
+        }
+
+        let loaded_assets = self
+            .loaded_assets
+            .get_or_insert_with(|| LoadedAssets::load(context));
+
+        let result = layout::draw(
+            context,
+            &self.status,
+            commands::button_label(&CommandIntent::AccountStatus),
+            &self.last_command,
+            &self.output_lines,
+            panel_default_height,
+            panel_max_height,
+            loaded_assets.logo_color.as_ref(),
+            loaded_assets.logo_bw.as_ref(),
+            self.account_setup_state,
+            &mut self.account_email_input,
+            &mut self.account_code_input,
+        );
+
+        if let Some(observed_height) = result.execution_panel_height {
+            let clamped_height = clamp_panel_height(observed_height, viewport_height);
+            self.execution_panel_height = Some(clamped_height);
+            self.persist_panel_height_if_stable(context, clamped_height);
+        }
+
+        if let Some(action) = result.account_setup_action {
+            match action {
+                AccountSetupAction::RunStatus => self.run_intent(CommandIntent::AccountStatus),
+                AccountSetupAction::Register { email } => {
+                    self.run_intent(CommandIntent::AccountRegister { email })
+                }
+                AccountSetupAction::Confirm { code } => {
+                    self.run_intent(CommandIntent::AccountConfirm { code })
+                }
+            }
+        }
+    }
+}
+
 fn clamp_panel_height(height: f32, viewport_height: f32) -> f32 {
     height
         .max(config::EXECUTION_PANEL_MIN_HEIGHT)
         .min(config::execution_panel_max_height(viewport_height))
+}
+
+fn derive_account_setup_state(lines: &[String], success: bool) -> AccountSetupState {
+    if !success {
+        return AccountSetupState::Unknown;
+    }
+
+    let output = lines.join("\n").to_lowercase();
+
+    let setup_missing_markers = [
+        "no local config file found",
+        "no account found in config",
+        "no access token found in config",
+        "you must confirm your account first",
+        "run `cargo ai account register <email>` first",
+    ];
+
+    if setup_missing_markers
+        .iter()
+        .any(|marker| output.contains(marker))
+    {
+        return AccountSetupState::NeedsSetup;
+    }
+
+    if output.contains("request failed") || output.contains("spawn error") {
+        return AccountSetupState::Unknown;
+    }
+
+    AccountSetupState::SignedIn
 }

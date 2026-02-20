@@ -16,6 +16,7 @@ The command surface is `cargo ai shipyard`.
 - `runtime/events.rs`: runtime event and status enums.
 - `widgets/title_bar.rs`: top bar rendering.
 - `widgets/workspace.rs`: primary workspace rendering.
+- `widgets/account_onboarding.rs`: account-first setup UI (register/confirm/status path).
 - `widgets/execution_feed.rs`: read-only command feed rendering.
 
 ## Tuning Knobs
@@ -37,7 +38,11 @@ Adjust these in `config.rs`:
 
 ## Runtime Behavior
 - Shipyard uses allowlisted command intents (no free-form command entry).
-- Current default intent runs the verbose command `profile list`.
+- Startup intent runs `account status` and routes workspace to onboarding until authenticated.
+- Onboarding path uses verbose commands:
+  - `account register <email>`
+  - `account confirm <code>`
+  - `account status`
 - First-launch panel split is ratio-based; user resize is persisted for future launches.
 - Title bar and workspace branding render from local Shipyard assets.
 - Execution feed is read-only and shows:

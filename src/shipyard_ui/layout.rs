@@ -2,10 +2,11 @@ use eframe::egui;
 
 use crate::shipyard_ui::config;
 use crate::shipyard_ui::runtime::events::RunStatus;
-use crate::shipyard_ui::widgets::{execution_feed, title_bar, workspace};
+use crate::shipyard_ui::widgets::account_onboarding::{AccountSetupAction, AccountSetupState};
+use crate::shipyard_ui::widgets::{account_onboarding, execution_feed, title_bar, workspace};
 
 pub struct LayoutResult {
-    pub run_default_intent: bool,
+    pub account_setup_action: Option<AccountSetupAction>,
     pub execution_panel_height: Option<f32>,
 }
 
@@ -19,8 +20,11 @@ pub fn draw(
     execution_panel_max_height: f32,
     title_logo: Option<&egui::TextureHandle>,
     workspace_logo: Option<&egui::TextureHandle>,
+    account_setup_state: AccountSetupState,
+    account_email_input: &mut String,
+    account_code_input: &mut String,
 ) -> LayoutResult {
-    let mut run_default_intent = false;
+    let mut account_setup_action = None;
     let mut execution_panel_height = None;
 
     egui::TopBottomPanel::top("shipyard_title")
@@ -37,16 +41,31 @@ pub fn draw(
         .show(context, |ui| {
             let result =
                 execution_feed::draw(ui, status, command_label, last_command, output_lines);
-            run_default_intent = result.run_clicked;
+            if result.run_clicked {
+                account_setup_action = Some(AccountSetupAction::RunStatus);
+            }
             execution_panel_height = Some(ui.max_rect().height());
         });
 
     egui::CentralPanel::default().show(context, |ui| {
-        workspace::draw(ui, workspace_logo);
+        if matches!(account_setup_state, AccountSetupState::SignedIn) {
+            workspace::draw(ui, workspace_logo);
+        } else {
+            let onboarding_action = account_onboarding::draw(
+                ui,
+                account_setup_state,
+                account_email_input,
+                account_code_input,
+                status.is_running(),
+            );
+            if account_setup_action.is_none() {
+                account_setup_action = onboarding_action;
+            }
+        }
     });
 
     LayoutResult {
-        run_default_intent,
+        account_setup_action,
         execution_panel_height,
     }
 }

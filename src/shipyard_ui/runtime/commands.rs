@@ -2,9 +2,11 @@ use std::path::PathBuf;
 
 use crate::shipyard_ui::config;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum CommandIntent {
-    ProfileList,
+    AccountStatus,
+    AccountRegister { email: String },
+    AccountConfirm { code: String },
 }
 
 #[derive(Clone)]
@@ -14,26 +16,52 @@ pub struct CommandPlan {
     pub display: String,
 }
 
-pub fn button_label(intent: CommandIntent) -> &'static str {
+pub fn button_label(intent: &CommandIntent) -> &'static str {
     match intent {
-        CommandIntent::ProfileList => config::PROFILE_LIST_INTENT_LABEL,
+        CommandIntent::AccountStatus => config::ACCOUNT_STATUS_INTENT_LABEL,
+        CommandIntent::AccountRegister { .. } => "Run `account register`",
+        CommandIntent::AccountConfirm { .. } => "Run `account confirm`",
     }
 }
 
-pub fn command_plan(intent: CommandIntent) -> CommandPlan {
+pub fn command_plan(intent: &CommandIntent) -> CommandPlan {
     match intent {
-        CommandIntent::ProfileList => profile_list_plan(),
+        CommandIntent::AccountStatus => account_status_plan(),
+        CommandIntent::AccountRegister { email } => account_register_plan(email),
+        CommandIntent::AccountConfirm { code } => account_confirm_plan(code),
     }
 }
 
-fn profile_list_plan() -> CommandPlan {
-    let args: Vec<String> = config::PROFILE_LIST_VERBOSE_ARGS
+fn account_status_plan() -> CommandPlan {
+    let args: Vec<String> = config::ACCOUNT_STATUS_VERBOSE_ARGS
         .iter()
         .map(|value| value.to_string())
         .collect();
+    plan_with_args(args, None)
+}
 
+fn account_register_plan(email: &str) -> CommandPlan {
+    let mut args: Vec<String> = config::ACCOUNT_REGISTER_VERBOSE_PREFIX_ARGS
+        .iter()
+        .map(|value| value.to_string())
+        .collect();
+    args.push(email.to_string());
+    plan_with_args(args, None)
+}
+
+fn account_confirm_plan(code: &str) -> CommandPlan {
+    let mut args: Vec<String> = config::ACCOUNT_CONFIRM_VERBOSE_PREFIX_ARGS
+        .iter()
+        .map(|value| value.to_string())
+        .collect();
+    args.push(code.to_string());
+    plan_with_args(args, Some("<redacted-code>".to_string()))
+}
+
+fn plan_with_args(args: Vec<String>, redacted_last_arg: Option<String>) -> CommandPlan {
     if let Ok(current_exe) = std::env::current_exe() {
-        let display = format!("{} {}", current_exe.display(), args.join(" "));
+        let display_args = display_args(&args, redacted_last_arg);
+        let display = format!("{} {}", current_exe.display(), display_args.join(" "));
         return CommandPlan {
             program: current_exe,
             args,
@@ -42,10 +70,21 @@ fn profile_list_plan() -> CommandPlan {
     }
 
     let fallback_program = PathBuf::from("cargo-ai");
-    let display = format!("{} {}", fallback_program.display(), args.join(" "));
+    let display_args = display_args(&args, redacted_last_arg);
+    let display = format!("{} {}", fallback_program.display(), display_args.join(" "));
     CommandPlan {
         program: fallback_program,
         args,
         display,
     }
+}
+
+fn display_args(args: &[String], redacted_last_arg: Option<String>) -> Vec<String> {
+    let mut values = args.to_vec();
+    if let Some(replacement) = redacted_last_arg {
+        if let Some(last) = values.last_mut() {
+            *last = replacement;
+        }
+    }
+    values
 }

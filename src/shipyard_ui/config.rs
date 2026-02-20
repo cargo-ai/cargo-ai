@@ -21,8 +21,10 @@ pub const TITLE_LOGO_HEIGHT: f32 = 24.0;
 pub const WORKSPACE_LOGO_HEIGHT: f32 = 140.0;
 pub const WORKSPACE_LOGO_ALPHA: u8 = 50;
 
-pub const PROFILE_LIST_INTENT_LABEL: &str = "Run `profile list`";
-pub const PROFILE_LIST_VERBOSE_ARGS: &[&str] = &["profile", "list"];
+pub const ACCOUNT_STATUS_INTENT_LABEL: &str = "Run `account status`";
+pub const ACCOUNT_STATUS_VERBOSE_ARGS: &[&str] = &["account", "status"];
+pub const ACCOUNT_REGISTER_VERBOSE_PREFIX_ARGS: &[&str] = &["account", "register"];
+pub const ACCOUNT_CONFIRM_VERBOSE_PREFIX_ARGS: &[&str] = &["account", "confirm"];
 
 pub fn execution_panel_default_height(viewport_height: f32) -> f32 {
     let max_height = execution_panel_max_height(viewport_height);
