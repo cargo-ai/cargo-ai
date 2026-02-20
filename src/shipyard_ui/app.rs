@@ -20,6 +20,7 @@ pub struct ShipyardApp {
     execution_panel_height: Option<f32>,
     last_saved_execution_panel_height: Option<f32>,
     loaded_assets: Option<LoadedAssets>,
+    ui_zoom_factor: f32,
     account_setup_state: AccountSetupState,
     account_email_input: String,
     account_code_input: String,
@@ -42,6 +43,7 @@ impl ShipyardApp {
             execution_panel_height: loaded_execution_panel_height,
             last_saved_execution_panel_height: loaded_execution_panel_height,
             loaded_assets: None,
+            ui_zoom_factor: 1.0,
             account_setup_state: AccountSetupState::Checking,
             account_email_input: String::new(),
             account_code_input: String::new(),
@@ -152,6 +154,7 @@ impl ShipyardApp {
 impl eframe::App for ShipyardApp {
     fn update(&mut self, context: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         self.flush_events();
+        self.apply_zoom_for_display(context);
 
         let viewport_height = context.screen_rect().height();
         let panel_max_height = config::execution_panel_max_height(viewport_height);
@@ -204,6 +207,22 @@ impl eframe::App for ShipyardApp {
                     self.run_intent(CommandIntent::AccountConfirm { code })
                 }
             }
+        }
+    }
+}
+
+impl ShipyardApp {
+    fn apply_zoom_for_display(&mut self, context: &eframe::egui::Context) {
+        let pixels_per_point = context.pixels_per_point();
+        let target_zoom = if pixels_per_point < config::LOW_DPI_PPP_THRESHOLD {
+            config::LOW_DPI_ZOOM_FACTOR
+        } else {
+            1.0
+        };
+
+        if (self.ui_zoom_factor - target_zoom).abs() >= 0.01 {
+            context.set_zoom_factor(target_zoom);
+            self.ui_zoom_factor = target_zoom;
         }
     }
 }

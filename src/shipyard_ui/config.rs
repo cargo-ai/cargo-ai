@@ -7,6 +7,8 @@ pub const WINDOW_MIN_WIDTH: f32 = 900.0;
 pub const WINDOW_MIN_HEIGHT: f32 = 560.0;
 
 pub const REPAINT_INTERVAL_MS: u64 = 40;
+pub const LOW_DPI_PPP_THRESHOLD: f32 = 1.35;
+pub const LOW_DPI_ZOOM_FACTOR: f32 = 1.1;
 
 pub const TITLE_PANEL_HEIGHT: f32 = 52.0;
 pub const EXECUTION_PANEL_MIN_HEIGHT: f32 = 170.0;

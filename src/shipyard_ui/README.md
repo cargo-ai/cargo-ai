@@ -32,6 +32,8 @@ Adjust these in `config.rs`:
   - `EXECUTION_PANEL_MAX_RATIO`
 - update timing:
   - `REPAINT_INTERVAL_MS`
+  - `LOW_DPI_PPP_THRESHOLD`
+  - `LOW_DPI_ZOOM_FACTOR`
 - terminal look:
   - `TERMINAL_FONT_SIZE`
   - `TERMINAL_CORNER_RADIUS`
@@ -45,6 +47,7 @@ Adjust these in `config.rs`:
   - `account status`
 - First-launch panel split is ratio-based; user resize is persisted for future launches.
 - Title bar and workspace branding render from local Shipyard assets.
+- Shipyard applies low-DPI zoom compensation to improve readability on lower-density displays.
 - Execution feed is read-only and shows:
   - command line
   - stdout/stderr lines

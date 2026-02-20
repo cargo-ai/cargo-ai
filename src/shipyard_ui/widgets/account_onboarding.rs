@@ -45,7 +45,7 @@ pub fn draw(
                         "Set up your Cargo AI account directly from Shipyard using explicit CLI flows.",
                     )
                     .size(14.0)
-                    .color(Color32::from_rgb(110, 116, 124)),
+                    .color(Color32::from_rgb(86, 93, 103)),
                 );
                 ui.add_space(14.0);
 
@@ -58,14 +58,22 @@ pub fn draw(
                         .hint_text("you@example.com")
                         .desired_width(f32::INFINITY),
                 );
-                let register_enabled = !is_command_running && !email_input.trim().is_empty();
                 if ui
-                    .add_enabled(register_enabled, egui::Button::new("Run account register"))
+                    .add_enabled(
+                        !is_command_running,
+                        egui::Button::new(
+                            RichText::new("Run account register")
+                                .color(Color32::from_rgb(42, 47, 54)),
+                        ),
+                    )
                     .clicked()
                 {
-                    action = Some(AccountSetupAction::Register {
-                        email: email_input.trim().to_string(),
-                    });
+                    let email = email_input.trim();
+                    if !email.is_empty() {
+                        action = Some(AccountSetupAction::Register {
+                            email: email.to_string(),
+                        });
+                    }
                 }
 
                 ui.add_space(14.0);
@@ -76,21 +84,35 @@ pub fn draw(
                         .hint_text("temporary code from email")
                         .desired_width(f32::INFINITY),
                 );
-                let confirm_enabled = !is_command_running && !code_input.trim().is_empty();
                 if ui
-                    .add_enabled(confirm_enabled, egui::Button::new("Run account confirm"))
+                    .add_enabled(
+                        !is_command_running,
+                        egui::Button::new(
+                            RichText::new("Run account confirm")
+                                .color(Color32::from_rgb(42, 47, 54)),
+                        ),
+                    )
                     .clicked()
                 {
-                    action = Some(AccountSetupAction::Confirm {
-                        code: code_input.trim().to_string(),
-                    });
-                    code_input.clear();
+                    let code = code_input.trim();
+                    if !code.is_empty() {
+                        action = Some(AccountSetupAction::Confirm {
+                            code: code.to_string(),
+                        });
+                        code_input.clear();
+                    }
                 }
 
                 ui.add_space(14.0);
                 ui.label(RichText::new("3) Verify Session").strong());
                 if ui
-                    .add_enabled(!is_command_running, egui::Button::new("Run account status"))
+                    .add_enabled(
+                        !is_command_running,
+                        egui::Button::new(
+                            RichText::new("Run account status")
+                                .color(Color32::from_rgb(42, 47, 54)),
+                        ),
+                    )
                     .clicked()
                 {
                     action = Some(AccountSetupAction::RunStatus);
