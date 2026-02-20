@@ -1,5 +1,5 @@
 slint::slint! {
-    import { Button, LineEdit, Slider, TextEdit } from "std-widgets.slint";
+    import { Button, LineEdit, TextEdit } from "std-widgets.slint";
 
     export component ShipyardWindow inherits Window {
         title: "Cargo AI Shipyard";
@@ -17,23 +17,18 @@ slint::slint! {
 
         in-out property <string> account_email;
         in-out property <string> account_code;
-
-        in-out property <float> execution_panel_ratio;
-        in property <float> execution_panel_min_ratio: 0.26;
-        in property <float> execution_panel_max_ratio: 0.55;
+        in-out property <bool> execution_view_visible;
 
         callback run_status();
         callback run_register(string);
         callback run_confirm(string);
-        callback execution_panel_ratio_changed(float);
-
-        changed execution_panel_ratio => {
-            root.execution_panel_ratio_changed(root.execution_panel_ratio);
-        }
+        callback toggle_execution_view();
 
         private property <length> title_height: 54px;
         private property <length> shell_gap: 10px;
-        private property <length> execution_panel_height: root.height * root.execution_panel_ratio;
+        private property <length> execution_panel_expanded_height: 280px;
+        private property <length> execution_panel_collapsed_height: 52px;
+        private property <length> execution_panel_height: root.execution_view_visible ? execution_panel_expanded_height : execution_panel_collapsed_height;
         private property <length> workspace_top: title_height + shell_gap;
         private property <length> workspace_height: root.height - title_height - execution_panel_height - shell_gap - shell_gap;
 
@@ -87,6 +82,7 @@ slint::slint! {
             border-width: 1px;
             border-color: rgb(210, 211, 216);
             border-radius: 12px;
+            animate height { duration: 170ms; easing: ease-out; }
 
             Rectangle {
                 visible: root.account_ready;
@@ -252,6 +248,8 @@ slint::slint! {
             height: root.execution_panel_height;
             background: rgb(20, 23, 29);
             border-radius: 10px;
+            animate y { duration: 170ms; easing: ease-out; }
+            animate height { duration: 170ms; easing: ease-out; }
 
             Text {
                 x: 12px;
@@ -271,8 +269,8 @@ slint::slint! {
                 font-weight: 700;
             }
 
-            Button {
-                x: parent.width - self.width - 12px;
+            if root.execution_view_visible: Button {
+                x: parent.width - self.width - 56px;
                 y: 6px;
                 text: "Run account status";
                 enabled: !root.command_running;
@@ -281,25 +279,57 @@ slint::slint! {
                 }
             }
 
-            Slider {
-                x: parent.width - 322px;
-                y: 42px;
-                width: 310px;
-                minimum: root.execution_panel_min_ratio;
-                maximum: root.execution_panel_max_ratio;
-                value <=> root.execution_panel_ratio;
-                enabled: !root.command_running;
+            toggle_shell := Rectangle {
+                x: parent.width - 44px;
+                y: 7px;
+                width: 32px;
+                height: 28px;
+                private property <bool> is_hovered: toggle_touch.has-hover;
+                border-radius: 14px;
+                border-width: 1px;
+                border-color: rgb(150, 157, 168);
+                background: toggle_touch.pressed ? rgb(208, 212, 219) : toggle_shell.is_hovered ? rgb(232, 236, 243) : rgb(224, 229, 236);
+
+                Text {
+                    x: (parent.width - self.width) / 2;
+                    y: 3px;
+                    text: ">";
+                    color: rgb(55, 61, 72);
+                    font-size: 18px;
+                    font-weight: 700;
+                }
+
+                toggle_touch := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.toggle_execution_view();
+                    }
+                }
             }
 
-            Text {
-                x: 12px;
-                y: 46px;
-                text: "Terminal height";
-                color: rgb(157, 167, 183);
-                font-size: 13px;
+            if toggle_shell.is_hovered: Rectangle {
+                x: toggle_shell.x - 180px;
+                y: 7px;
+                width: 172px;
+                height: 28px;
+                border-radius: 14px;
+                border-width: 1px;
+                border-color: rgb(173, 178, 186);
+                background: rgb(243, 245, 249);
+
+                Text {
+                    x: 14px;
+                    y: 5px;
+                    text: "Toggle execution view";
+                    color: rgb(39, 43, 50);
+                    font-size: 13px;
+                    font-weight: 520;
+                }
             }
 
-            Text {
+            if root.execution_view_visible: Text {
                 x: 12px;
                 y: 66px;
                 text: root.last_command == "" ? "Command: (none yet)" : "Command: " + root.last_command;
@@ -307,7 +337,7 @@ slint::slint! {
                 font-size: 13px;
             }
 
-            Rectangle {
+            if root.execution_view_visible: Rectangle {
                 x: 10px;
                 y: 90px;
                 width: parent.width - 20px;

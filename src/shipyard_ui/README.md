@@ -16,15 +16,11 @@ The command surface is `cargo ai shipyard`.
 
 ## Tuning Knobs
 Adjust these in `config.rs`:
-- execution panel behavior:
-  - `EXECUTION_PANEL_DEFAULT_RATIO`
-  - `EXECUTION_PANEL_MIN_RATIO`
-  - `EXECUTION_PANEL_MAX_RATIO`
 - update timing/output controls:
   - `REPAINT_INTERVAL_MS`
   - `MAX_TERMINAL_LINES`
-- legacy ratio fallback:
-  - `WINDOW_INITIAL_HEIGHT` (used only to convert prior height-only persisted state)
+- execution view defaults:
+  - `EXECUTION_VIEW_DEFAULT_VISIBLE`
 
 ## Runtime Behavior
 - Shipyard uses allowlisted command intents (no free-form command entry).
@@ -33,7 +29,7 @@ Adjust these in `config.rs`:
   - `account register <email>`
   - `account confirm <code>`
   - `account status`
-- Execution panel split is ratio-driven and persisted across launches.
+- Execution feed uses a bottom drawer toggle (collapsed/expanded) and persists visibility across launches.
 - Title bar and workspace branding render from local Shipyard assets.
 - Execution feed is read-only and shows:
   - command line

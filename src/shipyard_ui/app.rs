@@ -95,11 +95,9 @@ fn wire_callbacks(window: &ui::ShipyardWindow, controller: &Rc<RefCell<ShipyardC
             });
     });
 
-    let ratio_controller = controller.clone();
-    window.on_execution_panel_ratio_changed(move |ratio| {
-        ratio_controller
-            .borrow_mut()
-            .set_execution_panel_ratio(ratio);
+    let toggle_controller = controller.clone();
+    window.on_toggle_execution_view(move || {
+        toggle_controller.borrow_mut().toggle_execution_view();
     });
 }
 
@@ -111,7 +109,7 @@ struct ShipyardController {
     last_command: String,
     active_intent: Option<CommandIntent>,
     account_setup_state: AccountSetupState,
-    execution_panel_ratio: f32,
+    execution_view_visible: bool,
     event_tx: Sender<TerminalEvent>,
     event_rx: Receiver<TerminalEvent>,
 }
@@ -130,8 +128,8 @@ impl ShipyardController {
             last_command: String::new(),
             active_intent: None,
             account_setup_state: AccountSetupState::Checking,
-            execution_panel_ratio: state::load_execution_panel_ratio()
-                .unwrap_or(config::EXECUTION_PANEL_DEFAULT_RATIO),
+            execution_view_visible: state::load_execution_view_visible()
+                .unwrap_or(config::EXECUTION_VIEW_DEFAULT_VISIBLE),
             event_tx,
             event_rx,
         }
@@ -223,14 +221,9 @@ impl ShipyardController {
         }
     }
 
-    fn set_execution_panel_ratio(&mut self, ratio: f32) {
-        let clamped = config::clamp_execution_panel_ratio(ratio);
-        if (self.execution_panel_ratio - clamped).abs() < 0.0005 {
-            return;
-        }
-
-        self.execution_panel_ratio = clamped;
-        let _ = state::save_execution_panel_ratio(clamped);
+    fn toggle_execution_view(&mut self) {
+        self.execution_view_visible = !self.execution_view_visible;
+        let _ = state::save_execution_view_visible(self.execution_view_visible);
         self.sync_ui();
     }
 
@@ -251,7 +244,7 @@ impl ShipyardController {
             AccountSetupState::SignedIn
         ));
         window.set_terminal_output(self.output_lines.join("\n").into());
-        window.set_execution_panel_ratio(self.execution_panel_ratio);
+        window.set_execution_view_visible(self.execution_view_visible);
     }
 
     fn push_output_line(&mut self, line: String) {
