@@ -2,6 +2,7 @@
 
 Shipyard is an exploratory desktop UI for Cargo AI.
 The command surface is `cargo ai shipyard`.
+By default it is hidden/gated: launch with `cargo ai shipyard --experimental` or `CARGO_AI_ENABLE_SHIPYARD=1 cargo ai shipyard`.
 
 ## Folder Map
 - `mod.rs`: Shipyard launch entrypoint.
