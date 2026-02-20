@@ -17,6 +17,8 @@ pub fn draw(
     output_lines: &[String],
     execution_panel_default_height: f32,
     execution_panel_max_height: f32,
+    title_logo: Option<&egui::TextureHandle>,
+    workspace_logo: Option<&egui::TextureHandle>,
 ) -> LayoutResult {
     let mut run_default_intent = false;
     let mut execution_panel_height = None;
@@ -24,7 +26,7 @@ pub fn draw(
     egui::TopBottomPanel::top("shipyard_title")
         .exact_height(config::TITLE_PANEL_HEIGHT)
         .show(context, |ui| {
-            title_bar::draw(ui);
+            title_bar::draw(ui, title_logo);
         });
 
     egui::TopBottomPanel::bottom("shipyard_execution")
@@ -40,7 +42,7 @@ pub fn draw(
         });
 
     egui::CentralPanel::default().show(context, |ui| {
-        workspace::draw(ui);
+        workspace::draw(ui, workspace_logo);
     });
 
     LayoutResult {

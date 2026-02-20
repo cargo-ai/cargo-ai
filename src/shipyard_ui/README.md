@@ -9,6 +9,8 @@ The command surface is `cargo ai shipyard`.
 - `config.rs`: tunable constants for window/layout/timing/labels.
 - `theme.rs`: UI visual theme configuration.
 - `layout.rs`: panel composition and high-level view assembly.
+- `assets.rs`: loading embedded Shipyard image assets into egui textures.
+- `assets/`: logo/image assets used by Shipyard UI.
 - `runtime/commands.rs`: allowlisted command intents and command plans.
 - `runtime/executor.rs`: process execution and output streaming.
 - `runtime/events.rs`: runtime event and status enums.
@@ -37,6 +39,7 @@ Adjust these in `config.rs`:
 - Shipyard uses allowlisted command intents (no free-form command entry).
 - Current default intent runs the verbose command `profile list`.
 - First-launch panel split is ratio-based; user resize is persisted for future launches.
+- Title bar and workspace branding render from local Shipyard assets.
 - Execution feed is read-only and shows:
   - command line
   - stdout/stderr lines

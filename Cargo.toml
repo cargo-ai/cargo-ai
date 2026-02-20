@@ -21,6 +21,7 @@ clap = "4.5.35"
 dirs = "6.0.0"
 eframe = { version = "0.31.1", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 futures = "0.3.31"
+image = { version = "0.25.9", default-features = false, features = ["png"] }
 jsonlogic = "0.5.1"
 reqwest = { version = "0.12.15", features = ["json", "blocking"] }
 schemars = { version = "1.0.4", features = ["derive"] }

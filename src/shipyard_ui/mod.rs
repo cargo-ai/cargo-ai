@@ -1,4 +1,5 @@
 mod app;
+mod assets;
 mod config;
 mod layout;
 mod runtime;

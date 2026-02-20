@@ -1,6 +1,7 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
+use crate::shipyard_ui::assets::LoadedAssets;
 use crate::shipyard_ui::config;
 use crate::shipyard_ui::layout;
 use crate::shipyard_ui::runtime::commands::{self, CommandIntent};
@@ -15,6 +16,7 @@ pub struct ShipyardApp {
     auto_started: bool,
     execution_panel_height: Option<f32>,
     last_saved_execution_panel_height: Option<f32>,
+    loaded_assets: Option<LoadedAssets>,
     event_tx: Sender<TerminalEvent>,
     event_rx: Receiver<TerminalEvent>,
 }
@@ -31,6 +33,7 @@ impl ShipyardApp {
             auto_started: false,
             execution_panel_height: loaded_execution_panel_height,
             last_saved_execution_panel_height: loaded_execution_panel_height,
+            loaded_assets: None,
             event_tx,
             event_rx,
         }
@@ -95,6 +98,10 @@ impl eframe::App for ShipyardApp {
             context.request_repaint_after(Duration::from_millis(config::REPAINT_INTERVAL_MS));
         }
 
+        let loaded_assets = self
+            .loaded_assets
+            .get_or_insert_with(|| LoadedAssets::load(context));
+
         let result = layout::draw(
             context,
             &self.status,
@@ -103,6 +110,8 @@ impl eframe::App for ShipyardApp {
             &self.output_lines,
             panel_default_height,
             panel_max_height,
+            loaded_assets.logo_color.as_ref(),
+            loaded_assets.logo_bw.as_ref(),
         );
 
         if let Some(observed_height) = result.execution_panel_height {

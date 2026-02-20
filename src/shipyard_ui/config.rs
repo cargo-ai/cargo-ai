@@ -17,6 +17,9 @@ pub const EXECUTION_PANEL_PERSIST_WRITE_THRESHOLD: f32 = 1.0;
 pub const TERMINAL_FONT_SIZE: f32 = 12.5;
 pub const TERMINAL_CORNER_RADIUS: u8 = 8;
 pub const WORKSPACE_CORNER_RADIUS: u8 = 12;
+pub const TITLE_LOGO_HEIGHT: f32 = 24.0;
+pub const WORKSPACE_LOGO_HEIGHT: f32 = 140.0;
+pub const WORKSPACE_LOGO_ALPHA: u8 = 50;
 
 pub const PROFILE_LIST_INTENT_LABEL: &str = "Run `profile list`";
 pub const PROFILE_LIST_VERBOSE_ARGS: &[&str] = &["profile", "list"];
