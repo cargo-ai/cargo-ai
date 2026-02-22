@@ -16,6 +16,10 @@ categories = [
 ]
 build = "build.rs"
 
+[features]
+default = []
+shipyard-ui = ["dep:slint"]
+
 [dependencies]
 clap = "4.5.35"
 dirs = "6.0.0"
@@ -25,7 +29,7 @@ reqwest = { version = "0.12.15", features = ["json", "blocking"] }
 schemars = { version = "1.0.4", features = ["derive"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
-slint = { version = "1.15.1", default-features = false, features = ["backend-winit", "renderer-femtovg", "compat-1-2"] }
+slint = { version = "1.15.1", default-features = false, features = ["backend-winit", "renderer-femtovg", "compat-1-2"], optional = true }
 tokio = { version = "1.44.1", features = ["full"] }
 toml = "0.9.8"
 
