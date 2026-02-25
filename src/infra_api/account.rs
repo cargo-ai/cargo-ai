@@ -9,3 +9,4 @@ pub mod status;
 pub mod handle;
 pub mod agents;
 pub mod send_mail;
+pub mod mail_preferences;

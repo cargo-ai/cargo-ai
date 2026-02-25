@@ -1,19 +1,7 @@
 // clap - Command Line Arguement Parsing
 use clap::{Arg, ArgGroup, ArgMatches, Command};
 
-pub fn build_cli() -> ArgMatches {
-    // Collect the original command-line arguments
-    let mut args: Vec<String> = std::env::args().collect();
-
-    let mut bin_name = "cargo-ai";
-    // Check if runing as a cargo subcommand, i.e. cargo ai
-    if let Some(first_arg) = args.get(1) {
-        if first_arg == "ai" {
-            bin_name = "cargo ai";
-            args.remove(1);
-        }
-    }
-
+fn cli_command(bin_name: &'static str) -> Command {
     Command::new("cargo-ai")
         .bin_name(bin_name)
         .version(env!("CARGO_PKG_VERSION"))
@@ -235,6 +223,26 @@ pub fn build_cli() -> ArgMatches {
                                         .required(false)
                                         .value_name("TEXT")
                                         .num_args(1)
+                                )
+                        )
+                        .subcommand(
+                            Command::new("prefs")
+                                .about("View or set account email delivery preferences")
+                                .arg(
+                                    Arg::new("disable_all")
+                                        .long("disable-all")
+                                        .help("Disable all account emails")
+                                        .required(false)
+                                        .action(clap::ArgAction::SetTrue)
+                                        .conflicts_with("enable_all")
+                                )
+                                .arg(
+                                    Arg::new("enable_all")
+                                        .long("enable-all")
+                                        .help("Enable all account emails")
+                                        .required(false)
+                                        .action(clap::ArgAction::SetTrue)
+                                        .conflicts_with("disable_all")
                                 )
                         )
                 )
@@ -554,5 +562,90 @@ pub fn build_cli() -> ArgMatches {
                         )
                 )
         )
-        .get_matches_from(args)
+}
+
+pub fn build_cli() -> ArgMatches {
+    // Collect the original command-line arguments
+    let mut args: Vec<String> = std::env::args().collect();
+
+    let mut bin_name = "cargo-ai";
+    // Check if runing as a cargo subcommand, i.e. cargo ai
+    if let Some(first_arg) = args.get(1) {
+        if first_arg == "ai" {
+            bin_name = "cargo ai";
+            args.remove(1);
+        }
+    }
+
+    cli_command(bin_name).get_matches_from(args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cli_command;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn account_mail_prefs_defaults_to_get_intent() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "account", "mail", "prefs"])
+            .expect("prefs command should parse");
+
+        let prefs_matches = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("mail"))
+            .and_then(|m| m.subcommand_matches("prefs"))
+            .expect("prefs subcommand should be available");
+
+        assert!(!prefs_matches.get_flag("disable_all"));
+        assert!(!prefs_matches.get_flag("enable_all"));
+    }
+
+    #[test]
+    fn account_mail_prefs_disable_parses() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "account", "mail", "prefs", "--disable-all"])
+            .expect("disable-all form should parse");
+
+        let prefs_matches = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("mail"))
+            .and_then(|m| m.subcommand_matches("prefs"))
+            .expect("prefs subcommand should be available");
+
+        assert!(prefs_matches.get_flag("disable_all"));
+        assert!(!prefs_matches.get_flag("enable_all"));
+    }
+
+    #[test]
+    fn account_mail_prefs_enable_parses() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "account", "mail", "prefs", "--enable-all"])
+            .expect("enable-all form should parse");
+
+        let prefs_matches = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("mail"))
+            .and_then(|m| m.subcommand_matches("prefs"))
+            .expect("prefs subcommand should be available");
+
+        assert!(prefs_matches.get_flag("enable_all"));
+        assert!(!prefs_matches.get_flag("disable_all"));
+    }
+
+    #[test]
+    fn account_mail_prefs_conflicting_flags_are_rejected() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "mail",
+                "prefs",
+                "--disable-all",
+                "--enable-all",
+            ])
+            .expect_err("conflicting flags should fail parsing");
+
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
 }
