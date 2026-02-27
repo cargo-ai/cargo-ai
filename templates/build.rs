@@ -22,8 +22,11 @@ struct Action {
 
 fn main() -> std::io::Result<()> {
 
-    // Hint to Cargo: only rerun build.rs when the config changes (and when build.rs itself changes).
+    // Re-run generated-agent codegen only when local inputs change.
+    // `.agentcfg` defines the generated model; include `build.rs` to catch script logic updates.
+    // If generation later depends on custom env vars, add `cargo:rerun-if-env-changed=...`.
     println!("cargo:rerun-if-changed=.agentcfg");
+    println!("cargo:rerun-if-changed=build.rs");
 
     // Step 1: Read .agentcfg into memory and parse as JSON.
     // For now, this build script only supports JSON; future versions may support TOML/YAML.

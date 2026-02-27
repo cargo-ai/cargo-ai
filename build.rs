@@ -36,7 +36,9 @@ struct Action {
 // Keep it deterministic: local file inputs only and generated Rust outputs in `OUT_DIR`.
 fn main() -> std::io::Result<()> {
 
-    // Hint to Cargo: only rerun build.rs when the config changes (and when build.rs itself changes).
+    // Re-run codegen only when declared local inputs change.
+    // `.agentcfg` drives generated model code, `templates/` drives embedded scaffold files.
+    // If generation later depends on custom env vars, add `cargo:rerun-if-env-changed=...`.
     println!("cargo:rerun-if-changed=.agentcfg");
     println!("cargo:rerun-if-changed=templates");
     println!("cargo:rerun-if-changed=build.rs");
