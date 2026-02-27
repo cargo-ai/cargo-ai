@@ -123,3 +123,34 @@ fn rejects_non_string_action_args_with_actionable_path() {
     assert!(err.contains("$.actions[0].run[0].args[0]"));
     assert!(err.contains("expected a string argument"));
 }
+
+#[test]
+fn escapes_action_literals_and_logic_payload_safely() {
+    let cfg = config_with(
+        r#""value": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "special \"name\"\nline",
+            "logic": { "==": [ { "var": "value" }, "v#\"x\nz" ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["quote \" arg", "line\nbreak", "hash#\"marker"]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains("logic: serde_json::from_str(\""));
+    assert!(!generated.contains("serde_json::from_str(r#\""));
+    assert!(generated.contains("name: "));
+    assert!(generated.contains("\\\"name\\\""));
+    assert!(generated.contains("\\nline"));
+    assert!(generated.contains("\"quote \\\" arg\".to_string()"));
+    assert!(generated.contains("\"line\\nbreak\".to_string()"));
+    assert!(generated.contains("\"hash#\\\"marker\".to_string()"));
+}
