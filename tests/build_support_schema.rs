@@ -186,6 +186,52 @@ fn rejects_multi_operator_action_logic_object_with_actionable_path() {
 }
 
 #[test]
+fn rejects_unknown_logic_var_with_actionable_path() {
+    let cfg = config_with(
+        r#""answer": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "unknown_var",
+            "logic": { "==": [ { "var": "missing_field" }, 4 ] },
+            "run": [
+              { "kind": "exec", "program": "echo", "args": [] }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].logic.==[0].var"));
+    assert!(err.contains("unknown variable `missing_field`"));
+}
+
+#[test]
+fn rejects_logic_type_mismatch_with_actionable_path() {
+    let cfg = config_with(
+        r#""answer": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_type_match",
+            "logic": { "==": [ { "var": "answer" }, "4" ] },
+            "run": [
+              { "kind": "exec", "program": "echo", "args": [] }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].logic.=="));
+    assert!(err.contains("incompatible operand types"));
+}
+
+#[test]
 fn escapes_action_literals_and_logic_payload_safely() {
     let cfg = config_with(
         r#""value": { "type": "string" }"#,

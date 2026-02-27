@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env,
     error::Error,
     fmt,
@@ -75,6 +76,21 @@ struct Action {
     name: String,
     logic: Value,
     run: Vec<RunStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FieldType {
+    String,
+    Boolean,
+    Number,
+    Integer,
+    Array,
+}
+
+#[derive(Debug, Clone)]
+struct MappedPropertyType {
+    rust_type: String,
+    field_type: FieldType,
 }
 
 #[derive(Debug, Clone)]
@@ -165,16 +181,19 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
     }
     let properties = get_required_object(schema, "properties", "$.agent_schema")?;
 
+    let mut schema_field_types: BTreeMap<String, FieldType> = BTreeMap::new();
     let mut fields = Vec::with_capacity(properties.len());
     for (name, prop_value) in properties {
         validate_rust_identifier(name, &format!("$.agent_schema.properties.{name}"))?;
         let prop_obj = expect_object(prop_value, &format!("$.agent_schema.properties.{name}"))?;
-        let rust_type = map_property_type(prop_obj, &format!("$.agent_schema.properties.{name}"))?;
-        fields.push((name.clone(), rust_type));
+        let mapped_type =
+            map_property_type(prop_obj, &format!("$.agent_schema.properties.{name}"))?;
+        schema_field_types.insert(name.clone(), mapped_type.field_type);
+        fields.push((name.clone(), mapped_type.rust_type));
     }
 
     let resource_urls = parse_resource_urls(root_obj)?;
-    let actions = parse_actions(root_obj)?;
+    let actions = parse_actions(root_obj, &schema_field_types)?;
 
     Ok(AgentConfig {
         prompt,
@@ -199,7 +218,10 @@ fn parse_resource_urls(root_obj: &Map<String, Value>) -> Result<Vec<ResourceUrl>
     Ok(parsed)
 }
 
-fn parse_actions(root_obj: &Map<String, Value>) -> Result<Vec<Action>, BuildError> {
+fn parse_actions(
+    root_obj: &Map<String, Value>,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<Vec<Action>, BuildError> {
     let actions = get_required_array(root_obj, "actions", "$")?;
     let mut parsed = Vec::with_capacity(actions.len());
 
@@ -209,7 +231,11 @@ fn parse_actions(root_obj: &Map<String, Value>) -> Result<Vec<Action>, BuildErro
 
         let name = get_required_string(action_obj, "name", &action_path)?.to_string();
         let logic = get_required_field(action_obj, "logic", &action_path)?.clone();
-        validate_logic_expression(&logic, &format!("{action_path}.logic"))?;
+        validate_logic_expression(
+            &logic,
+            &format!("{action_path}.logic"),
+            schema_field_types,
+        )?;
 
         let runs = get_required_array(action_obj, "run", &action_path)?;
         let mut run_steps = Vec::with_capacity(runs.len());
@@ -263,7 +289,11 @@ fn parse_actions(root_obj: &Map<String, Value>) -> Result<Vec<Action>, BuildErro
     Ok(parsed)
 }
 
-fn validate_logic_expression(value: &Value, path: &str) -> Result<(), BuildError> {
+fn validate_logic_expression(
+    value: &Value,
+    path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<(), BuildError> {
     match value {
         Value::Object(map) => {
             if map.is_empty() {
@@ -292,7 +322,19 @@ fn validate_logic_expression(value: &Value, path: &str) -> Result<(), BuildError
                 return Ok(());
             }
 
-            validate_logic_arguments(arguments, &format!("{path}.{operator}"))
+            if operator == "var" {
+                resolve_var_field_type(arguments, schema_field_types, &format!("{path}.var"))?;
+                return Ok(());
+            }
+
+            let operator_path = format!("{path}.{operator}");
+            validate_logic_arguments(arguments, &operator_path, schema_field_types)?;
+            validate_operator_type_constraints(
+                operator,
+                arguments,
+                &operator_path,
+                schema_field_types,
+            )
         }
         _ => Err(BuildError::config(
             path,
@@ -301,28 +343,223 @@ fn validate_logic_expression(value: &Value, path: &str) -> Result<(), BuildError
     }
 }
 
-fn validate_logic_arguments(value: &Value, path: &str) -> Result<(), BuildError> {
+fn validate_logic_arguments(
+    value: &Value,
+    path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<(), BuildError> {
     match value {
         Value::Array(items) => {
             for (idx, item) in items.iter().enumerate() {
                 if item.is_object() {
-                    validate_logic_expression(item, &format!("{path}[{idx}]"))?;
+                    validate_logic_expression(item, &format!("{path}[{idx}]"), schema_field_types)?;
                 }
             }
             Ok(())
         }
-        Value::Object(_) => validate_logic_expression(value, path),
+        Value::Object(_) => validate_logic_expression(value, path, schema_field_types),
         _ => Ok(()),
     }
 }
 
-fn map_property_type(property: &Map<String, Value>, path: &str) -> Result<String, BuildError> {
+fn validate_operator_type_constraints(
+    operator: &str,
+    arguments: &Value,
+    operator_path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<(), BuildError> {
+    if !matches!(operator, "==" | "!=" | ">" | ">=" | "<" | "<=") {
+        return Ok(());
+    }
+
+    let operands = arguments
+        .as_array()
+        .ok_or_else(|| BuildError::config(operator_path, "expected an array of operands"))?;
+
+    if operands.len() != 2 {
+        return Err(BuildError::config(
+            operator_path,
+            "expected exactly two operands",
+        ));
+    }
+
+    let left_path = format!("{operator_path}[0]");
+    let right_path = format!("{operator_path}[1]");
+
+    let left = infer_logic_value_type(&operands[0], schema_field_types, &left_path)?;
+    let right = infer_logic_value_type(&operands[1], schema_field_types, &right_path)?;
+
+    match operator {
+        ">" | ">=" | "<" | "<=" => {
+            if !is_numeric_type(&left) {
+                return Err(BuildError::config(
+                    left_path,
+                    "expected a numeric operand for comparison",
+                ));
+            }
+            if !is_numeric_type(&right) {
+                return Err(BuildError::config(
+                    right_path,
+                    "expected a numeric operand for comparison",
+                ));
+            }
+        }
+        "==" | "!=" => {
+            if !are_compatible_types(&left, &right) {
+                return Err(BuildError::config(
+                    operator_path,
+                    format!(
+                        "incompatible operand types for `{operator}` ({}, {})",
+                        type_name(&left),
+                        type_name(&right)
+                    ),
+                ));
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn infer_logic_value_type(
+    value: &Value,
+    schema_field_types: &BTreeMap<String, FieldType>,
+    path: &str,
+) -> Result<FieldType, BuildError> {
+    match value {
+        Value::String(_) => Ok(FieldType::String),
+        Value::Bool(_) => Ok(FieldType::Boolean),
+        Value::Number(n) => {
+            if n.is_i64() || n.is_u64() {
+                Ok(FieldType::Integer)
+            } else {
+                Ok(FieldType::Number)
+            }
+        }
+        Value::Array(_) => Ok(FieldType::Array),
+        Value::Null => Err(BuildError::config(path, "null operands are not supported here")),
+        Value::Object(map) => {
+            if map.len() != 1 {
+                return Err(BuildError::config(
+                    path,
+                    "expected a JSON Logic object with exactly one operator key",
+                ));
+            }
+
+            let (operator, arguments) = map.iter().next().expect("non-empty map");
+            if operator == "var" {
+                return resolve_var_field_type(
+                    arguments,
+                    schema_field_types,
+                    &format!("{path}.var"),
+                );
+            }
+
+            if matches!(operator.as_str(), "==" | "!=" | ">" | ">=" | "<" | "<=") {
+                validate_operator_type_constraints(
+                    operator,
+                    arguments,
+                    &format!("{path}.{operator}"),
+                    schema_field_types,
+                )?;
+                return Ok(FieldType::Boolean);
+            }
+
+            if matches!(operator.as_str(), "and" | "or" | "!") {
+                return Ok(FieldType::Boolean);
+            }
+
+            if operator == "literal" {
+                return infer_logic_value_type(arguments, schema_field_types, path);
+            }
+
+            Ok(FieldType::String)
+        }
+    }
+}
+
+fn resolve_var_field_type(
+    arguments: &Value,
+    schema_field_types: &BTreeMap<String, FieldType>,
+    path: &str,
+) -> Result<FieldType, BuildError> {
+    let var_name = match arguments {
+        Value::String(name) => name.as_str(),
+        Value::Array(items) => items
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| BuildError::config(path, "expected first `var` argument to be a string"))?,
+        _ => {
+            return Err(BuildError::config(
+                path,
+                "expected `var` arguments as a string or array",
+            ))
+        }
+    };
+
+    if var_name.trim().is_empty() {
+        return Err(BuildError::config(path, "variable name cannot be empty"));
+    }
+
+    if var_name.contains('.') {
+        return Err(BuildError::config(
+            path,
+            "nested variable paths are not supported; use top-level schema property names",
+        ));
+    }
+
+    schema_field_types.get(var_name).cloned().ok_or_else(|| {
+        BuildError::config(
+            path,
+            format!(
+                "unknown variable `{var_name}`; expected one of: {}",
+                schema_field_types.keys().cloned().collect::<Vec<_>>().join(", ")
+            ),
+        )
+    })
+}
+
+fn is_numeric_type(field_type: &FieldType) -> bool {
+    matches!(field_type, FieldType::Number | FieldType::Integer)
+}
+
+fn are_compatible_types(left: &FieldType, right: &FieldType) -> bool {
+    left == right || (is_numeric_type(left) && is_numeric_type(right))
+}
+
+fn type_name(field_type: &FieldType) -> &'static str {
+    match field_type {
+        FieldType::String => "string",
+        FieldType::Boolean => "boolean",
+        FieldType::Number => "number",
+        FieldType::Integer => "integer",
+        FieldType::Array => "array",
+    }
+}
+
+fn map_property_type(
+    property: &Map<String, Value>,
+    path: &str,
+) -> Result<MappedPropertyType, BuildError> {
     let schema_type = get_schema_type(property, path)?;
     match schema_type.as_str() {
-        "string" => Ok("String".to_string()),
-        "boolean" => Ok("bool".to_string()),
-        "number" => Ok("f64".to_string()),
-        "integer" => Ok("i64".to_string()),
+        "string" => Ok(MappedPropertyType {
+            rust_type: "String".to_string(),
+            field_type: FieldType::String,
+        }),
+        "boolean" => Ok(MappedPropertyType {
+            rust_type: "bool".to_string(),
+            field_type: FieldType::Boolean,
+        }),
+        "number" => Ok(MappedPropertyType {
+            rust_type: "f64".to_string(),
+            field_type: FieldType::Number,
+        }),
+        "integer" => Ok(MappedPropertyType {
+            rust_type: "i64".to_string(),
+            field_type: FieldType::Integer,
+        }),
         "array" => map_array_type(property, path),
         "object" => Err(BuildError::config(
             format!("{path}.type"),
@@ -335,7 +572,10 @@ fn map_property_type(property: &Map<String, Value>, path: &str) -> Result<String
     }
 }
 
-fn map_array_type(property: &Map<String, Value>, path: &str) -> Result<String, BuildError> {
+fn map_array_type(
+    property: &Map<String, Value>,
+    path: &str,
+) -> Result<MappedPropertyType, BuildError> {
     let items_value = get_required_field(property, "items", path)?;
     let items_path = format!("{path}.items");
     let items_obj = expect_object(items_value, &items_path)?;
@@ -366,7 +606,10 @@ fn map_array_type(property: &Map<String, Value>, path: &str) -> Result<String, B
         }
     };
 
-    Ok(format!("Vec<{primitive}>"))
+    Ok(MappedPropertyType {
+        rust_type: format!("Vec<{primitive}>"),
+        field_type: FieldType::Array,
+    })
 }
 
 fn get_schema_type(property: &Map<String, Value>, path: &str) -> Result<String, BuildError> {
