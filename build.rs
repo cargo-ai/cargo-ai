@@ -43,15 +43,19 @@ fn main() -> std::io::Result<()> {
     println!("cargo:rerun-if-changed=templates");
     println!("cargo:rerun-if-changed=build.rs");
 
-    // Step 1: Read .agentcfg into memory and parse as JSON.
-    // For now, this build script only supports JSON; future versions may support TOML/YAML.
+    // Step 1: Read `.agentcfg` and parse as generic JSON for code generation.
+    // For now, this build script only supports JSON input.
     let json_str = fs::read_to_string(".agentcfg")
         .expect("Failed to read .agentcfg");
     let json: serde_json::Value = serde_json::from_str(&json_str)
         .expect("Invalid JSON in .agentcfg");
 
-    // Extract schema: properties + required (optional)
-    let schema = json["agent_schema"].as_object().expect("Expected `agent_schema` to be an object");
+    // Extract schema object used by this generator.
+    // Current field derivation reads `agent_schema.properties` directly.
+    // (`agent_schema.required` is not consumed at this extraction step.)
+    let schema = json["agent_schema"]
+        .as_object()
+        .expect("Expected `agent_schema` to be an object");
     let props = schema
         .get("properties")
         .and_then(|p| p.as_object())
