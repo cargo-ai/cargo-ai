@@ -2,8 +2,10 @@ use std::fs;
 use std::io::{Error, ErrorKind};
 
 pub(crate) fn run_hatch_pipeline(new_project_name: &str, file_contents: String) {
-    match crate::agent_builder::project::create_new_agent_project(new_project_name, Ok(file_contents))
-    {
+    match crate::agent_builder::project::create_new_agent_project(
+        new_project_name,
+        Ok(file_contents),
+    ) {
         Ok(_) => println!("✅ Project created successfully."),
         Err(e) => println!("❌ Failed to create project: {e}"),
     }

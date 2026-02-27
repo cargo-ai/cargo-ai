@@ -10,7 +10,10 @@ pub(crate) fn apply_actions(output: &crate::Output, actions: &[crate::Action]) {
             // println!("Action Loop: {:?}", action);
             if result.as_bool() == Some(true) {
                 for step in &action.run {
-                    println!("Running '{}': {} {:?}", action.name, step.program, step.args);
+                    println!(
+                        "Running '{}': {} {:?}",
+                        action.name, step.program, step.args
+                    );
 
                     // Execute the command
                     let status = std::process::Command::new(&step.program)

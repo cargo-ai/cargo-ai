@@ -9,7 +9,10 @@ pub fn run(sub_m: &ArgMatches) {
     if let Some(_) = sub_m.subcommand_matches("list") {
         if let Some(cfg) = load_config() {
             println!("Configured profiles:");
-            println!("{:<20} {:<10} {:<15} {}", "Name", "Server", "Model", "Default");
+            println!(
+                "{:<20} {:<10} {:<15} {}",
+                "Name", "Server", "Model", "Default"
+            );
             println!("{:-<65}", "");
 
             let default_name = cfg.default_profile.clone();
@@ -90,7 +93,10 @@ pub fn run(sub_m: &ArgMatches) {
             if let Some(cfg) = load_config() {
                 if cfg.profile.iter().any(|p| p.name == *name) {
                     use std::io::{self, Write};
-                    print!("Are you sure you want to remove profile '{}'? [y/N]: ", name);
+                    print!(
+                        "Are you sure you want to remove profile '{}'? [y/N]: ",
+                        name
+                    );
                     io::stdout().flush().unwrap();
 
                     let mut input = String::new();
