@@ -12,7 +12,7 @@ const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
 
 use serde::{Deserialize, Serialize};
 
-use std::{env, fs, path::Path};
+use std::{fs, path::Path};
 use std::io::{self, Write};
 
 use config::loader::{load_config, find_profile};
@@ -37,37 +37,7 @@ async fn main() {
         commands::hatch::run(sub_m);
 
     } else if let Some(sub_m) = cmd_args.subcommand_matches("shipyard") {
-        #[cfg(feature = "shipyard-ui")]
-        {
-            let enabled_by_flag = sub_m.get_flag("experimental");
-            let enabled_by_env = env::var("CARGO_AI_ENABLE_SHIPYARD")
-                .map(|value| {
-                    let normalized = value.trim().to_ascii_lowercase();
-                    matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-                })
-                .unwrap_or(false);
-
-            if !(enabled_by_flag || enabled_by_env) {
-                eprintln!("⚠️ Shipyard is experimental and currently hidden.");
-                eprintln!(
-                    "To launch it, run `cargo ai shipyard --experimental` or set `CARGO_AI_ENABLE_SHIPYARD=1`."
-                );
-                return;
-            }
-
-            if let Err(e) = shipyard_ui::launch() {
-                eprintln!("❌ Failed to launch Shipyard UI: {e}");
-            }
-        }
-
-        #[cfg(not(feature = "shipyard-ui"))]
-        {
-            let _ = sub_m;
-            eprintln!("⚠️ Shipyard UI is not included in this build.");
-            eprintln!(
-                "Reinstall with `cargo install --path . --features shipyard-ui` to enable it."
-            );
-        }
+        commands::shipyard::run(sub_m);
 
     } else if let Some(sub_m) = cmd_args.subcommand_matches("account") {
 
