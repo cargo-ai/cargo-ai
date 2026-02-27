@@ -1,11 +1,15 @@
+// Build-time codegen for cargo-ai.
+// - Reads `.agentcfg` and generates typed agent helpers into `OUT_DIR/agent_model.rs`.
+// - Emits template source mappings into `OUT_DIR/.generated_templates.rs` for hatch scaffolding.
+// These generated files are compiled into the crate via `include!(...)` in runtime modules.
 use std::{
-    env,                    // read OUT_DIR and other env vars
-    fs::{self, File},       // fs ops + File handle creation
-    io::Write,              // trait for write! / .write() on File
-    path::Path,             // path construction / manipulation
+    env,                    // Read Cargo-provided build environment (for example `OUT_DIR`).
+    fs::{self, File},       // Read `.agentcfg` and write generated Rust source files.
+    io::Write,              // Write generated source content to output files.
+    path::Path,             // Build output file paths under `OUT_DIR`.
 };
 
-use serde_json;      // dynamic JSON parsing
+use serde_json;      // Parse `.agentcfg` and preserve JSON logic payloads for generated code.
 
 #[derive(Debug)]
 struct RunStep {
