@@ -11,27 +11,29 @@ use std::{
 
 use serde_json;      // Parse `.agentcfg` and preserve JSON logic payloads for generated code.
 
+/// `run` step metadata parsed from `.agentcfg` action blocks.
+/// Current runtime execution expects `kind = "exec"`.
+/// `args` maps directly to argv tokens (no shell parsing/splitting).
 #[derive(Debug)]
-// `run` step metadata from `.agentcfg` action blocks.
-// Current runtime execution expects `kind = "exec"`.
-// `args` maps directly to argv tokens (no shell parsing/splitting).
 struct RunStep {
     kind: String,
     program: String,
     args: Vec<String>,
 }
 
+/// Action metadata parsed from `.agentcfg`.
+/// - `name`: label used in logs/output when a rule matches.
+/// - `logic`: JSON Logic expression evaluated against the typed model output.
+/// - `run`: ordered list of steps executed when `logic` evaluates to true.
 #[derive(Debug)]
-// Action metadata from `.agentcfg`:
-// - `name`: label used in logs/output when a rule matches.
-// - `logic`: JSON Logic expression evaluated against the typed model output.
-// - `run`: ordered list of steps executed when `logic` evaluates to true.
 struct Action {
     name: String,
     logic: serde_json::Value, // Follows the JSON Logic Standard
     run: Vec<RunStep>,
 }
 
+// Cargo invokes this build script before compiling the crate.
+// Keep it deterministic: local file inputs only and generated Rust outputs in `OUT_DIR`.
 fn main() -> std::io::Result<()> {
 
     // Hint to Cargo: only rerun build.rs when the config changes (and when build.rs itself changes).
