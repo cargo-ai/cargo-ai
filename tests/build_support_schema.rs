@@ -79,6 +79,21 @@ fn rejects_invalid_field_identifiers() {
 }
 
 #[test]
+fn rejects_reserved_keyword_field_identifiers() {
+    let cfg = config_with(
+        r#""union": { "type": "string" }"#,
+        "[]",
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.agent_schema.properties.union"));
+    assert!(err.contains("reserved Rust keyword"));
+}
+
+#[test]
 fn rejects_unsupported_action_kind_with_actionable_path() {
     let cfg = config_with(
         r#""value": { "type": "integer" }"#,

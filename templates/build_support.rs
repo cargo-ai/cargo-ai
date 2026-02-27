@@ -457,6 +457,21 @@ fn is_rust_keyword(name: &str) -> bool {
             | "async"
             | "await"
             | "dyn"
+            | "union"
+            | "abstract"
+            | "become"
+            | "box"
+            | "do"
+            | "final"
+            | "macro"
+            | "override"
+            | "priv"
+            | "try"
+            | "typeof"
+            | "unsized"
+            | "virtual"
+            | "yield"
+            | "gen"
     )
 }
 
@@ -592,4 +607,3 @@ pub fn actions() -> Vec<Action> {{
 fn rust_string_literal(value: &str) -> String {
     format!("{value:?}")
 }
-
