@@ -2,6 +2,8 @@
 // - Reads `.agentcfg` and generates typed agent helpers into `OUT_DIR/agent_model.rs`.
 // - Emits template source mappings into `OUT_DIR/.generated_templates.rs` for hatch scaffolding.
 // These generated files are compiled into the crate via `include!(...)` in runtime modules.
+// Design intent: keep runtime execution generic (`Cargo<Output>`, action loop),
+// and specialize schema-driven types/metadata at build time from `.agentcfg`.
 use std::{
     env,                    // Read Cargo-provided build environment (for example `OUT_DIR`).
     fs::{self, File},       // Read `.agentcfg` and write generated Rust source files.
