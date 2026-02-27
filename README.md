@@ -335,6 +335,26 @@ It follows the [JSON Logic](http://jsonlogic.com/) format for conditions.
 Currently, actions can run a command-line executable (`exec`).  
 Future versions will support additional action types.
 
+Action object schema:
+
+```json
+{
+  "name": "my_action",
+  "logic": { "==": [ { "var": "answer" }, 4 ] },
+  "run": [
+    {
+      "kind": "exec",
+      "program": "echo",
+      "args": ["Value is 4"]
+    }
+  ]
+}
+```
+
+- `name`: Action label shown in execution output/logs.
+- `logic`: JSON Logic condition evaluated against the typed agent response.
+- `run`: Ordered list of steps to execute when `logic` evaluates to true.
+
 `run` step schema:
 
 ```json

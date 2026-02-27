@@ -22,6 +22,10 @@ struct RunStep {
 }
 
 #[derive(Debug)]
+// Action metadata from `.agentcfg`:
+// - `name`: label used in logs/output when a rule matches.
+// - `logic`: JSON Logic expression evaluated against the typed model output.
+// - `run`: ordered list of steps executed when `logic` evaluates to true.
 struct Action {
     name: String,
     logic: serde_json::Value, // Follows the JSON Logic Standard
