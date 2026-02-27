@@ -209,6 +209,7 @@ fn parse_actions(root_obj: &Map<String, Value>) -> Result<Vec<Action>, BuildErro
 
         let name = get_required_string(action_obj, "name", &action_path)?.to_string();
         let logic = get_required_field(action_obj, "logic", &action_path)?.clone();
+        validate_logic_expression(&logic, &format!("{action_path}.logic"))?;
 
         let runs = get_required_array(action_obj, "run", &action_path)?;
         let mut run_steps = Vec::with_capacity(runs.len());
@@ -260,6 +261,59 @@ fn parse_actions(root_obj: &Map<String, Value>) -> Result<Vec<Action>, BuildErro
     }
 
     Ok(parsed)
+}
+
+fn validate_logic_expression(value: &Value, path: &str) -> Result<(), BuildError> {
+    match value {
+        Value::Object(map) => {
+            if map.is_empty() {
+                return Err(BuildError::config(
+                    path,
+                    "expected a non-empty JSON Logic object",
+                ));
+            }
+
+            if map.len() != 1 {
+                return Err(BuildError::config(
+                    path,
+                    "expected a JSON Logic object with exactly one operator key",
+                ));
+            }
+
+            let (operator, arguments) = map.iter().next().expect("non-empty map");
+            if operator.trim().is_empty() {
+                return Err(BuildError::config(
+                    path,
+                    "operator name cannot be empty",
+                ));
+            }
+
+            if operator == "literal" {
+                return Ok(());
+            }
+
+            validate_logic_arguments(arguments, &format!("{path}.{operator}"))
+        }
+        _ => Err(BuildError::config(
+            path,
+            "expected a JSON Logic object expression",
+        )),
+    }
+}
+
+fn validate_logic_arguments(value: &Value, path: &str) -> Result<(), BuildError> {
+    match value {
+        Value::Array(items) => {
+            for (idx, item) in items.iter().enumerate() {
+                if item.is_object() {
+                    validate_logic_expression(item, &format!("{path}[{idx}]"))?;
+                }
+            }
+            Ok(())
+        }
+        Value::Object(_) => validate_logic_expression(value, path),
+        _ => Ok(()),
+    }
 }
 
 fn map_property_type(property: &Map<String, Value>, path: &str) -> Result<String, BuildError> {

@@ -140,6 +140,52 @@ fn rejects_non_string_action_args_with_actionable_path() {
 }
 
 #[test]
+fn rejects_non_object_action_logic_with_actionable_path() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_logic_root",
+            "logic": true,
+            "run": [
+              { "kind": "exec", "program": "echo", "args": [] }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].logic"));
+    assert!(err.contains("expected a JSON Logic object expression"));
+}
+
+#[test]
+fn rejects_multi_operator_action_logic_object_with_actionable_path() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_logic_shape",
+            "logic": { "and": [true], "or": [false] },
+            "run": [
+              { "kind": "exec", "program": "echo", "args": [] }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].logic"));
+    assert!(err.contains("exactly one operator key"));
+}
+
+#[test]
 fn escapes_action_literals_and_logic_payload_safely() {
     let cfg = config_with(
         r#""value": { "type": "string" }"#,
