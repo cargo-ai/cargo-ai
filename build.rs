@@ -12,6 +12,9 @@ use std::{
 use serde_json;      // Parse `.agentcfg` and preserve JSON logic payloads for generated code.
 
 #[derive(Debug)]
+// `run` step metadata from `.agentcfg` action blocks.
+// Current runtime execution expects `kind = "exec"`.
+// `args` maps directly to argv tokens (no shell parsing/splitting).
 struct RunStep {
     kind: String,
     program: String,

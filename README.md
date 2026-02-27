@@ -335,6 +335,20 @@ It follows the [JSON Logic](http://jsonlogic.com/) format for conditions.
 Currently, actions can run a command-line executable (`exec`).  
 Future versions will support additional action types.
 
+`run` step schema:
+
+```json
+{
+  "kind": "exec",
+  "program": "echo",
+  "args": ["hello", "world"]
+}
+```
+
+- `kind`: Step type. Use `"exec"` for command execution.
+- `program`: Executable name or path to run.
+- `args`: Argument tokens passed directly as argv entries (no shell splitting).
+
 Example from [weather_agent.json](./weather_agent.json):
 
 ```json
