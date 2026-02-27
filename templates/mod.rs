@@ -1,11 +1,14 @@
 const BUILD_RS_NAME: &str = "build.rs";
 const BUILD_RS_TEMPLATE: &str = include_str!("build.rs");
 
+const BUILD_SUPPORT_RS_NAME: &str = "build_support.rs";
+const BUILD_SUPPORT_RS_TEMPLATE: &str = include_str!("build_support.rs");
+
 const AGENTCFG_NAME: &str = ".agentcfg";
 const AGENTCFG_TEMPLATE: &str = include_str!(".agentcfg");
 
 const MANIFEST_NAME: &str = "Cargo.toml";
-const MANIFEST_TEMPLATE: &str = include_str!("Cargo.toml");
+const MANIFEST_TEMPLATE: &str = include_str!("Targo.toml");
 
 const MAIN_RS_NAME: &str = "src/main.rs";
 const MAIN_RS_TEMPLATE: &str = include_str!("src/main.rs");
@@ -34,8 +37,9 @@ const CONFIG_MOD_RS_TEMPLATE: &str = include_str!("src/config/mod.rs");
 const CONFIG_SCHEMA_RS_NAME: &str = "src/config/schema.rs";
 const CONFIG_SCHEMA_RS_TEMPLATE: &str = include_str!("src/config/schema.rs");
 
-pub const TEMPLATES: [(&str, &str); 12] = [
+pub const TEMPLATES: [(&str, &str); 13] = [
     (BUILD_RS_NAME, BUILD_RS_TEMPLATE),
+    (BUILD_SUPPORT_RS_NAME, BUILD_SUPPORT_RS_TEMPLATE),
     (AGENTCFG_NAME, AGENTCFG_TEMPLATE),
     (MANIFEST_NAME, MANIFEST_TEMPLATE),
     (MAIN_RS_NAME, MAIN_RS_TEMPLATE),
