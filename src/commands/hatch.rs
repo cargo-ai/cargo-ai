@@ -8,6 +8,7 @@ pub fn run(sub_m: &ArgMatches) {
         return;
     };
     let check_only = sub_m.get_flag("check");
+    let force_overwrite = sub_m.get_flag("force");
     let hatch_mode = if check_only {
         super::hatch_pipeline::HatchMode::Check
     } else {
@@ -50,5 +51,10 @@ pub fn run(sub_m: &ArgMatches) {
         }
     };
 
-    super::hatch_pipeline::run_hatch_pipeline(new_project_name, file_contents, hatch_mode);
+    super::hatch_pipeline::run_hatch_pipeline(
+        new_project_name,
+        file_contents,
+        hatch_mode,
+        force_overwrite,
+    );
 }

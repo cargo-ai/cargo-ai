@@ -120,4 +120,23 @@ mod tests {
 
         assert!(hatch_matches.get_flag("check"));
     }
+
+    #[test]
+    fn hatch_force_flag_parses_long_and_short() {
+        let long_matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "hatch", "adder_force_long", "--force"])
+            .expect("hatch --force should parse");
+        let long_hatch = long_matches
+            .subcommand_matches("hatch")
+            .expect("hatch subcommand should be available");
+        assert!(long_hatch.get_flag("force"));
+
+        let short_matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "hatch", "adder_force_short", "-f"])
+            .expect("hatch -f should parse");
+        let short_hatch = short_matches
+            .subcommand_matches("hatch")
+            .expect("hatch subcommand should be available");
+        assert!(short_hatch.get_flag("force"));
+    }
 }

@@ -663,6 +663,7 @@ pub async fn run(agents_m: &ArgMatches) {
                 name,
                 definition_json_str,
                 crate::commands::hatch_pipeline::HatchMode::Build,
+                false,
             );
             return;
         }

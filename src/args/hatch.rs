@@ -25,4 +25,12 @@ pub fn command() -> Command {
                 .value_name("FILE")
                 .num_args(1),
         )
+        .arg(
+            Arg::new("force")
+                .long("force")
+                .short('f')
+                .help("Overwrite existing output binary if it already exists")
+                .required(false)
+                .action(clap::ArgAction::SetTrue),
+        )
 }

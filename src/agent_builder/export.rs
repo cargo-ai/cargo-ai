@@ -5,7 +5,7 @@ use std::io::{self, ErrorKind};
 
 /// Copies the built binary from `.cargo-ai/agents/{agent}/target/debug/{agent}`
 /// into the directory where the `cargo-ai` command was invoked.
-pub fn export_binary(agent_name: &str) -> io::Result<()> {
+pub fn export_binary(agent_name: &str, force_overwrite: bool) -> io::Result<()> {
 
     let project_path = super::agent_workspace_path(agent_name);
 
@@ -31,6 +31,15 @@ pub fn export_binary(agent_name: &str) -> io::Result<()> {
     dest_path.set_extension("exe");
 
     if dest_path.exists() {
+        if !force_overwrite {
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                format!(
+                    "Output already exists at {:?}. Re-run with --force to overwrite.",
+                    dest_path
+                ),
+            ));
+        }
         println!("ℹ️ Existing binary at {:?} will be overwritten.", dest_path);
     }
     

@@ -17,6 +17,7 @@ pub(crate) fn run_hatch_pipeline(
     new_project_name: &str,
     file_contents: String,
     mode: HatchMode,
+    force_overwrite: bool,
 ) {
     let _agent_lock = match crate::agent_builder::lock::try_acquire_agent_lock(new_project_name) {
         Ok(lock) => lock,
@@ -64,7 +65,7 @@ pub(crate) fn run_hatch_pipeline(
                 }
             }
 
-            match crate::agent_builder::export::export_binary(new_project_name) {
+            match crate::agent_builder::export::export_binary(new_project_name, force_overwrite) {
                 Ok(_) => println!("✅ Project binary exported successfully."),
                 Err(e) => {
                     println!("❌ Export failed: {e}");
