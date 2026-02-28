@@ -4,7 +4,6 @@
 //! source resolution for hatch-style flows.
 use std::fs;
 use std::io::{Error, ErrorKind};
-use std::path::Path;
 
 /// Execution mode for hatch pipeline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,28 +95,13 @@ fn cleanup_workspace(new_project_name: &str) {
     }
 }
 
-/// Resolves agent configuration content from either local file or registry key.
-pub(crate) fn config_contents(path: &str) -> Result<String, std::io::Error> {
-    let maybe_local_path = Path::new(path).exists()
-        || path.starts_with("./")
-        || path.starts_with("../")
-        || path.starts_with("~/")
-        || path.contains('/')
-        || path.contains('\\')
-        || Path::new(path)
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("json"))
-            .unwrap_or(false);
-
-    if maybe_local_path {
-        fs::read_to_string(path)
-    } else {
-        fetch_from_registry(path)
-    }
+/// Reads a local agent config file as UTF-8 text.
+pub(crate) fn read_local_config(path: &str) -> Result<String, std::io::Error> {
+    fs::read_to_string(path)
 }
 
-fn fetch_from_registry(name: &str) -> Result<String, Error> {
+/// Fetches a named agent config template from the Cargo-AI public registry.
+pub(crate) fn fetch_from_registry(name: &str) -> Result<String, Error> {
     let url = "https://api.cargo-ai.org/public";
     let client = reqwest::blocking::Client::new();
 

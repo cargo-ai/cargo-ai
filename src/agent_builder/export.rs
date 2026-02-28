@@ -29,6 +29,10 @@ pub fn export_binary(agent_name: &str) -> io::Result<()> {
     
     #[cfg(windows)]
     dest_path.set_extension("exe");
+
+    if dest_path.exists() {
+        println!("ℹ️ Existing binary at {:?} will be overwritten.", dest_path);
+    }
     
     fs::copy(&source_path, &dest_path)?;
 

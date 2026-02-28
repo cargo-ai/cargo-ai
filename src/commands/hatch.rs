@@ -20,23 +20,33 @@ pub fn run(sub_m: &ArgMatches) {
         println!("Build new cargo agent: {new_project_name}");
     }
 
-    // Determine config source: use flag if provided, otherwise default to project name
-    let agentcfg: &str = sub_m
-        .get_one::<String>("config")
-        .map(String::as_str)
-        .unwrap_or(new_project_name);
+    let file_contents = if let Some(config_path) = sub_m.get_one::<String>("config") {
+        match super::hatch_pipeline::read_local_config(config_path) {
+            Ok(contents) => contents,
+            Err(e) => {
+                println!("❌ Failed to read local config file '{}'.", config_path);
+                println!("Reason: {e}");
+                println!("Hint: Ensure the path is valid and points to a UTF-8 JSON file.");
+                return;
+            }
+        }
+    } else {
+        println!(
+            "🌐 No --config flag detected. Fetching default template '{}' from Cargo-AI registry...",
+            new_project_name
+        );
 
-    if sub_m.get_one::<String>("config").is_none() {
-        println!("🌐 No --config flag detected. Fetching default template '{agentcfg}' from Cargo-AI registry...");
-    }
-
-    let file_contents = match super::hatch_pipeline::config_contents(agentcfg) {
-        Ok(contents) => contents,
-        Err(e) => {
-            println!("❌ Failed to fetch agent configuration for '{agentcfg}'.");
-            println!("Reason: {e}");
-            println!("Hint: Ensure the agent name exists in the Cargo-AI registry or provide a local .json file.");
-            return;
+        match super::hatch_pipeline::fetch_from_registry(new_project_name) {
+            Ok(contents) => contents,
+            Err(e) => {
+                println!(
+                    "❌ Failed to fetch agent configuration for '{}' from Cargo-AI registry.",
+                    new_project_name
+                );
+                println!("Reason: {e}");
+                println!("Hint: Ensure the agent name exists in the Cargo-AI registry or provide --config <path-to-json>.");
+                return;
+            }
         }
     };
 
