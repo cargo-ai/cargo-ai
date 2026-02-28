@@ -1,15 +1,15 @@
 //! Runtime behavior for `cargo ai account agents`.
 use clap::ArgMatches;
 
-use crate::config::adder::set_account_tokens;
-use crate::config::loader::load_config;
-use crate::config::setup::config_path;
 use crate::infra_api;
 use crate::ui;
 
 use std::{fs, path::Path};
 
-use super::helpers::{apply_agents_list_display_limit, INFRA_BASE_URL};
+use super::helpers::{
+    apply_agents_list_display_limit, load_account_auth, persist_refreshed_access_token,
+    refresh_access_token_for_retry, RefreshAccessError, INFRA_BASE_URL,
+};
 
 /// Executes account-agent operations (list/push/pull/hatch/visibility/archive).
 pub async fn run(agents_m: &ArgMatches) {
@@ -217,11 +217,12 @@ pub async fn run(agents_m: &ArgMatches) {
             definition_path: hatch_m.get_one::<String>("path").map(|s| s.to_string()),
         }
     } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
+        let Some(name) = visibility_m.get_one::<String>("name") else {
+            eprintln!("❌ Missing agent name. Provide --name <NAME>.");
+            return;
+        };
         AgentsCommand::Visibility {
-            name: visibility_m
-                .get_one::<String>("name")
-                .expect("name is required")
-                .to_string(),
+            name: name.to_string(),
             definition_path: visibility_m.get_one::<String>("path").map(|s| s.to_string()),
             is_public: visibility_m.get_flag("public"),
             public_from: visibility_m
@@ -232,11 +233,12 @@ pub async fn run(agents_m: &ArgMatches) {
                 .map(|s| s.to_string()),
         }
     } else if let Some(archive_m) = agents_m.subcommand_matches("archive") {
+        let Some(name) = archive_m.get_one::<String>("name") else {
+            eprintln!("❌ Missing agent name. Provide --name <NAME>.");
+            return;
+        };
         AgentsCommand::Archive {
-            name: archive_m
-                .get_one::<String>("name")
-                .expect("name is required")
-                .to_string(),
+            name: name.to_string(),
             definition_path: archive_m.get_one::<String>("path").map(|s| s.to_string()),
             is_archived: archive_m.get_flag("archive"),
         }
@@ -247,39 +249,17 @@ pub async fn run(agents_m: &ArgMatches) {
         return;
     };
 
-    // 1. Load config
-    let cfg = match load_config() {
-        Some(cfg) => cfg,
-        None => {
-            eprintln!(
-                "❌ No local config file found at '{}'. Run `cargo ai account register <email>` on this machine, or copy your config from another machine.",
-                config_path().display()
-            );
+    let auth = match load_account_auth() {
+        Ok(auth) => auth,
+        Err(message) => {
+            eprintln!("{message}");
             return;
         }
     };
-
-    // 2. Extract account
-    let acct = match cfg.account.as_ref() {
-        Some(acct) => acct,
-        None => {
-            eprintln!("❌ No account found in config. You must confirm your account first.");
-            return;
-        }
-    };
-
-    // 3. Extract access token
-    let access_token = match acct.access_token.as_ref() {
-        Some(t) => t,
-        None => {
-            eprintln!("❌ No access token found in config. Run `cargo ai account confirm <code>` first.");
-            return;
-        }
-    };
-    let refresh_token = acct.refresh_token.as_ref();
+    let access_token_owned = auth.access_token;
+    let refresh_token = auth.refresh_token;
 
     // 4. Execute first attempt using current access token.
-    let access_token_owned = access_token.clone();
     let mut response = match &agents_command {
         AgentsCommand::List {
             owner_handle,
@@ -409,9 +389,10 @@ pub async fn run(agents_m: &ArgMatches) {
         .unwrap_or(false);
 
     if is_expired_error {
-        let rt = match refresh_token {
-            Some(rt) => rt,
-            None => {
+        match refresh_access_token_for_retry(access_token_owned.as_str(), refresh_token.as_deref())
+            .await
+        {
+            Err(RefreshAccessError::MissingRefreshToken) => {
                 eprintln!("⚠️ Access token expired, and no refresh token exists in config. Run `cargo ai account status` or re-confirm account.");
                 if !ui::account_status::render_backend_ui(&response) {
                     match serde_json::to_string_pretty(&response) {
@@ -421,45 +402,11 @@ pub async fn run(agents_m: &ArgMatches) {
                 }
                 return;
             }
-        };
-
-        let refresh_response = match infra_api::account::status::fetch_status(
-            INFRA_BASE_URL,
-            access_token_owned.as_str(),
-            Some(rt.as_str()),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("❌ Request failed while refreshing session: {e:?}");
+            Err(RefreshAccessError::RequestFailed(error)) => {
+                eprintln!("❌ Request failed while refreshing session: {error}");
                 return;
             }
-        };
-
-        let refreshed_access_token = refresh_response
-            .get("session")
-            .and_then(|s| s.get("access_token"))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-
-        let refreshed_expires_in: Option<i32> = refresh_response
-            .get("session")
-            .and_then(|s| s.get("expires_in_seconds"))
-            .and_then(|v| v.as_i64())
-            .and_then(|n| i32::try_from(n).ok());
-
-        let retry_access_token = match refreshed_access_token {
-            Some(ref at) => {
-                if let Some(expires_in) = refreshed_expires_in {
-                    if let Err(e) = set_account_tokens(at.to_string(), rt.clone(), expires_in) {
-                        eprintln!("⚠️ Failed to update account tokens in config: {e}");
-                    }
-                }
-                at.clone()
-            }
-            None => {
+            Err(RefreshAccessError::MissingRefreshedToken(refresh_response)) => {
                 eprintln!("⚠️ Session refresh did not return a new access token. Cannot retry agents request.");
                 if !ui::account_status::render_backend_ui(&refresh_response) {
                     match serde_json::to_string_pretty(&refresh_response) {
@@ -469,128 +416,137 @@ pub async fn run(agents_m: &ArgMatches) {
                 }
                 return;
             }
-        };
+            Ok((retry_access_token, refreshed_expires_in)) => {
+                if let Some(rt) = refresh_token.as_deref() {
+                    persist_refreshed_access_token(
+                        retry_access_token.as_str(),
+                        rt,
+                        refreshed_expires_in,
+                    );
+                }
 
-        response = match &agents_command {
-            AgentsCommand::List {
-                owner_handle,
-                include_archived,
-                ..
-            } => match infra_api::account::agents::list_agents(
-                INFRA_BASE_URL,
-                retry_access_token.as_str(),
-                owner_handle.as_deref(),
-                *include_archived,
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("❌ Request failed after session refresh: {e:?}");
-                    return;
-                }
-            },
-            AgentsCommand::Push {
-                name,
-                definition_path,
-                definition_json,
-            } => match infra_api::account::agents::push_agent(
-                INFRA_BASE_URL,
-                retry_access_token.as_str(),
-                name,
-                definition_path.as_deref(),
-                definition_json.clone(),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("❌ Request failed after session refresh: {e:?}");
-                    return;
-                }
-            },
-            AgentsCommand::Pull {
-                name,
-                owner_handle,
-                definition_path,
-                ..
-            } => match infra_api::account::agents::pull_agent(
-                INFRA_BASE_URL,
-                retry_access_token.as_str(),
-                name,
-                owner_handle.as_deref(),
-                definition_path.as_deref(),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("❌ Request failed after session refresh: {e:?}");
-                    return;
-                }
-            },
-            AgentsCommand::Hatch {
-                name,
-                owner_handle,
-                definition_path,
-            } => match infra_api::account::agents::pull_agent(
-                INFRA_BASE_URL,
-                retry_access_token.as_str(),
-                name,
-                owner_handle.as_deref(),
-                definition_path.as_deref(),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("❌ Request failed after session refresh: {e:?}");
-                    return;
-                }
-            },
-            AgentsCommand::Visibility {
-                name,
-                definition_path,
-                is_public,
-                public_from,
-                public_until,
-            } => match infra_api::account::agents::set_agent_visibility(
-                INFRA_BASE_URL,
-                retry_access_token.as_str(),
-                name,
-                definition_path.as_deref(),
-                *is_public,
-                public_from.as_deref(),
-                public_until.as_deref(),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("❌ Request failed after session refresh: {e:?}");
-                    return;
-                }
-            },
-            AgentsCommand::Archive {
-                name,
-                definition_path,
-                is_archived,
-            } => match infra_api::account::agents::set_agent_archive(
-                INFRA_BASE_URL,
-                retry_access_token.as_str(),
-                name,
-                definition_path.as_deref(),
-                *is_archived,
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("❌ Request failed after session refresh: {e:?}");
-                    return;
-                }
-            },
-        };
+                response = match &agents_command {
+                    AgentsCommand::List {
+                        owner_handle,
+                        include_archived,
+                        ..
+                    } => match infra_api::account::agents::list_agents(
+                        INFRA_BASE_URL,
+                        retry_access_token.as_str(),
+                        owner_handle.as_deref(),
+                        *include_archived,
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            return;
+                        }
+                    },
+                    AgentsCommand::Push {
+                        name,
+                        definition_path,
+                        definition_json,
+                    } => match infra_api::account::agents::push_agent(
+                        INFRA_BASE_URL,
+                        retry_access_token.as_str(),
+                        name,
+                        definition_path.as_deref(),
+                        definition_json.clone(),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            return;
+                        }
+                    },
+                    AgentsCommand::Pull {
+                        name,
+                        owner_handle,
+                        definition_path,
+                        ..
+                    } => match infra_api::account::agents::pull_agent(
+                        INFRA_BASE_URL,
+                        retry_access_token.as_str(),
+                        name,
+                        owner_handle.as_deref(),
+                        definition_path.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            return;
+                        }
+                    },
+                    AgentsCommand::Hatch {
+                        name,
+                        owner_handle,
+                        definition_path,
+                    } => match infra_api::account::agents::pull_agent(
+                        INFRA_BASE_URL,
+                        retry_access_token.as_str(),
+                        name,
+                        owner_handle.as_deref(),
+                        definition_path.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            return;
+                        }
+                    },
+                    AgentsCommand::Visibility {
+                        name,
+                        definition_path,
+                        is_public,
+                        public_from,
+                        public_until,
+                    } => match infra_api::account::agents::set_agent_visibility(
+                        INFRA_BASE_URL,
+                        retry_access_token.as_str(),
+                        name,
+                        definition_path.as_deref(),
+                        *is_public,
+                        public_from.as_deref(),
+                        public_until.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            return;
+                        }
+                    },
+                    AgentsCommand::Archive {
+                        name,
+                        definition_path,
+                        is_archived,
+                    } => match infra_api::account::agents::set_agent_archive(
+                        INFRA_BASE_URL,
+                        retry_access_token.as_str(),
+                        name,
+                        definition_path.as_deref(),
+                        *is_archived,
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            return;
+                        }
+                    },
+                };
+            }
+        }
     }
 
     let mut pull_stdout_payload: Option<String> = None;

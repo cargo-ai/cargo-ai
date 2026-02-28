@@ -3,9 +3,10 @@ use clap::ArgMatches;
 
 /// Executes the `hatch` command flow from parsed CLI arguments.
 pub fn run(sub_m: &ArgMatches) {
-    let new_project_name = sub_m
-        .get_one::<String>("name")
-        .expect("project name is required");
+    let Some(new_project_name) = sub_m.get_one::<String>("name") else {
+        eprintln!("❌ Missing project name. Use `cargo ai hatch <name>`.");
+        return;
+    };
 
     println!("Build new cargo agent: {new_project_name}");
 

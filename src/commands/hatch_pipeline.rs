@@ -4,6 +4,7 @@
 //! source resolution for hatch-style flows.
 use std::fs;
 use std::io::{Error, ErrorKind};
+use std::path::Path;
 
 /// Runs the standard hatch execution pipeline for a single agent definition.
 pub(crate) fn run_hatch_pipeline(new_project_name: &str, file_contents: String) {
@@ -12,19 +13,35 @@ pub(crate) fn run_hatch_pipeline(new_project_name: &str, file_contents: String) 
         Ok(file_contents),
     ) {
         Ok(_) => println!("✅ Project created successfully."),
-        Err(e) => println!("❌ Failed to create project: {e}"),
+        Err(e) => {
+            println!("❌ Failed to create project: {e}");
+            cleanup_workspace(new_project_name);
+            return;
+        }
     }
 
     match crate::agent_builder::build::build_agent_project(new_project_name) {
         Ok(_) => println!("✅ Project built successfully."),
-        Err(e) => println!("❌ Build failed: {e}"),
+        Err(e) => {
+            println!("❌ Build failed: {e}");
+            cleanup_workspace(new_project_name);
+            return;
+        }
     }
 
     match crate::agent_builder::export::export_binary(new_project_name) {
         Ok(_) => println!("✅ Project binary exported successfully."),
-        Err(e) => println!("❌ Export failed: {e}"),
+        Err(e) => {
+            println!("❌ Export failed: {e}");
+            cleanup_workspace(new_project_name);
+            return;
+        }
     }
 
+    cleanup_workspace(new_project_name);
+}
+
+fn cleanup_workspace(new_project_name: &str) {
     match crate::agent_builder::cleanup::delete_agent_workspace(new_project_name) {
         Ok(_) => println!("🧼 Agent workspace removed."),
         Err(e) => println!("⚠️ Failed to clean up workspace: {e}"),
@@ -33,11 +50,21 @@ pub(crate) fn run_hatch_pipeline(new_project_name: &str, file_contents: String) 
 
 /// Resolves agent configuration content from either local file or registry key.
 pub(crate) fn config_contents(path: &str) -> Result<String, std::io::Error> {
-    if path.contains('.') {
-        // Local file path
+    let maybe_local_path = Path::new(path).exists()
+        || path.starts_with("./")
+        || path.starts_with("../")
+        || path.starts_with("~/")
+        || path.contains('/')
+        || path.contains('\\')
+        || Path::new(path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("json"))
+            .unwrap_or(false);
+
+    if maybe_local_path {
         fs::read_to_string(path)
     } else {
-        // Fetch from Cargo-AI registry
         fetch_from_registry(path)
     }
 }

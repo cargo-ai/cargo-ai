@@ -11,7 +11,10 @@ use super::helpers::INFRA_BASE_URL;
 
 /// Confirms a registration code and persists returned tokens on success.
 pub async fn run(conf_m: &ArgMatches) {
-    let code = conf_m.get_one::<String>("code").expect("code is required");
+    let Some(code) = conf_m.get_one::<String>("code") else {
+        eprintln!("❌ Missing confirmation code. Use `cargo ai account confirm <code>`.");
+        return;
+    };
 
     let cfg = match load_config() {
         Some(cfg) => cfg,
@@ -64,7 +67,7 @@ pub async fn run(conf_m: &ArgMatches) {
                 let expires_in = creds
                     .and_then(|c| c.get("expires_in"))
                     .and_then(|v| v.as_i64())
-                    .map(|n| n as i32);
+                    .and_then(|n| i32::try_from(n).ok());
 
                 match (access_token, refresh_token, expires_in) {
                     (Some(at), Some(rt), Some(ex)) => {

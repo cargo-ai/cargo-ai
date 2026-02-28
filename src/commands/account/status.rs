@@ -1,11 +1,10 @@
 //! Runtime behavior for `cargo ai account status`.
-use crate::config::adder::set_account_tokens;
 use crate::config::loader::load_config;
 use crate::config::setup::config_path;
 use crate::infra_api;
 use crate::ui;
 
-use super::helpers::INFRA_BASE_URL;
+use super::helpers::{persist_refreshed_access_token, INFRA_BASE_URL};
 
 /// Queries account/session status and persists refreshed access tokens.
 pub async fn run() {
@@ -175,9 +174,7 @@ pub async fn run() {
                     }
                 };
 
-                if let Err(e) = set_account_tokens(at.to_string(), rt, expires_in) {
-                    eprintln!("⚠️ Failed to update account tokens in config: {e}");
-                }
+                persist_refreshed_access_token(at, rt.as_str(), Some(expires_in));
             }
         }
     }

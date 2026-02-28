@@ -90,8 +90,9 @@ pub async fn run(sub_m: &ArgMatches) {
     // End: Argument assignments
 
     if !(server == "ollama" || server == "openai") {
-        println!("{server}");
-        panic!("Unknown AI Server")
+        eprintln!("❌ Unknown AI server '{}'.", server);
+        eprintln!("Use `--server ollama` or `--server openai`.");
+        return;
     }
 
     let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
@@ -99,9 +100,14 @@ pub async fn run(sub_m: &ArgMatches) {
     let resources = crate::resource_urls();
 
     // Build data block for LLM context
-    let data_block = crate::web_resources::build_data_block(&resources)
-        .await
-        .expect("Failed to fetch required web resources");
+    let data_block = match crate::web_resources::build_data_block(&resources).await {
+        Ok(data_block) => data_block,
+        Err(error) => {
+            eprintln!("❌ Failed to fetch required web resources.");
+            eprintln!("Reason: {error}");
+            return;
+        }
+    };
 
     let context = format!("{}\n\n{}", static_context, data_block);
 

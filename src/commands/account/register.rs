@@ -13,7 +13,10 @@ use super::helpers::{extract_status_account_email, fetch_status_for_register_gua
 
 /// Registers an account email and persists the active email on success.
 pub async fn run(reg_m: &ArgMatches) {
-    let email = reg_m.get_one::<String>("email").expect("email is required");
+    let Some(email) = reg_m.get_one::<String>("email") else {
+        eprintln!("❌ Missing email. Use `cargo ai account register <email>`.");
+        return;
+    };
 
     if let Err(e) = ensure_config_file_exists() {
         eprintln!(

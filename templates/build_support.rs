@@ -321,7 +321,12 @@ fn validate_logic_expression(
                 ));
             }
 
-            let (operator, arguments) = map.iter().next().expect("non-empty map");
+            let Some((operator, arguments)) = map.iter().next() else {
+                return Err(BuildError::config(
+                    path,
+                    "expected a non-empty JSON Logic object",
+                ));
+            };
             if operator.trim().is_empty() {
                 return Err(BuildError::config(
                     path,
@@ -458,7 +463,12 @@ fn infer_logic_value_type(
                 ));
             }
 
-            let (operator, arguments) = map.iter().next().expect("non-empty map");
+            let Some((operator, arguments)) = map.iter().next() else {
+                return Err(BuildError::config(
+                    path,
+                    "expected a JSON Logic object with exactly one operator key",
+                ));
+            };
             if operator == "var" {
                 return resolve_var_field_type(
                     arguments,

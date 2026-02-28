@@ -35,13 +35,18 @@ pub fn run(sub_m: &ArgMatches) {
             println!("No config file found.");
         }
     } else if let Some(add_m) = sub_m.subcommand_matches("add") {
-        let name = add_m
-            .get_one::<String>("name")
-            .expect("Profile name is required");
-        let server = add_m
-            .get_one::<String>("server")
-            .expect("Server is required");
-        let model = add_m.get_one::<String>("model").expect("Model is required");
+        let Some(name) = add_m.get_one::<String>("name") else {
+            eprintln!("Please provide a profile name. Example: cargo ai profile add <name> ...");
+            return;
+        };
+        let Some(server) = add_m.get_one::<String>("server") else {
+            eprintln!("Please provide --server (for example: openai or ollama).");
+            return;
+        };
+        let Some(model) = add_m.get_one::<String>("model") else {
+            eprintln!("Please provide --model (for example: gpt-4o or mistral).");
+            return;
+        };
         let url = add_m
             .get_one::<String>("url")
             .map(String::as_str)
@@ -99,10 +104,16 @@ pub fn run(sub_m: &ArgMatches) {
                         "Are you sure you want to remove profile '{}'? [y/N]: ",
                         name
                     );
-                    io::stdout().flush().unwrap();
+                    if let Err(error) = io::stdout().flush() {
+                        eprintln!("Failed to flush stdout: {error}");
+                        return;
+                    }
 
                     let mut input = String::new();
-                    io::stdin().read_line(&mut input).unwrap();
+                    if let Err(error) = io::stdin().read_line(&mut input) {
+                        eprintln!("Failed to read input: {error}");
+                        return;
+                    }
 
                     if input.trim().eq_ignore_ascii_case("y")
                         || input.trim().eq_ignore_ascii_case("yes")
