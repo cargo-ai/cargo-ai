@@ -10,6 +10,9 @@ pub mod export;
 // Handles cleaup after export
 pub mod cleanup;
 
+// Handles per-agent workspace locking during hatch/check runs
+pub mod lock;
+
 use std::env;
 use std::path::PathBuf;
 
@@ -26,7 +29,17 @@ fn cargo_home() -> PathBuf {
 
 /// Root for CargoAI’s agents inside Cargo home
 fn agents_workspace_root() -> PathBuf {
-    cargo_home().join(".cargo-ai/agents")
+    cargo_ai_root().join("agents")
+}
+
+/// Root for CargoAI internal files inside Cargo home
+fn cargo_ai_root() -> PathBuf {
+    cargo_home().join(".cargo-ai")
+}
+
+/// Root for lock files that coordinate hatch/check runs.
+fn locks_root() -> PathBuf {
+    cargo_ai_root().join("locks")
 }
 
 /// Full path to a specific agent workspace
