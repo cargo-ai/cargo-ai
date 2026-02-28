@@ -1,3 +1,6 @@
+//! Command execution modules for the `cargo-ai` CLI.
+//!
+//! Each submodule owns one command area and keeps `main.rs` dispatch-only.
 pub mod account;
 pub mod hatch;
 pub mod hatch_pipeline;

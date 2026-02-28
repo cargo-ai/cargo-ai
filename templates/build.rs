@@ -1,5 +1,6 @@
-// Build-time codegen entrypoint for scaffolded agents.
-// Logic is shared with cargo-ai's root build script via `build_support.rs`.
+//! Build-time codegen entrypoint for scaffolded agents.
+//!
+//! Logic is shared with the root crate build via `build_support.rs`.
 mod build_support;
 
 fn main() -> Result<(), build_support::BuildError> {

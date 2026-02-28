@@ -1,3 +1,4 @@
+//! Runtime behavior for `cargo ai account handle`.
 use clap::ArgMatches;
 
 use crate::config::adder::set_account_tokens;
@@ -8,6 +9,7 @@ use crate::ui;
 
 use super::helpers::INFRA_BASE_URL;
 
+/// Fetches or updates the account handle, including token-refresh retry logic.
 pub async fn run(handle_m: &ArgMatches) {
     // Account handle: get current handle or set a new one.
     //

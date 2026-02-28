@@ -1,5 +1,7 @@
+//! CLI parser definition for `cargo ai preflight`.
 use clap::{Arg, Command};
 
+/// Builds the `preflight` command schema.
 pub fn command() -> Command {
     Command::new("preflight")
         .about("Internal: test agent config file")

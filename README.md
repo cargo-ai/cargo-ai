@@ -23,6 +23,14 @@ Supports both **OpenAI‑API‑compatible servers** and **Ollama**.
 - **Repository Integration** – Download JSON configurations directly from Cargo-AI and hatch agents without needing local files
 - **Cross‑Platform Support** – Runs on any Linux, macOS, or Windows device
 
+## 🧭 Internal Layout (CLI)
+
+- `src/main.rs` keeps runtime dispatch thin and routes work into `src/commands/*`.
+- `src/args.rs` is the parser root and composes command parsers from `src/args/*`.
+- `src/commands/*` owns command behavior (`preflight`, `hatch`, `profile`, `shipyard`, `account`).
+- `src/commands/account/*` and `src/args/account/*` keep account subcommand paths explicit and testable.
+- `templates/build_support.rs` is the shared build-time hardening/codegen logic used by both build scripts.
+
 ## 🚀 Upcoming Features
 
 - **User Repositories (Public & Private)** – Publish agents to your own hosted repository and share them publicly or privately with collaborators.

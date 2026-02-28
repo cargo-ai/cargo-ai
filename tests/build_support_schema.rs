@@ -1,7 +1,11 @@
+//! Focused schema/codegen hardening tests for `templates/build_support.rs`.
+
 #[allow(dead_code)]
 #[path = "../templates/build_support.rs"]
 mod build_support;
 
+/// Constructs a minimal `.agentcfg` JSON document with caller-provided schema
+/// properties and actions sections.
 fn config_with(properties: &str, actions: &str) -> String {
     format!(
         r#"{{

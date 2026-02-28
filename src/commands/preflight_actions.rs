@@ -1,5 +1,7 @@
+//! Action execution helpers for preflight/test flows.
 use jsonlogic::apply;
 
+/// Applies configured action rules to model output and executes matching steps.
 pub(crate) fn apply_actions(output: &crate::Output, actions: &[crate::Action]) {
     // println!("DEBUG: Applying actions -> {:?}", actions);
 

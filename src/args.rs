@@ -1,3 +1,7 @@
+//! Top-level CLI parser assembly for `cargo-ai`.
+//!
+//! This module composes command parsers from `src/args/*` and normalizes both
+//! invocation forms: `cargo-ai ...` and `cargo ai ...`.
 use clap::{ArgMatches, Command};
 
 mod account;
@@ -18,8 +22,9 @@ fn cli_command(bin_name: &'static str) -> Command {
         .subcommand(account::command())
 }
 
+/// Parses CLI arguments into clap matches.
 pub fn build_cli() -> ArgMatches {
-    // Collect the original command-line arguments.
+    // Collect raw process args so we can normalize cargo-subcommand mode.
     let mut args: Vec<String> = std::env::args().collect();
 
     let mut bin_name = "cargo-ai";

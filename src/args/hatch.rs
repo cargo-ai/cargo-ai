@@ -1,5 +1,7 @@
+//! CLI parser definition for `cargo ai hatch`.
 use clap::{Arg, Command};
 
+/// Builds the `hatch` command schema.
 pub fn command() -> Command {
     Command::new("hatch")
         .about("Hatch a new AI agent from a JSON config")

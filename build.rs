@@ -1,6 +1,7 @@
-// Build-time codegen entrypoint for cargo-ai.
-// Shared parsing/mapping/codegen logic lives in `templates/build_support.rs`
-// so the top-level build and scaffolded agent build stay behavior-identical.
+//! Build-time entrypoint for the root `cargo-ai` crate.
+//!
+//! Shared parsing/mapping/codegen lives in `templates/build_support.rs` so the
+//! root build and scaffolded-agent build stay behavior-identical.
 #[path = "templates/build_support.rs"]
 mod build_support;
 

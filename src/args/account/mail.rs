@@ -1,5 +1,7 @@
+//! CLI parser definitions for `cargo ai account mail`.
 use clap::{Arg, Command};
 
+/// Builds the `mail` account subcommand schema (`test`, `prefs`).
 pub fn command() -> Command {
     Command::new("mail")
         .about("Send account mail")

@@ -1,5 +1,7 @@
+//! CLI parser definition for `cargo ai profile`.
 use clap::{Arg, Command};
 
+/// Builds the `profile` command schema and nested subcommands.
 pub fn command() -> Command {
     Command::new("profile")
         .about("Manage connection profiles in the Cargo-AI config file")

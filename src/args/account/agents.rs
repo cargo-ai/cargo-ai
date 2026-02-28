@@ -1,5 +1,7 @@
+//! CLI parser definitions for `cargo ai account agents`.
 use clap::{Arg, ArgGroup, Command};
 
+/// Builds the `agents` account subcommand schema.
 pub fn command() -> Command {
     Command::new("agents")
         .about("Manage account agents")

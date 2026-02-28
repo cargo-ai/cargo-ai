@@ -1,3 +1,4 @@
+//! Runtime behavior for `cargo ai account status`.
 use crate::config::adder::set_account_tokens;
 use crate::config::loader::load_config;
 use crate::config::setup::config_path;
@@ -6,6 +7,7 @@ use crate::ui;
 
 use super::helpers::INFRA_BASE_URL;
 
+/// Queries account/session status and persists refreshed access tokens.
 pub async fn run() {
     // Account status: check and optionally refresh tokens, print status.
     //

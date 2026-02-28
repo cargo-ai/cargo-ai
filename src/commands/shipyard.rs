@@ -1,5 +1,7 @@
+//! Runtime behavior for `cargo ai shipyard`.
 use clap::ArgMatches;
 
+/// Executes the shipyard command, honoring feature and explicit enable gates.
 pub fn run(sub_m: &ArgMatches) {
     #[cfg(feature = "shipyard-ui")]
     {

@@ -1,3 +1,5 @@
+//! Embedded source templates used when scaffolding agent projects.
+
 const BUILD_RS_NAME: &str = "build.rs";
 const BUILD_RS_TEMPLATE: &str = include_str!("build.rs");
 
@@ -37,6 +39,7 @@ const CONFIG_MOD_RS_TEMPLATE: &str = include_str!("src/config/mod.rs");
 const CONFIG_SCHEMA_RS_NAME: &str = "src/config/schema.rs";
 const CONFIG_SCHEMA_RS_TEMPLATE: &str = include_str!("src/config/schema.rs");
 
+/// Template files emitted into a newly scaffolded agent workspace.
 pub const TEMPLATES: [(&str, &str); 13] = [
     (BUILD_RS_NAME, BUILD_RS_TEMPLATE),
     (BUILD_SUPPORT_RS_NAME, BUILD_SUPPORT_RS_TEMPLATE),

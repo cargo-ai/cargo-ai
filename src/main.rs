@@ -1,3 +1,7 @@
+//! Binary entrypoint for `cargo-ai`.
+//!
+//! This file intentionally stays thin: it parses CLI arguments and dispatches
+//! into command modules, while command behavior lives in `src/commands/*`.
 mod agent_builder;
 mod args;
 mod commands;

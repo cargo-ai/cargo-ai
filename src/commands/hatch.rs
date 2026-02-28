@@ -1,5 +1,7 @@
+//! Runtime behavior for `cargo ai hatch`.
 use clap::ArgMatches;
 
+/// Executes the `hatch` command flow from parsed CLI arguments.
 pub fn run(sub_m: &ArgMatches) {
     let new_project_name = sub_m
         .get_one::<String>("name")

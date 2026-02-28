@@ -1,3 +1,4 @@
+//! Runtime behavior for `cargo ai account agents`.
 use clap::ArgMatches;
 
 use crate::config::adder::set_account_tokens;
@@ -10,6 +11,7 @@ use std::{fs, path::Path};
 
 use super::helpers::{apply_agents_list_display_limit, INFRA_BASE_URL};
 
+/// Executes account-agent operations (list/push/pull/hatch/visibility/archive).
 pub async fn run(agents_m: &ArgMatches) {
     enum AgentsCommand {
         List {

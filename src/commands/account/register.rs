@@ -1,3 +1,4 @@
+//! Runtime behavior for `cargo ai account register`.
 use clap::ArgMatches;
 
 use crate::config::adder::set_account_email;
@@ -10,6 +11,7 @@ use std::io::{self, Write};
 
 use super::helpers::{extract_status_account_email, fetch_status_for_register_guard, INFRA_BASE_URL};
 
+/// Registers an account email and persists the active email on success.
 pub async fn run(reg_m: &ArgMatches) {
     let email = reg_m.get_one::<String>("email").expect("email is required");
 

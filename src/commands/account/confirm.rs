@@ -1,3 +1,4 @@
+//! Runtime behavior for `cargo ai account confirm`.
 use clap::ArgMatches;
 
 use crate::config::adder::set_account_tokens;
@@ -8,6 +9,7 @@ use crate::ui;
 
 use super::helpers::INFRA_BASE_URL;
 
+/// Confirms a registration code and persists returned tokens on success.
 pub async fn run(conf_m: &ArgMatches) {
     let code = conf_m.get_one::<String>("code").expect("code is required");
 

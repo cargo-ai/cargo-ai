@@ -1,5 +1,7 @@
+//! CLI parser definition for `cargo ai shipyard`.
 use clap::{Arg, Command};
 
+/// Builds the hidden `shipyard` command schema.
 pub fn command() -> Command {
     Command::new("shipyard")
         .hide(true)

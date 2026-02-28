@@ -1,7 +1,10 @@
+//! Runtime behavior for `cargo ai preflight`.
 use clap::ArgMatches;
 
 use crate::config::loader::{find_profile, load_config};
 
+/// Executes the preflight flow: resolve runtime settings, call provider, and
+/// run any configured post-response actions.
 pub async fn run(sub_m: &ArgMatches) {
     let prompt = if let Some(cli_prompt) = sub_m.get_one::<String>("prompt") {
         cli_prompt.to_string()

@@ -1,8 +1,12 @@
+//! CLI parser definitions for `cargo ai account`.
+//!
+//! Larger nested branches (`mail`, `agents`) are split into dedicated modules.
 use clap::{Arg, Command};
 
 mod agents;
 mod mail;
 
+/// Builds the `account` command schema and all nested subcommands.
 pub fn command() -> Command {
     Command::new("account")
         .about("Manage account lifecycle")

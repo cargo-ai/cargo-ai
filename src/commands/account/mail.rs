@@ -1,3 +1,4 @@
+//! Runtime behavior for `cargo ai account mail`.
 use clap::ArgMatches;
 
 use crate::config::adder::set_account_tokens;
@@ -8,6 +9,7 @@ use crate::ui;
 
 use super::helpers::INFRA_BASE_URL;
 
+/// Routes account mail operations to `test` and `prefs` handlers.
 pub async fn run(mail_m: &ArgMatches) {
     if let Some(test_m) = mail_m.subcommand_matches("test") {
         run_test(test_m).await;
@@ -20,6 +22,7 @@ pub async fn run(mail_m: &ArgMatches) {
     }
 }
 
+/// Sends a test email using the configured account session.
 async fn run_test(test_m: &ArgMatches) {
     const DEFAULT_TEST_MAIL_SUBJECT: &str = "Cargo-AI deliverability test";
     const DEFAULT_TEST_MAIL_TEXT: &str = "This is a setup test email from Cargo-AI.";
@@ -179,6 +182,7 @@ async fn run_test(test_m: &ArgMatches) {
     }
 }
 
+/// Gets or updates account-wide mail preference flags.
 async fn run_prefs(prefs_m: &ArgMatches) {
     let set_all_emails_enabled = if prefs_m.get_flag("disable_all") {
         Some(false)

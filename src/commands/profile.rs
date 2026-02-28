@@ -1,3 +1,4 @@
+//! Runtime behavior for `cargo ai profile`.
 use clap::ArgMatches;
 
 use crate::config::adder::add_profile;
@@ -5,6 +6,7 @@ use crate::config::loader::{find_profile, load_config};
 use crate::config::remover::remove_profile;
 use crate::config::schema::Profile;
 
+/// Executes profile list/show/add/remove operations.
 pub fn run(sub_m: &ArgMatches) {
     if let Some(_) = sub_m.subcommand_matches("list") {
         if let Some(cfg) = load_config() {

@@ -1,6 +1,11 @@
+//! Shared hatch pipeline helpers.
+//!
+//! This module centralizes scaffold/build/export/cleanup execution and config
+//! source resolution for hatch-style flows.
 use std::fs;
 use std::io::{Error, ErrorKind};
 
+/// Runs the standard hatch execution pipeline for a single agent definition.
 pub(crate) fn run_hatch_pipeline(new_project_name: &str, file_contents: String) {
     match crate::agent_builder::project::create_new_agent_project(
         new_project_name,
@@ -26,6 +31,7 @@ pub(crate) fn run_hatch_pipeline(new_project_name: &str, file_contents: String) 
     }
 }
 
+/// Resolves agent configuration content from either local file or registry key.
 pub(crate) fn config_contents(path: &str) -> Result<String, std::io::Error> {
     if path.contains('.') {
         // Local file path

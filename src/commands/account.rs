@@ -1,3 +1,7 @@
+//! Account command dispatcher.
+//!
+//! This module keeps routing logic thin and delegates each account subcommand
+//! to a focused implementation module.
 use clap::ArgMatches;
 
 mod agents;
@@ -8,6 +12,7 @@ mod mail;
 mod register;
 mod status;
 
+/// Routes `cargo ai account ...` subcommands to their runtime handlers.
 pub async fn run(sub_m: &ArgMatches) {
     if let Some(reg_m) = sub_m.subcommand_matches("register") {
         register::run(reg_m).await;
