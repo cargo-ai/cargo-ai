@@ -107,4 +107,17 @@ mod tests {
 
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
+
+    #[test]
+    fn hatch_check_flag_parses() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "hatch", "adder_check", "--check"])
+            .expect("hatch --check should parse");
+
+        let hatch_matches = matches
+            .subcommand_matches("hatch")
+            .expect("hatch subcommand should be available");
+
+        assert!(hatch_matches.get_flag("check"));
+    }
 }

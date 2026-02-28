@@ -11,6 +11,13 @@ pub fn command() -> Command {
                 .required(true),
         )
         .arg(
+            Arg::new("check")
+                .long("check")
+                .help("Validate scaffold and compile path with `cargo check` (no binary export)")
+                .required(false)
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("config")
                 .long("config")
                 .short('c')

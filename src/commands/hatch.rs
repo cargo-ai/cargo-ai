@@ -7,8 +7,18 @@ pub fn run(sub_m: &ArgMatches) {
         eprintln!("❌ Missing project name. Use `cargo ai hatch <name>`.");
         return;
     };
+    let check_only = sub_m.get_flag("check");
+    let hatch_mode = if check_only {
+        super::hatch_pipeline::HatchMode::Check
+    } else {
+        super::hatch_pipeline::HatchMode::Build
+    };
 
-    println!("Build new cargo agent: {new_project_name}");
+    if check_only {
+        println!("Check new cargo agent: {new_project_name}");
+    } else {
+        println!("Build new cargo agent: {new_project_name}");
+    }
 
     // Determine config source: use flag if provided, otherwise default to project name
     let agentcfg: &str = sub_m
@@ -30,5 +40,5 @@ pub fn run(sub_m: &ArgMatches) {
         }
     };
 
-    super::hatch_pipeline::run_hatch_pipeline(new_project_name, file_contents);
+    super::hatch_pipeline::run_hatch_pipeline(new_project_name, file_contents, hatch_mode);
 }

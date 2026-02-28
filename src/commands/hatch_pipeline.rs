@@ -6,8 +6,19 @@ use std::fs;
 use std::io::{Error, ErrorKind};
 use std::path::Path;
 
-/// Runs the standard hatch execution pipeline for a single agent definition.
-pub(crate) fn run_hatch_pipeline(new_project_name: &str, file_contents: String) {
+/// Execution mode for hatch pipeline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HatchMode {
+    Build,
+    Check,
+}
+
+/// Runs the hatch execution pipeline for a single agent definition.
+pub(crate) fn run_hatch_pipeline(
+    new_project_name: &str,
+    file_contents: String,
+    mode: HatchMode,
+) {
     match crate::agent_builder::project::create_new_agent_project(
         new_project_name,
         Ok(file_contents),
@@ -20,21 +31,35 @@ pub(crate) fn run_hatch_pipeline(new_project_name: &str, file_contents: String) 
         }
     }
 
-    match crate::agent_builder::build::build_agent_project(new_project_name) {
-        Ok(_) => println!("✅ Project built successfully."),
-        Err(e) => {
-            println!("❌ Build failed: {e}");
-            cleanup_workspace(new_project_name);
-            return;
-        }
-    }
+    match mode {
+        HatchMode::Build => {
+            match crate::agent_builder::build::build_agent_project(new_project_name) {
+                Ok(_) => println!("✅ Project built successfully."),
+                Err(e) => {
+                    println!("❌ Build failed: {e}");
+                    cleanup_workspace(new_project_name);
+                    return;
+                }
+            }
 
-    match crate::agent_builder::export::export_binary(new_project_name) {
-        Ok(_) => println!("✅ Project binary exported successfully."),
-        Err(e) => {
-            println!("❌ Export failed: {e}");
-            cleanup_workspace(new_project_name);
-            return;
+            match crate::agent_builder::export::export_binary(new_project_name) {
+                Ok(_) => println!("✅ Project binary exported successfully."),
+                Err(e) => {
+                    println!("❌ Export failed: {e}");
+                    cleanup_workspace(new_project_name);
+                    return;
+                }
+            }
+        }
+        HatchMode::Check => {
+            match crate::agent_builder::build::check_agent_project(new_project_name) {
+                Ok(_) => println!("✅ Project checked successfully."),
+                Err(e) => {
+                    println!("❌ Check failed: {e}");
+                    cleanup_workspace(new_project_name);
+                    return;
+                }
+            }
         }
     }
 

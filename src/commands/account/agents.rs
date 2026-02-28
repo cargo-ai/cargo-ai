@@ -659,7 +659,11 @@ pub async fn run(agents_m: &ArgMatches) {
                 owner_label, name, path_label
             );
             println!("Build new cargo agent: {name}");
-            crate::commands::hatch_pipeline::run_hatch_pipeline(name, definition_json_str);
+            crate::commands::hatch_pipeline::run_hatch_pipeline(
+                name,
+                definition_json_str,
+                crate::commands::hatch_pipeline::HatchMode::Build,
+            );
             return;
         }
     }
