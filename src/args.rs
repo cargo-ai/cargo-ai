@@ -6,6 +6,8 @@ use clap::{ArgMatches, Command};
 
 mod account;
 mod hatch;
+mod init;
+mod new;
 mod preflight;
 mod profile;
 mod shipyard;
@@ -17,6 +19,8 @@ fn cli_command(bin_name: &'static str) -> Command {
         .subcommand(Command::new("version").about("Print version information"))
         .subcommand(preflight::command())
         .subcommand(hatch::command())
+        .subcommand(init::command())
+        .subcommand(new::command())
         .subcommand(shipyard::command())
         .subcommand(profile::command())
         .subcommand(account::command())
@@ -138,5 +142,58 @@ mod tests {
             .subcommand_matches("hatch")
             .expect("hatch subcommand should be available");
         assert!(short_hatch.get_flag("force"));
+    }
+
+    #[test]
+    fn init_defaults_parse() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "init"])
+            .expect("init should parse");
+
+        let init = matches
+            .subcommand_matches("init")
+            .expect("init subcommand should be available");
+
+        assert_eq!(
+            init.get_one::<String>("path").map(String::as_str),
+            Some(".")
+        );
+        assert_eq!(
+            init.get_one::<String>("vcs").map(String::as_str),
+            Some("git")
+        );
+        assert!(init.get_one::<String>("template").is_none());
+    }
+
+    #[test]
+    fn new_requires_path_and_parses_template_vcs() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "new",
+                "sample-agent",
+                "--template",
+                "codex",
+                "--vcs",
+                "none",
+            ])
+            .expect("new should parse");
+
+        let new = matches
+            .subcommand_matches("new")
+            .expect("new subcommand should be available");
+
+        assert_eq!(
+            new.get_one::<String>("path").map(String::as_str),
+            Some("sample-agent")
+        );
+        assert_eq!(
+            new.get_one::<String>("template").map(String::as_str),
+            Some("codex")
+        );
+        assert_eq!(
+            new.get_one::<String>("vcs").map(String::as_str),
+            Some("none")
+        );
     }
 }

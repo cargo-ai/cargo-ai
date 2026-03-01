@@ -26,6 +26,10 @@ async fn main() {
         commands::preflight::run(sub_m).await;
     } else if let Some(sub_m) = cmd_args.subcommand_matches("hatch") {
         commands::hatch::run(sub_m);
+    } else if let Some(sub_m) = cmd_args.subcommand_matches("init") {
+        commands::init::run(sub_m);
+    } else if let Some(sub_m) = cmd_args.subcommand_matches("new") {
+        commands::new::run(sub_m);
     } else if let Some(sub_m) = cmd_args.subcommand_matches("shipyard") {
         commands::shipyard::run(sub_m);
     } else if let Some(sub_m) = cmd_args.subcommand_matches("account") {
