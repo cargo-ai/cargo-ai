@@ -3,6 +3,72 @@ use clap::ArgMatches;
 
 use crate::config::loader::{find_profile, load_config};
 
+fn unknown_server_messages(server: &str) -> Vec<String> {
+    let display_server = if server.trim().is_empty() {
+        "(not set)"
+    } else {
+        server
+    };
+
+    vec![
+        format!("❌ Unknown AI server '{}'.", display_server),
+        "Use `--server ollama` or `--server openai`.".to_string(),
+        "Hint: Set `--server` explicitly or configure a default profile with a supported server.".to_string(),
+        "Example: cargo ai preflight --server ollama --model mistral --prompt \"What is 2 + 2?\"".to_string(),
+    ]
+}
+
+fn provider_error_hint(server: &str, error: &str) -> Option<&'static str> {
+    let normalized_server = server.to_lowercase();
+    let normalized_error = error.to_lowercase();
+
+    if normalized_server == "ollama" {
+        if normalized_error.contains("404")
+            && normalized_error.contains("model")
+            && normalized_error.contains("not found")
+        {
+            return Some(
+                "Run `ollama list` to inspect installed models, then `ollama pull <model>` for missing models.",
+            );
+        }
+
+        if normalized_error.contains("connection refused")
+            || normalized_error.contains("failed to connect")
+            || normalized_error.contains("timed out")
+        {
+            return Some(
+                "Ensure Ollama is running (`ollama serve`) and the configured URL is reachable.",
+            );
+        }
+    } else if normalized_server == "openai" {
+        if normalized_error.contains("401")
+            || normalized_error.contains("unauthorized")
+            || normalized_error.contains("invalid api key")
+        {
+            return Some("Verify your OpenAI token (`--token` or profile token) and model access.");
+        }
+
+        if normalized_error.contains("429") || normalized_error.contains("rate limit") {
+            return Some("OpenAI rate limit reached; retry later or adjust your account/model limits.");
+        }
+    }
+
+    None
+}
+
+fn provider_error_messages(provider_label: &str, server: &str, error: &str) -> Vec<String> {
+    let mut messages = vec![
+        format!("❌ Issue communicating with the AI server ({}).", provider_label),
+        format!("Reason: {}", error),
+    ];
+
+    if let Some(hint) = provider_error_hint(server, error) {
+        messages.push(format!("Hint: {}", hint));
+    }
+
+    messages
+}
+
 /// Executes the preflight flow: resolve runtime settings, call provider, and
 /// run any configured post-response actions.
 pub async fn run(sub_m: &ArgMatches) {
@@ -90,8 +156,9 @@ pub async fn run(sub_m: &ArgMatches) {
     // End: Argument assignments
 
     if !(server == "ollama" || server == "openai") {
-        eprintln!("❌ Unknown AI server '{}'.", server);
-        eprintln!("Use `--server ollama` or `--server openai`.");
+        for line in unknown_server_messages(&server) {
+            eprintln!("{}", line);
+        }
         return;
     }
 
@@ -132,8 +199,10 @@ pub async fn run(sub_m: &ArgMatches) {
                 response.push_str(&r);
             }
             Err(e) => {
-                eprintln!("❌ Issue communicating with the AI server (Ollama).");
-                eprintln!("Reason: {}\n", e);
+                let error = e.to_string();
+                for line in provider_error_messages("Ollama", "ollama", &error) {
+                    eprintln!("{}", line);
+                }
                 return;
             }
         }
@@ -168,8 +237,10 @@ pub async fn run(sub_m: &ArgMatches) {
         {
             Ok(r) => response.push_str(&r),
             Err(e) => {
-                eprintln!("❌ Issue communicating with the AI server (OpenAI).");
-                eprintln!("Reason: {}\n", e);
+                let error = e.to_string();
+                for line in provider_error_messages("OpenAI", "openai", &error) {
+                    eprintln!("{}", line);
+                }
                 return;
             }
         };
@@ -196,4 +267,61 @@ pub async fn run(sub_m: &ArgMatches) {
     // println!("Actions {:?}", actions);
 
     super::preflight_actions::apply_actions(&output, &actions);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{provider_error_messages, provider_error_hint, unknown_server_messages};
+
+    #[test]
+    fn unknown_server_messages_include_actionable_guidance() {
+        let messages = unknown_server_messages("wat");
+        assert!(messages
+            .iter()
+            .any(|line| line.contains("Unknown AI server 'wat'")));
+        assert!(messages
+            .iter()
+            .any(|line| line.contains("--server ollama")));
+        assert!(messages
+            .iter()
+            .any(|line| line.contains("cargo ai preflight --server ollama")));
+    }
+
+    #[test]
+    fn unknown_server_messages_handle_empty_value() {
+        let messages = unknown_server_messages("");
+        assert!(messages
+            .iter()
+            .any(|line| line.contains("Unknown AI server '(not set)'")));
+    }
+
+    #[test]
+    fn ollama_model_not_found_hint_is_added() {
+        let hint = provider_error_hint(
+            "ollama",
+            "HTTP error 404 Not Found: {\"error\":\"model 'mixtral' not found\"}",
+        );
+        assert_eq!(
+            hint,
+            Some(
+                "Run `ollama list` to inspect installed models, then `ollama pull <model>` for missing models."
+            )
+        );
+    }
+
+    #[test]
+    fn provider_error_messages_include_reason_and_hint_when_available() {
+        let messages = provider_error_messages(
+            "Ollama",
+            "ollama",
+            "HTTP error 404 Not Found: {\"error\":\"model 'mixtral' not found\"}",
+        );
+        assert!(messages
+            .iter()
+            .any(|line| line.contains("Issue communicating with the AI server (Ollama)")));
+        assert!(messages
+            .iter()
+            .any(|line| line.contains("Reason: HTTP error 404")));
+        assert!(messages.iter().any(|line| line.contains("ollama pull <model>")));
+    }
 }
