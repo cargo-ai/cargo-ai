@@ -31,6 +31,18 @@ fn is_existing_json_file(path: &str) -> bool {
             .unwrap_or(false)
 }
 
+fn looks_like_local_path_input(input: &str) -> bool {
+    input.starts_with("./")
+        || input.starts_with("../")
+        || input.starts_with("~/")
+        || input.contains('/')
+        || input.contains('\\')
+        || input
+            .rsplit_once('.')
+            .map(|(_, ext)| ext.eq_ignore_ascii_case("json"))
+            .unwrap_or(false)
+}
+
 fn derive_project_name_from_json_path(path: &str) -> Result<String, String> {
     let stem = Path::new(path)
         .file_stem()
@@ -73,15 +85,37 @@ fn resolve_hatch_input(
         });
     }
 
-    if is_existing_json_file(name_or_path) {
-        let derived_project_name = derive_project_name_from_json_path(name_or_path)?;
-        return Ok(HatchResolution {
-            project_name: derived_project_name,
-            config_source: HatchConfigSource::LocalPath {
-                path: name_or_path.to_string(),
-                from_positional_shorthand: true,
-            },
-        });
+    if looks_like_local_path_input(name_or_path) {
+        if is_existing_json_file(name_or_path) {
+            let derived_project_name = derive_project_name_from_json_path(name_or_path)?;
+            return Ok(HatchResolution {
+                project_name: derived_project_name,
+                config_source: HatchConfigSource::LocalPath {
+                    path: name_or_path.to_string(),
+                    from_positional_shorthand: true,
+                },
+            });
+        }
+
+        let path = Path::new(name_or_path);
+        if !path.exists() {
+            return Err(format!(
+                "Local config path '{}' was not found. Use an existing .json file, or use `cargo ai hatch <name>` for a registry template.",
+                name_or_path
+            ));
+        }
+
+        if !path.is_file() {
+            return Err(format!(
+                "Local config path '{}' is not a file. Provide a .json file path, or use `cargo ai hatch <name>` for a registry template.",
+                name_or_path
+            ));
+        }
+
+        return Err(format!(
+            "Local config path '{}' must point to a .json file. Use `cargo ai hatch <name> --config <path-to-json>` for explicit naming.",
+            name_or_path
+        ));
     }
 
     Ok(HatchResolution {
@@ -256,5 +290,25 @@ mod tests {
             HatchConfigSource::RegistryName(name) => assert_eq!(name, "adder_registry"),
             HatchConfigSource::LocalPath { .. } => panic!("expected registry resolution"),
         }
+    }
+
+    #[test]
+    fn local_intent_path_without_json_fails_fast() {
+        let err = match resolve_hatch_input("~/Developer/cargo-ai/adder_test", None) {
+            Ok(_) => panic!("resolution should fail"),
+            Err(err) => err,
+        };
+        assert!(err.contains("Local config path"));
+        assert!(err.contains("was not found") || err.contains("must point to a .json file"));
+    }
+
+    #[test]
+    fn missing_json_shorthand_fails_fast() {
+        let err = match resolve_hatch_input("missing_agent_config.json", None) {
+            Ok(_) => panic!("resolution should fail"),
+            Err(err) => err,
+        };
+        assert!(err.contains("Local config path"));
+        assert!(err.contains("was not found"));
     }
 }
