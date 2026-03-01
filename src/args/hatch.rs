@@ -7,7 +7,7 @@ pub fn command() -> Command {
         .about("Hatch a new AI agent from a JSON config")
         .arg(
             Arg::new("name")
-                .help("Name of the new agent project")
+                .help("Agent name or local .json config path (shorthand)")
                 .required(true),
         )
         .arg(
@@ -21,7 +21,7 @@ pub fn command() -> Command {
             Arg::new("config")
                 .long("config")
                 .short('c')
-                .help("Path to the agent configuration (local .json file or remote registry name)")
+                .help("Local path to the agent .json configuration file")
                 .value_name("FILE")
                 .num_args(1),
         )
