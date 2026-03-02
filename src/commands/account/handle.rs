@@ -10,7 +10,7 @@ use super::helpers::{
 };
 
 /// Fetches or updates the account handle, including token-refresh retry logic.
-pub async fn run(handle_m: &ArgMatches) {
+pub async fn run(handle_m: &ArgMatches) -> bool {
     // Account handle: get current handle or set a new one.
     //
     // Behavior:
@@ -21,7 +21,7 @@ pub async fn run(handle_m: &ArgMatches) {
         Ok(auth) => auth,
         Err(message) => {
             eprintln!("{message}");
-            return;
+            return false;
         }
     };
     let access_token_owned = auth.access_token;
@@ -41,7 +41,7 @@ pub async fn run(handle_m: &ArgMatches) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("❌ Request failed: {e:?}");
-                return;
+                return false;
             }
         }
     } else {
@@ -51,7 +51,7 @@ pub async fn run(handle_m: &ArgMatches) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("❌ Request failed: {e:?}");
-                return;
+                return false;
             }
         }
     };
@@ -75,11 +75,11 @@ pub async fn run(handle_m: &ArgMatches) {
                         Err(_) => println!("{response:?}"),
                     }
                 }
-                return;
+                return false;
             }
             Err(RefreshAccessError::RequestFailed(error)) => {
                 eprintln!("❌ Request failed while refreshing session: {error}");
-                return;
+                return false;
             }
             Err(RefreshAccessError::MissingRefreshedToken(refresh_response)) => {
                 eprintln!("⚠️ Session refresh did not return a new access token. Cannot retry handle request.");
@@ -89,7 +89,7 @@ pub async fn run(handle_m: &ArgMatches) {
                         Err(_) => println!("{refresh_response:?}"),
                     }
                 }
-                return;
+                return false;
             }
             Ok((retry_access_token, refreshed_expires_in)) => {
                 if let Some(rt) = refresh_token.as_deref() {
@@ -111,7 +111,7 @@ pub async fn run(handle_m: &ArgMatches) {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("❌ Request failed after session refresh: {e:?}");
-                            return;
+                            return false;
                         }
                     }
                 } else {
@@ -124,7 +124,7 @@ pub async fn run(handle_m: &ArgMatches) {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("❌ Request failed after session refresh: {e:?}");
-                            return;
+                            return false;
                         }
                     }
                 };
@@ -139,4 +139,10 @@ pub async fn run(handle_m: &ArgMatches) {
             Err(_) => println!("{response:?}"),
         }
     }
+
+    response
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.eq_ignore_ascii_case("success"))
+        .unwrap_or(false)
 }

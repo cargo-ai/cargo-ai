@@ -7,7 +7,7 @@ use crate::config::remover::remove_profile;
 use crate::config::schema::Profile;
 
 /// Executes profile list/show/add/remove operations.
-pub fn run(sub_m: &ArgMatches) {
+pub fn run(sub_m: &ArgMatches) -> bool {
     if let Some(_) = sub_m.subcommand_matches("list") {
         if let Some(cfg) = load_config() {
             println!("Configured profiles:");
@@ -31,21 +31,23 @@ pub fn run(sub_m: &ArgMatches) {
                     profile.name, profile.server, profile.model, mark
                 );
             }
+            true
         } else {
-            println!("No config file found.");
+            eprintln!("❌ No config file found.");
+            false
         }
     } else if let Some(add_m) = sub_m.subcommand_matches("add") {
         let Some(name) = add_m.get_one::<String>("name") else {
             eprintln!("Please provide a profile name. Example: cargo ai profile add <name> ...");
-            return;
+            return false;
         };
         let Some(server) = add_m.get_one::<String>("server") else {
             eprintln!("Please provide --server (for example: openai or ollama).");
-            return;
+            return false;
         };
         let Some(model) = add_m.get_one::<String>("model") else {
             eprintln!("Please provide --model (for example: gpt-4o or mistral).");
-            return;
+            return false;
         };
         let url = add_m
             .get_one::<String>("url")
@@ -94,6 +96,9 @@ pub fn run(sub_m: &ArgMatches) {
 
         if let Err(e) = add_profile(new_profile, false, set_as_default) {
             eprintln!("Failed to add profile: {}", e);
+            false
+        } else {
+            true
         }
     } else if let Some(remove_m) = sub_m.subcommand_matches("remove") {
         if let Some(name) = remove_m.get_one::<String>("name") {
@@ -106,13 +111,13 @@ pub fn run(sub_m: &ArgMatches) {
                     );
                     if let Err(error) = io::stdout().flush() {
                         eprintln!("Failed to flush stdout: {error}");
-                        return;
+                        return false;
                     }
 
                     let mut input = String::new();
                     if let Err(error) = io::stdin().read_line(&mut input) {
                         eprintln!("Failed to read input: {error}");
-                        return;
+                        return false;
                     }
 
                     if input.trim().eq_ignore_ascii_case("y")
@@ -120,18 +125,26 @@ pub fn run(sub_m: &ArgMatches) {
                     {
                         if let Err(e) = remove_profile(name) {
                             eprintln!("Failed to remove profile '{}': {}", name, e);
+                            return false;
                         }
+                        true
                     } else {
                         println!("Operation canceled.");
+                        true
                     }
                 } else {
-                    println!("Profile '{}' not found.", name);
+                    eprintln!("❌ Profile '{}' not found.", name);
+                    false
                 }
             } else {
-                println!("No config file found.");
+                eprintln!("❌ No config file found.");
+                false
             }
         } else {
-            println!("Please provide a profile name to remove. Example: cargo ai profile remove openai-prod");
+            eprintln!(
+                "❌ Please provide a profile name to remove. Example: cargo ai profile remove openai-prod"
+            );
+            false
         }
     } else if let Some(show_m) = sub_m.subcommand_matches("show") {
         if let Some(name) = show_m.get_one::<String>("name") {
@@ -158,16 +171,21 @@ pub fn run(sub_m: &ArgMatches) {
                     if let Some(desc) = &p.description {
                         println!("Description: {}", desc);
                     }
+                    true
                 } else {
-                    println!("Profile '{}' not found.", name);
+                    eprintln!("❌ Profile '{}' not found.", name);
+                    false
                 }
             } else {
-                println!("No config file found.");
+                eprintln!("❌ No config file found.");
+                false
             }
         } else {
-            println!("Please provide a profile name. Example: cargo ai profile show openai-prod");
+            eprintln!("❌ Please provide a profile name. Example: cargo ai profile show openai-prod");
+            false
         }
     } else {
-        println!("No profile subcommand found. Try 'cargo ai profile list'.");
+        eprintln!("❌ No profile subcommand found. Try 'cargo ai profile list'.");
+        false
     }
 }

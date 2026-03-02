@@ -13,6 +13,7 @@ mod ui;
 mod web_resources;
 
 use serde::{Deserialize, Serialize};
+use std::process;
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
@@ -22,21 +23,29 @@ include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 async fn main() {
     let cmd_args = args::build_cli();
 
-    if let Some(sub_m) = cmd_args.subcommand_matches("preflight") {
-        commands::preflight::run(sub_m).await;
+    let command_succeeded = if let Some(sub_m) = cmd_args.subcommand_matches("preflight") {
+        commands::preflight::run(sub_m).await
     } else if let Some(sub_m) = cmd_args.subcommand_matches("hatch") {
-        commands::hatch::run(sub_m);
+        commands::hatch::run(sub_m)
+    } else if cmd_args.subcommand_matches("version").is_some() {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        true
     } else if let Some(sub_m) = cmd_args.subcommand_matches("init") {
-        commands::init::run(sub_m);
+        commands::init::run(sub_m)
     } else if let Some(sub_m) = cmd_args.subcommand_matches("new") {
-        commands::new::run(sub_m);
+        commands::new::run(sub_m)
     } else if let Some(sub_m) = cmd_args.subcommand_matches("shipyard") {
-        commands::shipyard::run(sub_m);
+        commands::shipyard::run(sub_m)
     } else if let Some(sub_m) = cmd_args.subcommand_matches("account") {
-        commands::account::run(sub_m).await;
+        commands::account::run(sub_m).await
     } else if let Some(sub_m) = cmd_args.subcommand_matches("profile") {
-        commands::profile::run(sub_m);
+        commands::profile::run(sub_m)
     } else {
-        println!("Provide subcommand.");
+        eprintln!("❌ Provide subcommand.");
+        false
+    };
+
+    if !command_succeeded {
+        process::exit(1);
     }
 }

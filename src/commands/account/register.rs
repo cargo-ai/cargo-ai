@@ -12,10 +12,10 @@ use std::io::{self, Write};
 use super::helpers::{extract_status_account_email, fetch_status_for_register_guard, INFRA_BASE_URL};
 
 /// Registers an account email and persists the active email on success.
-pub async fn run(reg_m: &ArgMatches) {
+pub async fn run(reg_m: &ArgMatches) -> bool {
     let Some(email) = reg_m.get_one::<String>("email") else {
         eprintln!("❌ Missing email. Use `cargo ai account register <email>`.");
-        return;
+        return false;
     };
 
     if let Err(e) = ensure_config_file_exists() {
@@ -23,7 +23,7 @@ pub async fn run(reg_m: &ArgMatches) {
             "❌ Failed to initialize local config at '{}': {e}",
             config_path().display()
         );
-        return;
+        return false;
     }
 
     // Guard: skip register when local session is already valid for the requested email.
@@ -42,7 +42,7 @@ pub async fn run(reg_m: &ArgMatches) {
                             "✅ You are already signed in as '{}'. Registration is not needed.",
                             active_email
                         );
-                        return;
+                        return true;
                     }
                 }
             }
@@ -64,19 +64,19 @@ pub async fn run(reg_m: &ArgMatches) {
                     print!("Continue and switch to '{}'? [y/N]: ", email);
                     if let Err(e) = io::stdout().flush() {
                         eprintln!("⚠️ Failed to flush stdout: {e}");
-                        return;
+                        return false;
                     }
 
                     let mut input = String::new();
                     if let Err(e) = io::stdin().read_line(&mut input) {
                         eprintln!("⚠️ Failed to read input: {e}");
-                        return;
+                        return false;
                     }
 
                     let input = input.trim();
                     if !(input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes")) {
                         println!("Operation canceled.");
-                        return;
+                        return true;
                     }
                 }
             }
@@ -102,10 +102,14 @@ pub async fn run(reg_m: &ArgMatches) {
                 if let Err(e) = set_account_email(email.to_string(), true) {
                     eprintln!("⚠️ Failed to save account email to config: {e}");
                 }
+                true
+            } else {
+                false
             }
         }
         Err(e) => {
             eprintln!("❌ Request failed: {e}");
+            false
         }
     }
 }

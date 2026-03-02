@@ -125,10 +125,10 @@ fn resolve_hatch_input(
 }
 
 /// Executes the `hatch` command flow from parsed CLI arguments.
-pub fn run(sub_m: &ArgMatches) {
+pub fn run(sub_m: &ArgMatches) -> bool {
     let Some(name_or_path) = sub_m.get_one::<String>("name") else {
         eprintln!("❌ Missing project name. Use `cargo ai hatch <name>`.");
-        return;
+        return false;
     };
     let check_only = sub_m.get_flag("check");
     let force_overwrite = sub_m.get_flag("force");
@@ -139,7 +139,7 @@ pub fn run(sub_m: &ArgMatches) {
         Ok(resolution) => resolution,
         Err(error) => {
             eprintln!("❌ {}", error);
-            return;
+            return false;
         }
     };
 
@@ -174,7 +174,7 @@ pub fn run(sub_m: &ArgMatches) {
                     println!("❌ Failed to read local config file '{}'.", path);
                     println!("Reason: {e}");
                     println!("Hint: Ensure the path is valid and points to a UTF-8 JSON file.");
-                    return;
+                    return false;
                 }
             }
         }
@@ -193,7 +193,7 @@ pub fn run(sub_m: &ArgMatches) {
                     );
                     println!("Reason: {e}");
                     println!("Hint: Ensure the agent name exists in the Cargo-AI registry or provide --config <path-to-json>.");
-                    return;
+                    return false;
                 }
             }
         }
@@ -204,7 +204,7 @@ pub fn run(sub_m: &ArgMatches) {
         file_contents,
         hatch_mode,
         force_overwrite,
-    );
+    )
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ use super::helpers::{
 };
 
 /// Executes account-agent operations (list/push/pull/hatch/visibility/archive).
-pub async fn run(agents_m: &ArgMatches) {
+pub async fn run(agents_m: &ArgMatches) -> bool {
     enum AgentsCommand {
         List {
             owner_handle: Option<String>,
@@ -106,7 +106,7 @@ pub async fn run(agents_m: &ArgMatches) {
                     "❌ The value passed to --name ('{}') looks like a file path. Use --json-file <FILE> for file input and keep --name for the agent name.",
                     name
                 );
-                return;
+                return false;
             }
             trimmed_name.to_string()
         } else if let Some(file_path) = json_file_path.as_deref() {
@@ -122,7 +122,7 @@ pub async fn run(agents_m: &ArgMatches) {
                         "❌ Could not infer agent name from file '{}'. Use --name explicitly.",
                         file_path
                     );
-                    return;
+                    return false;
                 }
             };
 
@@ -131,14 +131,14 @@ pub async fn run(agents_m: &ArgMatches) {
                     "❌ Inferred agent name '{}' from '{}' is invalid. Use --name explicitly.",
                     stem, file_path
                 );
-                return;
+                return false;
             }
 
             println!("ℹ️ Using inferred agent name from file: {}", stem);
             stem.to_string()
         } else {
             eprintln!("❌ Missing agent name. Provide --name or use --json-file <FILE> (or positional FILE).");
-            return;
+            return false;
         };
 
         let definition_path = push_m.get_one::<String>("path").map(|s| s.to_string());
@@ -149,12 +149,12 @@ pub async fn run(agents_m: &ArgMatches) {
                 Ok(contents) => contents,
                 Err(e) => {
                     eprintln!("❌ Failed to read JSON file '{}': {e}", file_path);
-                    return;
+                    return false;
                 }
             }
         } else {
             eprintln!("❌ Missing required input: provide --json, --json-file <FILE>, or positional FILE.");
-            return;
+            return false;
         };
 
         let definition_json = match serde_json::from_str::<serde_json::Value>(&definition_json_raw)
@@ -162,7 +162,7 @@ pub async fn run(agents_m: &ArgMatches) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("❌ Invalid JSON provided for agent definition: {e}");
-                return;
+                return false;
             }
         };
 
@@ -182,7 +182,7 @@ pub async fn run(agents_m: &ArgMatches) {
                 String::new()
             });
         if name.is_empty() {
-            return;
+            return false;
         }
 
         AgentsCommand::Pull {
@@ -206,7 +206,7 @@ pub async fn run(agents_m: &ArgMatches) {
                 String::new()
             });
         if name.is_empty() {
-            return;
+            return false;
         }
 
         AgentsCommand::Hatch {
@@ -219,7 +219,7 @@ pub async fn run(agents_m: &ArgMatches) {
     } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
         let Some(name) = visibility_m.get_one::<String>("name") else {
             eprintln!("❌ Missing agent name. Provide --name <NAME>.");
-            return;
+            return false;
         };
         AgentsCommand::Visibility {
             name: name.to_string(),
@@ -235,7 +235,7 @@ pub async fn run(agents_m: &ArgMatches) {
     } else if let Some(archive_m) = agents_m.subcommand_matches("archive") {
         let Some(name) = archive_m.get_one::<String>("name") else {
             eprintln!("❌ Missing agent name. Provide --name <NAME>.");
-            return;
+            return false;
         };
         AgentsCommand::Archive {
             name: name.to_string(),
@@ -246,14 +246,14 @@ pub async fn run(agents_m: &ArgMatches) {
         println!(
             "No agents subcommand found. Try 'cargo ai account agents list|push|pull|hatch|visibility|archive'."
         );
-        return;
+        return false;
     };
 
     let auth = match load_account_auth() {
         Ok(auth) => auth,
         Err(message) => {
             eprintln!("{message}");
-            return;
+            return false;
         }
     };
     let access_token_owned = auth.access_token;
@@ -276,7 +276,7 @@ pub async fn run(agents_m: &ArgMatches) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("❌ Request failed: {e:?}");
-                return;
+                return false;
             }
         },
         AgentsCommand::Push {
@@ -295,7 +295,7 @@ pub async fn run(agents_m: &ArgMatches) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("❌ Request failed: {e:?}");
-                return;
+                return false;
             }
         },
         AgentsCommand::Pull {
@@ -315,7 +315,7 @@ pub async fn run(agents_m: &ArgMatches) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("❌ Request failed: {e:?}");
-                return;
+                return false;
             }
         },
         AgentsCommand::Hatch {
@@ -334,7 +334,7 @@ pub async fn run(agents_m: &ArgMatches) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("❌ Request failed: {e:?}");
-                return;
+                return false;
             }
         },
         AgentsCommand::Visibility {
@@ -357,7 +357,7 @@ pub async fn run(agents_m: &ArgMatches) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("❌ Request failed: {e:?}");
-                return;
+                return false;
             }
         },
         AgentsCommand::Archive {
@@ -376,7 +376,7 @@ pub async fn run(agents_m: &ArgMatches) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("❌ Request failed: {e:?}");
-                return;
+                return false;
             }
         },
     };
@@ -400,11 +400,11 @@ pub async fn run(agents_m: &ArgMatches) {
                         Err(_) => println!("{response:?}"),
                     }
                 }
-                return;
+                return false;
             }
             Err(RefreshAccessError::RequestFailed(error)) => {
                 eprintln!("❌ Request failed while refreshing session: {error}");
-                return;
+                return false;
             }
             Err(RefreshAccessError::MissingRefreshedToken(refresh_response)) => {
                 eprintln!("⚠️ Session refresh did not return a new access token. Cannot retry agents request.");
@@ -414,7 +414,7 @@ pub async fn run(agents_m: &ArgMatches) {
                         Err(_) => println!("{refresh_response:?}"),
                     }
                 }
-                return;
+                return false;
             }
             Ok((retry_access_token, refreshed_expires_in)) => {
                 if let Some(rt) = refresh_token.as_deref() {
@@ -441,7 +441,7 @@ pub async fn run(agents_m: &ArgMatches) {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("❌ Request failed after session refresh: {e:?}");
-                            return;
+                            return false;
                         }
                     },
                     AgentsCommand::Push {
@@ -460,7 +460,7 @@ pub async fn run(agents_m: &ArgMatches) {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("❌ Request failed after session refresh: {e:?}");
-                            return;
+                            return false;
                         }
                     },
                     AgentsCommand::Pull {
@@ -480,7 +480,7 @@ pub async fn run(agents_m: &ArgMatches) {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("❌ Request failed after session refresh: {e:?}");
-                            return;
+                            return false;
                         }
                     },
                     AgentsCommand::Hatch {
@@ -499,7 +499,7 @@ pub async fn run(agents_m: &ArgMatches) {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("❌ Request failed after session refresh: {e:?}");
-                            return;
+                            return false;
                         }
                     },
                     AgentsCommand::Visibility {
@@ -522,7 +522,7 @@ pub async fn run(agents_m: &ArgMatches) {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("❌ Request failed after session refresh: {e:?}");
-                            return;
+                            return false;
                         }
                     },
                     AgentsCommand::Archive {
@@ -541,7 +541,7 @@ pub async fn run(agents_m: &ArgMatches) {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("❌ Request failed after session refresh: {e:?}");
-                            return;
+                            return false;
                         }
                     },
                 };
@@ -569,7 +569,7 @@ pub async fn run(agents_m: &ArgMatches) {
                 Some(value) => value,
                 None => {
                     eprintln!("❌ Pull succeeded but response did not include 'definition_json'.");
-                    return;
+                    return false;
                 }
             };
 
@@ -577,7 +577,7 @@ pub async fn run(agents_m: &ArgMatches) {
                 Ok(pretty) => pretty,
                 Err(e) => {
                     eprintln!("❌ Failed to serialize pulled definition JSON: {e}");
-                    return;
+                    return false;
                 }
             };
 
@@ -595,12 +595,12 @@ pub async fn run(agents_m: &ArgMatches) {
                         "❌ Output file '{}' already exists. Use --force to overwrite or --json-file <FILE> to choose another path.",
                         path
                     );
-                    return;
+                    return false;
                 }
 
                 if let Err(e) = fs::write(&path, format!("{pretty_definition}\n")) {
                     eprintln!("❌ Failed to write pulled definition JSON to '{}': {e}", path);
-                    return;
+                    return false;
                 }
 
                 if *stdout {
@@ -618,7 +618,7 @@ pub async fn run(agents_m: &ArgMatches) {
 
     if let Some(pretty_definition) = pull_stdout_payload {
         println!("{pretty_definition}");
-        return;
+        return true;
     }
 
     if let AgentsCommand::Hatch {
@@ -640,7 +640,7 @@ pub async fn run(agents_m: &ArgMatches) {
                     eprintln!(
                         "❌ Hatch could not continue because response did not include 'definition_json'."
                     );
-                    return;
+                    return false;
                 }
             };
 
@@ -648,7 +648,7 @@ pub async fn run(agents_m: &ArgMatches) {
                 Ok(pretty) => pretty,
                 Err(e) => {
                     eprintln!("❌ Failed to serialize pulled definition JSON: {e}");
-                    return;
+                    return false;
                 }
             };
 
@@ -659,13 +659,12 @@ pub async fn run(agents_m: &ArgMatches) {
                 owner_label, name, path_label
             );
             println!("Build new cargo agent: {name}");
-            crate::commands::hatch_pipeline::run_hatch_pipeline(
+            return crate::commands::hatch_pipeline::run_hatch_pipeline(
                 name,
                 definition_json_str,
                 crate::commands::hatch_pipeline::HatchMode::Build,
                 false,
             );
-            return;
         }
     }
 
@@ -690,4 +689,10 @@ pub async fn run(agents_m: &ArgMatches) {
             shown, total
         );
     }
+
+    response
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.eq_ignore_ascii_case("success"))
+        .unwrap_or(false)
 }

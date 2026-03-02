@@ -10,10 +10,10 @@ use crate::ui;
 use super::helpers::INFRA_BASE_URL;
 
 /// Confirms a registration code and persists returned tokens on success.
-pub async fn run(conf_m: &ArgMatches) {
+pub async fn run(conf_m: &ArgMatches) -> bool {
     let Some(code) = conf_m.get_one::<String>("code") else {
         eprintln!("❌ Missing confirmation code. Use `cargo ai account confirm <code>`.");
-        return;
+        return false;
     };
 
     let cfg = match load_config() {
@@ -23,7 +23,7 @@ pub async fn run(conf_m: &ArgMatches) {
                 "❌ No local config file found at '{}'. Run `cargo ai account register <email>` on this machine, or copy your config from another machine.",
                 config_path().display()
             );
-            return;
+            return false;
         }
     };
 
@@ -32,7 +32,7 @@ pub async fn run(conf_m: &ArgMatches) {
         Some(e) => e,
         None => {
             eprintln!("❌ No account email found in config. Run `cargo ai account register <email>` first.");
-            return;
+            return false;
         }
     };
 
@@ -80,9 +80,15 @@ pub async fn run(conf_m: &ArgMatches) {
                     }
                 }
             }
+            json
+                .get("status")
+                .and_then(|s| s.as_str())
+                .map(|s| s.eq_ignore_ascii_case("success"))
+                .unwrap_or(false)
         }
         Err(e) => {
             eprintln!("❌ Request failed: {e:?}");
+            false
         }
     }
 }

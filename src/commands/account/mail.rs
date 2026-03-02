@@ -10,20 +10,21 @@ use super::helpers::{
 };
 
 /// Routes account mail operations to `test` and `prefs` handlers.
-pub async fn run(mail_m: &ArgMatches) {
+pub async fn run(mail_m: &ArgMatches) -> bool {
     if let Some(test_m) = mail_m.subcommand_matches("test") {
-        run_test(test_m).await;
+        run_test(test_m).await
     } else if let Some(prefs_m) = mail_m.subcommand_matches("prefs") {
-        run_prefs(prefs_m).await;
+        run_prefs(prefs_m).await
     } else {
-        println!(
+        eprintln!(
             "No mail subcommand found. Try 'cargo ai account mail test' or 'cargo ai account mail prefs [--disable-all|--enable-all]'."
         );
+        false
     }
 }
 
 /// Sends a test email using the configured account session.
-async fn run_test(test_m: &ArgMatches) {
+async fn run_test(test_m: &ArgMatches) -> bool {
     const DEFAULT_TEST_MAIL_SUBJECT: &str = "Cargo-AI deliverability test";
     const DEFAULT_TEST_MAIL_TEXT: &str = "This is a setup test email from Cargo-AI.";
 
@@ -43,7 +44,7 @@ async fn run_test(test_m: &ArgMatches) {
         Ok(auth) => auth,
         Err(message) => {
             eprintln!("{message}");
-            return;
+            return false;
         }
     };
     let access_token_owned = auth.access_token;
@@ -61,7 +62,7 @@ async fn run_test(test_m: &ArgMatches) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("❌ Request failed: {e:?}");
-            return;
+            return false;
         }
     };
 
@@ -84,11 +85,11 @@ async fn run_test(test_m: &ArgMatches) {
                         Err(_) => println!("{response:?}"),
                     }
                 }
-                return;
+                return false;
             }
             Err(RefreshAccessError::RequestFailed(error)) => {
                 eprintln!("❌ Request failed while refreshing session: {error}");
-                return;
+                return false;
             }
             Err(RefreshAccessError::MissingRefreshedToken(refresh_response)) => {
                 eprintln!("⚠️ Session refresh did not return a new access token. Cannot retry send-mail request.");
@@ -98,7 +99,7 @@ async fn run_test(test_m: &ArgMatches) {
                         Err(_) => println!("{refresh_response:?}"),
                     }
                 }
-                return;
+                return false;
             }
             Ok((retry_access_token, refreshed_expires_in)) => {
                 if let Some(rt) = refresh_token.as_deref() {
@@ -120,7 +121,7 @@ async fn run_test(test_m: &ArgMatches) {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("❌ Request failed after session refresh: {e:?}");
-                        return;
+                        return false;
                     }
                 };
             }
@@ -134,10 +135,16 @@ async fn run_test(test_m: &ArgMatches) {
             Err(_) => println!("{response:?}"),
         }
     }
+
+    response
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.eq_ignore_ascii_case("success"))
+        .unwrap_or(false)
 }
 
 /// Gets or updates account-wide mail preference flags.
-async fn run_prefs(prefs_m: &ArgMatches) {
+async fn run_prefs(prefs_m: &ArgMatches) -> bool {
     let set_all_emails_enabled = if prefs_m.get_flag("disable_all") {
         Some(false)
     } else if prefs_m.get_flag("enable_all") {
@@ -150,7 +157,7 @@ async fn run_prefs(prefs_m: &ArgMatches) {
         Ok(auth) => auth,
         Err(message) => {
             eprintln!("{message}");
-            return;
+            return false;
         }
     };
     let access_token_owned = auth.access_token;
@@ -168,7 +175,7 @@ async fn run_prefs(prefs_m: &ArgMatches) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("❌ Request failed: {e:?}");
-                return;
+                return false;
             }
         }
     } else {
@@ -181,7 +188,7 @@ async fn run_prefs(prefs_m: &ArgMatches) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("❌ Request failed: {e:?}");
-                return;
+                return false;
             }
         }
     };
@@ -205,11 +212,11 @@ async fn run_prefs(prefs_m: &ArgMatches) {
                         Err(_) => println!("{response:?}"),
                     }
                 }
-                return;
+                return false;
             }
             Err(RefreshAccessError::RequestFailed(error)) => {
                 eprintln!("❌ Request failed while refreshing session: {error}");
-                return;
+                return false;
             }
             Err(RefreshAccessError::MissingRefreshedToken(refresh_response)) => {
                 eprintln!("⚠️ Session refresh did not return a new access token. Cannot retry mail-preferences request.");
@@ -219,7 +226,7 @@ async fn run_prefs(prefs_m: &ArgMatches) {
                         Err(_) => println!("{refresh_response:?}"),
                     }
                 }
-                return;
+                return false;
             }
             Ok((retry_access_token, refreshed_expires_in)) => {
                 if let Some(rt) = refresh_token.as_deref() {
@@ -241,7 +248,7 @@ async fn run_prefs(prefs_m: &ArgMatches) {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("❌ Request failed after session refresh: {e:?}");
-                            return;
+                            return false;
                         }
                     }
                 } else {
@@ -254,7 +261,7 @@ async fn run_prefs(prefs_m: &ArgMatches) {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("❌ Request failed after session refresh: {e:?}");
-                            return;
+                            return false;
                         }
                     }
                 };
@@ -269,4 +276,10 @@ async fn run_prefs(prefs_m: &ArgMatches) {
             Err(_) => println!("{response:?}"),
         }
     }
+
+    response
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.eq_ignore_ascii_case("success"))
+        .unwrap_or(false)
 }

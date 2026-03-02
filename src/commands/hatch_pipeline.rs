@@ -18,7 +18,7 @@ pub(crate) fn run_hatch_pipeline(
     file_contents: String,
     mode: HatchMode,
     force_overwrite: bool,
-) {
+) -> bool {
     let _agent_lock = match crate::agent_builder::lock::try_acquire_agent_lock(new_project_name) {
         Ok(lock) => lock,
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -26,7 +26,7 @@ pub(crate) fn run_hatch_pipeline(
                 "❌ Agent '{}' is already running a hatch/check operation in another process.",
                 new_project_name
             );
-            return;
+            return false;
         }
         Err(error) => {
             println!(
@@ -36,7 +36,7 @@ pub(crate) fn run_hatch_pipeline(
                     .display(),
                 error
             );
-            return;
+            return false;
         }
     };
 
@@ -50,7 +50,7 @@ pub(crate) fn run_hatch_pipeline(
         Err(e) => {
             println!("❌ Failed to create project: {e}");
             cleanup_workspace(new_project_name);
-            return;
+            return false;
         }
     }
 
@@ -61,7 +61,7 @@ pub(crate) fn run_hatch_pipeline(
                 Err(e) => {
                     println!("❌ Build failed: {e}");
                     cleanup_workspace(new_project_name);
-                    return;
+                    return false;
                 }
             }
 
@@ -70,7 +70,7 @@ pub(crate) fn run_hatch_pipeline(
                 Err(e) => {
                     println!("❌ Export failed: {e}");
                     cleanup_workspace(new_project_name);
-                    return;
+                    return false;
                 }
             }
         }
@@ -80,13 +80,14 @@ pub(crate) fn run_hatch_pipeline(
                 Err(e) => {
                     println!("❌ Check failed: {e}");
                     cleanup_workspace(new_project_name);
-                    return;
+                    return false;
                 }
             }
         }
     }
 
     cleanup_workspace(new_project_name);
+    true
 }
 
 fn cleanup_workspace(new_project_name: &str) {

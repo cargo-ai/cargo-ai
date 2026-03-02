@@ -2,7 +2,7 @@
 use clap::ArgMatches;
 
 /// Executes the shipyard command, honoring feature and explicit enable gates.
-pub fn run(sub_m: &ArgMatches) {
+pub fn run(sub_m: &ArgMatches) -> bool {
     #[cfg(feature = "shipyard-ui")]
     {
         let enabled_by_flag = sub_m.get_flag("experimental");
@@ -18,12 +18,14 @@ pub fn run(sub_m: &ArgMatches) {
             eprintln!(
                 "To launch it, run `cargo ai shipyard --experimental` or set `CARGO_AI_ENABLE_SHIPYARD=1`."
             );
-            return;
+            return false;
         }
 
         if let Err(e) = crate::shipyard_ui::launch() {
             eprintln!("❌ Failed to launch Shipyard UI: {e}");
+            return false;
         }
+        return true;
     }
 
     #[cfg(not(feature = "shipyard-ui"))]
@@ -31,5 +33,6 @@ pub fn run(sub_m: &ArgMatches) {
         let _ = sub_m;
         eprintln!("⚠️ Shipyard UI is not included in this build.");
         eprintln!("Reinstall with `cargo install --path . --features shipyard-ui` to enable it.");
+        false
     }
 }

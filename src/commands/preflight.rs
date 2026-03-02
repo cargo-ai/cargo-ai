@@ -71,7 +71,7 @@ fn provider_error_messages(provider_label: &str, server: &str, error: &str) -> V
 
 /// Executes the preflight flow: resolve runtime settings, call provider, and
 /// run any configured post-response actions.
-pub async fn run(sub_m: &ArgMatches) {
+pub async fn run(sub_m: &ArgMatches) -> bool {
     let prompt = if let Some(cli_prompt) = sub_m.get_one::<String>("prompt") {
         cli_prompt.to_string()
     } else {
@@ -159,7 +159,7 @@ pub async fn run(sub_m: &ArgMatches) {
         for line in unknown_server_messages(&server) {
             eprintln!("{}", line);
         }
-        return;
+        return false;
     }
 
     let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
@@ -172,7 +172,7 @@ pub async fn run(sub_m: &ArgMatches) {
         Err(error) => {
             eprintln!("❌ Failed to fetch required web resources.");
             eprintln!("Reason: {error}");
-            return;
+            return false;
         }
     };
 
@@ -203,7 +203,7 @@ pub async fn run(sub_m: &ArgMatches) {
                 for line in provider_error_messages("Ollama", "ollama", &error) {
                     eprintln!("{}", line);
                 }
-                return;
+                return false;
             }
         }
     } else if server == "openai" {
@@ -241,7 +241,7 @@ pub async fn run(sub_m: &ArgMatches) {
                 for line in provider_error_messages("OpenAI", "openai", &error) {
                     eprintln!("{}", line);
                 }
-                return;
+                return false;
             }
         };
     }
@@ -250,7 +250,7 @@ pub async fn run(sub_m: &ArgMatches) {
     if !ai_cargo.set_response(response.clone()) {
         eprintln!("❌ LLM output did NOT conform to the required JSON schema.");
         eprintln!("Raw output received from server:\n{}\n", response);
-        return; // Stop execution cleanly — do NOT continue to unwrap
+        return false; // Stop execution cleanly — do NOT continue to unwrap
     }
 
     let output = match ai_cargo.get_response() {
@@ -258,7 +258,7 @@ pub async fn run(sub_m: &ArgMatches) {
         None => {
             eprintln!("❌ Internal error: response was expected but missing.");
             eprintln!("Raw output received from server:\n{}\n", response);
-            return;
+            return false;
         }
     };
 
@@ -267,6 +267,7 @@ pub async fn run(sub_m: &ArgMatches) {
     // println!("Actions {:?}", actions);
 
     super::preflight_actions::apply_actions(&output, &actions);
+    true
 }
 
 #[cfg(test)]

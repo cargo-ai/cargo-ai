@@ -1,7 +1,6 @@
 //! Runtime behavior for `cargo ai new`.
 use clap::ArgMatches;
 use std::path::Path;
-use std::process;
 
 fn print_success(report: &super::scaffold::ScaffoldReport) {
     println!(
@@ -16,11 +15,12 @@ fn print_success(report: &super::scaffold::ScaffoldReport) {
 }
 
 /// Executes the `new` command flow from parsed CLI arguments.
-pub fn run(sub_m: &ArgMatches) {
+pub fn run(sub_m: &ArgMatches) -> bool {
     if let Err(error) = run_impl(sub_m) {
         eprintln!("❌ {}", error);
-        process::exit(1);
+        return false;
     }
+    true
 }
 
 fn run_impl(sub_m: &ArgMatches) -> Result<(), String> {

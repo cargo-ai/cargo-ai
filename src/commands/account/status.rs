@@ -7,7 +7,7 @@ use crate::ui;
 use super::helpers::{persist_refreshed_access_token, INFRA_BASE_URL};
 
 /// Queries account/session status and persists refreshed access tokens.
-pub async fn run() {
+pub async fn run() -> bool {
     // Account status: check and optionally refresh tokens, print status.
     //
     // Behavior:
@@ -25,7 +25,7 @@ pub async fn run() {
                 "❌ No local config file found at '{}'. Run `cargo ai account register <email>` on this machine, or copy your config from another machine.",
                 config_path().display()
             );
-            return;
+            return false;
         }
     };
 
@@ -34,7 +34,7 @@ pub async fn run() {
         Some(acct) => acct,
         None => {
             eprintln!("❌ No account found in config. You must confirm your account first.");
-            return;
+            return false;
         }
     };
 
@@ -45,7 +45,7 @@ pub async fn run() {
             eprintln!(
                 "❌ No access token found in config. Run `cargo ai account confirm <code>` first."
             );
-            return;
+            return false;
         }
     };
 
@@ -105,7 +105,7 @@ pub async fn run() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("❌ Request failed: {e:?}");
-            return;
+            return false;
         }
     };
 
@@ -133,7 +133,7 @@ pub async fn run() {
                 Ok(r) => response = r,
                 Err(e) => {
                     eprintln!("❌ Request failed: {e:?}");
-                    return;
+                    return false;
                 }
             }
         }
@@ -170,7 +170,7 @@ pub async fn run() {
                     None => {
                         // Shouldn't happen in the refresh scenario, but don't clobber anything.
                         eprintln!("⚠️ Refreshed access token returned, but no refresh token exists in config to persist alongside it.");
-                        return;
+                        return false;
                     }
                 };
 
@@ -178,4 +178,10 @@ pub async fn run() {
             }
         }
     }
+
+    response
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.eq_ignore_ascii_case("success"))
+        .unwrap_or(false)
 }
