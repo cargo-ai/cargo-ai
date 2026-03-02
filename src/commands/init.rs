@@ -7,7 +7,14 @@ fn print_success(report: &super::scaffold::ScaffoldReport) {
         "✅ Cargo-AI project initialized at: {}",
         report.project_root.display()
     );
-    println!("🧩 Wrote metadata: {}", report.metadata_path.display());
+    if report.metadata_written {
+        println!("🧩 Wrote metadata: {}", report.metadata_path.display());
+    } else {
+        println!(
+            "ℹ️ Metadata already present: {}",
+            report.metadata_path.display()
+        );
+    }
     if let Some(template_path) = &report.template_output_path {
         println!("🧩 Applied template file: {}", template_path.display());
         println!(

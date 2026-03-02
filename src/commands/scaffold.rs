@@ -166,6 +166,7 @@ impl fmt::Display for GitSetup {
 pub struct ScaffoldReport {
     pub project_root: PathBuf,
     pub metadata_path: PathBuf,
+    pub metadata_written: bool,
     pub template_output_path: Option<PathBuf>,
     pub git_setup: GitSetup,
 }
@@ -191,7 +192,7 @@ pub fn scaffold_new(
         )
     })?;
 
-    match scaffold_in_place(target_dir, template, vcs_mode) {
+    match scaffold_in_place(target_dir, template, vcs_mode, false) {
         Ok(report) => Ok(report),
         Err(error) => {
             let _ = fs::remove_dir_all(target_dir);
@@ -220,43 +221,56 @@ pub fn scaffold_init(
         ));
     }
 
-    scaffold_in_place(target_dir, template, vcs_mode)
+    scaffold_in_place(target_dir, template, vcs_mode, true)
 }
 
 fn scaffold_in_place(
     target_dir: &Path,
     template: Option<ProjectTemplate>,
     vcs_mode: VcsMode,
+    allow_existing_metadata: bool,
 ) -> Result<ScaffoldReport, String> {
     let metadata_path = target_dir.join(".cargo-ai").join("project.toml");
+    let metadata_exists = metadata_path.exists();
     let template_artifacts = template.map(ProjectTemplate::artifacts).unwrap_or_default();
     let template_output_path =
         template.map(|selected| target_dir.join(selected.output_file_name()));
 
-    let mut managed_paths = vec![metadata_path.clone()];
+    let mut managed_paths = Vec::new();
+    if !metadata_exists || !allow_existing_metadata {
+        managed_paths.push(metadata_path.clone());
+    }
+
     for artifact in &template_artifacts {
         managed_paths.push(target_dir.join(artifact.relative_path));
     }
 
     ensure_no_conflicts(&managed_paths)?;
 
-    if let Some(parent) = metadata_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "Failed to create metadata directory '{}': {}",
-                parent.display(),
-                error
-            )
-        })?;
-    }
+    let metadata_written = if metadata_exists {
+        false
+    } else {
+        if let Some(parent) = metadata_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "Failed to create metadata directory '{}': {}",
+                    parent.display(),
+                    error
+                )
+            })?;
+        }
 
-    fs::write(&metadata_path, render_project_metadata(template, vcs_mode)).map_err(|error| {
-        format!(
-            "Failed to write metadata file '{}': {}",
-            metadata_path.display(),
-            error
-        )
-    })?;
+        fs::write(&metadata_path, render_project_metadata(template, vcs_mode)).map_err(
+            |error| {
+                format!(
+                    "Failed to write metadata file '{}': {}",
+                    metadata_path.display(),
+                    error
+                )
+            },
+        )?;
+        true
+    };
 
     for artifact in &template_artifacts {
         let output_path = target_dir.join(artifact.relative_path);
@@ -284,6 +298,7 @@ fn scaffold_in_place(
     Ok(ScaffoldReport {
         project_root: target_dir.to_path_buf(),
         metadata_path,
+        metadata_written,
         template_output_path,
         git_setup,
     })
@@ -388,6 +403,7 @@ mod tests {
 
         let report = scaffold_init(&dir, Some(ProjectTemplate::Codex), VcsMode::None)
             .expect("init should succeed");
+        assert!(report.metadata_written);
         assert!(report.metadata_path.exists());
         let template_path = report
             .template_output_path
@@ -423,8 +439,8 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_init_fails_on_managed_file_conflict() {
-        let dir = temp_dir_path("init-conflict");
+    fn scaffold_init_is_idempotent_when_metadata_exists() {
+        let dir = temp_dir_path("init-idempotent");
         let metadata_path = dir.join(".cargo-ai").join("project.toml");
         fs::create_dir_all(
             metadata_path
@@ -432,12 +448,15 @@ mod tests {
                 .expect("metadata parent should exist"),
         )
         .expect("metadata dir should be created");
-        fs::write(&metadata_path, "existing = true").expect("metadata fixture should be written");
+        fs::write(&metadata_path, "existing = true\n").expect("metadata fixture should be written");
 
-        let err = scaffold_init(&dir, Some(ProjectTemplate::Claude), VcsMode::None)
-            .expect_err("init should fail");
-        assert!(err.contains("managed file"));
-        assert!(err.contains("project.toml"));
+        let report = scaffold_init(&dir, None, VcsMode::None).expect("init should succeed");
+        assert!(!report.metadata_written);
+        assert!(report.template_output_path.is_none());
+
+        let metadata_contents =
+            fs::read_to_string(&metadata_path).expect("metadata should be readable");
+        assert_eq!(metadata_contents, "existing = true\n");
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -449,6 +468,7 @@ mod tests {
 
         let report = scaffold_init(&dir, Some(ProjectTemplate::Claude), VcsMode::None)
             .expect("init should succeed");
+        assert!(report.metadata_written);
         let template_path = report
             .template_output_path
             .expect("template output should be present");
@@ -465,6 +485,53 @@ mod tests {
         let guidance =
             fs::read_to_string(template_path).expect("guidance template output should be readable");
         assert!(guidance.contains("Cargo-AI Agent Authoring (Claude)"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scaffold_init_allows_template_add_when_metadata_exists() {
+        let dir = temp_dir_path("init-template-add");
+        let metadata_path = dir.join(".cargo-ai").join("project.toml");
+        fs::create_dir_all(
+            metadata_path
+                .parent()
+                .expect("metadata parent should exist"),
+        )
+        .expect("metadata dir should be created");
+        fs::write(&metadata_path, "existing = true\n").expect("metadata fixture should be written");
+
+        let report = scaffold_init(&dir, Some(ProjectTemplate::Codex), VcsMode::None)
+            .expect("template add should succeed");
+        assert!(!report.metadata_written);
+        let template_path = report
+            .template_output_path
+            .expect("template output should be present");
+        assert_eq!(
+            template_path.file_name().and_then(|name| name.to_str()),
+            Some("AGENTS.md")
+        );
+        assert!(dir.join(".cargo-ai/examples/agent-minimal.json").exists());
+
+        let metadata_contents =
+            fs::read_to_string(&metadata_path).expect("metadata should be readable");
+        assert_eq!(metadata_contents, "existing = true\n");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scaffold_init_fails_when_template_output_conflicts() {
+        let dir = temp_dir_path("init-template-conflict");
+        fs::create_dir_all(&dir).expect("test dir should be created");
+        let conflict_path = dir.join("AGENTS.md");
+        fs::write(&conflict_path, "# existing")
+            .expect("template conflict fixture should be written");
+
+        let err = scaffold_init(&dir, Some(ProjectTemplate::Codex), VcsMode::None)
+            .expect_err("init should fail");
+        assert!(err.contains("managed file"));
+        assert!(err.contains("AGENTS.md"));
 
         let _ = fs::remove_dir_all(dir);
     }
