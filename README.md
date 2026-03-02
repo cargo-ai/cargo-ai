@@ -323,7 +323,7 @@ cargo ai hatch weather_agent --config weather_agent.json
   ```json
   "resource_urls": [
     {
-      "url": "https://worldtimeapi.org/api/timezone/etc/utc",
+      "url": "https://gettimeapi.dev/v1/time?timezone=UTC",
       "description": "Current UTC date and time."
     },
     {
