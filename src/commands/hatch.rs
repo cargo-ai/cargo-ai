@@ -15,6 +15,14 @@ struct HatchResolution {
     config_source: HatchConfigSource,
 }
 
+fn mode_from_check_flag(check_only: bool) -> super::hatch_pipeline::HatchMode {
+    if check_only {
+        super::hatch_pipeline::HatchMode::Check
+    } else {
+        super::hatch_pipeline::HatchMode::Build
+    }
+}
+
 fn is_supported_project_name(name: &str) -> bool {
     !name.is_empty()
         && name
@@ -144,11 +152,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
     };
 
     let new_project_name = resolution.project_name;
-    let hatch_mode = if check_only {
-        super::hatch_pipeline::HatchMode::Check
-    } else {
-        super::hatch_pipeline::HatchMode::Build
-    };
+    let hatch_mode = mode_from_check_flag(check_only);
 
     if check_only {
         println!("Check new cargo agent: {new_project_name}");
@@ -209,7 +213,8 @@ pub fn run(sub_m: &ArgMatches) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_hatch_input, HatchConfigSource};
+    use super::{mode_from_check_flag, resolve_hatch_input, HatchConfigSource};
+    use crate::commands::hatch_pipeline::HatchMode;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -310,5 +315,11 @@ mod tests {
         };
         assert!(err.contains("Local config path"));
         assert!(err.contains("was not found"));
+    }
+
+    #[test]
+    fn check_flag_maps_to_validation_only_mode() {
+        assert_eq!(mode_from_check_flag(true), HatchMode::Check);
+        assert_eq!(mode_from_check_flag(false), HatchMode::Build);
     }
 }

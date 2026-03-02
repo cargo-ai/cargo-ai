@@ -19,7 +19,26 @@ pub(crate) fn run_hatch_pipeline(
     mode: HatchMode,
     force_overwrite: bool,
 ) -> bool {
-    let _agent_lock = match crate::agent_builder::lock::try_acquire_agent_lock(new_project_name) {
+    run_hatch_pipeline_with_lock(
+        new_project_name,
+        file_contents,
+        mode,
+        force_overwrite,
+        crate::agent_builder::lock::try_acquire_agent_lock,
+    )
+}
+
+fn run_hatch_pipeline_with_lock<F>(
+    new_project_name: &str,
+    file_contents: String,
+    mode: HatchMode,
+    force_overwrite: bool,
+    acquire_lock: F,
+) -> bool
+where
+    F: FnOnce(&str) -> std::io::Result<crate::agent_builder::lock::AgentLockGuard>,
+{
+    let _agent_lock = match acquire_lock(new_project_name) {
         Ok(lock) => lock,
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             println!(
@@ -32,15 +51,17 @@ pub(crate) fn run_hatch_pipeline(
             println!(
                 "❌ Failed to acquire lock for agent '{}' ({}): {}",
                 new_project_name,
-                crate::agent_builder::agent_workspace_path(new_project_name)
-                    .display(),
+                crate::agent_builder::agent_workspace_path(new_project_name).display(),
                 error
             );
             return false;
         }
     };
 
-    println!("🔒 Acquired workspace lock: {}", _agent_lock.path().display());
+    println!(
+        "🔒 Acquired workspace lock: {}",
+        _agent_lock.path().display()
+    );
 
     match crate::agent_builder::project::create_new_agent_project(
         new_project_name,
@@ -141,4 +162,28 @@ pub(crate) fn fetch_from_registry(name: &str) -> Result<String, Error> {
     }
 
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{run_hatch_pipeline_with_lock, HatchMode};
+    use std::io;
+
+    #[test]
+    fn lock_conflict_fails_fast_before_project_mutation() {
+        let result = run_hatch_pipeline_with_lock(
+            "agent_lock_conflict_test",
+            r#"{"version":"0.0.10"}"#.to_string(),
+            HatchMode::Check,
+            false,
+            |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "lock already exists",
+                ))
+            },
+        );
+
+        assert!(!result);
+    }
 }
