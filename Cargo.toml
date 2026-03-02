@@ -7,7 +7,6 @@ description = "Build lightweight AI agents with Cargo. Powered by Rust. Declared
 repository = "https://github.com/analyzer1/cargo-ai"
 homepage = "https://cargo-ai.org"
 readme = "README.md"
-documentation = "https://docs.rs/cargo-ai"
 keywords = ["ai", "agents", "automation", "llm", "cli"]
 categories = [
     "command-line-utilities",

@@ -7,6 +7,7 @@ mod args;
 mod commands;
 mod config;
 mod infra_api;
+mod providers;
 #[cfg(feature = "shipyard-ui")]
 mod shipyard_ui;
 mod ui;

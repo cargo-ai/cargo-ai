@@ -13,8 +13,10 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
     vec![
         format!("❌ Unknown AI server '{}'.", display_server),
         "Use `--server ollama` or `--server openai`.".to_string(),
-        "Hint: Set `--server` explicitly or configure a default profile with a supported server.".to_string(),
-        "Example: cargo ai preflight --server ollama --model mistral --prompt \"What is 2 + 2?\"".to_string(),
+        "Hint: Set `--server` explicitly or configure a default profile with a supported server."
+            .to_string(),
+        "Example: cargo ai preflight --server ollama --model mistral --prompt \"What is 2 + 2?\""
+            .to_string(),
     ]
 }
 
@@ -49,7 +51,9 @@ fn provider_error_hint(server: &str, error: &str) -> Option<&'static str> {
         }
 
         if normalized_error.contains("429") || normalized_error.contains("rate limit") {
-            return Some("OpenAI rate limit reached; retry later or adjust your account/model limits.");
+            return Some(
+                "OpenAI rate limit reached; retry later or adjust your account/model limits.",
+            );
         }
     }
 
@@ -58,7 +62,10 @@ fn provider_error_hint(server: &str, error: &str) -> Option<&'static str> {
 
 fn provider_error_messages(provider_label: &str, server: &str, error: &str) -> Vec<String> {
     let mut messages = vec![
-        format!("❌ Issue communicating with the AI server ({}).", provider_label),
+        format!(
+            "❌ Issue communicating with the AI server ({}).",
+            provider_label
+        ),
         format!("Reason: {}", error),
     ];
 
@@ -178,7 +185,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 
     let context = format!("{}\n\n{}", static_context, data_block);
 
-    let mut ai_cargo = cargo_ai::Cargo::<crate::Output>::new(prompt.clone(), context);
+    let mut ai_cargo = crate::providers::AgentCargo::<crate::Output>::new(prompt.clone(), context);
 
     let structured_prompt = ai_cargo.prompt();
 
@@ -186,7 +193,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 
     if server == "ollama" {
         // Send request to Ollama and `await` the LLM response
-        match cargo_ai::ollama_send_request(
+        match crate::providers::send_ollama_request(
             &url,
             &model,
             &structured_prompt,
@@ -225,7 +232,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         });
 
         // Send request to OpenAI and `await` the LLM response
-        match cargo_ai::openai_send_request(
+        match crate::providers::send_openai_request(
             &url,
             &model,
             &structured_prompt,
@@ -272,7 +279,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_error_messages, provider_error_hint, unknown_server_messages};
+    use super::{provider_error_hint, provider_error_messages, unknown_server_messages};
 
     #[test]
     fn unknown_server_messages_include_actionable_guidance() {
@@ -280,9 +287,7 @@ mod tests {
         assert!(messages
             .iter()
             .any(|line| line.contains("Unknown AI server 'wat'")));
-        assert!(messages
-            .iter()
-            .any(|line| line.contains("--server ollama")));
+        assert!(messages.iter().any(|line| line.contains("--server ollama")));
         assert!(messages
             .iter()
             .any(|line| line.contains("cargo ai preflight --server ollama")));
@@ -323,6 +328,8 @@ mod tests {
         assert!(messages
             .iter()
             .any(|line| line.contains("Reason: HTTP error 404")));
-        assert!(messages.iter().any(|line| line.contains("ollama pull <model>")));
+        assert!(messages
+            .iter()
+            .any(|line| line.contains("ollama pull <model>")));
     }
 }

@@ -36,26 +36,23 @@ pub async fn send_request(
     timeout_in_sec: u64,
     format: serde_json::Value,
 ) -> Result<String, Box<dyn std::error::Error>> {
-
     let request = Request {
         model: model.clone(),
         prompt: prompt.clone(),
         format: format.clone(),
         stream: false,
         think: false,
-        options: Options { temperature: crate::DEFAULT_TEMPERATURE}
+        options: Options {
+            temperature: super::DEFAULT_TEMPERATURE,
+        },
     };
 
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()?; // 30 sec Default too short for some LLMs.
 
-    let http_resp = client
-        .post(url)
-        .json(&request)
-        .send()
-        .await?;
-    
+    let http_resp = client.post(url).json(&request).send().await?;
+
     let status = http_resp.status();
     let body_bytes = http_resp.bytes().await?;
 
