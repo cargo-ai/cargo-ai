@@ -230,6 +230,13 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 #[cfg(test)]
 mod tests {
     use super::unknown_server_messages;
+    use crate::args::test_cli_command;
+
+    fn matches(args: &[&str]) -> clap::ArgMatches {
+        test_cli_command("cargo-ai")
+            .try_get_matches_from(args)
+            .expect("cargo-ai args should parse")
+    }
 
     #[test]
     fn unknown_server_messages_include_actionable_guidance() {
@@ -249,5 +256,45 @@ mod tests {
         assert!(messages
             .iter()
             .any(|line| line.contains("Unknown AI server '(not set)'")));
+    }
+
+    #[tokio::test]
+    async fn run_fails_closed_on_unknown_server() {
+        let cmd = matches(&[
+            "cargo-ai",
+            "preflight",
+            "--server",
+            "wat",
+            "--model",
+            "mistral",
+            "--prompt",
+            "What is 2 + 2?",
+        ]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        assert!(!super::run(preflight).await);
+    }
+
+    #[tokio::test]
+    async fn run_fails_closed_on_missing_openai_token() {
+        let cmd = matches(&[
+            "cargo-ai",
+            "preflight",
+            "--server",
+            "openai",
+            "--model",
+            "gpt-4o-mini",
+            "--token",
+            "",
+            "--prompt",
+            "Return 4",
+        ]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        assert!(!super::run(preflight).await);
     }
 }

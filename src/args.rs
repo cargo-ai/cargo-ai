@@ -44,6 +44,11 @@ pub fn build_cli() -> ArgMatches {
 }
 
 #[cfg(test)]
+pub(crate) fn test_cli_command(bin_name: &'static str) -> Command {
+    cli_command(bin_name)
+}
+
+#[cfg(test)]
 mod tests {
     use super::cli_command;
     use clap::error::ErrorKind;
