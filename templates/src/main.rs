@@ -1,6 +1,7 @@
 mod args;
 mod web_resources;
 mod config;
+mod providers;
 
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
@@ -113,7 +114,7 @@ async fn main() {
 
     let context = format!("{}\n\n{}", static_context, data_block);
 
-    let mut ai_cargo = cargo_ai::Cargo::<Output>::new(prompt.clone(), context);
+    let mut ai_cargo = crate::providers::AgentCargo::<Output>::new(prompt.clone(), context);
 
     let structured_prompt = ai_cargo.prompt();
     
@@ -121,7 +122,7 @@ async fn main() {
 
     if server == "ollama" {
         // Send request to Ollama and `await` the LLM response
-        match cargo_ai::ollama_send_request(&url, &model, &structured_prompt, timeout_in_sec, json_schema_value()).await {
+        match crate::providers::send_ollama_request(&url, &model, &structured_prompt, timeout_in_sec, json_schema_value()).await {
             Ok(r) => {
                 response.push_str(&r);
             },
@@ -148,7 +149,7 @@ async fn main() {
     });
 
         // Send request to OpenAI and `await` the LLM response
-        match cargo_ai::openai_send_request(&url, &model, &structured_prompt, timeout_in_sec, &token, fmt).await {
+        match crate::providers::send_openai_request(&url, &model, &structured_prompt, timeout_in_sec, &token, fmt).await {
             Ok(r) => response.push_str(&r),
             Err(e) => {
                 eprintln!("❌ Issue communicating with the AI server (OpenAI).");

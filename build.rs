@@ -37,20 +37,20 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
         source: "src/web_resources.rs",
     },
     TemplateSource {
-        destination: "src/cargo.rs",
-        source: "src/cargo.rs",
+        destination: "src/providers/mod.rs",
+        source: "src/providers/mod.rs",
     },
     TemplateSource {
-        destination: "src/lib.rs",
-        source: "src/lib.rs",
+        destination: "src/providers/runtime.rs",
+        source: "src/providers/runtime.rs",
     },
     TemplateSource {
-        destination: "src/ollama_api_client.rs",
-        source: "src/ollama_api_client.rs",
+        destination: "src/providers/openai.rs",
+        source: "src/providers/openai.rs",
     },
     TemplateSource {
-        destination: "src/openai_api_client.rs",
-        source: "src/openai_api_client.rs",
+        destination: "src/providers/ollama.rs",
+        source: "src/providers/ollama.rs",
     },
     TemplateSource {
         destination: "src/config/loader.rs",

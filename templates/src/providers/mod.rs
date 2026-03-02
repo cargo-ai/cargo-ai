@@ -1,0 +1,14 @@
+//! Internal provider/runtime boundaries for the CLI binary.
+//!
+//! These modules are implementation details for `cargo-ai` command execution.
+//! They are intentionally kept out of a public SDK contract.
+mod ollama;
+mod openai;
+mod runtime;
+
+pub(crate) use ollama::send_request as send_ollama_request;
+pub(crate) use openai::send_request as send_openai_request;
+pub(crate) use runtime::Cargo as AgentCargo;
+
+/// Default temperature used for model requests when not explicitly overridden.
+pub(crate) const DEFAULT_TEMPERATURE: f64 = 0.0;

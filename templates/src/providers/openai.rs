@@ -58,7 +58,7 @@ pub async fn send_request(
     let temperature = if model.starts_with("gpt-5") {
         1.0
     } else {
-        crate::DEFAULT_TEMPERATURE
+        super::DEFAULT_TEMPERATURE
     };
 
     let role = String::from("user");
