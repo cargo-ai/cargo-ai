@@ -1,4 +1,5 @@
 // External Crates
+use super::{ProviderError, ProviderKind};
 use reqwest::ClientBuilder; // HTTP client builder
 use serde::{Deserialize, Serialize}; // Data format (e.g.,JSON, TOML) (de)serialization
 use std::time::Duration; // Duration for timeout handling // for overriding the API URL in tests
@@ -35,7 +36,7 @@ pub async fn send_request(
     prompt: &String,
     timeout_in_sec: u64,
     format: serde_json::Value,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, ProviderError> {
     let request = Request {
         model: model.clone(),
         prompt: prompt.clone(),
@@ -49,23 +50,39 @@ pub async fn send_request(
 
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
-        .build()?; // 30 sec Default too short for some LLMs.
+        .build()
+        .map_err(|error| ProviderError::from_reqwest(ProviderKind::Ollama, error))?; // 30 sec Default too short for some LLMs.
 
-    let http_resp = client.post(url).json(&request).send().await?;
+    let http_resp = client
+        .post(url)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| ProviderError::from_reqwest(ProviderKind::Ollama, error))?;
 
     let status = http_resp.status();
-    let body_bytes = http_resp.bytes().await?;
+    let body_bytes = http_resp
+        .bytes()
+        .await
+        .map_err(|error| ProviderError::from_reqwest(ProviderKind::Ollama, error))?;
 
     if !status.is_success() {
         let raw = String::from_utf8_lossy(&body_bytes);
-        return Err(format!("HTTP error {}: {}", status, raw).into());
+        return Err(ProviderError::from_http_status(
+            ProviderKind::Ollama,
+            status,
+            &raw,
+        ));
     }
 
     let reply: Response = match serde_json::from_slice(&body_bytes) {
         Ok(resp) => resp,
         Err(e) => {
             let raw = String::from_utf8_lossy(&body_bytes);
-            return Err(format!("Failed to parse JSON: {}\nRaw response:\n{}", e, raw).into());
+            return Err(ProviderError::invalid_response(
+                ProviderKind::Ollama,
+                format!("Failed to parse JSON: {e}\nRaw response:\n{raw}"),
+            ));
         }
     };
 
@@ -78,7 +95,10 @@ pub async fn send_request(
     } else if let Some(t) = reply.thinking {
         t
     } else {
-        return Err("Ollama returned neither response nor thinking fields.".into());
+        return Err(ProviderError::invalid_response(
+            ProviderKind::Ollama,
+            "Ollama returned neither response nor thinking fields.",
+        ));
     };
 
     Ok(final_output)

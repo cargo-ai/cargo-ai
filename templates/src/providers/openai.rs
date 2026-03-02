@@ -1,4 +1,5 @@
 // External Crates
+use super::{ProviderError, ProviderKind};
 use reqwest::ClientBuilder; // HTTP client builder
 use serde::{Deserialize, Serialize}; // Data format (e.g.,JSON, TOML) (de)serialization
 use std::time::Duration; // Duration for timeout handling
@@ -50,10 +51,11 @@ pub async fn send_request(
     timeout_in_sec: u64,
     token: &String,
     response_format: serde_json::Value,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, ProviderError> {
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
-        .build()?; // 30 sec Default too short for some requests.
+        .build()
+        .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?; // 30 sec Default too short for some requests.
 
     let temperature = if model.starts_with("gpt-5") {
         1.0
@@ -88,28 +90,45 @@ pub async fn send_request(
         .header("Content-Type", "application/json")
         .json(&request)
         .send()
-        .await?;
+        .await
+        .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
 
-    // TEMP: print raw server response (without consuming parse-ability)
-    let body_bytes = http_resp.bytes().await?;
-    // println!("Raw OpenAI response:\n{}", String::from_utf8_lossy(&body_bytes));
+    let status = http_resp.status();
+    let body_bytes = http_resp
+        .bytes()
+        .await
+        .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
+
+    if !status.is_success() {
+        let raw = String::from_utf8_lossy(&body_bytes);
+        return Err(ProviderError::from_http_status(
+            ProviderKind::OpenAi,
+            status,
+            &raw,
+        ));
+    }
 
     // Parse as usual from the captured bytes
     let response: Response = match serde_json::from_slice(&body_bytes) {
         Ok(resp) => resp,
         Err(e) => {
             let raw = String::from_utf8_lossy(&body_bytes);
-            return Err(format!("Failed to parse JSON: {}\nRaw response:\n{}", e, raw).into());
+            return Err(ProviderError::invalid_response(
+                ProviderKind::OpenAi,
+                format!("Failed to parse JSON: {e}\nRaw response:\n{raw}"),
+            ));
         }
     };
 
-    let response_content = response
-        .choices
-        .get(0)
-        .ok_or("No ChatGPT Response Index 0 Choice.")?
-        .message
-        .content
-        .clone();
+    let response_content = match response.choices.first() {
+        Some(choice) => choice.message.content.clone(),
+        None => {
+            return Err(ProviderError::invalid_response(
+                ProviderKind::OpenAi,
+                "No ChatGPT response choice at index 0.",
+            ))
+        }
+    };
 
     Ok(response_content)
 }

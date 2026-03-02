@@ -2,6 +2,7 @@
 use clap::ArgMatches;
 
 use crate::config::loader::{find_profile, load_config};
+use crate::providers::{provider_error_messages, validate_provider_request, ProviderKind};
 
 fn unknown_server_messages(server: &str) -> Vec<String> {
     let display_server = if server.trim().is_empty() {
@@ -18,62 +19,6 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
         "Example: cargo ai preflight --server ollama --model mistral --prompt \"What is 2 + 2?\""
             .to_string(),
     ]
-}
-
-fn provider_error_hint(server: &str, error: &str) -> Option<&'static str> {
-    let normalized_server = server.to_lowercase();
-    let normalized_error = error.to_lowercase();
-
-    if normalized_server == "ollama" {
-        if normalized_error.contains("404")
-            && normalized_error.contains("model")
-            && normalized_error.contains("not found")
-        {
-            return Some(
-                "Run `ollama list` to inspect installed models, then `ollama pull <model>` for missing models.",
-            );
-        }
-
-        if normalized_error.contains("connection refused")
-            || normalized_error.contains("failed to connect")
-            || normalized_error.contains("timed out")
-        {
-            return Some(
-                "Ensure Ollama is running (`ollama serve`) and the configured URL is reachable.",
-            );
-        }
-    } else if normalized_server == "openai" {
-        if normalized_error.contains("401")
-            || normalized_error.contains("unauthorized")
-            || normalized_error.contains("invalid api key")
-        {
-            return Some("Verify your OpenAI token (`--token` or profile token) and model access.");
-        }
-
-        if normalized_error.contains("429") || normalized_error.contains("rate limit") {
-            return Some(
-                "OpenAI rate limit reached; retry later or adjust your account/model limits.",
-            );
-        }
-    }
-
-    None
-}
-
-fn provider_error_messages(provider_label: &str, server: &str, error: &str) -> Vec<String> {
-    let mut messages = vec![
-        format!(
-            "❌ Issue communicating with the AI server ({}).",
-            provider_label
-        ),
-        format!("Reason: {}", error),
-    ];
-
-    if let Some(hint) = provider_error_hint(server, error) {
-        messages.push(format!("Hint: {}", hint));
-    }
-
-    messages
 }
 
 /// Executes the preflight flow: resolve runtime settings, call provider, and
@@ -141,6 +86,10 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         model = model_arg.to_string();
     }
 
+    if let Some(url_arg) = sub_m.get_one::<String>("url") {
+        url = url_arg.to_string();
+    }
+
     if let Some(cmd_token) = sub_m.get_one::<String>("token") {
         token = cmd_token.to_string();
     }
@@ -149,25 +98,29 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         timeout_in_sec = timeout_arg.parse::<u64>().unwrap_or(60);
     }
 
-    // Final URL fallback based on resolved server
+    let provider = match ProviderKind::from_server_value(&server) {
+        Some(provider) => provider,
+        None => {
+            for line in unknown_server_messages(&server) {
+                eprintln!("{}", line);
+            }
+            return false;
+        }
+    };
+
+    // Final URL fallback based on resolved server.
     if url.is_empty() {
-        url = if server == "ollama" {
-            "http://localhost:11434/api/generate".to_string()
-        } else if server == "openai" {
-            "https://api.openai.com/v1/chat/completions".to_string()
-        } else {
-            String::new()
-        };
+        url = provider.default_url().to_string();
     }
 
-    // End: Argument assignments
-
-    if !(server == "ollama" || server == "openai") {
-        for line in unknown_server_messages(&server) {
-            eprintln!("{}", line);
+    if let Err(validation_issues) = validate_provider_request(provider, &model, &url, &token) {
+        for issue in validation_issues {
+            eprintln!("{issue}");
         }
         return false;
     }
+
+    // End: Argument assignments
 
     let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
 
@@ -191,8 +144,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 
     let mut response = String::new(); // Holds the LLM response
 
-    if server == "ollama" {
-        // Send request to Ollama and `await` the LLM response
+    if provider == ProviderKind::Ollama {
         match crate::providers::send_ollama_request(
             &url,
             &model,
@@ -205,15 +157,14 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             Ok(r) => {
                 response.push_str(&r);
             }
-            Err(e) => {
-                let error = e.to_string();
-                for line in provider_error_messages("Ollama", "ollama", &error) {
+            Err(error) => {
+                for line in provider_error_messages(&error) {
                     eprintln!("{}", line);
                 }
                 return false;
             }
         }
-    } else if server == "openai" {
+    } else if provider == ProviderKind::OpenAi {
         let mut schema = crate::json_schema_value(); // this is a serde_json::Value (object)
         if let Some(obj) = schema.as_object_mut() {
             obj.insert(
@@ -243,9 +194,8 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         .await
         {
             Ok(r) => response.push_str(&r),
-            Err(e) => {
-                let error = e.to_string();
-                for line in provider_error_messages("OpenAI", "openai", &error) {
+            Err(error) => {
+                for line in provider_error_messages(&error) {
                     eprintln!("{}", line);
                 }
                 return false;
@@ -279,7 +229,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_error_hint, provider_error_messages, unknown_server_messages};
+    use super::unknown_server_messages;
 
     #[test]
     fn unknown_server_messages_include_actionable_guidance() {
@@ -299,37 +249,5 @@ mod tests {
         assert!(messages
             .iter()
             .any(|line| line.contains("Unknown AI server '(not set)'")));
-    }
-
-    #[test]
-    fn ollama_model_not_found_hint_is_added() {
-        let hint = provider_error_hint(
-            "ollama",
-            "HTTP error 404 Not Found: {\"error\":\"model 'mixtral' not found\"}",
-        );
-        assert_eq!(
-            hint,
-            Some(
-                "Run `ollama list` to inspect installed models, then `ollama pull <model>` for missing models."
-            )
-        );
-    }
-
-    #[test]
-    fn provider_error_messages_include_reason_and_hint_when_available() {
-        let messages = provider_error_messages(
-            "Ollama",
-            "ollama",
-            "HTTP error 404 Not Found: {\"error\":\"model 'mixtral' not found\"}",
-        );
-        assert!(messages
-            .iter()
-            .any(|line| line.contains("Issue communicating with the AI server (Ollama)")));
-        assert!(messages
-            .iter()
-            .any(|line| line.contains("Reason: HTTP error 404")));
-        assert!(messages
-            .iter()
-            .any(|line| line.contains("ollama pull <model>")));
     }
 }

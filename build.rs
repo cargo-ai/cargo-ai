@@ -53,6 +53,10 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
         source: "src/providers/ollama.rs",
     },
     TemplateSource {
+        destination: "src/providers/error.rs",
+        source: "src/providers/error.rs",
+    },
+    TemplateSource {
         destination: "src/config/loader.rs",
         source: "src/config/loader.rs",
     },
