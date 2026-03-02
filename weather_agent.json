@@ -12,7 +12,7 @@
   },
   "resource_urls": [
     {
-      "url": "https://worldtimeapi.org/api/timezone/America/New_York",
+      "url": "https://gettimeapi.dev/v1/time?timezone=America/New_York",
       "description": "Current local date and time for the Eastern Time zone."
     },
     {

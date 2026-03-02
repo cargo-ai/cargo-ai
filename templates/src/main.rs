@@ -1,13 +1,32 @@
 mod args;
 mod web_resources;
 mod config;
+mod providers;
 
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
 
 use config::loader::{load_config, find_profile};
+use providers::{provider_error_messages, validate_provider_request, ProviderKind};
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
+
+fn unknown_server_messages(server: &str) -> Vec<String> {
+    let display_server = if server.trim().is_empty() {
+        "(not set)"
+    } else {
+        server
+    };
+
+    vec![
+        format!("❌ Unknown AI server '{}'.", display_server),
+        "Use `--server ollama` or `--server openai`.".to_string(),
+        "Hint: Set `--server` explicitly or configure a default profile with a supported server."
+            .to_string(),
+        "Example: cargo ai preflight --server ollama --model mistral --prompt \"What is 2 + 2?\""
+            .to_string(),
+    ]
+}
 
 // Initialize Tokio runtime macro
 // Executor: Responsible for polling and running to completion
@@ -27,10 +46,11 @@ async fn main() {
     if let Some(profile_name) = cmd_args.get_one::<String>("profile") {
         if let Some(cfg) = load_config() {
             if let Some(profile) = find_profile(&cfg, profile_name) {
-                server = profile.server.clone();
+                server = profile.server.clone().to_lowercase();
                 model = profile.model.clone();
                 token = profile.token.clone().unwrap_or_default();
                 timeout_in_sec = profile.timeout_in_sec;
+                url = profile.url.clone().unwrap_or_default();
                 println!("Using profile '{}'", profile_name);
             } else {
                 eprintln!("Profile '{}' not found.", profile_name);
@@ -54,6 +74,7 @@ async fn main() {
                     model = profile.model.clone();
                     token = profile.token.clone().unwrap_or_default();
                     timeout_in_sec = profile.timeout_in_sec;
+                    url = profile.url.clone().unwrap_or_default();
                     println!("Using default profile '{}'", default_profile_name);
                 }
             }
@@ -81,26 +102,34 @@ async fn main() {
         timeout_in_sec = timeout_arg.parse::<u64>().unwrap_or(60);
     }
 
-    if url.is_empty() {
-        url = if server == "ollama" {
-            "http://localhost:11434/api/generate".to_string()
-        } else if server == "openai" {
-            "https://api.openai.com/v1/chat/completions".to_string()
-        } else {
-            String::new()
-        };
-    }
-
     let prompt = if let Some(prompt_arg) = cmd_args.get_one::<String>("prompt") {
         prompt_arg.to_string()
     } else {
         prompt() // fallback to default JSON-defined prompt
     };
-    // End: Argument assignments
 
-    if !(server == "ollama" || server == "openai") {
-        panic!("Unknown AI Server")
+    let provider = match ProviderKind::from_server_value(&server) {
+        Some(provider) => provider,
+        None => {
+            for line in unknown_server_messages(&server) {
+                eprintln!("{line}");
+            }
+            return;
+        }
+    };
+
+    if url.is_empty() {
+        url = provider.default_url().to_string();
     }
+
+    if let Err(validation_issues) = validate_provider_request(provider, &model, &url, &token) {
+        for issue in validation_issues {
+            eprintln!("{issue}");
+        }
+        return;
+    }
+
+    // End: Argument assignments
 
     let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
     
@@ -113,25 +142,26 @@ async fn main() {
 
     let context = format!("{}\n\n{}", static_context, data_block);
 
-    let mut ai_cargo = cargo_ai::Cargo::<Output>::new(prompt.clone(), context);
+    let mut ai_cargo = crate::providers::AgentCargo::<Output>::new(prompt.clone(), context);
 
     let structured_prompt = ai_cargo.prompt();
     
     let mut response = String::new(); // Holds the LLM response
 
-    if server == "ollama" {
+    if provider == ProviderKind::Ollama {
         // Send request to Ollama and `await` the LLM response
-        match cargo_ai::ollama_send_request(&url, &model, &structured_prompt, timeout_in_sec, json_schema_value()).await {
+        match crate::providers::send_ollama_request(&url, &model, &structured_prompt, timeout_in_sec, json_schema_value()).await {
             Ok(r) => {
                 response.push_str(&r);
             },
-            Err(e) => {
-                eprintln!("❌ Issue communicating with the AI server (Ollama).");
-                eprintln!("Reason: {}\n", e);
+            Err(error) => {
+                for line in provider_error_messages(&error) {
+                    eprintln!("{line}");
+                }
                 return;
             }
         }
-    } else if server == "openai" {
+    } else if provider == ProviderKind::OpenAi {
 
     let mut schema = json_schema_value(); // this is a serde_json::Value (object)
     if let Some(obj) = schema.as_object_mut() {
@@ -148,11 +178,12 @@ async fn main() {
     });
 
         // Send request to OpenAI and `await` the LLM response
-        match cargo_ai::openai_send_request(&url, &model, &structured_prompt, timeout_in_sec, &token, fmt).await {
+        match crate::providers::send_openai_request(&url, &model, &structured_prompt, timeout_in_sec, &token, fmt).await {
             Ok(r) => response.push_str(&r),
-            Err(e) => {
-                eprintln!("❌ Issue communicating with the AI server (OpenAI).");
-                eprintln!("Reason: {}\n", e);
+            Err(error) => {
+                for line in provider_error_messages(&error) {
+                    eprintln!("{line}");
+                }
                 return;
             }
         };

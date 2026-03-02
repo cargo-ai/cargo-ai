@@ -1,575 +1,38 @@
-// clap - Command Line Arguement Parsing
-use clap::{Arg, ArgGroup, ArgMatches, Command};
+//! Top-level CLI parser assembly for `cargo-ai`.
+//!
+//! This module composes command parsers from `src/args/*` and normalizes both
+//! invocation forms: `cargo-ai ...` and `cargo ai ...`.
+use clap::{ArgMatches, Command};
+
+mod account;
+mod hatch;
+mod init;
+mod new;
+mod preflight;
+mod profile;
+mod shipyard;
 
 fn cli_command(bin_name: &'static str) -> Command {
     Command::new("cargo-ai")
         .bin_name(bin_name)
         .version(env!("CARGO_PKG_VERSION"))
-        .subcommand(
-            Command::new("version")
-                .about("Print version information")
-        )
-        .subcommand(
-            Command::new("preflight")
-                .about("Internal: test agent config file")
-                .hide(true)
-                    .arg(
-                        Arg::new("profile")
-                            .long("profile")
-                            .short('P')
-                            .help("Use a saved connection profile instead of manual flags")
-                            .required(false)
-                            .value_name("PROFILE")
-                    )
-                    .arg(
-                        Arg::new("server")
-                            .long("server")
-                            .short('s')
-                            .value_name("CLIENT")
-                            .help("Client Type - Ollama or OpenAI")
-                    )
-                    .arg(
-                        Arg::new("model")
-                            .long("model")
-                            .short('m')
-                            .value_name("MODEL")
-                            .help("LLM model to use")
-                    )
-                    .arg(
-                        Arg::new("url")
-                            .long("url")
-                            .help("Custom transformer server URL (HTTPS preferred)")
-                            .required(false)
-                            .value_name("URL")
-                    )
-                    .arg(
-                        Arg::new("token")
-                            .long("token")
-                            .value_name("TOKEN")
-                            .help("API token"),
-                    )
-                    .arg(
-                        Arg::new("timeout_in_sec")
-                            .long("timeout_in_sec")
-                            .value_name("SECONDS")
-                            .help("Client timeout request")
-                            .default_value("60")
-                    )
-                    .arg(
-                        Arg::new("prompt")
-                            .long("prompt")
-                            .short('p')
-                            .help("Prompt to provide to the agent at runtime")
-                            .value_name("TEXT")
-                            .num_args(1)
-                    )
-        )
-        .subcommand(
-            Command::new("hatch")
-                .about("Hatch a new AI agent from a JSON config")
-                .arg(
-                    Arg::new("name")
-                        .help("Name of the new agent project")
-                        .required(true)
-                )
-                .arg(
-                    Arg::new("config")
-                        .long("config")
-                        .short('c')
-                        .help("Path to the agent configuration (local .json file or remote registry name)")
-                        .value_name("FILE")
-                        .num_args(1)
-                )
-        )
-        .subcommand(
-            Command::new("shipyard")
-                .hide(true)
-                .about("Launch Shipyard desktop UI (exploratory)")
-                .arg(
-                    Arg::new("experimental")
-                        .long("experimental")
-                        .help("Internal: enable experimental Shipyard UI launch")
-                        .hide(true)
-                        .action(clap::ArgAction::SetTrue)
-                )
-        )
-        .subcommand(
-            Command::new("profile")
-                .about("Manage connection profiles in the Cargo-AI config file")
-                .subcommand(
-                    Command::new("list")
-                        .about("List all configured profiles")
-                )
-                .subcommand(
-                    Command::new("show")
-                        .about("Show detailed information for a specific profile")
-                        .arg(
-                            Arg::new("name")
-                                .help("Name of the profile to display")
-                                .required(true)
-                                .value_name("NAME")
-                        )
-                )
-                .subcommand(
-                    Command::new("add")
-                        .about("Add a new connection profile or overwrite an existing one")
-                        .arg(
-                            Arg::new("name")
-                                .help("Name of the profile to add or update")
-                                .required(true)
-                                .value_name("NAME")
-                        )
-                        .arg(
-                            Arg::new("server")
-                                .long("server")
-                                .short('s')
-                                .help("LLM server (e.g., openai or ollama)")
-                                .required(true)
-                                .value_name("SERVER")
-                        )
-                        .arg(
-                            Arg::new("model")
-                                .long("model")
-                                .short('m')
-                                .help("LLM model identifier (e.g., gpt-4o, mistral)")
-                                .required(true)
-                                .value_name("MODEL")
-                        )
-                        .arg(
-                            Arg::new("url")
-                                .long("url")
-                                .help("Custom transformer server URL (HTTPS preferred)")
-                                .required(false)
-                                .value_name("URL")
-                        )
-                        .arg(
-                            Arg::new("token")
-                                .long("token")
-                                .help("API token for the server")
-                                .required(false)
-                                .value_name("TOKEN")
-                        )
-                        .arg(
-                            Arg::new("description")
-                                .long("description")
-                                .short('d')
-                                .help("Optional description for the profile")
-                                .required(false)
-                                .value_name("TEXT")
-                        )
-                        .arg(
-                            Arg::new("default")
-                                .long("default")
-                                .help("Set this profile as the default")
-                                .action(clap::ArgAction::SetTrue)
-                        )
-                )
-                .subcommand(
-                    Command::new("remove")
-                        .about("Remove an existing connection profile by name")
-                        .arg(
-                            Arg::new("name")
-                                .help("Name of the profile to remove")
-                                .required(true)
-                                .value_name("NAME")
-                        )
-                )
-        )
-        .subcommand(
-            Command::new("account")
-                .about("Manage account lifecycle")
-                .subcommand(
-                    Command::new("register")
-                        .about("Register a new account by email")
-                        .arg(
-                            Arg::new("email")
-                                .help("Email address to register")
-                                .required(true)
-                                .value_name("EMAIL")
-                        )
-                )
-                .subcommand(
-                    Command::new("confirm")
-                        .about("Confirm an account using the temporary code")
-                        .arg(
-                            Arg::new("code")
-                                .help("Temporary confirmation code from email")
-                                .required(true)
-                                .value_name("CODE")
-                        )
-                )
-                .subcommand(
-                    Command::new("status")
-                        .about("Show account status")
-                )
-                .subcommand(
-                    Command::new("mail")
-                        .about("Send account mail")
-                        .subcommand(
-                            Command::new("test")
-                                .about("Send a test email to your account email")
-                                .arg(
-                                    Arg::new("subject")
-                                        .long("subject")
-                                        .help("Optional subject override (quote values with spaces)")
-                                        .required(false)
-                                        .value_name("TEXT")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("text")
-                                        .long("text")
-                                        .help("Optional body override (quote values with spaces)")
-                                        .required(false)
-                                        .value_name("TEXT")
-                                        .num_args(1)
-                                )
-                        )
-                        .subcommand(
-                            Command::new("prefs")
-                                .about("View or set account email delivery preferences")
-                                .arg(
-                                    Arg::new("disable_all")
-                                        .long("disable-all")
-                                        .help("Disable all account emails")
-                                        .required(false)
-                                        .action(clap::ArgAction::SetTrue)
-                                        .conflicts_with("enable_all")
-                                )
-                                .arg(
-                                    Arg::new("enable_all")
-                                        .long("enable-all")
-                                        .help("Enable all account emails")
-                                        .required(false)
-                                        .action(clap::ArgAction::SetTrue)
-                                        .conflicts_with("disable_all")
-                                )
-                        )
-                )
-                .subcommand(
-                    Command::new("handle")
-                        .about("Get or set account handle")
-                        .arg(
-                            Arg::new("set")
-                                .long("set")
-                                .help("Set a new handle (if omitted, returns current handle)")
-                                .required(false)
-                                .value_name("HANDLE")
-                                .num_args(1)
-                        )
-                )
-                .subcommand(
-                    Command::new("agents")
-                        .about("Manage account agents")
-                        .subcommand(
-                            Command::new("list")
-                                .about("List agents")
-                                .arg(
-                                    Arg::new("owner_handle")
-                                        .long("owner-handle")
-                                        .help("List public agents for this owner handle (omit to list your agents)")
-                                        .required(false)
-                                        .value_name("HANDLE")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("include_archived")
-                                        .long("include-archived")
-                                        .help("Include archived agents (applies to listing your own agents)")
-                                        .action(clap::ArgAction::SetTrue)
-                                )
-                                .arg(
-                                    Arg::new("limit")
-                                        .long("limit")
-                                        .help("Maximum number of agents to display (default: 20)")
-                                        .required(false)
-                                        .value_name("N")
-                                        .num_args(1)
-                                        .value_parser(clap::value_parser!(u32).range(1..))
-                                        .conflicts_with("all")
-                                )
-                                .arg(
-                                    Arg::new("all")
-                                        .long("all")
-                                        .help("Display all returned agents")
-                                        .action(clap::ArgAction::SetTrue)
-                                        .conflicts_with("limit")
-                                )
-                        )
-                        .subcommand(
-                            Command::new("push")
-                                .about("Upload or overwrite an agent definition")
-                                .group(
-                                    ArgGroup::new("push_input")
-                                        .args(["json", "json_file", "input_file"])
-                                        .required(true)
-                                )
-                                .arg(
-                                    Arg::new("name")
-                                        .long("name")
-                                        .help("Agent name (defaults to file name when --json-file or positional FILE is used)")
-                                        .required(false)
-                                        .required_unless_present_any(["json_file", "input_file"])
-                                        .value_name("NAME")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("path")
-                                        .long("path")
-                                        .help("Path namespace (defaults to '/')")
-                                        .required(false)
-                                        .value_name("PATH")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("json")
-                                        .long("json")
-                                        .help("Agent definition JSON (raw JSON string; highest input precedence)")
-                                        .required(false)
-                                        .value_name("JSON")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("json_file")
-                                        .long("json-file")
-                                        .help("Path to agent definition JSON file (used when --json is not provided)")
-                                        .required(false)
-                                        .value_name("FILE")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("input_file")
-                                        .help("Shortcut file input (equivalent to --json-file <FILE>)")
-                                        .required(false)
-                                        .value_name("FILE")
-                                        .num_args(1)
-                                        .index(1)
-                                        .conflicts_with_all(["json", "json_file"])
-                                )
-                                .after_help(
-                                    "Notes:\n  - Required input: provide one of --json, --json-file, or positional FILE.\n  - Name is required for --json, and inferred from file name for --json-file/FILE when omitted.\n  - Input precedence: --json, then --json-file, then positional FILE.\n  - If --name looks like a file path, use --json-file <FILE> or positional FILE instead."
-                                )
-                        )
-                        .subcommand(
-                            Command::new("pull")
-                                .about("Fetch an agent definition")
-                                .group(
-                                    ArgGroup::new("pull_name")
-                                        .args(["name", "name_positional"])
-                                        .required(true)
-                                )
-                                .arg(
-                                    Arg::new("name")
-                                        .long("name")
-                                        .help("Agent name (explicit alias for positional NAME)")
-                                        .required(false)
-                                        .value_name("NAME")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("name_positional")
-                                        .help("Agent name")
-                                        .required(false)
-                                        .value_name("NAME")
-                                        .num_args(1)
-                                        .index(1)
-                                        .conflicts_with("name")
-                                )
-                                .arg(
-                                    Arg::new("owner_handle")
-                                        .long("owner-handle")
-                                        .help("Owner handle to pull from (omit to pull your own)")
-                                        .required(false)
-                                        .value_name("HANDLE")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("path")
-                                        .long("path")
-                                        .help("Path namespace (defaults to '/')")
-                                        .required(false)
-                                        .value_name("PATH")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("json_file")
-                                        .long("json-file")
-                                        .help("Write pulled definition JSON to this file (defaults to ./<name>.json)")
-                                        .required(false)
-                                        .value_name("FILE")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("stdout")
-                                        .long("stdout")
-                                        .help("Print pulled definition_json to stdout (no default file write unless --json-file is also set)")
-                                        .required(false)
-                                        .action(clap::ArgAction::SetTrue)
-                                )
-                                .arg(
-                                    Arg::new("force")
-                                        .long("force")
-                                        .help("Overwrite output file if it already exists")
-                                        .required(false)
-                                        .action(clap::ArgAction::SetTrue)
-                                )
-                                .after_help(
-                                    "Notes:\n  - Name can be provided as positional NAME or via --name.\n  - Default output: ./<name>.json (when --json-file is omitted and --stdout is not set).\n  - --force applies only when writing to a file."
-                                )
-                        )
-                        .subcommand(
-                            Command::new("hatch")
-                                .about("Build an executable from an account agent definition")
-                                .group(
-                                    ArgGroup::new("hatch_name")
-                                        .args(["name", "name_positional"])
-                                        .required(true)
-                                )
-                                .arg(
-                                    Arg::new("name")
-                                        .long("name")
-                                        .help("Agent name (explicit alias for positional NAME)")
-                                        .required(false)
-                                        .value_name("NAME")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("name_positional")
-                                        .help("Agent name")
-                                        .required(false)
-                                        .value_name("NAME")
-                                        .num_args(1)
-                                        .index(1)
-                                        .conflicts_with("name")
-                                )
-                                .arg(
-                                    Arg::new("owner_handle")
-                                        .long("owner-handle")
-                                        .help("Owner handle to hatch from (omit to hatch your own)")
-                                        .required(false)
-                                        .value_name("HANDLE")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("path")
-                                        .long("path")
-                                        .help("Path namespace (defaults to '/')")
-                                        .required(false)
-                                        .value_name("PATH")
-                                        .num_args(1)
-                                )
-                                .after_help(
-                                    "Notes:\n  - Name can be provided as positional NAME or via --name.\n  - Owner defaults to your authenticated account when --owner-handle is omitted.\n  - Path defaults to '/'."
-                                )
-                        )
-                        .subcommand(
-                            Command::new("visibility")
-                                .about("Set public visibility for an agent")
-                                .group(
-                                    ArgGroup::new("visibility_state")
-                                        .args(["public", "private"])
-                                        .required(true)
-                                )
-                                .arg(
-                                    Arg::new("name")
-                                        .long("name")
-                                        .help("Agent name")
-                                        .required(true)
-                                        .value_name("NAME")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("path")
-                                        .long("path")
-                                        .help("Path namespace (defaults to '/')")
-                                        .required(false)
-                                        .value_name("PATH")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("public")
-                                        .long("public")
-                                        .help("Set agent visibility to public")
-                                        .required(false)
-                                        .conflicts_with("private")
-                                        .action(clap::ArgAction::SetTrue)
-                                )
-                                .arg(
-                                    Arg::new("private")
-                                        .long("private")
-                                        .help("Set agent visibility to private")
-                                        .required(false)
-                                        .conflicts_with("public")
-                                        .action(clap::ArgAction::SetTrue)
-                                )
-                                .arg(
-                                    Arg::new("public_from")
-                                        .long("public-from")
-                                        .help("RFC 3339 timestamp for when agent becomes public")
-                                        .required(false)
-                                        .value_name("RFC3339")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("public_until")
-                                        .long("public-until")
-                                        .help("RFC 3339 timestamp for when agent stops being public")
-                                        .required(false)
-                                        .value_name("RFC3339")
-                                        .num_args(1)
-                                )
-                        )
-                        .subcommand(
-                            Command::new("archive")
-                                .about("Archive or unarchive an agent")
-                                .group(
-                                    ArgGroup::new("archive_state")
-                                        .args(["archive", "unarchive"])
-                                        .required(true)
-                                )
-                                .arg(
-                                    Arg::new("name")
-                                        .long("name")
-                                        .help("Agent name")
-                                        .required(true)
-                                        .value_name("NAME")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("path")
-                                        .long("path")
-                                        .help("Path namespace (defaults to '/')")
-                                        .required(false)
-                                        .value_name("PATH")
-                                        .num_args(1)
-                                )
-                                .arg(
-                                    Arg::new("archive")
-                                        .long("archive")
-                                        .help("Archive the agent")
-                                        .required(false)
-                                        .conflicts_with("unarchive")
-                                        .action(clap::ArgAction::SetTrue)
-                                )
-                                .arg(
-                                    Arg::new("unarchive")
-                                        .long("unarchive")
-                                        .help("Unarchive the agent")
-                                        .required(false)
-                                        .conflicts_with("archive")
-                                        .action(clap::ArgAction::SetTrue)
-                                )
-                        )
-                )
-        )
+        .subcommand(Command::new("version").about("Print version information"))
+        .subcommand(preflight::command())
+        .subcommand(hatch::command())
+        .subcommand(init::command())
+        .subcommand(new::command())
+        .subcommand(shipyard::command())
+        .subcommand(profile::command())
+        .subcommand(account::command())
 }
 
+/// Parses CLI arguments into clap matches.
 pub fn build_cli() -> ArgMatches {
-    // Collect the original command-line arguments
+    // Collect raw process args so we can normalize cargo-subcommand mode.
     let mut args: Vec<String> = std::env::args().collect();
 
     let mut bin_name = "cargo-ai";
-    // Check if runing as a cargo subcommand, i.e. cargo ai
+    // Check if running as a cargo subcommand, i.e. cargo ai
     if let Some(first_arg) = args.get(1) {
         if first_arg == "ai" {
             bin_name = "cargo ai";
@@ -578,6 +41,11 @@ pub fn build_cli() -> ArgMatches {
     }
 
     cli_command(bin_name).get_matches_from(args)
+}
+
+#[cfg(test)]
+pub(crate) fn test_cli_command(bin_name: &'static str) -> Command {
+    cli_command(bin_name)
 }
 
 #[cfg(test)]
@@ -647,5 +115,90 @@ mod tests {
             .expect_err("conflicting flags should fail parsing");
 
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn hatch_check_flag_parses() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "hatch", "adder_check", "--check"])
+            .expect("hatch --check should parse");
+
+        let hatch_matches = matches
+            .subcommand_matches("hatch")
+            .expect("hatch subcommand should be available");
+
+        assert!(hatch_matches.get_flag("check"));
+    }
+
+    #[test]
+    fn hatch_force_flag_parses_long_and_short() {
+        let long_matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "hatch", "adder_force_long", "--force"])
+            .expect("hatch --force should parse");
+        let long_hatch = long_matches
+            .subcommand_matches("hatch")
+            .expect("hatch subcommand should be available");
+        assert!(long_hatch.get_flag("force"));
+
+        let short_matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "hatch", "adder_force_short", "-f"])
+            .expect("hatch -f should parse");
+        let short_hatch = short_matches
+            .subcommand_matches("hatch")
+            .expect("hatch subcommand should be available");
+        assert!(short_hatch.get_flag("force"));
+    }
+
+    #[test]
+    fn init_defaults_parse() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "init"])
+            .expect("init should parse");
+
+        let init = matches
+            .subcommand_matches("init")
+            .expect("init subcommand should be available");
+
+        assert_eq!(
+            init.get_one::<String>("path").map(String::as_str),
+            Some(".")
+        );
+        assert_eq!(
+            init.get_one::<String>("vcs").map(String::as_str),
+            Some("git")
+        );
+        assert!(init.get_one::<String>("template").is_none());
+    }
+
+    #[test]
+    fn new_requires_path_and_parses_template_vcs() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "new",
+                "sample-agent",
+                "--template",
+                "codex",
+                "--vcs",
+                "none",
+            ])
+            .expect("new should parse");
+
+        let new = matches
+            .subcommand_matches("new")
+            .expect("new subcommand should be available");
+
+        assert_eq!(
+            new.get_one::<String>("path").map(String::as_str),
+            Some("sample-agent")
+        );
+        assert_eq!(
+            new.get_one::<String>("template").map(String::as_str),
+            Some("codex")
+        );
+        assert_eq!(
+            new.get_one::<String>("vcs").map(String::as_str),
+            Some("none")
+        );
     }
 }

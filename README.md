@@ -23,6 +23,14 @@ Supports both **OpenAI‑API‑compatible servers** and **Ollama**.
 - **Repository Integration** – Download JSON configurations directly from Cargo-AI and hatch agents without needing local files
 - **Cross‑Platform Support** – Runs on any Linux, macOS, or Windows device
 
+## 🧭 Internal Layout (CLI)
+
+- `src/main.rs` keeps runtime dispatch thin and routes work into `src/commands/*`.
+- `src/args.rs` is the parser root and composes command parsers from `src/args/*`.
+- `src/commands/*` owns command behavior (`preflight`, `hatch`, `profile`, `shipyard`, `account`).
+- `src/commands/account/*` and `src/args/account/*` keep account subcommand paths explicit and testable.
+- `templates/build_support.rs` is the shared build-time hardening/codegen logic used by both build scripts.
+
 ## 🚀 Upcoming Features
 
 - **User Repositories (Public & Private)** – Publish agents to your own hosted repository and share them publicly or privately with collaborators.
@@ -315,7 +323,7 @@ cargo ai hatch weather_agent --config weather_agent.json
   ```json
   "resource_urls": [
     {
-      "url": "https://worldtimeapi.org/api/timezone/etc/utc",
+      "url": "https://gettimeapi.dev/v1/time?timezone=UTC",
       "description": "Current UTC date and time."
     },
     {
@@ -334,6 +342,40 @@ It follows the [JSON Logic](http://jsonlogic.com/) format for conditions.
 
 Currently, actions can run a command-line executable (`exec`).  
 Future versions will support additional action types.
+
+Action object schema:
+
+```json
+{
+  "name": "my_action",
+  "logic": { "==": [ { "var": "answer" }, 4 ] },
+  "run": [
+    {
+      "kind": "exec",
+      "program": "echo",
+      "args": ["Value is 4"]
+    }
+  ]
+}
+```
+
+- `name`: Action label shown in execution output/logs.
+- `logic`: JSON Logic condition evaluated against the typed agent response.
+- `run`: Ordered list of steps to execute when `logic` evaluates to true.
+
+`run` step schema:
+
+```json
+{
+  "kind": "exec",
+  "program": "echo",
+  "args": ["hello", "world"]
+}
+```
+
+- `kind`: Step type. Use `"exec"` for command execution.
+- `program`: Executable name or path to run.
+- `args`: Argument tokens passed directly as argv entries (no shell splitting).
 
 Example from [weather_agent.json](./weather_agent.json):
 

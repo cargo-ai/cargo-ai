@@ -5,7 +5,7 @@
 
 #![allow(dead_code)]
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -16,6 +16,9 @@ pub struct Config {
 
     #[serde(default)]
     pub default_profile: Option<String>,
+
+    #[serde(default)]
+    pub web_resources: Option<WebResources>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -25,7 +28,7 @@ pub struct Profile {
     pub model: String,
 
     #[serde(default)]
-    pub url: Option<String>, 
+    pub url: Option<String>,
 
     #[serde(default)]
     pub token: Option<String>,
@@ -35,6 +38,18 @@ pub struct Profile {
 
     #[serde(default)]
     pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WebResources {
+    #[serde(default)]
+    pub max_attempts: Option<u32>,
+
+    #[serde(default)]
+    pub base_backoff_ms: Option<u64>,
+
+    #[serde(default)]
+    pub retry_on_empty_body: Option<bool>,
 }
 
 fn default_timeout() -> u64 {

@@ -36,6 +36,7 @@ pub fn ensure_config_file_exists() -> Result<(), Box<dyn std::error::Error>> {
             cargo_ai_token: None,
             default_profile: None,
             account: None,
+            web_resources: None,
         };
 
         let serialized = toml::to_string_pretty(&cfg)?;

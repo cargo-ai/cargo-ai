@@ -1,0 +1,32 @@
+{
+  "version": "0.0.10",
+  "prompt": "What is 2 + 2? Return the answer as a number.",
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "answer": {
+        "type": "integer",
+        "description": "The numeric result."
+      }
+    }
+  },
+  "resource_urls": [],
+  "actions": [
+    {
+      "name": "is_4",
+      "logic": {
+        "==": [
+          { "var": "answer" },
+          4
+        ]
+      },
+      "run": [
+        {
+          "kind": "exec",
+          "program": "echo",
+          "args": ["Value is 4."]
+        }
+      ]
+    }
+  ]
+}

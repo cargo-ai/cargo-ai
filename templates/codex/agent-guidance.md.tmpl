@@ -1,0 +1,28 @@
+# AGENTS.md
+
+## Cargo-AI Agent Authoring (Codex)
+
+This project is scaffolded for Cargo-AI agent development. Keep edits deterministic and validate with canonical Cargo-AI commands.
+
+## Canonical Workflow
+1. Start from a known-good example:
+   - `.cargo-ai/examples/agent-minimal.json`
+   - `.cargo-ai/examples/agent-array-valid.json`
+2. Copy to your working config (for example `my_agent.json`) and edit.
+3. Validate only:
+   - `cargo ai hatch <agent-name> --config <config.json> --check`
+4. Fix reported schema/action errors and re-run step 3.
+5. Build/export once validation passes:
+   - `cargo ai hatch <agent-name> --config <config.json>`
+6. Overwrite an existing export only when intentional:
+   - `cargo ai hatch <agent-name> --config <config.json> --force`
+
+## Companion Files
+- `.cargo-ai/docs/schema-quick-reference.md`
+- `.cargo-ai/docs/hatch-check-loop.md`
+- `.cargo-ai/examples/invalid/agent-logic-invalid-var.json` (intentionally invalid for fail-fast validation demonstrations)
+
+## Codex-Specific Guidance
+- Use canonical `--config` commands; do not rely on shorthand command forms.
+- Keep changes focused on the target agent config and supporting docs.
+- Prefer small iterations: edit config -> run `--check` -> fix -> repeat.
