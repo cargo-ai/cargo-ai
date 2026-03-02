@@ -2,10 +2,25 @@ use std::fs;
 use std::path::PathBuf;
 use crate::config::schema::{Config, Profile};
 
+fn resolve_config_path(cargo_home: Option<PathBuf>, home_dir: Option<PathBuf>) -> PathBuf {
+    if let Some(cargo_home) = cargo_home {
+        return cargo_home.join(".cargo-ai/config.toml");
+    }
+
+    if let Some(home_dir) = home_dir {
+        return home_dir.join(".cargo/.cargo-ai/config.toml");
+    }
+
+    // Last-resort fallback for constrained environments where neither CARGO_HOME nor
+    // HOME can be resolved. This avoids panic and keeps path behavior deterministic.
+    PathBuf::from(".cargo/.cargo-ai/config.toml")
+}
+
 pub fn config_path() -> PathBuf {
-    dirs::home_dir()
-        .expect("could not find home directory")
-        .join(".cargo/.cargo-ai/config.toml")
+    resolve_config_path(
+        std::env::var_os("CARGO_HOME").map(PathBuf::from),
+        dirs::home_dir(),
+    )
 }
 
 pub fn load_config() -> Option<Config> {
@@ -20,4 +35,34 @@ pub fn load_config() -> Option<Config> {
 
 pub fn find_profile<'a>(config: &'a Config, name: &str) -> Option<&'a Profile> {
     config.profile.iter().find(|p| p.name == name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_config_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn prefers_cargo_home_when_present() {
+        let path = resolve_config_path(
+            Some(PathBuf::from("/tmp/cargo-home")),
+            Some(PathBuf::from("/Users/example")),
+        );
+
+        assert_eq!(path, PathBuf::from("/tmp/cargo-home/.cargo-ai/config.toml"));
+    }
+
+    #[test]
+    fn falls_back_to_home_dir_when_cargo_home_missing() {
+        let path = resolve_config_path(None, Some(PathBuf::from("/Users/example")));
+
+        assert_eq!(path, PathBuf::from("/Users/example/.cargo/.cargo-ai/config.toml"));
+    }
+
+    #[test]
+    fn falls_back_to_relative_path_when_no_home_context_exists() {
+        let path = resolve_config_path(None, None);
+
+        assert_eq!(path, PathBuf::from(".cargo/.cargo-ai/config.toml"));
+    }
 }
