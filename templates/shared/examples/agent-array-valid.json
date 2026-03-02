@@ -1,0 +1,35 @@
+{
+  "version": "0.0.10",
+  "prompt": "Return one list of integer IDs for retry.",
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "retry_ids": {
+        "type": "array",
+        "items": {
+          "type": "integer"
+        },
+        "description": "Integer IDs that should be retried."
+      }
+    }
+  },
+  "resource_urls": [],
+  "actions": [
+    {
+      "name": "has_retries",
+      "logic": {
+        "!=": [
+          { "var": "retry_ids" },
+          []
+        ]
+      },
+      "run": [
+        {
+          "kind": "exec",
+          "program": "echo",
+          "args": ["Retry IDs were returned."]
+        }
+      ]
+    }
+  ]
+}

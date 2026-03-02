@@ -12,6 +12,55 @@ const CLAUDE_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/claude/assistant-guidance.md.tmpl"
 ));
+const EXAMPLE_AGENT_MINIMAL: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/shared/examples/agent-minimal.json"
+));
+const EXAMPLE_AGENT_ARRAY_VALID: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/shared/examples/agent-array-valid.json"
+));
+const EXAMPLE_AGENT_LOGIC_INVALID_VAR: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/shared/examples/invalid/agent-logic-invalid-var.json"
+));
+const DOC_SCHEMA_QUICK_REFERENCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/shared/docs/schema-quick-reference.md"
+));
+const DOC_HATCH_CHECK_LOOP: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/shared/docs/hatch-check-loop.md"
+));
+
+#[derive(Clone, Copy)]
+struct TemplateArtifact {
+    relative_path: &'static str,
+    contents: &'static str,
+}
+
+const COMMON_TEMPLATE_ARTIFACTS: [TemplateArtifact; 5] = [
+    TemplateArtifact {
+        relative_path: ".cargo-ai/examples/agent-minimal.json",
+        contents: EXAMPLE_AGENT_MINIMAL,
+    },
+    TemplateArtifact {
+        relative_path: ".cargo-ai/examples/agent-array-valid.json",
+        contents: EXAMPLE_AGENT_ARRAY_VALID,
+    },
+    TemplateArtifact {
+        relative_path: ".cargo-ai/examples/invalid/agent-logic-invalid-var.json",
+        contents: EXAMPLE_AGENT_LOGIC_INVALID_VAR,
+    },
+    TemplateArtifact {
+        relative_path: ".cargo-ai/docs/schema-quick-reference.md",
+        contents: DOC_SCHEMA_QUICK_REFERENCE,
+    },
+    TemplateArtifact {
+        relative_path: ".cargo-ai/docs/hatch-check-loop.md",
+        contents: DOC_HATCH_CHECK_LOOP,
+    },
+];
 
 /// Supported template overlays for scaffolding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,6 +102,16 @@ impl ProjectTemplate {
             Self::Codex => CODEX_TEMPLATE,
             Self::Claude => CLAUDE_TEMPLATE,
         }
+    }
+
+    fn artifacts(self) -> Vec<TemplateArtifact> {
+        let mut artifacts = Vec::with_capacity(1 + COMMON_TEMPLATE_ARTIFACTS.len());
+        artifacts.push(TemplateArtifact {
+            relative_path: self.output_file_name(),
+            contents: self.output_file_contents(),
+        });
+        artifacts.extend_from_slice(&COMMON_TEMPLATE_ARTIFACTS);
+        artifacts
     }
 }
 
@@ -170,10 +229,16 @@ fn scaffold_in_place(
     vcs_mode: VcsMode,
 ) -> Result<ScaffoldReport, String> {
     let metadata_path = target_dir.join(".cargo-ai").join("project.toml");
+    let template_artifacts = template.map(ProjectTemplate::artifacts).unwrap_or_default();
     let template_output_path =
         template.map(|selected| target_dir.join(selected.output_file_name()));
 
-    ensure_no_conflicts(&metadata_path, template_output_path.as_ref())?;
+    let mut managed_paths = vec![metadata_path.clone()];
+    for artifact in &template_artifacts {
+        managed_paths.push(target_dir.join(artifact.relative_path));
+    }
+
+    ensure_no_conflicts(&managed_paths)?;
 
     if let Some(parent) = metadata_path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -193,9 +258,19 @@ fn scaffold_in_place(
         )
     })?;
 
-    if let Some(selected) = template {
-        let output_path = target_dir.join(selected.output_file_name());
-        fs::write(&output_path, selected.output_file_contents()).map_err(|error| {
+    for artifact in &template_artifacts {
+        let output_path = target_dir.join(artifact.relative_path);
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "Failed to create template directory '{}': {}",
+                    parent.display(),
+                    error
+                )
+            })?;
+        }
+
+        fs::write(&output_path, artifact.contents).map_err(|error| {
             format!(
                 "Failed to write template output '{}': {}",
                 output_path.display(),
@@ -214,16 +289,10 @@ fn scaffold_in_place(
     })
 }
 
-fn ensure_no_conflicts(
-    metadata_path: &Path,
-    template_output_path: Option<&PathBuf>,
-) -> Result<(), String> {
+fn ensure_no_conflicts(managed_paths: &[PathBuf]) -> Result<(), String> {
     let mut conflicts = Vec::new();
 
-    if metadata_path.exists() {
-        conflicts.push(metadata_path.display().to_string());
-    }
-    if let Some(path) = template_output_path {
+    for path in managed_paths {
         if path.exists() {
             conflicts.push(path.display().to_string());
         }
@@ -333,6 +402,22 @@ mod tests {
             fs::read_to_string(&report.metadata_path).expect("metadata should be readable");
         assert!(metadata_contents.contains("template = \"codex\""));
         assert!(metadata_contents.contains("vcs = \"none\""));
+        assert!(dir.join(".cargo-ai/examples/agent-minimal.json").exists());
+        assert!(dir
+            .join(".cargo-ai/examples/agent-array-valid.json")
+            .exists());
+        assert!(dir
+            .join(".cargo-ai/examples/invalid/agent-logic-invalid-var.json")
+            .exists());
+        assert!(dir
+            .join(".cargo-ai/docs/schema-quick-reference.md")
+            .exists());
+        assert!(dir.join(".cargo-ai/docs/hatch-check-loop.md").exists());
+
+        let guidance =
+            fs::read_to_string(template_path).expect("guidance template output should be readable");
+        assert!(guidance.contains("Cargo-AI Agent Authoring (Codex)"));
+        assert!(guidance.contains("--config <config.json> --check"));
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -353,6 +438,53 @@ mod tests {
             .expect_err("init should fail");
         assert!(err.contains("managed file"));
         assert!(err.contains("project.toml"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scaffold_init_writes_claude_template_and_shared_assets() {
+        let dir = temp_dir_path("init-claude");
+        fs::create_dir_all(&dir).expect("test dir should be created");
+
+        let report = scaffold_init(&dir, Some(ProjectTemplate::Claude), VcsMode::None)
+            .expect("init should succeed");
+        let template_path = report
+            .template_output_path
+            .expect("template output should be present");
+        assert_eq!(
+            template_path.file_name().and_then(|name| name.to_str()),
+            Some("CLAUDE.md")
+        );
+        assert!(!dir.join("AGENTS.md").exists());
+        assert!(dir.join(".cargo-ai/examples/agent-minimal.json").exists());
+        assert!(dir
+            .join(".cargo-ai/docs/schema-quick-reference.md")
+            .exists());
+
+        let guidance =
+            fs::read_to_string(template_path).expect("guidance template output should be readable");
+        assert!(guidance.contains("Cargo-AI Agent Authoring (Claude)"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scaffold_init_fails_when_companion_asset_conflicts() {
+        let dir = temp_dir_path("init-companion-conflict");
+        let conflict_path = dir.join(".cargo-ai/examples/agent-minimal.json");
+        fs::create_dir_all(
+            conflict_path
+                .parent()
+                .expect("conflict parent should be available"),
+        )
+        .expect("conflict parent should be created");
+        fs::write(&conflict_path, "{}").expect("conflict fixture should be written");
+
+        let err = scaffold_init(&dir, Some(ProjectTemplate::Codex), VcsMode::None)
+            .expect_err("init should fail");
+        assert!(err.contains("managed file"));
+        assert!(err.contains("agent-minimal.json"));
 
         let _ = fs::remove_dir_all(dir);
     }

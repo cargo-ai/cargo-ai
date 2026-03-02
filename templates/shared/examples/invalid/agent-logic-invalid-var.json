@@ -1,0 +1,32 @@
+{
+  "version": "0.0.10",
+  "prompt": "What is 2 + 2? Return the answer as a number.",
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "answer": {
+        "type": "integer",
+        "description": "The numeric result."
+      }
+    }
+  },
+  "resource_urls": [],
+  "actions": [
+    {
+      "name": "invalid_unknown_var",
+      "logic": {
+        "==": [
+          { "var": "answers" },
+          4
+        ]
+      },
+      "run": [
+        {
+          "kind": "exec",
+          "program": "echo",
+          "args": ["This example should fail build-time validation."]
+        }
+      ]
+    }
+  ]
+}

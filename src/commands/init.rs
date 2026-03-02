@@ -10,6 +10,10 @@ fn print_success(report: &super::scaffold::ScaffoldReport) {
     println!("🧩 Wrote metadata: {}", report.metadata_path.display());
     if let Some(template_path) = &report.template_output_path {
         println!("🧩 Applied template file: {}", template_path.display());
+        println!(
+            "🧩 Wrote companion template assets under: {}",
+            report.project_root.join(".cargo-ai").display()
+        );
     }
     println!("🌿 VCS setup: {}", report.git_setup);
 }
