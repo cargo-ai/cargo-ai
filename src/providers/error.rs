@@ -237,6 +237,7 @@ pub(crate) fn validate_provider_request(
 mod tests {
     use super::{provider_error_messages, validate_provider_request, ProviderError, ProviderKind};
     use reqwest::StatusCode;
+    use tokio::net::TcpListener;
 
     #[test]
     fn parses_provider_kind_from_server_value() {
@@ -285,11 +286,48 @@ mod tests {
 
     #[test]
     fn validates_openai_token_requirement() {
-        let issues =
-            validate_provider_request(ProviderKind::OpenAi, "gpt-4o-mini", "https://api.openai.com/v1/chat/completions", "")
-                .expect_err("expected token validation failure");
+        let issues = validate_provider_request(
+            ProviderKind::OpenAi,
+            "gpt-4o-mini",
+            "https://api.openai.com/v1/chat/completions",
+            "",
+        )
+        .expect_err("expected token validation failure");
         assert!(issues
             .iter()
             .any(|line| line.contains("Missing OpenAI token")));
+    }
+
+    #[test]
+    fn invalid_response_uses_actionable_hint() {
+        let error = ProviderError::invalid_response(
+            ProviderKind::OpenAi,
+            "Failed to parse JSON from provider",
+        );
+        let messages = provider_error_messages(&error);
+        assert!(messages
+            .iter()
+            .any(|line| line.contains("unexpected response shape")));
+    }
+
+    #[tokio::test]
+    async fn classifies_connectivity_reqwest_errors() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("capture local address");
+        drop(listener); // no server listening now -> connection refused
+
+        let request_error = reqwest::Client::new()
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect_err("request should fail with connectivity error");
+
+        let provider_error = ProviderError::from_reqwest(ProviderKind::Ollama, request_error);
+        assert_eq!(
+            provider_error.kind(),
+            super::ProviderErrorKind::Connectivity
+        );
     }
 }

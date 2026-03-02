@@ -1,14 +1,19 @@
-use crate::config::schema::{Account, Config, Profile};
 use crate::config::loader::{config_path, load_config};
+use crate::config::schema::{Account, Config, Profile};
 use std::fs;
 use std::io::{self, Write};
 
-pub fn add_profile(new_profile: Profile, overwrite: bool, set_as_default: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut cfg = load_config().unwrap_or(Config { 
-        profile: Vec::new(), 
+pub fn add_profile(
+    new_profile: Profile,
+    overwrite: bool,
+    set_as_default: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut cfg = load_config().unwrap_or(Config {
+        profile: Vec::new(),
         cargo_ai_token: None,
         default_profile: None,
         account: None,
+        web_resources: None,
     });
 
     if let Some(existing) = cfg.profile.iter().position(|p| p.name == new_profile.name) {
@@ -16,7 +21,10 @@ pub fn add_profile(new_profile: Profile, overwrite: bool, set_as_default: bool) 
             println!("Overwriting existing profile '{}'.", new_profile.name);
             cfg.profile[existing] = new_profile;
         } else {
-            print!("Profile '{}' already exists. Replace? [y/N]: ", cfg.profile[existing].name);
+            print!(
+                "Profile '{}' already exists. Replace? [y/N]: ",
+                cfg.profile[existing].name
+            );
             io::stdout().flush()?;
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
@@ -41,7 +49,10 @@ pub fn add_profile(new_profile: Profile, overwrite: bool, set_as_default: bool) 
     } else if cfg.default_profile.is_none() {
         let profile_name = cfg.profile.last().unwrap().name.clone();
         cfg.default_profile = Some(profile_name.clone());
-        println!("Profile '{}' set as default (first profile added).", profile_name);
+        println!(
+            "Profile '{}' set as default (first profile added).",
+            profile_name
+        );
     }
 
     let serialized = toml::to_string_pretty(&cfg)?;
@@ -55,6 +66,7 @@ pub fn set_account_email(email: String, overwrite: bool) -> Result<(), Box<dyn s
         cargo_ai_token: None,
         default_profile: None,
         account: None,
+        web_resources: None,
     });
 
     let existing_email = cfg.account.as_ref().and_then(|a| a.email.clone());
@@ -83,7 +95,10 @@ pub fn set_account_email(email: String, overwrite: bool) -> Result<(), Box<dyn s
                     access_token_issued_at: None,
                 });
             } else {
-                print!("Account email is already set to '{}'. Replace with '{}'? [y/N]: ", old_email, email);
+                print!(
+                    "Account email is already set to '{}'. Replace with '{}'? [y/N]: ",
+                    old_email, email
+                );
                 io::stdout().flush()?;
                 let mut input = String::new();
                 io::stdin().read_line(&mut input)?;
@@ -120,6 +135,7 @@ pub fn set_account_tokens(
         cargo_ai_token: None,
         default_profile: None,
         account: None,
+        web_resources: None,
     });
 
     let issued_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
@@ -130,7 +146,9 @@ pub fn set_account_tokens(
         account.access_token_expires_in = Some(access_token_expires_in);
         account.access_token_issued_at = Some(issued_at);
     } else {
-        return Err(Box::<dyn std::error::Error>::from("No account configured. Run `cargo ai account register <email>` first."));
+        return Err(Box::<dyn std::error::Error>::from(
+            "No account configured. Run `cargo ai account register <email>` first.",
+        ));
     }
 
     let serialized = toml::to_string_pretty(&cfg)?;
