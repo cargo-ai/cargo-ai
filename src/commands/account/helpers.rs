@@ -32,10 +32,9 @@ pub fn load_account_auth() -> Result<AccountAuth, String> {
         )
     })?;
 
-    let acct = cfg
-        .account
-        .as_ref()
-        .ok_or_else(|| "❌ No account found in config. You must confirm your account first.".to_string())?;
+    let acct = cfg.account.as_ref().ok_or_else(|| {
+        "❌ No account found in config. You must confirm your account first.".to_string()
+    })?;
 
     let access_token = acct.access_token.as_ref().cloned().ok_or_else(|| {
         "❌ No access token found in config. Run `cargo ai account confirm <code>` first."
@@ -226,4 +225,146 @@ pub fn extract_status_account_email(status_response: &serde_json::Value) -> Opti
         .and_then(|v| v.get("email"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_agents_list_display_limit, extract_status_account_email};
+    use serde_json::json;
+
+    fn sample_agents_list_response() -> serde_json::Value {
+        json!({
+            "status": "success",
+            "type": "account_agents_list_succeeded",
+            "agents": [
+                { "name": "agent-1" },
+                { "name": "agent-2" },
+                { "name": "agent-3" }
+            ],
+            "ui": {
+                "summary": "Showing all agents.",
+                "sections": [
+                    {
+                        "type": "list",
+                        "items": [
+                            { "name": "agent-1" },
+                            { "name": "agent-2" },
+                            { "name": "agent-3" }
+                        ]
+                    },
+                    {
+                        "type": "kv",
+                        "items": [
+                            { "label": "count", "value": 3 },
+                            { "label": "owner", "value": "demo" }
+                        ]
+                    }
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn applies_display_limit_and_keeps_response_shape_consistent() {
+        let mut response = sample_agents_list_response();
+        let result = apply_agents_list_display_limit(&mut response, Some(2));
+
+        assert_eq!(result, Some((2, 3)));
+        assert_eq!(
+            response
+                .get("agents")
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(
+            response
+                .get("ui")
+                .and_then(|v| v.get("summary"))
+                .and_then(|v| v.as_str()),
+            Some("Showing 2 of 3 agents.")
+        );
+
+        let sections = response
+            .get("ui")
+            .and_then(|v| v.get("sections"))
+            .and_then(|v| v.as_array())
+            .expect("ui.sections should be present");
+
+        let list_len = sections
+            .iter()
+            .find(|section| section.get("type").and_then(|v| v.as_str()) == Some("list"))
+            .and_then(|section| section.get("items"))
+            .and_then(|items| items.as_array())
+            .map(Vec::len);
+        assert_eq!(list_len, Some(2));
+
+        let kv_count_value = sections
+            .iter()
+            .find(|section| section.get("type").and_then(|v| v.as_str()) == Some("kv"))
+            .and_then(|section| section.get("items"))
+            .and_then(|items| items.as_array())
+            .and_then(|items| {
+                items.iter().find(|item| {
+                    item.get("label")
+                        .and_then(|v| v.as_str())
+                        .map(|label| label.eq_ignore_ascii_case("count"))
+                        .unwrap_or(false)
+                })
+            })
+            .and_then(|item| item.get("value"))
+            .and_then(|v| v.as_i64());
+        assert_eq!(kv_count_value, Some(2));
+
+        let has_notice = sections.iter().any(|section| {
+            section.get("type").and_then(|v| v.as_str()) == Some("notice")
+                && section
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .map(|m| m.contains("Showing 2 of 3 agents"))
+                    .unwrap_or(false)
+        });
+        assert!(has_notice);
+    }
+
+    #[test]
+    fn does_not_apply_limit_for_non_success_agents_list_shape() {
+        let mut response = json!({
+            "status": "error",
+            "type": "account_agents_list_failed",
+            "agents": [{ "name": "agent-1" }]
+        });
+        let original = response.clone();
+        let result = apply_agents_list_display_limit(&mut response, Some(1));
+
+        assert_eq!(result, None);
+        assert_eq!(response, original);
+    }
+
+    #[test]
+    fn extracts_status_email_on_success_shape() {
+        let response = json!({
+            "status": "success",
+            "account": {
+                "email": "jp@example.com"
+            }
+        });
+
+        assert_eq!(
+            extract_status_account_email(&response),
+            Some("jp@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn returns_none_for_non_success_status_shape() {
+        let response = json!({
+            "status": "error",
+            "account": {
+                "email": "jp@example.com"
+            }
+        });
+
+        assert_eq!(extract_status_account_email(&response), None);
+    }
 }
