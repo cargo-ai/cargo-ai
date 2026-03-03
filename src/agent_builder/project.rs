@@ -10,14 +10,11 @@ use std::io::Error;
 include!(concat!(env!("OUT_DIR"), "/.generated_templates.rs"));
 
 const MAIN_ARGS_CALL: &str = "    let cmd_args = args::build_cli();";
-const VERSION_HOOK_SNIPPET: &str = r#"    if let Some(first_arg) = std::env::args().nth(1) {
-        if first_arg == "version" {
-            print_agent_version_status();
-            return;
-        }
-    }
-
-    let cmd_args = args::build_cli();"#;
+const VERSION_HOOK_SNIPPET: &str = r#"    let cmd_args = args::build_cli();
+    if cmd_args.subcommand_matches("version").is_some() {
+        print_agent_version_status();
+        return;
+    }"#;
 const GENERATED_AGENT_VERSION_BLOCK_TEMPLATE: &str =
     include_str!("templates/agent_version_block.rs.tmpl");
 
@@ -225,6 +222,7 @@ mod tests {
         );
 
         assert!(rendered.contains("print_agent_version_status();"));
+        assert!(rendered.contains(r#"subcommand_matches("version")"#));
         assert!(rendered.contains("agent_version_status ="));
         assert!(rendered.contains("generated_agent_provenance"));
         assert!(rendered.contains("generated_by_cargo_ai_version"));
