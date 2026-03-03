@@ -44,7 +44,7 @@ fn resolve_local_hatch_name(
     }
     if looks_like_local_path_input(trimmed) {
         return Err(format!(
-            "Local name '{}' looks like a path. Use --local-name for name-only local output and --path for remote account definition path selection.",
+            "Local name '{}' looks like a path. Use --local-name for name-only local output and --definition-path for remote account definition path selection.",
             trimmed
         ));
     }
@@ -194,7 +194,9 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             return false;
         };
 
-        let definition_path = push_m.get_one::<String>("path").map(|s| s.to_string());
+        let definition_path = push_m
+            .get_one::<String>("definition_path")
+            .map(|s| s.to_string());
         let definition_json_raw = if let Some(raw) = push_m.get_one::<String>("json") {
             raw.to_string()
         } else if let Some(file_path) = json_file_path.as_deref() {
@@ -243,7 +245,9 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             owner_handle: pull_m
                 .get_one::<String>("owner_handle")
                 .map(|s| s.to_string()),
-            definition_path: pull_m.get_one::<String>("path").map(|s| s.to_string()),
+            definition_path: pull_m
+                .get_one::<String>("definition_path")
+                .map(|s| s.to_string()),
             json_file: pull_m.get_one::<String>("json_file").map(|s| s.to_string()),
             stdout: pull_m.get_flag("stdout"),
             force: pull_m.get_flag("force"),
@@ -278,7 +282,9 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             owner_handle: hatch_m
                 .get_one::<String>("owner_handle")
                 .map(|s| s.to_string()),
-            definition_path: hatch_m.get_one::<String>("path").map(|s| s.to_string()),
+            definition_path: hatch_m
+                .get_one::<String>("definition_path")
+                .map(|s| s.to_string()),
             force_overwrite: hatch_m.get_flag("force"),
         }
     } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
@@ -289,7 +295,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         AgentsCommand::Visibility {
             name: name.to_string(),
             definition_path: visibility_m
-                .get_one::<String>("path")
+                .get_one::<String>("definition_path")
                 .map(|s| s.to_string()),
             is_public: visibility_m.get_flag("public"),
             public_from: visibility_m
@@ -306,7 +312,9 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         };
         AgentsCommand::Archive {
             name: name.to_string(),
-            definition_path: archive_m.get_one::<String>("path").map(|s| s.to_string()),
+            definition_path: archive_m
+                .get_one::<String>("definition_path")
+                .map(|s| s.to_string()),
             is_archived: archive_m.get_flag("archive"),
         }
     } else {

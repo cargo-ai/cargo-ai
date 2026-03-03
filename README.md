@@ -164,7 +164,7 @@ cargo ai account agents hatch weather_agent --owner-handle alice
 To select a non-root definition path:
 
 ```bash
-cargo ai account agents hatch weather_agent --path /team/ops
+cargo ai account agents hatch weather_agent --definition-path /team/ops
 ```
 
   To understand what is happening behind the scenes, we can look at the internal structure of the sample agent JSON file, [`adder_test.json`](./adder_test.json). 

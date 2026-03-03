@@ -58,9 +58,9 @@ pub fn command() -> Command {
                         .num_args(1),
                 )
                 .arg(
-                    Arg::new("path")
-                        .long("path")
-                        .help("Path namespace (defaults to '/')")
+                    Arg::new("definition_path")
+                        .long("definition-path")
+                        .help("Account-side definition namespace path to read from (defaults to '/'; not a local filesystem path).")
                         .required(false)
                         .value_name("PATH")
                         .num_args(1),
@@ -128,9 +128,9 @@ pub fn command() -> Command {
                         .num_args(1),
                 )
                 .arg(
-                    Arg::new("path")
-                        .long("path")
-                        .help("Path namespace (defaults to '/')")
+                    Arg::new("definition_path")
+                        .long("definition-path")
+                        .help("Account-side definition namespace path to read from (defaults to '/'; not a local filesystem path).")
                         .required(false)
                         .value_name("PATH")
                         .num_args(1),
@@ -180,9 +180,9 @@ pub fn command() -> Command {
                         .num_args(1)
                 )
                 .arg(
-                    Arg::new("path")
-                        .long("path")
-                        .help("Path namespace (defaults to '/')")
+                    Arg::new("definition_path")
+                        .long("definition-path")
+                        .help("Account-side definition namespace path to read from (defaults to '/'; not a local filesystem path).")
                         .required(false)
                         .value_name("PATH")
                         .num_args(1),
@@ -204,7 +204,7 @@ pub fn command() -> Command {
                         .action(clap::ArgAction::SetTrue),
                 )
                 .after_help(
-                    "Notes:\n  - AGENT is the account source identifier.\n  - --local-name sets only local workspace/output naming (not remote path selection).\n  - Owner defaults to your authenticated account when --owner-handle is omitted.\n  - Path defaults to '/'.\n  - Existing output binaries require --force/-f to overwrite.",
+                    "Notes:\n  - AGENT is the account source identifier.\n  - --local-name sets only local workspace/output naming (not remote path selection).\n  - --definition-path selects account-side definition namespace path (defaults to '/'; not local filesystem path).\n  - Owner defaults to your authenticated account when --owner-handle is omitted.\n  - Existing output binaries require --force/-f to overwrite.",
                 ),
         )
         .subcommand(
@@ -224,9 +224,9 @@ pub fn command() -> Command {
                         .num_args(1),
                 )
                 .arg(
-                    Arg::new("path")
-                        .long("path")
-                        .help("Path namespace (defaults to '/')")
+                    Arg::new("definition_path")
+                        .long("definition-path")
+                        .help("Account-side definition namespace path to read from (defaults to '/'; not a local filesystem path).")
                         .required(false)
                         .value_name("PATH")
                         .num_args(1),
@@ -281,9 +281,9 @@ pub fn command() -> Command {
                         .num_args(1),
                 )
                 .arg(
-                    Arg::new("path")
-                        .long("path")
-                        .help("Path namespace (defaults to '/')")
+                    Arg::new("definition_path")
+                        .long("definition-path")
+                        .help("Account-side definition namespace path to read from (defaults to '/'; not a local filesystem path).")
                         .required(false)
                         .value_name("PATH")
                         .num_args(1),
