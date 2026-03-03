@@ -6,11 +6,9 @@
 //! - Keep behavior deterministic and local-only (no network calls).
 use crate::config::loader::{config_path, load_config};
 use crate::config::schema::{Config, VersionBaseline as VersionBaselineConfig};
-use serde_json::Value;
+use crate::schema_version;
 use std::fs;
 use std::path::Path;
-
-const TEMPLATE_AGENTCFG: &str = include_str!("../.agentcfg");
 
 fn default_config() -> Config {
     Config {
@@ -24,23 +22,8 @@ fn default_config() -> Config {
     }
 }
 
-fn resolve_template_schema_version_from_agentcfg(agentcfg_contents: &str) -> String {
-    match serde_json::from_str::<Value>(agentcfg_contents)
-        .ok()
-        .and_then(|json| {
-            json.get("version")
-                .and_then(|value| value.as_str())
-                .map(|value| value.trim().to_string())
-        })
-        .filter(|value| !value.is_empty())
-    {
-        Some(version) => version,
-        None => env!("CARGO_PKG_VERSION").to_string(),
-    }
-}
-
 fn current_template_schema_version() -> String {
-    resolve_template_schema_version_from_agentcfg(TEMPLATE_AGENTCFG)
+    schema_version::current_schema_version()
 }
 
 fn write_config_at_path(path: &Path, cfg: &Config) -> Result<(), String> {
@@ -92,11 +75,9 @@ pub fn persist_current_baseline() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        persist_baseline_in_config, resolve_template_schema_version_from_agentcfg,
-        write_config_at_path,
-    };
+    use super::{persist_baseline_in_config, write_config_at_path};
     use crate::config::schema::Config;
+    use crate::schema_version;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -122,39 +103,52 @@ mod tests {
     }
 
     #[test]
-    fn template_schema_version_uses_agentcfg_version_when_present() {
-        let value = resolve_template_schema_version_from_agentcfg(
-            r#"{"version":"0.0.11","prompt":"x","agent_schema":{"type":"object","properties":{}},"resource_urls":[],"actions":[]}"#,
+    fn template_schema_version_uses_date_revision_format_when_present() {
+        let value = schema_version::extract_schema_version_from_agentcfg(
+            r#"{"version":"2026-03-03.r2","prompt":"x","agent_schema":{"type":"object","properties":{}},"resource_urls":[],"actions":[]}"#,
         );
-        assert_eq!(value, "0.0.11");
+        assert_eq!(value.as_deref(), Some("2026-03-03.r2"));
     }
 
     #[test]
-    fn template_schema_version_falls_back_to_package_version_when_missing() {
-        let value = resolve_template_schema_version_from_agentcfg(
+    fn template_schema_version_rejects_legacy_semver_values() {
+        let value = schema_version::extract_schema_version_from_agentcfg(
+            r#"{"version":"0.0.11","prompt":"x","agent_schema":{"type":"object","properties":{}},"resource_urls":[],"actions":[]}"#,
+        );
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn template_schema_version_falls_back_to_current_schema_version_when_missing() {
+        let value = schema_version::extract_schema_version_from_agentcfg(
             r#"{"prompt":"x","agent_schema":{"type":"object","properties":{}},"resource_urls":[],"actions":[]}"#,
         );
-        assert_eq!(value, env!("CARGO_PKG_VERSION"));
+        assert!(value.is_none());
+        let fallback = schema_version::current_schema_version();
+        assert!(schema_version::is_valid_schema_version(&fallback));
     }
 
     #[test]
     fn persist_baseline_sets_both_versions_deterministically() {
         let mut cfg = default_test_config();
 
-        persist_baseline_in_config(&mut cfg, "0.0.11", "0.0.10");
+        persist_baseline_in_config(&mut cfg, "0.0.11", "2026-03-03.r1");
         let baseline = cfg
             .version_baseline
             .as_ref()
             .expect("version baseline should be initialized");
 
         assert_eq!(baseline.cargo_ai_version.as_deref(), Some("0.0.11"));
-        assert_eq!(baseline.template_schema_version.as_deref(), Some("0.0.10"));
+        assert_eq!(
+            baseline.template_schema_version.as_deref(),
+            Some("2026-03-03.r1")
+        );
     }
 
     #[test]
     fn write_config_persists_version_baseline_section() {
         let mut cfg = default_test_config();
-        persist_baseline_in_config(&mut cfg, "0.0.11", "0.0.10");
+        persist_baseline_in_config(&mut cfg, "0.0.11", "2026-03-03.r1");
 
         let path = temp_file_path("write");
         write_config_at_path(&path, &cfg).expect("config should be written");
@@ -162,7 +156,7 @@ mod tests {
         let written = fs::read_to_string(&path).expect("written config should be readable");
         assert!(written.contains("version_baseline"));
         assert!(written.contains("cargo_ai_version = \"0.0.11\""));
-        assert!(written.contains("template_schema_version = \"0.0.10\""));
+        assert!(written.contains("template_schema_version = \"2026-03-03.r1\""));
 
         let _ = fs::remove_file(path);
     }

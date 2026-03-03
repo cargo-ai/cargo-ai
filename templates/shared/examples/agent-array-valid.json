@@ -1,5 +1,5 @@
 {
-  "version": "0.0.10",
+  "version": "2026-03-03.r1",
   "prompt": "Return one list of integer IDs for retry.",
   "agent_schema": {
     "type": "object",

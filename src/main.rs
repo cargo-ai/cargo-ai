@@ -8,6 +8,7 @@ mod commands;
 mod config;
 mod infra_api;
 mod providers;
+mod schema_version;
 #[cfg(feature = "shipyard-ui")]
 mod shipyard_ui;
 mod ui;

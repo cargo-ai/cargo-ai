@@ -3,7 +3,7 @@
 //! It creates the `.cargo-ai/agents/{agent_name}` folder and populates it
 //! with the necessary config and build files.
 
-use serde_json::Value;
+use crate::schema_version;
 use std::fs;
 use std::io::Error;
 
@@ -59,21 +59,6 @@ fn sync_state_label(state: AgentSyncState) -> &'static str {
 
 fn rust_string_literal(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
-}
-
-fn resolve_template_schema_version_from_agentcfg(agentcfg_contents: &str) -> String {
-    match serde_json::from_str::<Value>(agentcfg_contents)
-        .ok()
-        .and_then(|json| {
-            json.get("version")
-                .and_then(|value| value.as_str())
-                .map(|value| value.trim().to_string())
-        })
-        .filter(|value| !value.is_empty())
-    {
-        Some(version) => version,
-        None => env!("CARGO_PKG_VERSION").to_string(),
-    }
 }
 
 fn provenance_block(generated_by_version: &str, template_schema_version: &str) -> String {
@@ -156,8 +141,8 @@ fn load_agent_workspace(agent_name: &str, agentcfg: Result<String, Error>) -> Re
     let generated_by_version = env!("CARGO_PKG_VERSION");
     let template_schema_version = provided_agentcfg
         .as_deref()
-        .map(resolve_template_schema_version_from_agentcfg)
-        .unwrap_or_else(|| generated_by_version.to_string());
+        .and_then(schema_version::extract_schema_version_from_agentcfg)
+        .unwrap_or_else(schema_version::current_schema_version);
 
     for (file_name, file_contents) in TEMPLATES {
         let file_path = base_path.join(file_name);
@@ -198,24 +183,35 @@ fn load_agent_workspace(agent_name: &str, agentcfg: Result<String, Error>) -> Re
 #[cfg(test)]
 mod tests {
     use super::{
-        determine_agent_sync_state, render_workspace_file_contents,
-        resolve_template_schema_version_from_agentcfg, sync_state_label, AgentSyncState,
+        determine_agent_sync_state, render_workspace_file_contents, sync_state_label,
+        AgentSyncState,
     };
+    use crate::schema_version;
 
     #[test]
     fn resolves_template_schema_version_from_agentcfg_version() {
-        let version = resolve_template_schema_version_from_agentcfg(
-            r#"{"version":"0.0.10","prompt":"x","agent_schema":{"type":"object","properties":{}},"resource_urls":[],"actions":[]}"#,
+        let version = schema_version::extract_schema_version_from_agentcfg(
+            r#"{"version":"2026-03-03.r2","prompt":"x","agent_schema":{"type":"object","properties":{}},"resource_urls":[],"actions":[]}"#,
         );
-        assert_eq!(version, "0.0.10");
+        assert_eq!(version.as_deref(), Some("2026-03-03.r2"));
     }
 
     #[test]
-    fn falls_back_to_package_version_when_agentcfg_version_is_missing() {
-        let version = resolve_template_schema_version_from_agentcfg(
+    fn rejects_legacy_semver_agentcfg_version() {
+        let version = schema_version::extract_schema_version_from_agentcfg(
+            r#"{"version":"0.0.10","prompt":"x","agent_schema":{"type":"object","properties":{}},"resource_urls":[],"actions":[]}"#,
+        );
+        assert!(version.is_none());
+    }
+
+    #[test]
+    fn falls_back_to_current_schema_version_when_agentcfg_version_is_missing() {
+        let version = schema_version::extract_schema_version_from_agentcfg(
             r#"{"prompt":"x","agent_schema":{"type":"object","properties":{}},"resource_urls":[],"actions":[]}"#,
         );
-        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+        assert!(version.is_none());
+        let fallback = schema_version::current_schema_version();
+        assert!(schema_version::is_valid_schema_version(&fallback));
     }
 
     #[test]
@@ -225,7 +221,7 @@ mod tests {
             "fn main() {\n    let cmd_args = args::build_cli();\n}\n",
             "adder_agent",
             "0.0.11",
-            "0.0.10",
+            "2026-03-03.r1",
         );
 
         assert!(rendered.contains("print_agent_version_status();"));
@@ -234,7 +230,7 @@ mod tests {
         assert!(rendered.contains("generated_by_cargo_ai_version"));
         assert!(rendered.contains("generated_with_template_schema_version"));
         assert!(rendered.contains("0.0.11"));
-        assert!(rendered.contains("0.0.10"));
+        assert!(rendered.contains("2026-03-03.r1"));
     }
 
     #[test]
@@ -244,7 +240,7 @@ mod tests {
             "const BIN: &str = \"cargo-ai\";\n",
             "adder_agent",
             "0.0.11",
-            "0.0.10",
+            "2026-03-03.r1",
         );
 
         assert!(rendered.contains("adder_agent"));
@@ -253,21 +249,32 @@ mod tests {
 
     #[test]
     fn sync_state_is_in_sync_when_versions_match() {
-        let state = determine_agent_sync_state("0.0.11", "0.0.10", Some("0.0.11"), Some("0.0.10"));
+        let state = determine_agent_sync_state(
+            "0.0.11",
+            "2026-03-03.r1",
+            Some("0.0.11"),
+            Some("2026-03-03.r1"),
+        );
         assert_eq!(state, AgentSyncState::InSync);
         assert_eq!(sync_state_label(state), "in_sync");
     }
 
     #[test]
     fn sync_state_is_out_of_sync_for_exact_mismatch() {
-        let state = determine_agent_sync_state("0.0.11", "0.0.10", Some("0.0.12"), Some("0.0.10"));
+        let state = determine_agent_sync_state(
+            "0.0.11",
+            "2026-03-03.r1",
+            Some("0.0.12"),
+            Some("2026-03-03.r1"),
+        );
         assert_eq!(state, AgentSyncState::OutOfSync);
         assert_eq!(sync_state_label(state), "out_of_sync");
     }
 
     #[test]
     fn sync_state_is_unknown_when_local_baseline_missing() {
-        let state = determine_agent_sync_state("0.0.11", "0.0.10", None, Some("0.0.10"));
+        let state =
+            determine_agent_sync_state("0.0.11", "2026-03-03.r1", None, Some("2026-03-03.r1"));
         assert_eq!(state, AgentSyncState::Unknown);
         assert_eq!(sync_state_label(state), "unknown");
     }

@@ -98,6 +98,7 @@ pub struct VersionBaseline {
     #[serde(default)]
     pub cargo_ai_version: Option<String>,
 
+    // Agent-definition schema version (format: YYYY-MM-DD.rN), decoupled from cargo-ai semver.
     #[serde(default)]
     pub template_schema_version: Option<String>,
 }

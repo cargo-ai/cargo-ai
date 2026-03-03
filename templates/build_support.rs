@@ -14,10 +14,19 @@ use std::{
 
 use serde_json::{Map, Value};
 
+const SCHEMA_VERSION_FORMAT: &str = "YYYY-MM-DD.rN";
+const SCHEMA_VERSION_EXAMPLE: &str = "2026-03-03.r1";
+
 #[derive(Debug)]
 pub enum BuildError {
-    Config { path: String, message: String },
-    Io { context: String, source: std::io::Error },
+    Config {
+        path: String,
+        message: String,
+    },
+    Io {
+        context: String,
+        source: std::io::Error,
+    },
     EnvVar {
         name: &'static str,
         source: std::env::VarError,
@@ -43,10 +52,15 @@ impl BuildError {
 impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Config { path, message } => write!(f, "Invalid `.agentcfg` at `{path}`: {message}"),
+            Self::Config { path, message } => {
+                write!(f, "Invalid `.agentcfg` at `{path}`: {message}")
+            }
             Self::Io { context, source } => write!(f, "{context}: {source}"),
             Self::EnvVar { name, source } => {
-                write!(f, "Missing required environment variable `{name}`: {source}")
+                write!(
+                    f,
+                    "Missing required environment variable `{name}`: {source}"
+                )
             }
         }
     }
@@ -180,6 +194,9 @@ fn resolve_out_dir() -> Result<PathBuf, BuildError> {
 fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
     let root_obj = expect_object(root, "$")?;
 
+    let schema_version = get_required_string(root_obj, "version", "$")?;
+    validate_schema_version(schema_version, "$.version")?;
+
     let prompt = get_required_string(root_obj, "prompt", "$")?.to_string();
 
     let schema = get_required_object(root_obj, "agent_schema", "$")?;
@@ -214,6 +231,83 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
     })
 }
 
+fn validate_schema_version(value: &str, path: &str) -> Result<(), BuildError> {
+    if is_valid_schema_version(value) {
+        return Ok(());
+    }
+
+    Err(BuildError::config(
+        path,
+        format!(
+            "expected schema version format `{}` (example: `{}`)",
+            SCHEMA_VERSION_FORMAT, SCHEMA_VERSION_EXAMPLE
+        ),
+    ))
+}
+
+fn is_valid_schema_version(value: &str) -> bool {
+    let Some((date, revision)) = value.split_once(".r") else {
+        return false;
+    };
+
+    if !is_valid_date_prefix(date) {
+        return false;
+    }
+
+    if revision.is_empty() || !revision.chars().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+
+    revision.parse::<u32>().ok().filter(|n| *n > 0).is_some()
+}
+
+fn is_valid_date_prefix(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 {
+        return false;
+    }
+
+    if bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+
+    let year = match value[0..4].parse::<u32>() {
+        Ok(year) => year,
+        Err(_) => return false,
+    };
+    let month = match value[5..7].parse::<u32>() {
+        Ok(month) => month,
+        Err(_) => return false,
+    };
+    let day = match value[8..10].parse::<u32>() {
+        Ok(day) => day,
+        Err(_) => return false,
+    };
+
+    if !(1..=12).contains(&month) {
+        return false;
+    }
+
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => return false,
+    };
+
+    (1..=max_day).contains(&day)
+}
+
+fn is_leap_year(year: u32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
 fn parse_resource_urls(root_obj: &Map<String, Value>) -> Result<Vec<ResourceUrl>, BuildError> {
     let urls = get_required_array(root_obj, "resource_urls", "$")?;
     let mut parsed = Vec::with_capacity(urls.len());
@@ -242,11 +336,7 @@ fn parse_actions(
 
         let name = get_required_string(action_obj, "name", &action_path)?.to_string();
         let logic = get_required_field(action_obj, "logic", &action_path)?.clone();
-        validate_logic_expression(
-            &logic,
-            &format!("{action_path}.logic"),
-            schema_field_types,
-        )?;
+        validate_logic_expression(&logic, &format!("{action_path}.logic"), schema_field_types)?;
 
         let runs = get_required_array(action_obj, "run", &action_path)?;
         let mut run_steps = Vec::with_capacity(runs.len());
@@ -328,10 +418,7 @@ fn validate_logic_expression(
                 ));
             };
             if operator.trim().is_empty() {
-                return Err(BuildError::config(
-                    path,
-                    "operator name cannot be empty",
-                ));
+                return Err(BuildError::config(path, "operator name cannot be empty"));
             }
 
             if operator == "literal" {
@@ -454,7 +541,10 @@ fn infer_logic_value_type(
             }
         }
         Value::Array(_) => Ok(FieldType::Array),
-        Value::Null => Err(BuildError::config(path, "null operands are not supported here")),
+        Value::Null => Err(BuildError::config(
+            path,
+            "null operands are not supported here",
+        )),
         Value::Object(map) => {
             if map.len() != 1 {
                 return Err(BuildError::config(
@@ -507,10 +597,9 @@ fn resolve_var_field_type(
 ) -> Result<FieldType, BuildError> {
     let var_name = match arguments {
         Value::String(name) => name.as_str(),
-        Value::Array(items) => items
-            .first()
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| BuildError::config(path, "expected first `var` argument to be a string"))?,
+        Value::Array(items) => items.first().and_then(|v| v.as_str()).ok_or_else(|| {
+            BuildError::config(path, "expected first `var` argument to be a string")
+        })?,
         _ => {
             return Err(BuildError::config(
                 path,
@@ -535,7 +624,11 @@ fn resolve_var_field_type(
             path,
             format!(
                 "unknown variable `{var_name}`; expected one of: {}",
-                schema_field_types.keys().cloned().collect::<Vec<_>>().join(", ")
+                schema_field_types
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         )
     })
@@ -642,7 +735,10 @@ fn get_schema_type(property: &Map<String, Value>, path: &str) -> Result<String, 
             type_path,
             "union schema types are not supported yet",
         )),
-        _ => Err(BuildError::config(type_path, "expected a string schema type")),
+        _ => Err(BuildError::config(
+            type_path,
+            "expected a string schema type",
+        )),
     }
 }
 
@@ -737,8 +833,7 @@ fn validate_rust_identifier(name: &str, path: &str) -> Result<(), BuildError> {
 fn is_rust_keyword(name: &str) -> bool {
     matches!(
         name,
-        "as"
-            | "break"
+        "as" | "break"
             | "const"
             | "continue"
             | "crate"
