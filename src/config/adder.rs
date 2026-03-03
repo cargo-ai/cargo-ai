@@ -14,6 +14,7 @@ pub fn add_profile(
         default_profile: None,
         account: None,
         web_resources: None,
+        update_check: None,
     });
 
     if let Some(existing) = cfg.profile.iter().position(|p| p.name == new_profile.name) {
@@ -67,6 +68,7 @@ pub fn set_account_email(email: String, overwrite: bool) -> Result<(), Box<dyn s
         default_profile: None,
         account: None,
         web_resources: None,
+        update_check: None,
     });
 
     let existing_email = cfg.account.as_ref().and_then(|a| a.email.clone());
@@ -136,6 +138,7 @@ pub fn set_account_tokens(
         default_profile: None,
         account: None,
         web_resources: None,
+        update_check: None,
     });
 
     let issued_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;

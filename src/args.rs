@@ -2,7 +2,7 @@
 //!
 //! This module composes command parsers from `src/args/*` and normalizes both
 //! invocation forms: `cargo-ai ...` and `cargo ai ...`.
-use clap::{ArgMatches, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command};
 
 mod account;
 mod hatch;
@@ -11,12 +11,20 @@ mod new;
 mod preflight;
 mod profile;
 mod shipyard;
+mod version;
 
 fn cli_command(bin_name: &'static str) -> Command {
     Command::new("cargo-ai")
         .bin_name(bin_name)
         .version(env!("CARGO_PKG_VERSION"))
-        .subcommand(Command::new("version").about("Print version information"))
+        .arg(
+            Arg::new("no_update_check")
+                .long("no-update-check")
+                .help("Skip update checks for this invocation")
+                .global(true)
+                .action(ArgAction::SetTrue),
+        )
+        .subcommand(version::command())
         .subcommand(preflight::command())
         .subcommand(hatch::command())
         .subcommand(init::command())
@@ -52,6 +60,57 @@ pub(crate) fn test_cli_command(bin_name: &'static str) -> Command {
 mod tests {
     use super::cli_command;
     use clap::error::ErrorKind;
+
+    #[test]
+    fn version_supports_check_flag() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "version", "--check"])
+            .expect("version --check should parse");
+
+        let version = matches
+            .subcommand_matches("version")
+            .expect("version subcommand should be available");
+        assert!(version.get_flag("check"));
+        assert!(version.get_one::<String>("update_mode").is_none());
+    }
+
+    #[test]
+    fn version_supports_update_mode_flag() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "version", "--update-mode", "off"])
+            .expect("version --update-mode should parse");
+
+        let version = matches
+            .subcommand_matches("version")
+            .expect("version subcommand should be available");
+        assert_eq!(
+            version.get_one::<String>("update_mode").map(String::as_str),
+            Some("off")
+        );
+        assert!(!version.get_flag("check"));
+    }
+
+    #[test]
+    fn version_rejects_conflicting_check_and_update_mode() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "version", "--check", "--update-mode", "check"])
+            .expect_err("version flag conflict should fail parsing");
+
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn no_update_check_flag_is_global() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "--no-update-check", "version"])
+            .expect("global no-update-check should parse");
+        assert!(matches.get_flag("no_update_check"));
+
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "hatch", "demo", "--no-update-check"])
+            .expect("global no-update-check after subcommand should parse");
+        assert!(matches.get_flag("no_update_check"));
+    }
 
     #[test]
     fn account_mail_prefs_defaults_to_get_intent() {
