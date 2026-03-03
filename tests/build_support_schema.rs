@@ -9,7 +9,7 @@ mod build_support;
 fn config_with(properties: &str, actions: &str) -> String {
     format!(
         r#"{{
-    "version": "0.0.10",
+    "version": "2026-03-03.r1",
     "prompt": "Test prompt",
     "agent_schema": {{
         "type": "object",
