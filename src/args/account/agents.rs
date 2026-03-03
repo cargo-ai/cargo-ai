@@ -164,27 +164,12 @@ pub fn command() -> Command {
         .subcommand(
             Command::new("hatch")
                 .about("Build an executable from an account agent definition")
-                .group(
-                    ArgGroup::new("hatch_name")
-                        .args(["name", "name_positional"])
-                        .required(true),
-                )
                 .arg(
-                    Arg::new("name")
-                        .long("name")
-                        .help("Agent name (explicit alias for positional NAME)")
-                        .required(false)
-                        .value_name("NAME")
-                        .num_args(1),
-                )
-                .arg(
-                    Arg::new("name_positional")
+                    Arg::new("agent")
                         .help("Agent name")
-                        .required(false)
-                        .value_name("NAME")
-                        .num_args(1)
-                        .index(1)
-                        .conflicts_with("name"),
+                        .required(true)
+                        .value_name("AGENT")
+                        .num_args(1),
                 )
                 .arg(
                     Arg::new("owner_handle")
@@ -192,7 +177,7 @@ pub fn command() -> Command {
                         .help("Owner handle to hatch from (omit to hatch your own)")
                         .required(false)
                         .value_name("HANDLE")
-                        .num_args(1),
+                        .num_args(1)
                 )
                 .arg(
                     Arg::new("path")
@@ -202,8 +187,24 @@ pub fn command() -> Command {
                         .value_name("PATH")
                         .num_args(1),
                 )
+                .arg(
+                    Arg::new("local_name")
+                        .long("local-name")
+                        .help("Local output/workspace name override (name only; no path)")
+                        .required(false)
+                        .value_name("NAME")
+                        .num_args(1),
+                )
+                .arg(
+                    Arg::new("force")
+                        .long("force")
+                        .short('f')
+                        .help("Overwrite output binary if it already exists")
+                        .required(false)
+                        .action(clap::ArgAction::SetTrue),
+                )
                 .after_help(
-                    "Notes:\n  - Name can be provided as positional NAME or via --name.\n  - Owner defaults to your authenticated account when --owner-handle is omitted.\n  - Path defaults to '/'.",
+                    "Notes:\n  - AGENT is the account source identifier.\n  - --local-name sets only local workspace/output naming (not remote path selection).\n  - Owner defaults to your authenticated account when --owner-handle is omitted.\n  - Path defaults to '/'.\n  - Existing output binaries require --force/-f to overwrite.",
                 ),
         )
         .subcommand(

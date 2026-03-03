@@ -148,8 +148,11 @@ When you are signed in, you can hatch an agent directly from account-hosted defi
 # Hatch your own account agent (path defaults to "/")
 cargo ai account agents hatch weather_agent
 
-# Equivalent explicit form
-cargo ai account agents hatch --name weather_agent
+# Override the local output/workspace name
+cargo ai account agents hatch weather_agent --local-name weather_agent_v2
+
+# Overwrite existing local output binary
+cargo ai account agents hatch weather_agent --force
 ```
 
 To hatch a public agent from another owner:

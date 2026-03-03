@@ -231,6 +231,78 @@ mod tests {
     }
 
     #[test]
+    fn account_agents_hatch_parses_local_name_and_force_flags() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "hatch",
+                "weather_agent",
+                "--local-name",
+                "weather_agent_v2",
+                "--force",
+            ])
+            .expect("account agents hatch flags should parse");
+
+        let hatch_matches = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("agents"))
+            .and_then(|m| m.subcommand_matches("hatch"))
+            .expect("account agents hatch should be available");
+
+        assert_eq!(
+            hatch_matches.get_one::<String>("agent").map(String::as_str),
+            Some("weather_agent")
+        );
+        assert_eq!(
+            hatch_matches
+                .get_one::<String>("local_name")
+                .map(String::as_str),
+            Some("weather_agent_v2")
+        );
+        assert!(hatch_matches.get_flag("force"));
+    }
+
+    #[test]
+    fn account_agents_hatch_supports_short_force_flag() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "hatch",
+                "weather_agent",
+                "-f",
+            ])
+            .expect("account agents hatch -f should parse");
+
+        let hatch_matches = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("agents"))
+            .and_then(|m| m.subcommand_matches("hatch"))
+            .expect("account agents hatch should be available");
+
+        assert!(hatch_matches.get_flag("force"));
+    }
+
+    #[test]
+    fn account_agents_hatch_rejects_removed_name_flag() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "hatch",
+                "--name",
+                "weather_agent",
+            ])
+            .expect_err("--name should be rejected for account agents hatch");
+
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
     fn init_defaults_parse() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from(["cargo-ai", "init"])
