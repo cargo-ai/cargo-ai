@@ -26,6 +26,9 @@ pub struct Config {
 
     #[serde(default)]
     pub update_check: Option<UpdateCheck>,
+
+    #[serde(default)]
+    pub version_baseline: Option<VersionBaseline>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -88,6 +91,15 @@ pub struct UpdateCheck {
 
     #[serde(default)]
     pub latest_version: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VersionBaseline {
+    #[serde(default)]
+    pub cargo_ai_version: Option<String>,
+
+    #[serde(default)]
+    pub template_schema_version: Option<String>,
 }
 
 fn default_timeout() -> u64 {

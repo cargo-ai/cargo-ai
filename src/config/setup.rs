@@ -38,6 +38,7 @@ pub fn ensure_config_file_exists() -> Result<(), Box<dyn std::error::Error>> {
             account: None,
             web_resources: None,
             update_check: None,
+            version_baseline: None,
         };
 
         let serialized = toml::to_string_pretty(&cfg)?;

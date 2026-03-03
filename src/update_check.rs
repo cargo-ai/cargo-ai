@@ -83,6 +83,7 @@ fn default_config() -> Config {
         account: None,
         web_resources: None,
         update_check: None,
+        version_baseline: None,
     }
 }
 
@@ -224,7 +225,10 @@ async fn fetch_latest_version_from_base(base_url: &str) -> Result<String, String
 }
 
 fn update_check_user_agent() -> String {
-    format!("cargo-ai/{} (+https://cargo-ai.org)", env!("CARGO_PKG_VERSION"))
+    format!(
+        "cargo-ai/{} (+https://cargo-ai.org)",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 async fn fetch_latest_version() -> Result<String, String> {
