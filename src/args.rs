@@ -24,14 +24,14 @@ fn cli_command(bin_name: &'static str) -> Command {
                 .global(true)
                 .action(ArgAction::SetTrue),
         )
-        .subcommand(version::command())
-        .subcommand(preflight::command())
-        .subcommand(hatch::command())
-        .subcommand(init::command())
         .subcommand(new::command())
-        .subcommand(shipyard::command())
+        .subcommand(init::command())
+        .subcommand(hatch::command())
         .subcommand(profile::command())
         .subcommand(account::command())
+        .subcommand(version::command())
+        .subcommand(preflight::command())
+        .subcommand(shipyard::command())
 }
 
 /// Parses CLI arguments into clap matches.
@@ -88,6 +88,28 @@ mod tests {
             Some("off")
         );
         assert!(!version.get_flag("check"));
+    }
+
+    #[test]
+    fn subcommand_order_prioritizes_core_workflows() {
+        let command = cli_command("cargo-ai");
+        let names: Vec<String> = command
+            .get_subcommands()
+            .map(|subcommand| subcommand.get_name().to_string())
+            .collect();
+
+        let index_of = |name: &str| {
+            names
+                .iter()
+                .position(|candidate| candidate == name)
+                .expect("expected subcommand to exist")
+        };
+
+        assert!(index_of("new") < index_of("init"));
+        assert!(index_of("init") < index_of("hatch"));
+        assert!(index_of("hatch") < index_of("profile"));
+        assert!(index_of("profile") < index_of("account"));
+        assert!(index_of("account") < index_of("version"));
     }
 
     #[test]
