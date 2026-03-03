@@ -7,6 +7,7 @@
 //! - persisted local state in `config.toml`
 use crate::config::loader::{config_path, load_config};
 use crate::config::schema::{Config, UpdateCheck as UpdateCheckConfig};
+use reqwest::header::{ACCEPT, USER_AGENT};
 use semver::Version;
 use serde::Deserialize;
 use std::fs;
@@ -181,6 +182,8 @@ async fn fetch_latest_version_from_base(base_url: &str) -> Result<String, String
 
     let response = reqwest::Client::new()
         .get(&url)
+        .header(USER_AGENT, update_check_user_agent())
+        .header(ACCEPT, "application/json")
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
@@ -218,6 +221,10 @@ async fn fetch_latest_version_from_base(base_url: &str) -> Result<String, String
     }
 
     Err("crates.io response did not include max version metadata.".to_string())
+}
+
+fn update_check_user_agent() -> String {
+    format!("cargo-ai/{} (+https://cargo-ai.org)", env!("CARGO_PKG_VERSION"))
 }
 
 async fn fetch_latest_version() -> Result<String, String> {
@@ -334,6 +341,8 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let _mock = server
             .mock("GET", "/api/v1/crates/cargo-ai")
+            .match_header("user-agent", mockito::Matcher::Regex("^cargo-ai/".into()))
+            .match_header("accept", mockito::Matcher::Regex("application/json".into()))
             .with_status(200)
             .with_body(
                 r#"{"crate":{"id":"cargo-ai","max_version":"0.0.11","max_stable_version":"0.0.10"}}"#,
