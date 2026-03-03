@@ -11,6 +11,53 @@ use super::helpers::{
     refresh_access_token_for_retry, RefreshAccessError, INFRA_BASE_URL,
 };
 
+fn is_supported_local_hatch_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn looks_like_local_path_input(input: &str) -> bool {
+    input.starts_with("./")
+        || input.starts_with("../")
+        || input.starts_with("~/")
+        || input.contains('/')
+        || input.contains('\\')
+}
+
+fn resolve_local_hatch_name(
+    source_name: &str,
+    local_name_override: Option<&str>,
+) -> Result<String, String> {
+    let Some(source_trimmed) = Some(source_name.trim()).filter(|s| !s.is_empty()) else {
+        return Err("Missing agent name. Provide positional AGENT.".to_string());
+    };
+
+    let Some(local_name) = local_name_override else {
+        return Ok(source_trimmed.to_string());
+    };
+
+    let trimmed = local_name.trim();
+    if trimmed.is_empty() {
+        return Err("Local name cannot be empty. Provide --local-name <NAME>.".to_string());
+    }
+    if looks_like_local_path_input(trimmed) {
+        return Err(format!(
+            "Local name '{}' looks like a path. Use --local-name for name-only local output and --definition-path for remote account definition path selection.",
+            trimmed
+        ));
+    }
+    if !is_supported_local_hatch_name(trimmed) {
+        return Err(format!(
+            "Local name '{}' is invalid. Use only letters, numbers, '-' or '_' for --local-name.",
+            trimmed
+        ));
+    }
+
+    Ok(trimmed.to_string())
+}
+
 /// Executes account-agent operations (list/push/pull/hatch/visibility/archive).
 pub async fn run(agents_m: &ArgMatches) -> bool {
     enum AgentsCommand {
@@ -33,9 +80,11 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             force: bool,
         },
         Hatch {
-            name: String,
+            source_name: String,
+            local_name: String,
             owner_handle: Option<String>,
             definition_path: Option<String>,
+            force_overwrite: bool,
         },
         Visibility {
             name: String,
@@ -71,7 +120,11 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         let json_file_path = push_m
             .get_one::<String>("json_file")
             .map(|s| s.to_string())
-            .or_else(|| push_m.get_one::<String>("input_file").map(|s| s.to_string()));
+            .or_else(|| {
+                push_m
+                    .get_one::<String>("input_file")
+                    .map(|s| s.to_string())
+            });
 
         let is_valid_inferred_name = |candidate: &str| {
             let normalized = candidate.trim().to_lowercase();
@@ -141,7 +194,9 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             return false;
         };
 
-        let definition_path = push_m.get_one::<String>("path").map(|s| s.to_string());
+        let definition_path = push_m
+            .get_one::<String>("definition_path")
+            .map(|s| s.to_string());
         let definition_json_raw = if let Some(raw) = push_m.get_one::<String>("json") {
             raw.to_string()
         } else if let Some(file_path) = json_file_path.as_deref() {
@@ -190,31 +245,47 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             owner_handle: pull_m
                 .get_one::<String>("owner_handle")
                 .map(|s| s.to_string()),
-            definition_path: pull_m.get_one::<String>("path").map(|s| s.to_string()),
+            definition_path: pull_m
+                .get_one::<String>("definition_path")
+                .map(|s| s.to_string()),
             json_file: pull_m.get_one::<String>("json_file").map(|s| s.to_string()),
             stdout: pull_m.get_flag("stdout"),
             force: pull_m.get_flag("force"),
         }
     } else if let Some(hatch_m) = agents_m.subcommand_matches("hatch") {
-        let name = hatch_m
-            .get_one::<String>("name")
-            .or_else(|| hatch_m.get_one::<String>("name_positional"))
+        let source_name = hatch_m
+            .get_one::<String>("agent")
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| {
-                eprintln!("❌ Missing agent name. Provide positional NAME or --name <NAME>.");
+                eprintln!("❌ Missing agent name. Provide positional AGENT.");
                 String::new()
             });
-        if name.is_empty() {
+        if source_name.is_empty() {
             return false;
         }
 
+        let local_name = match resolve_local_hatch_name(
+            &source_name,
+            hatch_m.get_one::<String>("local_name").map(String::as_str),
+        ) {
+            Ok(name) => name,
+            Err(error) => {
+                eprintln!("❌ {}", error);
+                return false;
+            }
+        };
+
         AgentsCommand::Hatch {
-            name,
+            source_name,
+            local_name,
             owner_handle: hatch_m
                 .get_one::<String>("owner_handle")
                 .map(|s| s.to_string()),
-            definition_path: hatch_m.get_one::<String>("path").map(|s| s.to_string()),
+            definition_path: hatch_m
+                .get_one::<String>("definition_path")
+                .map(|s| s.to_string()),
+            force_overwrite: hatch_m.get_flag("force"),
         }
     } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
         let Some(name) = visibility_m.get_one::<String>("name") else {
@@ -223,7 +294,9 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         };
         AgentsCommand::Visibility {
             name: name.to_string(),
-            definition_path: visibility_m.get_one::<String>("path").map(|s| s.to_string()),
+            definition_path: visibility_m
+                .get_one::<String>("definition_path")
+                .map(|s| s.to_string()),
             is_public: visibility_m.get_flag("public"),
             public_from: visibility_m
                 .get_one::<String>("public_from")
@@ -239,7 +312,9 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         };
         AgentsCommand::Archive {
             name: name.to_string(),
-            definition_path: archive_m.get_one::<String>("path").map(|s| s.to_string()),
+            definition_path: archive_m
+                .get_one::<String>("definition_path")
+                .map(|s| s.to_string()),
             is_archived: archive_m.get_flag("archive"),
         }
     } else {
@@ -319,13 +394,14 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             }
         },
         AgentsCommand::Hatch {
-            name,
+            source_name,
             owner_handle,
             definition_path,
+            ..
         } => match infra_api::account::agents::pull_agent(
             INFRA_BASE_URL,
             access_token_owned.as_str(),
-            name,
+            source_name,
             owner_handle.as_deref(),
             definition_path.as_deref(),
         )
@@ -484,13 +560,14 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                         }
                     },
                     AgentsCommand::Hatch {
-                        name,
+                        source_name,
                         owner_handle,
                         definition_path,
+                        ..
                     } => match infra_api::account::agents::pull_agent(
                         INFRA_BASE_URL,
                         retry_access_token.as_str(),
-                        name,
+                        source_name,
                         owner_handle.as_deref(),
                         definition_path.as_deref(),
                     )
@@ -599,7 +676,10 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                 }
 
                 if let Err(e) = fs::write(&path, format!("{pretty_definition}\n")) {
-                    eprintln!("❌ Failed to write pulled definition JSON to '{}': {e}", path);
+                    eprintln!(
+                        "❌ Failed to write pulled definition JSON to '{}': {e}",
+                        path
+                    );
                     return false;
                 }
 
@@ -622,9 +702,11 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
     }
 
     if let AgentsCommand::Hatch {
-        name,
+        source_name,
+        local_name,
         owner_handle,
         definition_path,
+        force_overwrite,
     } = &agents_command
     {
         let is_pull_success = response
@@ -656,14 +738,20 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             let path_label = definition_path.as_deref().unwrap_or("/");
             println!(
                 "📦 Using account agent definition: owner='{}', name='{}', path='{}'",
-                owner_label, name, path_label
+                owner_label, source_name, path_label
             );
-            println!("Build new cargo agent: {name}");
+            if local_name != source_name {
+                println!(
+                    "ℹ️ Local hatch name override: source='{}' local='{}'.",
+                    source_name, local_name
+                );
+            }
+            println!("Build new cargo agent: {local_name}");
             return crate::commands::hatch_pipeline::run_hatch_pipeline(
-                name,
+                local_name,
                 definition_json_str,
                 crate::commands::hatch_pipeline::HatchMode::Build,
-                false,
+                *force_overwrite,
             );
         }
     }
@@ -695,4 +783,37 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         .and_then(|v| v.as_str())
         .map(|s| s.eq_ignore_ascii_case("success"))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_local_hatch_name;
+
+    #[test]
+    fn local_hatch_name_defaults_to_source_name() {
+        let resolved = resolve_local_hatch_name("weather_agent", None)
+            .expect("default local hatch name should resolve");
+        assert_eq!(resolved, "weather_agent");
+    }
+
+    #[test]
+    fn local_hatch_name_accepts_valid_override() {
+        let resolved = resolve_local_hatch_name("weather_agent", Some("weather_agent_v2"))
+            .expect("valid local hatch override should resolve");
+        assert_eq!(resolved, "weather_agent_v2");
+    }
+
+    #[test]
+    fn local_hatch_name_rejects_path_like_override() {
+        let err = resolve_local_hatch_name("weather_agent", Some("./bin/weather_agent_v2"))
+            .expect_err("path-like override should fail");
+        assert!(err.contains("looks like a path"));
+    }
+
+    #[test]
+    fn local_hatch_name_rejects_invalid_name_override() {
+        let err = resolve_local_hatch_name("weather_agent", Some("weather.agent.v2"))
+            .expect_err("invalid override should fail");
+        assert!(err.contains("invalid"));
+    }
 }

@@ -231,6 +231,227 @@ mod tests {
     }
 
     #[test]
+    fn account_agents_hatch_parses_local_name_and_force_flags() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "hatch",
+                "weather_agent",
+                "--definition-path",
+                "/team/ops",
+                "--local-name",
+                "weather_agent_v2",
+                "--force",
+            ])
+            .expect("account agents hatch flags should parse");
+
+        let hatch_matches = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("agents"))
+            .and_then(|m| m.subcommand_matches("hatch"))
+            .expect("account agents hatch should be available");
+
+        assert_eq!(
+            hatch_matches.get_one::<String>("agent").map(String::as_str),
+            Some("weather_agent")
+        );
+        assert_eq!(
+            hatch_matches
+                .get_one::<String>("definition_path")
+                .map(String::as_str),
+            Some("/team/ops")
+        );
+        assert_eq!(
+            hatch_matches
+                .get_one::<String>("local_name")
+                .map(String::as_str),
+            Some("weather_agent_v2")
+        );
+        assert!(hatch_matches.get_flag("force"));
+    }
+
+    #[test]
+    fn account_agents_hatch_supports_short_force_flag() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "hatch",
+                "weather_agent",
+                "-f",
+            ])
+            .expect("account agents hatch -f should parse");
+
+        let hatch_matches = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("agents"))
+            .and_then(|m| m.subcommand_matches("hatch"))
+            .expect("account agents hatch should be available");
+
+        assert!(hatch_matches.get_flag("force"));
+    }
+
+    #[test]
+    fn account_agents_hatch_rejects_removed_name_flag() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "hatch",
+                "--name",
+                "weather_agent",
+            ])
+            .expect_err("--name should be rejected for account agents hatch");
+
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn account_agents_definition_path_parses_across_commands() {
+        let pull_matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "pull",
+                "weather_agent",
+                "--definition-path",
+                "/team/ops",
+                "--stdout",
+            ])
+            .expect("account agents pull --definition-path should parse");
+        let pull = pull_matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("agents"))
+            .and_then(|m| m.subcommand_matches("pull"))
+            .expect("pull subcommand should be available");
+        assert_eq!(
+            pull.get_one::<String>("definition_path")
+                .map(String::as_str),
+            Some("/team/ops")
+        );
+
+        let hatch_matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "hatch",
+                "weather_agent",
+                "--definition-path",
+                "/team/ops",
+            ])
+            .expect("account agents hatch --definition-path should parse");
+        let hatch = hatch_matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("agents"))
+            .and_then(|m| m.subcommand_matches("hatch"))
+            .expect("hatch subcommand should be available");
+        assert_eq!(
+            hatch
+                .get_one::<String>("definition_path")
+                .map(String::as_str),
+            Some("/team/ops")
+        );
+
+        let push_matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "push",
+                "--name",
+                "weather_agent",
+                "--json",
+                "{}",
+                "--definition-path",
+                "/team/ops",
+            ])
+            .expect("account agents push --definition-path should parse");
+        let push = push_matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("agents"))
+            .and_then(|m| m.subcommand_matches("push"))
+            .expect("push subcommand should be available");
+        assert_eq!(
+            push.get_one::<String>("definition_path")
+                .map(String::as_str),
+            Some("/team/ops")
+        );
+
+        let visibility_matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "visibility",
+                "--name",
+                "weather_agent",
+                "--public",
+                "--definition-path",
+                "/team/ops",
+            ])
+            .expect("account agents visibility --definition-path should parse");
+        let visibility = visibility_matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("agents"))
+            .and_then(|m| m.subcommand_matches("visibility"))
+            .expect("visibility subcommand should be available");
+        assert_eq!(
+            visibility
+                .get_one::<String>("definition_path")
+                .map(String::as_str),
+            Some("/team/ops")
+        );
+
+        let archive_matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "archive",
+                "--name",
+                "weather_agent",
+                "--archive",
+                "--definition-path",
+                "/team/ops",
+            ])
+            .expect("account agents archive --definition-path should parse");
+        let archive = archive_matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("agents"))
+            .and_then(|m| m.subcommand_matches("archive"))
+            .expect("archive subcommand should be available");
+        assert_eq!(
+            archive
+                .get_one::<String>("definition_path")
+                .map(String::as_str),
+            Some("/team/ops")
+        );
+    }
+
+    #[test]
+    fn account_agents_hatch_rejects_old_path_flag() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "hatch",
+                "weather_agent",
+                "--path",
+                "/team/ops",
+            ])
+            .expect_err("--path should be rejected for account agents hatch");
+
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
     fn init_defaults_parse() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from(["cargo-ai", "init"])
