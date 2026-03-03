@@ -9,6 +9,58 @@ use std::io::Error;
 
 include!(concat!(env!("OUT_DIR"), "/.generated_templates.rs"));
 
+const MAIN_ARGS_CALL: &str = "    let cmd_args = args::build_cli();";
+const VERSION_HOOK_SNIPPET: &str = r#"    if let Some(first_arg) = std::env::args().nth(1) {
+        if first_arg == "version" {
+            print_agent_version_status();
+            return;
+        }
+    }
+
+    let cmd_args = args::build_cli();"#;
+const GENERATED_AGENT_VERSION_BLOCK_TEMPLATE: &str =
+    include_str!("templates/agent_version_block.rs.tmpl");
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentSyncState {
+    InSync,
+    OutOfSync,
+    Unknown,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn determine_agent_sync_state(
+    generated_by_version: &str,
+    generated_template_version: &str,
+    local_cargo_ai_version: Option<&str>,
+    local_template_version: Option<&str>,
+) -> AgentSyncState {
+    match (local_cargo_ai_version, local_template_version) {
+        (Some(local_cargo_ai), Some(local_template)) => {
+            if local_cargo_ai == generated_by_version
+                && local_template == generated_template_version
+            {
+                AgentSyncState::InSync
+            } else {
+                AgentSyncState::OutOfSync
+            }
+        }
+        _ => AgentSyncState::Unknown,
+    }
+}
+
+fn sync_state_label(state: AgentSyncState) -> &'static str {
+    match state {
+        AgentSyncState::InSync => "in_sync",
+        AgentSyncState::OutOfSync => "out_of_sync",
+        AgentSyncState::Unknown => "unknown",
+    }
+}
+
+fn rust_string_literal(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
 fn resolve_template_schema_version_from_agentcfg(agentcfg_contents: &str) -> String {
     match serde_json::from_str::<Value>(agentcfg_contents)
         .ok()
@@ -25,20 +77,35 @@ fn resolve_template_schema_version_from_agentcfg(agentcfg_contents: &str) -> Str
 }
 
 fn provenance_block(generated_by_version: &str, template_schema_version: &str) -> String {
-    format!(
-        "\n#[allow(dead_code)]\n\
-const GENERATED_BY_CARGO_AI_VERSION: &str = {generated_by_version:?};\n\
-#[allow(dead_code)]\n\
-const GENERATED_WITH_TEMPLATE_SCHEMA_VERSION: &str = {template_schema_version:?};\n\
-\n\
-#[allow(dead_code)]\n\
-pub fn generated_agent_provenance() -> [(&'static str, &'static str); 2] {{\n\
-    [\n\
-        (\"generated_by_cargo_ai_version\", GENERATED_BY_CARGO_AI_VERSION),\n\
-        (\"generated_with_template_schema_version\", GENERATED_WITH_TEMPLATE_SCHEMA_VERSION),\n\
-    ]\n\
-}}\n"
-    )
+    GENERATED_AGENT_VERSION_BLOCK_TEMPLATE
+        .replace(
+            "__GENERATED_BY_CARGO_AI_VERSION__",
+            &rust_string_literal(generated_by_version),
+        )
+        .replace(
+            "__GENERATED_WITH_TEMPLATE_SCHEMA_VERSION__",
+            &rust_string_literal(template_schema_version),
+        )
+        .replace(
+            "__SYNC_STATUS_IN_SYNC__",
+            &rust_string_literal(sync_state_label(AgentSyncState::InSync)),
+        )
+        .replace(
+            "__SYNC_STATUS_OUT_OF_SYNC__",
+            &rust_string_literal(sync_state_label(AgentSyncState::OutOfSync)),
+        )
+        .replace(
+            "__SYNC_STATUS_UNKNOWN__",
+            &rust_string_literal(sync_state_label(AgentSyncState::Unknown)),
+        )
+}
+
+fn inject_version_command_hook(main_source: &str) -> String {
+    if !main_source.contains(MAIN_ARGS_CALL) {
+        return main_source.to_string();
+    }
+
+    main_source.replacen(MAIN_ARGS_CALL, VERSION_HOOK_SNIPPET, 1)
 }
 
 fn render_workspace_file_contents(
@@ -53,6 +120,7 @@ fn render_workspace_file_contents(
         .replace("cargo_ai", agent_name);
 
     if file_name == "src/main.rs" {
+        rendered = inject_version_command_hook(&rendered);
         rendered.push_str(&provenance_block(
             generated_by_version,
             template_schema_version,
@@ -129,7 +197,10 @@ fn load_agent_workspace(agent_name: &str, agentcfg: Result<String, Error>) -> Re
 
 #[cfg(test)]
 mod tests {
-    use super::{render_workspace_file_contents, resolve_template_schema_version_from_agentcfg};
+    use super::{
+        determine_agent_sync_state, render_workspace_file_contents,
+        resolve_template_schema_version_from_agentcfg, sync_state_label, AgentSyncState,
+    };
 
     #[test]
     fn resolves_template_schema_version_from_agentcfg_version() {
@@ -151,12 +222,14 @@ mod tests {
     fn stamps_main_template_with_provenance_metadata() {
         let rendered = render_workspace_file_contents(
             "src/main.rs",
-            "fn main() {}\n",
+            "fn main() {\n    let cmd_args = args::build_cli();\n}\n",
             "adder_agent",
             "0.0.11",
             "0.0.10",
         );
 
+        assert!(rendered.contains("print_agent_version_status();"));
+        assert!(rendered.contains("agent_version_status ="));
         assert!(rendered.contains("generated_agent_provenance"));
         assert!(rendered.contains("generated_by_cargo_ai_version"));
         assert!(rendered.contains("generated_with_template_schema_version"));
@@ -176,5 +249,26 @@ mod tests {
 
         assert!(rendered.contains("adder_agent"));
         assert!(!rendered.contains("generated_agent_provenance"));
+    }
+
+    #[test]
+    fn sync_state_is_in_sync_when_versions_match() {
+        let state = determine_agent_sync_state("0.0.11", "0.0.10", Some("0.0.11"), Some("0.0.10"));
+        assert_eq!(state, AgentSyncState::InSync);
+        assert_eq!(sync_state_label(state), "in_sync");
+    }
+
+    #[test]
+    fn sync_state_is_out_of_sync_for_exact_mismatch() {
+        let state = determine_agent_sync_state("0.0.11", "0.0.10", Some("0.0.12"), Some("0.0.10"));
+        assert_eq!(state, AgentSyncState::OutOfSync);
+        assert_eq!(sync_state_label(state), "out_of_sync");
+    }
+
+    #[test]
+    fn sync_state_is_unknown_when_local_baseline_missing() {
+        let state = determine_agent_sync_state("0.0.11", "0.0.10", None, Some("0.0.10"));
+        assert_eq!(state, AgentSyncState::Unknown);
+        assert_eq!(sync_state_label(state), "unknown");
     }
 }
