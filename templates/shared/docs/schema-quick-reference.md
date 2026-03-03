@@ -4,6 +4,7 @@ Use this as a concise reference while authoring agent configs.
 
 ## Required top-level fields
 - `version`
+  - format: `YYYY-MM-DD.rN` (example: `2026-03-03.r1`)
 - `prompt`
 - `agent_schema`
 - `resource_urls`

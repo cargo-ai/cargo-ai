@@ -173,7 +173,7 @@ mod tests {
     fn lock_conflict_fails_fast_before_project_mutation() {
         let result = run_hatch_pipeline_with_lock(
             "agent_lock_conflict_test",
-            r#"{"version":"0.0.10"}"#.to_string(),
+            r#"{"version":"2026-03-03.r1"}"#.to_string(),
             HatchMode::Check,
             false,
             |_| {

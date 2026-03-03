@@ -535,6 +535,7 @@ dependencies = [
  "mockito",
  "reqwest",
  "schemars",
+ "semver",
  "serde",
  "serde_json",
  "slint",

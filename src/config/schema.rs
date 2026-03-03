@@ -23,6 +23,12 @@ pub struct Config {
 
     #[serde(default)]
     pub web_resources: Option<WebResources>,
+
+    #[serde(default)]
+    pub update_check: Option<UpdateCheck>,
+
+    #[serde(default)]
+    pub version_baseline: Option<VersionBaseline>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -73,6 +79,28 @@ pub struct WebResources {
 
     #[serde(default)]
     pub retry_on_empty_body: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateCheck {
+    #[serde(default)]
+    pub mode: Option<String>,
+
+    #[serde(default)]
+    pub last_checked_unix_seconds: Option<i64>,
+
+    #[serde(default)]
+    pub latest_version: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VersionBaseline {
+    #[serde(default)]
+    pub cargo_ai_version: Option<String>,
+
+    // Agent-definition schema version (format: YYYY-MM-DD.rN), decoupled from cargo-ai semver.
+    #[serde(default)]
+    pub template_schema_version: Option<String>,
 }
 
 fn default_timeout() -> u64 {

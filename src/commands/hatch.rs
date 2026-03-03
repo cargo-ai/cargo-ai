@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn positional_json_shorthand_derives_project_name() {
         let config_path = temp_json_path("adder_test");
-        fs::write(&config_path, r#"{"version":"0.0.10"}"#).expect("test file should be writable");
+        fs::write(&config_path, r#"{"version":"2026-03-03.r1"}"#).expect("test file should be writable");
 
         let resolution =
             resolve_hatch_input(&config_path, None).expect("resolution should succeed");
@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn positional_json_shorthand_rejects_invalid_derived_name() {
         let config_path = temp_json_path("bad.name");
-        fs::write(&config_path, r#"{"version":"0.0.10"}"#).expect("test file should be writable");
+        fs::write(&config_path, r#"{"version":"2026-03-03.r1"}"#).expect("test file should be writable");
 
         let err = match resolve_hatch_input(&config_path, None) {
             Ok(_) => panic!("resolution should fail"),

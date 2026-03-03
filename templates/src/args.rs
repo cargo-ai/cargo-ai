@@ -16,6 +16,9 @@ pub fn build_cli() -> ArgMatches {
 
     Command::new("cargo-ai")
         .bin_name(bin_name)
+        .subcommand(
+            Command::new("version").about("Print generated-agent provenance and sync status"),
+        )
         .arg(
             Arg::new("profile")
                 .long("profile")
