@@ -5,6 +5,7 @@ use crate::config::adder::add_profile;
 use crate::config::loader::{find_profile, load_config};
 use crate::config::remover::remove_profile;
 use crate::config::schema::Profile;
+use crate::credentials::store;
 
 /// Executes profile list/show/add/remove operations.
 pub fn run(sub_m: &ArgMatches) -> bool {
@@ -67,7 +68,14 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         println!("  Server: {}", server);
         println!("  Model: {}", model);
         println!("  URL: {}", url);
-        println!("  Token: {}", token);
+        println!(
+            "  Token: {}",
+            if token == "(none)" {
+                "(none)"
+            } else {
+                "***********"
+            }
+        );
         println!("  Description: {}", description);
 
         let new_profile = Profile {
@@ -163,9 +171,23 @@ pub fn run(sub_m: &ArgMatches) -> bool {
                     }
                     println!("Server:  {}", p.server);
                     println!("Model:   {}", p.model);
+                    let token_available = match store::load_profile_token(&p.name) {
+                        Ok(Some(_)) => true,
+                        Ok(None) => p.token.is_some(),
+                        Err(error) => {
+                            eprintln!(
+                                "⚠️ Failed to load profile token from credential store: {error}"
+                            );
+                            p.token.is_some()
+                        }
+                    };
                     println!(
                         "Token:   {}",
-                        p.token.as_ref().map(|_| "***********").unwrap_or("(none)")
+                        if token_available {
+                            "***********"
+                        } else {
+                            "(none)"
+                        }
                     );
                     println!("Timeout: {}", p.timeout_in_sec);
                     if let Some(desc) = &p.description {
@@ -181,7 +203,9 @@ pub fn run(sub_m: &ArgMatches) -> bool {
                 false
             }
         } else {
-            eprintln!("❌ Please provide a profile name. Example: cargo ai profile show openai-prod");
+            eprintln!(
+                "❌ Please provide a profile name. Example: cargo ai profile show openai-prod"
+            );
             false
         }
     } else {

@@ -72,7 +72,7 @@ pub async fn run(conf_m: &ArgMatches) -> bool {
                 match (access_token, refresh_token, expires_in) {
                     (Some(at), Some(rt), Some(ex)) => {
                         if let Err(e) = set_account_tokens(at, rt, ex) {
-                            eprintln!("⚠️ Failed to save account tokens to config: {e}");
+                            eprintln!("⚠️ Failed to save account tokens to credential store: {e}");
                         }
                     }
                     _ => {
@@ -80,8 +80,7 @@ pub async fn run(conf_m: &ArgMatches) -> bool {
                     }
                 }
             }
-            json
-                .get("status")
+            json.get("status")
                 .and_then(|s| s.as_str())
                 .map(|s| s.eq_ignore_ascii_case("success"))
                 .unwrap_or(false)

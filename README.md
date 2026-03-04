@@ -82,6 +82,16 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 --url <custom_llm_endpoint>
 ```
 
+#### Credential Storage (Phase 1)
+
+- `config.toml` is metadata-only and no longer persists profile/account secret values.
+- Secrets (profile API tokens and account access/refresh tokens) are resolved keychain-first through Rust `keyring` (3.x stable).
+- When keychain is unavailable, Cargo-AI falls back to `credentials.toml` at:
+  - `$CARGO_HOME/.cargo-ai/credentials.toml`, or
+  - `~/.cargo/.cargo-ai/credentials.toml`.
+- Legacy secrets found in `config.toml` are migrated once at startup into the credential store path.
+- Generated agents use the same credential lookup behavior, so default-profile token usage remains compatible.
+
 ### Create a Sample Agent
 
 1. **Hatch a Sample Agent**  

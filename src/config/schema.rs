@@ -41,6 +41,7 @@ pub struct Profile {
     pub url: Option<String>,
 
     #[serde(default)]
+    #[serde(skip_serializing)]
     pub token: Option<String>,
 
     #[serde(default = "default_timeout")]
@@ -56,9 +57,11 @@ pub struct Account {
     pub email: Option<String>,
 
     #[serde(default)]
+    #[serde(skip_serializing)]
     pub access_token: Option<String>,
 
     #[serde(default)]
+    #[serde(skip_serializing)]
     pub refresh_token: Option<String>,
 
     #[serde(default)]

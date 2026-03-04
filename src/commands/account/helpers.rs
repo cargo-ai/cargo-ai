@@ -2,12 +2,13 @@
 use crate::config::adder::set_account_tokens;
 use crate::config::loader::load_config;
 use crate::config::setup::config_path;
+use crate::credentials::store;
 use crate::infra_api;
 
 /// Canonical Cargo-AI API base URL used by account command flows.
 pub const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
 
-/// In-memory account auth tokens loaded from local config.
+/// In-memory account auth tokens loaded from local credential storage.
 #[derive(Debug, Clone)]
 pub struct AccountAuth {
     pub access_token: String,
@@ -22,7 +23,7 @@ pub enum RefreshAccessError {
     MissingRefreshedToken(serde_json::Value),
 }
 
-/// Loads the account access and refresh tokens from local config with
+/// Loads the account access and refresh tokens from local credential storage with
 /// user-facing validation errors.
 pub fn load_account_auth() -> Result<AccountAuth, String> {
     let cfg = load_config().ok_or_else(|| {
@@ -36,8 +37,18 @@ pub fn load_account_auth() -> Result<AccountAuth, String> {
         "❌ No account found in config. You must confirm your account first.".to_string()
     })?;
 
+    if let Some(account_tokens) = store::load_account_tokens()
+        .map_err(|error| format!("❌ Failed to load account credentials: {error}"))?
+    {
+        return Ok(AccountAuth {
+            access_token: account_tokens.access_token,
+            refresh_token: account_tokens.refresh_token,
+        });
+    }
+
+    // Backward-compatible fallback for legacy configs when migration has not run yet.
     let access_token = acct.access_token.as_ref().cloned().ok_or_else(|| {
-        "❌ No access token found in config. Run `cargo ai account confirm <code>` first."
+        "❌ No access token found in credentials store or legacy config. Run `cargo ai account confirm <code>` first."
             .to_string()
     })?;
 
@@ -91,7 +102,7 @@ pub fn persist_refreshed_access_token(
             refresh_token.to_string(),
             expires_in,
         ) {
-            eprintln!("⚠️ Failed to update account tokens in config: {e}");
+            eprintln!("⚠️ Failed to update account tokens in credential store: {e}");
         }
     }
 }

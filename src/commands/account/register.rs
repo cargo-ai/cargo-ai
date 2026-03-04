@@ -9,7 +9,10 @@ use crate::ui;
 
 use std::io::{self, Write};
 
-use super::helpers::{extract_status_account_email, fetch_status_for_register_guard, INFRA_BASE_URL};
+use super::helpers::{
+    extract_status_account_email, fetch_status_for_register_guard, load_account_auth,
+    INFRA_BASE_URL,
+};
 
 /// Registers an account email and persists the active email on success.
 pub async fn run(reg_m: &ArgMatches) -> bool {
@@ -29,20 +32,22 @@ pub async fn run(reg_m: &ArgMatches) -> bool {
     // Guard: skip register when local session is already valid for the requested email.
     if let Some(cfg) = load_config() {
         if let Some(acct) = cfg.account.as_ref() {
-            if let (Some(_existing_email), Some(access_token)) =
-                (acct.email.as_deref(), acct.access_token.as_deref())
-            {
-                let status_response =
-                    fetch_status_for_register_guard(access_token, acct.refresh_token.as_deref())
-                        .await;
+            if acct.email.as_deref().is_some() {
+                if let Ok(auth) = load_account_auth() {
+                    let status_response = fetch_status_for_register_guard(
+                        auth.access_token.as_str(),
+                        auth.refresh_token.as_deref(),
+                    )
+                    .await;
 
-                if let Some(active_email) = extract_status_account_email(&status_response) {
-                    if active_email.eq_ignore_ascii_case(email) {
-                        println!(
-                            "✅ You are already signed in as '{}'. Registration is not needed.",
-                            active_email
-                        );
-                        return true;
+                    if let Some(active_email) = extract_status_account_email(&status_response) {
+                        if active_email.eq_ignore_ascii_case(email) {
+                            println!(
+                                "✅ You are already signed in as '{}'. Registration is not needed.",
+                                active_email
+                            );
+                            return true;
+                        }
                     }
                 }
             }

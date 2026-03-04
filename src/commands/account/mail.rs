@@ -78,7 +78,7 @@ async fn run_test(test_m: &ArgMatches) -> bool {
             .await
         {
             Err(RefreshAccessError::MissingRefreshToken) => {
-                eprintln!("⚠️ Access token expired, and no refresh token exists in config. Run `cargo ai account status` or re-confirm account.");
+                eprintln!("⚠️ Access token expired, and no refresh token exists in credential store. Run `cargo ai account status` or re-confirm account.");
                 if !ui::account_status::render_backend_ui(&response) {
                     match serde_json::to_string_pretty(&response) {
                         Ok(pretty) => println!("{pretty}"),
@@ -205,7 +205,7 @@ async fn run_prefs(prefs_m: &ArgMatches) -> bool {
             .await
         {
             Err(RefreshAccessError::MissingRefreshToken) => {
-                eprintln!("⚠️ Access token expired, and no refresh token exists in config. Run `cargo ai account status` or re-confirm account.");
+                eprintln!("⚠️ Access token expired, and no refresh token exists in credential store. Run `cargo ai account status` or re-confirm account.");
                 if !ui::account_status::render_backend_ui(&response) {
                     match serde_json::to_string_pretty(&response) {
                         Ok(pretty) => println!("{pretty}"),

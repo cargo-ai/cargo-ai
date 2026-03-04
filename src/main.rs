@@ -6,6 +6,7 @@ mod agent_builder;
 mod args;
 mod commands;
 mod config;
+mod credentials;
 mod infra_api;
 mod providers;
 mod schema_version;
@@ -27,6 +28,24 @@ include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 async fn main() {
     let cmd_args = args::build_cli();
     let skip_update_check_for_invocation = cmd_args.get_flag("no_update_check");
+
+    match credentials::migration::run_phase1_migration() {
+        Ok(outcome) if outcome.changed() => {
+            println!(
+                "✅ Migrated legacy credentials: {} profile token(s), account tokens migrated: {}.",
+                outcome.migrated_profile_tokens,
+                if outcome.migrated_account_tokens {
+                    "yes"
+                } else {
+                    "no"
+                }
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("⚠️ Failed to migrate legacy credentials: {error}");
+        }
+    }
 
     if let Err(error) = version_baseline::persist_current_baseline() {
         eprintln!("⚠️ Failed to persist local version baseline: {error}");

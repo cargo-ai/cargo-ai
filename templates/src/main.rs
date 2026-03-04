@@ -1,12 +1,14 @@
 mod args;
 mod web_resources;
 mod config;
+mod credentials;
 mod providers;
 
 use serde::{Deserialize, Serialize};
 use jsonlogic::apply;
 
 use config::loader::{load_config, find_profile};
+use config::schema::Profile;
 use providers::{provider_error_messages, validate_provider_request, ProviderKind};
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
@@ -26,6 +28,12 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
         "Example: cargo ai preflight --server ollama --model mistral --prompt \"What is 2 + 2?\""
             .to_string(),
     ]
+}
+
+fn resolve_profile_token(profile: &Profile) -> String {
+    credentials::store::load_profile_token(&profile.name)
+        .or_else(|| profile.token.clone())
+        .unwrap_or_default()
 }
 
 // Initialize Tokio runtime macro
@@ -48,7 +56,7 @@ async fn main() {
             if let Some(profile) = find_profile(&cfg, profile_name) {
                 server = profile.server.clone().to_lowercase();
                 model = profile.model.clone();
-                token = profile.token.clone().unwrap_or_default();
+                token = resolve_profile_token(profile);
                 timeout_in_sec = profile.timeout_in_sec;
                 url = profile.url.clone().unwrap_or_default();
                 println!("Using profile '{}'", profile_name);
@@ -72,7 +80,7 @@ async fn main() {
                 if let Some(profile) = find_profile(&cfg, default_profile_name) {
                     server = profile.server.clone().to_lowercase();
                     model = profile.model.clone();
-                    token = profile.token.clone().unwrap_or_default();
+                    token = resolve_profile_token(profile);
                     timeout_in_sec = profile.timeout_in_sec;
                     url = profile.url.clone().unwrap_or_default();
                     println!("Using default profile '{}'", default_profile_name);

@@ -31,6 +31,7 @@ pub struct Profile {
     pub url: Option<String>,
 
     #[serde(default)]
+    #[serde(skip_serializing)]
     pub token: Option<String>,
 
     #[serde(default = "default_timeout")]

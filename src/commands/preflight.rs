@@ -2,6 +2,8 @@
 use clap::ArgMatches;
 
 use crate::config::loader::{find_profile, load_config};
+use crate::config::schema::Profile;
+use crate::credentials::store;
 use crate::providers::{provider_error_messages, validate_provider_request, ProviderKind};
 
 fn unknown_server_messages(server: &str) -> Vec<String> {
@@ -19,6 +21,17 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
         "Example: cargo ai preflight --server ollama --model mistral --prompt \"What is 2 + 2?\""
             .to_string(),
     ]
+}
+
+fn resolve_profile_token(profile: &Profile) -> String {
+    match store::load_profile_token(&profile.name) {
+        Ok(Some(token)) => token,
+        Ok(None) => profile.token.clone().unwrap_or_default(),
+        Err(error) => {
+            eprintln!("⚠️ Failed to load profile token from credential store: {error}");
+            profile.token.clone().unwrap_or_default()
+        }
+    }
 }
 
 /// Executes the preflight flow: resolve runtime settings, call provider, and
@@ -43,7 +56,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             if let Some(profile) = find_profile(&cfg, profile_name) {
                 server = profile.server.clone().to_lowercase();
                 model = profile.model.clone();
-                token = profile.token.clone().unwrap_or_default();
+                token = resolve_profile_token(profile);
                 timeout_in_sec = profile.timeout_in_sec;
                 // Updated URL assignment logic:
                 url = profile.url.clone().unwrap_or_default();
@@ -68,7 +81,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                 if let Some(profile) = find_profile(&cfg, default_profile_name) {
                     server = profile.server.clone().to_lowercase();
                     model = profile.model.clone();
-                    token = profile.token.clone().unwrap_or_default();
+                    token = resolve_profile_token(profile);
                     timeout_in_sec = profile.timeout_in_sec;
                     url = profile.url.clone().unwrap_or_default();
                     println!("Using default profile '{}'", default_profile_name);

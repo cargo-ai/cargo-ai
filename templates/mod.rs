@@ -42,8 +42,14 @@ const CONFIG_MOD_RS_TEMPLATE: &str = include_str!("src/config/mod.rs");
 const CONFIG_SCHEMA_RS_NAME: &str = "src/config/schema.rs";
 const CONFIG_SCHEMA_RS_TEMPLATE: &str = include_str!("src/config/schema.rs");
 
+const CREDENTIALS_MOD_RS_NAME: &str = "src/credentials/mod.rs";
+const CREDENTIALS_MOD_RS_TEMPLATE: &str = include_str!("src/credentials/mod.rs");
+
+const CREDENTIALS_STORE_RS_NAME: &str = "src/credentials/store.rs";
+const CREDENTIALS_STORE_RS_TEMPLATE: &str = include_str!("src/credentials/store.rs");
+
 /// Template files emitted into a newly scaffolded agent workspace.
-pub const TEMPLATES: [(&str, &str); 14] = [
+pub const TEMPLATES: [(&str, &str); 16] = [
     (BUILD_RS_NAME, BUILD_RS_TEMPLATE),
     (BUILD_SUPPORT_RS_NAME, BUILD_SUPPORT_RS_TEMPLATE),
     (AGENTCFG_NAME, AGENTCFG_TEMPLATE),
@@ -58,4 +64,6 @@ pub const TEMPLATES: [(&str, &str); 14] = [
     (CONFIG_LOADER_RS_NAME, CONFIG_LOADER_RS_TEMPLATE),
     (CONFIG_MOD_RS_NAME, CONFIG_MOD_RS_TEMPLATE),
     (CONFIG_SCHEMA_RS_NAME, CONFIG_SCHEMA_RS_TEMPLATE),
+    (CREDENTIALS_MOD_RS_NAME, CREDENTIALS_MOD_RS_TEMPLATE),
+    (CREDENTIALS_STORE_RS_NAME, CREDENTIALS_STORE_RS_TEMPLATE),
 ];

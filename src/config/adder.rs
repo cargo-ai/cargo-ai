@@ -1,13 +1,22 @@
 use crate::config::loader::{config_path, load_config};
 use crate::config::schema::{Account, Config, Profile};
+use crate::credentials::store;
 use std::fs;
 use std::io::{self, Write};
 
 pub fn add_profile(
-    new_profile: Profile,
+    mut new_profile: Profile,
     overwrite: bool,
     set_as_default: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let profile_name_for_secret = new_profile.name.clone();
+    let token_for_secret = new_profile
+        .token
+        .as_ref()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty());
+    new_profile.token = None;
+
     let mut cfg = load_config().unwrap_or(Config {
         profile: Vec::new(),
         cargo_ai_token: None,
@@ -59,6 +68,16 @@ pub fn add_profile(
 
     let serialized = toml::to_string_pretty(&cfg)?;
     fs::write(config_path(), serialized)?;
+
+    match token_for_secret {
+        Some(token) => {
+            store::store_profile_token(&profile_name_for_secret, token.as_str())
+                .map_err(io::Error::other)?;
+        }
+        None => {
+            store::clear_profile_token(&profile_name_for_secret).map_err(io::Error::other)?;
+        }
+    }
     Ok(())
 }
 
@@ -84,6 +103,7 @@ pub fn set_account_email(email: String, overwrite: bool) -> Result<(), Box<dyn s
                 access_token_expires_in: None,
                 access_token_issued_at: None,
             });
+            store::clear_account_tokens().map_err(io::Error::other)?;
         }
         Some(ref old_email) if old_email == &email => {
             return Ok(());
@@ -98,6 +118,7 @@ pub fn set_account_email(email: String, overwrite: bool) -> Result<(), Box<dyn s
                     access_token_expires_in: None,
                     access_token_issued_at: None,
                 });
+                store::clear_account_tokens().map_err(io::Error::other)?;
             } else {
                 print!(
                     "Account email is already set to '{}'. Replace with '{}'? [y/N]: ",
@@ -114,6 +135,7 @@ pub fn set_account_email(email: String, overwrite: bool) -> Result<(), Box<dyn s
                         access_token_expires_in: None,
                         access_token_issued_at: None,
                     });
+                    store::clear_account_tokens().map_err(io::Error::other)?;
                 } else {
                     println!("Operation canceled.");
                     return Ok(());
@@ -147,8 +169,10 @@ pub fn set_account_tokens(
     let issued_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
     if let Some(account) = cfg.account.as_mut() {
-        account.access_token = Some(access_token);
-        account.refresh_token = Some(refresh_token);
+        store::store_account_tokens(access_token.as_str(), Some(refresh_token.as_str()))
+            .map_err(io::Error::other)?;
+        account.access_token = None;
+        account.refresh_token = None;
         account.access_token_expires_in = Some(access_token_expires_in);
         account.access_token_issued_at = Some(issued_at);
     } else {
