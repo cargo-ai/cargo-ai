@@ -19,7 +19,7 @@ Supports both **OpenAI‑API‑compatible servers** and **Ollama**.
 - **Full CLI Integration** – Conformed agent outputs can run an arbitrary command-line program
 - **Rust-Powered** – Safe, fast, and portable across environments  
 - **Fully Local & Secure** – All logic executes client-side (no phoning home)  
-- **LLM Connection Profiles** – Store reusable settings for servers, models, tokens, and timeouts so you don't re-enter them each run
+- **LLM Connection Profiles** – Store reusable settings for servers, models, auth modes, and timeouts so you don't re-enter them each run
 - **Repository Integration** – Download JSON configurations directly from Cargo-AI and hatch agents without needing local files
 - **Cross‑Platform Support** – Runs on any Linux, macOS, or Windows device
 
@@ -73,8 +73,21 @@ Example (using OpenAI GPT 4o):
 cargo ai profile add openai \
     --server openai \
     --model gpt-4o \
-    --token sk-*** \
     --default
+```
+
+Set profile auth mode and token-based credentials:
+
+```bash
+cargo ai profile auth set openai api_key
+cargo ai profile token set openai --token sk-***
+```
+
+Or use OpenAI account login instead of API key:
+
+```bash
+cargo ai auth login openai --profile openai --set-default
+cargo ai profile auth set openai openai_account
 ```
 
 Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change the default URL, use:
@@ -94,6 +107,16 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
   - `cargo ai settings secret-store status`
   - `cargo ai settings secret-store set <file|keychain>`
   - `cargo ai settings secret-store set <file|keychain> --migrate --yes`
+- Manage OpenAI auth session with:
+  - `cargo ai auth login openai [--profile <name>] [--set-default]`
+  - `cargo ai auth status [--json]`
+  - `cargo ai auth logout [--revoke] [--yes]`
+- Manage profile auth/token material with:
+  - `cargo ai profile auth set <name> <none|api_key|openai_account>`
+  - `cargo ai profile auth status [<name>]`
+  - `cargo ai profile token set <name> (--token <TOKEN> | --stdin | --env <ENV_VAR>)`
+  - `cargo ai profile token clear <name> [--yes]`
+  - `cargo ai profile token status <name>`
 - Use `--migrate --dry-run` to preview migration without writes.
 - Fresh installs can switch to `keychain` before any secrets are created (metadata-only switch).
 - Legacy secrets found in `config.toml` are migrated once at startup into the active secret-store path.

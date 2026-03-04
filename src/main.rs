@@ -70,6 +70,8 @@ async fn main() {
             commands::shipyard::run(sub_m)
         } else if let Some(sub_m) = cmd_args.subcommand_matches("account") {
             commands::account::run(sub_m).await
+        } else if let Some(sub_m) = cmd_args.subcommand_matches("auth") {
+            commands::auth::run(sub_m).await
         } else if let Some(sub_m) = cmd_args.subcommand_matches("profile") {
             commands::profile::run(sub_m)
         } else if let Some(sub_m) = cmd_args.subcommand_matches("settings") {
