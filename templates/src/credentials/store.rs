@@ -13,31 +13,11 @@ use std::path::PathBuf;
 const KEYCHAIN_SERVICE: &str = "cargo-ai";
 const PROFILE_TOKEN_PREFIX: &str = "profile/";
 const PROFILE_TOKEN_SUFFIX: &str = "/token";
-const OPENAI_OAUTH_ACCESS_KEY: &str = "openai_oauth/access_token";
-const OPENAI_OAUTH_REFRESH_KEY: &str = "openai_oauth/refresh_token";
-
-#[derive(Debug, Clone)]
-pub struct OpenAiOAuthTokens {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-}
 
 #[derive(Debug, Deserialize, Default)]
 struct CredentialsFile {
     #[serde(default)]
     profile_tokens: BTreeMap<String, String>,
-
-    #[serde(default)]
-    openai_oauth: Option<CredentialsAccount>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct CredentialsAccount {
-    #[serde(default)]
-    access_token: Option<String>,
-
-    #[serde(default)]
-    refresh_token: Option<String>,
 }
 
 fn resolve_credentials_path(cargo_home: Option<PathBuf>, home_dir: Option<PathBuf>) -> PathBuf {
@@ -137,111 +117,6 @@ fn load_profile_token_from_file(profile_name: &str) -> Result<Option<String>, St
         }))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "windows",
-    target_os = "linux",
-    target_os = "freebsd",
-    target_os = "openbsd"
-))]
-fn load_openai_oauth_tokens_from_keychain() -> Result<Option<OpenAiOAuthTokens>, String> {
-    if !keychain_enabled() {
-        return Err("keychain usage is disabled by CARGO_AI_DISABLE_KEYCHAIN".to_string());
-    }
-
-    let access_entry = keyring::Entry::new(KEYCHAIN_SERVICE, OPENAI_OAUTH_ACCESS_KEY).map_err(
-        |error| {
-            format!(
-                "failed to initialize keyring entry for '{}': {error}",
-                OPENAI_OAUTH_ACCESS_KEY
-            )
-        },
-    )?;
-
-    let access_token = match access_entry.get_password() {
-        Ok(token) if !token.trim().is_empty() => token,
-        Ok(_) | Err(keyring::Error::NoEntry) => return Ok(None),
-        Err(error) => {
-            return Err(format!(
-                "keyring lookup failed for '{}': {error}",
-                OPENAI_OAUTH_ACCESS_KEY
-            ))
-        }
-    };
-
-    let refresh_entry = keyring::Entry::new(KEYCHAIN_SERVICE, OPENAI_OAUTH_REFRESH_KEY).map_err(
-        |error| {
-            format!(
-                "failed to initialize keyring entry for '{}': {error}",
-                OPENAI_OAUTH_REFRESH_KEY
-            )
-        },
-    )?;
-    let refresh_token = match refresh_entry.get_password() {
-        Ok(token) if !token.trim().is_empty() => Some(token),
-        Ok(_) | Err(keyring::Error::NoEntry) => None,
-        Err(error) => {
-            return Err(format!(
-                "keyring lookup failed for '{}': {error}",
-                OPENAI_OAUTH_REFRESH_KEY
-            ))
-        }
-    };
-
-    Ok(Some(OpenAiOAuthTokens {
-        access_token,
-        refresh_token,
-    }))
-}
-
-#[cfg(not(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "windows",
-    target_os = "linux",
-    target_os = "freebsd",
-    target_os = "openbsd"
-)))]
-fn load_openai_oauth_tokens_from_keychain() -> Result<Option<OpenAiOAuthTokens>, String> {
-    Err("keychain backend is unavailable on this platform".to_string())
-}
-
-fn load_openai_oauth_tokens_from_file() -> Result<Option<OpenAiOAuthTokens>, String> {
-    let path = credentials_path();
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let raw = fs::read_to_string(path)
-        .map_err(|error| format!("failed to read credentials file: {error}"))?;
-    let parsed = toml::from_str::<CredentialsFile>(&raw)
-        .map_err(|error| format!("failed to parse credentials file: {error}"))?;
-
-    let openai_oauth = match parsed.openai_oauth {
-        Some(openai_oauth) => openai_oauth,
-        None => return Ok(None),
-    };
-
-    let access_token = match openai_oauth.access_token {
-        Some(token) if !token.trim().is_empty() => token,
-        _ => return Ok(None),
-    };
-    let refresh_token = openai_oauth.refresh_token.and_then(|token| {
-        let trimmed = token.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    });
-
-    Ok(Some(OpenAiOAuthTokens {
-        access_token,
-        refresh_token,
-    }))
-}
-
 pub fn load_profile_token(profile_name: &str) -> Result<Option<String>, String> {
     match configured_secret_store_mode() {
         Some(SecretStoreMode::File) => load_profile_token_from_file(profile_name),
@@ -249,17 +124,6 @@ pub fn load_profile_token(profile_name: &str) -> Result<Option<String>, String> 
         None => match load_profile_token_from_keychain(profile_name) {
             Ok(Some(token)) => Ok(Some(token)),
             Ok(None) | Err(_) => load_profile_token_from_file(profile_name),
-        },
-    }
-}
-
-pub fn load_openai_oauth_tokens() -> Result<Option<OpenAiOAuthTokens>, String> {
-    match configured_secret_store_mode() {
-        Some(SecretStoreMode::File) => load_openai_oauth_tokens_from_file(),
-        Some(SecretStoreMode::Keychain) => load_openai_oauth_tokens_from_keychain(),
-        None => match load_openai_oauth_tokens_from_keychain() {
-            Ok(Some(tokens)) => Ok(Some(tokens)),
-            Ok(None) | Err(_) => load_openai_oauth_tokens_from_file(),
         },
     }
 }
