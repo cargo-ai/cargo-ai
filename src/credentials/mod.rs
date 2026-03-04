@@ -5,5 +5,4 @@
 //! read compatibility for older configs that do not yet set a mode.
 
 pub mod migration;
-pub mod openai_oauth;
 pub mod store;

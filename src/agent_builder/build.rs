@@ -1,7 +1,7 @@
 //! Handles compiling an agent workspace into an executable.
 
-use std::path::Path;
 use std::process::{Command, Stdio};
+use std::path::Path;
 
 /// Builds the agent project at the given path (e.g. `.cargo-ai/agents/my_agent`)
 pub fn build_agent_project(agent_name: &str) -> Result<(), std::io::Error> {

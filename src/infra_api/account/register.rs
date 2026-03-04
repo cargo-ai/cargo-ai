@@ -69,5 +69,6 @@ pub async fn register_email(base_url: &str, email: &str) -> Result<Value, Regist
 
     let text = resp.text().await?;
 
-    serde_json::from_str::<Value>(&text).map_err(|e| RegisterError::Parse(e.to_string()))
+    serde_json::from_str::<Value>(&text)
+        .map_err(|e| RegisterError::Parse(e.to_string()))
 }

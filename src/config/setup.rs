@@ -37,7 +37,6 @@ pub fn ensure_config_file_exists() -> Result<(), Box<dyn std::error::Error>> {
             default_profile: None,
             secret_store: Some(default_secret_store_mode()),
             account: None,
-            openai_auth: None,
             web_resources: None,
             update_check: None,
             version_baseline: None,

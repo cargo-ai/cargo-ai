@@ -1,10 +1,10 @@
 //! CLI parser definition for `cargo ai profile`.
-use clap::{Arg, ArgAction, ArgGroup, Command};
+use clap::{Arg, Command};
 
 /// Builds the `profile` command schema and nested subcommands.
 pub fn command() -> Command {
     Command::new("profile")
-        .about("Manage connection profiles and profile auth behavior")
+        .about("Manage connection profiles in the Cargo-AI config file")
         .subcommand(Command::new("list").about("List all configured profiles"))
         .subcommand(
             Command::new("show")
@@ -49,6 +49,13 @@ pub fn command() -> Command {
                         .value_name("URL"),
                 )
                 .arg(
+                    Arg::new("token")
+                        .long("token")
+                        .help("API token for the server")
+                        .required(false)
+                        .value_name("TOKEN"),
+                )
+                .arg(
                     Arg::new("description")
                         .long("description")
                         .short('d')
@@ -60,7 +67,7 @@ pub fn command() -> Command {
                     Arg::new("default")
                         .long("default")
                         .help("Set this profile as the default")
-                        .action(ArgAction::SetTrue),
+                        .action(clap::ArgAction::SetTrue),
                 ),
         )
         .subcommand(
@@ -71,106 +78,6 @@ pub fn command() -> Command {
                         .help("Name of the profile to remove")
                         .required(true)
                         .value_name("NAME"),
-                ),
-        )
-        .subcommand(
-            Command::new("auth")
-                .about("Manage per-profile auth mode")
-                .subcommand(
-                    Command::new("set")
-                        .about("Set auth mode for a profile")
-                        .arg(
-                            Arg::new("name")
-                                .help("Profile name")
-                                .required(true)
-                                .value_name("NAME"),
-                        )
-                        .arg(
-                            Arg::new("mode")
-                                .help("Auth mode")
-                                .required(true)
-                                .value_name("MODE")
-                                .value_parser(["none", "api_key", "openai_account"]),
-                        ),
-                )
-                .subcommand(
-                    Command::new("status")
-                        .about("Show auth mode for one profile or all profiles")
-                        .arg(
-                            Arg::new("name")
-                                .help("Optional profile name")
-                                .required(false)
-                                .value_name("NAME"),
-                        ),
-                ),
-        )
-        .subcommand(
-            Command::new("token")
-                .about("Manage API keys for profiles")
-                .subcommand(
-                    Command::new("set")
-                        .about("Store API key material for a profile")
-                        .group(
-                            ArgGroup::new("token_source")
-                                .args(["token", "stdin", "env"])
-                                .required(true),
-                        )
-                        .arg(
-                            Arg::new("name")
-                                .help("Profile name")
-                                .required(true)
-                                .value_name("NAME"),
-                        )
-                        .arg(
-                            Arg::new("token")
-                                .long("token")
-                                .help("Raw API token value")
-                                .required(false)
-                                .value_name("TOKEN")
-                                .num_args(1),
-                        )
-                        .arg(
-                            Arg::new("stdin")
-                                .long("stdin")
-                                .help("Read API token from standard input")
-                                .required(false)
-                                .action(ArgAction::SetTrue),
-                        )
-                        .arg(
-                            Arg::new("env")
-                                .long("env")
-                                .help("Read API token from environment variable")
-                                .required(false)
-                                .value_name("ENV_VAR")
-                                .num_args(1),
-                        ),
-                )
-                .subcommand(
-                    Command::new("clear")
-                        .about("Clear API token for a profile")
-                        .arg(
-                            Arg::new("name")
-                                .help("Profile name")
-                                .required(true)
-                                .value_name("NAME"),
-                        )
-                        .arg(
-                            Arg::new("yes")
-                                .long("yes")
-                                .help("Skip interactive confirmation")
-                                .required(false)
-                                .action(ArgAction::SetTrue),
-                        ),
-                )
-                .subcommand(
-                    Command::new("status")
-                        .about("Show whether a profile has an API token")
-                        .arg(
-                            Arg::new("name")
-                                .help("Profile name")
-                                .required(true)
-                                .value_name("NAME"),
-                        ),
                 ),
         )
 }

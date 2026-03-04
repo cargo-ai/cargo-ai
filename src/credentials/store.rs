@@ -18,17 +18,9 @@ const PROFILE_TOKEN_PREFIX: &str = "profile/";
 const PROFILE_TOKEN_SUFFIX: &str = "/token";
 const ACCOUNT_ACCESS_KEY: &str = "account/access_token";
 const ACCOUNT_REFRESH_KEY: &str = "account/refresh_token";
-const OPENAI_OAUTH_ACCESS_KEY: &str = "openai_oauth/access_token";
-const OPENAI_OAUTH_REFRESH_KEY: &str = "openai_oauth/refresh_token";
 
 #[derive(Debug, Clone)]
 pub struct AccountTokens {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct OpenAiOAuthTokens {
     pub access_token: String,
     pub refresh_token: Option<String>,
 }
@@ -59,9 +51,6 @@ struct CredentialsFile {
 
     #[serde(default)]
     account: Option<CredentialsAccount>,
-
-    #[serde(default)]
-    openai_oauth: Option<CredentialsAccount>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -77,14 +66,11 @@ struct CredentialsAccount {
 struct SecretSnapshot {
     profile_tokens: BTreeMap<String, String>,
     account_tokens: Option<AccountTokens>,
-    openai_oauth_tokens: Option<OpenAiOAuthTokens>,
 }
 
 impl SecretSnapshot {
     fn is_empty(&self) -> bool {
-        self.profile_tokens.is_empty()
-            && self.account_tokens.is_none()
-            && self.openai_oauth_tokens.is_none()
+        self.profile_tokens.is_empty() && self.account_tokens.is_none()
     }
 
     fn merge_keychain_preferred(file_snapshot: Self, keychain_snapshot: Self) -> Self {
@@ -95,10 +81,6 @@ impl SecretSnapshot {
 
         if keychain_snapshot.account_tokens.is_some() {
             merged.account_tokens = keychain_snapshot.account_tokens;
-        }
-
-        if keychain_snapshot.openai_oauth_tokens.is_some() {
-            merged.openai_oauth_tokens = keychain_snapshot.openai_oauth_tokens;
         }
 
         merged
@@ -458,57 +440,6 @@ fn clear_account_tokens_in_file_with_path(path: &Path) -> Result<(), String> {
     write_credentials_file(path, &credentials)
 }
 
-fn load_openai_oauth_tokens_from_file_with_path(
-    path: &Path,
-) -> Result<Option<OpenAiOAuthTokens>, String> {
-    let credentials = read_credentials_file(path)?;
-    let openai_oauth = match credentials.openai_oauth {
-        Some(tokens) => tokens,
-        None => return Ok(None),
-    };
-
-    let access_token = match openai_oauth.access_token {
-        Some(value) if !value.trim().is_empty() => value,
-        _ => return Ok(None),
-    };
-
-    let refresh_token = openai_oauth.refresh_token.and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    });
-
-    Ok(Some(OpenAiOAuthTokens {
-        access_token,
-        refresh_token,
-    }))
-}
-
-fn store_openai_oauth_tokens_in_file_with_path(
-    path: &Path,
-    access_token: &str,
-    refresh_token: Option<&str>,
-) -> Result<(), String> {
-    let mut credentials = read_credentials_file(path)?;
-    credentials.openai_oauth = Some(CredentialsAccount {
-        access_token: Some(access_token.to_string()),
-        refresh_token: refresh_token
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
-    });
-    write_credentials_file(path, &credentials)
-}
-
-fn clear_openai_oauth_tokens_in_file_with_path(path: &Path) -> Result<(), String> {
-    let mut credentials = read_credentials_file(path)?;
-    credentials.openai_oauth = None;
-    write_credentials_file(path, &credentials)
-}
-
 fn load_account_tokens_from_keychain() -> Result<Option<AccountTokens>, String> {
     let access_token = match keychain_get(ACCOUNT_ACCESS_KEY)? {
         Some(value) => value,
@@ -525,27 +456,6 @@ fn load_account_tokens_from_keychain() -> Result<Option<AccountTokens>, String> 
     });
 
     Ok(Some(AccountTokens {
-        access_token,
-        refresh_token,
-    }))
-}
-
-fn load_openai_oauth_tokens_from_keychain() -> Result<Option<OpenAiOAuthTokens>, String> {
-    let access_token = match keychain_get(OPENAI_OAUTH_ACCESS_KEY)? {
-        Some(value) => value,
-        None => return Ok(None),
-    };
-
-    let refresh_token = keychain_get(OPENAI_OAUTH_REFRESH_KEY)?.and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    });
-
-    Ok(Some(OpenAiOAuthTokens {
         access_token,
         refresh_token,
     }))
@@ -580,23 +490,6 @@ fn load_snapshot_from_file(path: &Path) -> Result<SecretSnapshot, String> {
         }
     }
 
-    if let Some(openai_oauth) = credentials.openai_oauth {
-        if let Some(access_token) = openai_oauth
-            .access_token
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            let refresh_token = openai_oauth
-                .refresh_token
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty());
-            snapshot.openai_oauth_tokens = Some(OpenAiOAuthTokens {
-                access_token,
-                refresh_token,
-            });
-        }
-    }
-
     Ok(snapshot)
 }
 
@@ -611,7 +504,6 @@ fn load_snapshot_from_keychain(profile_names: &[String]) -> Result<SecretSnapsho
     }
 
     snapshot.account_tokens = load_account_tokens_from_keychain()?;
-    snapshot.openai_oauth_tokens = load_openai_oauth_tokens_from_keychain()?;
     Ok(snapshot)
 }
 
@@ -625,14 +517,6 @@ fn write_snapshot_to_file(path: &Path, snapshot: &SecretSnapshot) -> Result<(), 
             access_token: Some(tokens.access_token.clone()),
             refresh_token: tokens.refresh_token.clone(),
         });
-    credentials.openai_oauth =
-        snapshot
-            .openai_oauth_tokens
-            .as_ref()
-            .map(|tokens| CredentialsAccount {
-                access_token: Some(tokens.access_token.clone()),
-                refresh_token: tokens.refresh_token.clone(),
-            });
 
     write_credentials_file(path, &credentials)
 }
@@ -663,30 +547,12 @@ fn write_snapshot_to_keychain(snapshot: &SecretSnapshot) -> Result<(), String> {
         }
     }
 
-    match &snapshot.openai_oauth_tokens {
-        Some(tokens) => {
-            keychain_set(OPENAI_OAUTH_ACCESS_KEY, &tokens.access_token)?;
-            match tokens.refresh_token.as_deref() {
-                Some(refresh) => keychain_set(OPENAI_OAUTH_REFRESH_KEY, refresh)?,
-                None => {
-                    keychain_delete(OPENAI_OAUTH_REFRESH_KEY)?;
-                }
-            }
-        }
-        None => {
-            keychain_delete(OPENAI_OAUTH_ACCESS_KEY)?;
-            keychain_delete(OPENAI_OAUTH_REFRESH_KEY)?;
-        }
-    }
-
     Ok(())
 }
 
 fn clear_keychain_snapshot(profile_names: &[String]) -> Result<(), String> {
     keychain_delete(ACCOUNT_ACCESS_KEY)?;
     keychain_delete(ACCOUNT_REFRESH_KEY)?;
-    keychain_delete(OPENAI_OAUTH_ACCESS_KEY)?;
-    keychain_delete(OPENAI_OAUTH_REFRESH_KEY)?;
 
     for profile_name in profile_names {
         keychain_delete(&keychain_account_for_profile(profile_name))?;
@@ -936,87 +802,6 @@ pub fn clear_account_tokens() -> Result<(), String> {
     let _ = keychain_delete(ACCOUNT_ACCESS_KEY);
     let _ = keychain_delete(ACCOUNT_REFRESH_KEY);
     clear_account_tokens_in_file_with_path(&credentials_path())
-}
-
-pub fn load_openai_oauth_tokens() -> Result<Option<OpenAiOAuthTokens>, String> {
-    match configured_secret_store_mode() {
-        Some(SecretStoreMode::File) => {
-            load_openai_oauth_tokens_from_file_with_path(&credentials_path())
-        }
-        Some(SecretStoreMode::Keychain) => load_openai_oauth_tokens_from_keychain(),
-        None => {
-            let access_from_keychain = keychain_get(OPENAI_OAUTH_ACCESS_KEY);
-            let refresh_from_keychain = keychain_get(OPENAI_OAUTH_REFRESH_KEY);
-
-            if let Ok(Some(access_token)) = access_from_keychain {
-                let refresh_token = refresh_from_keychain
-                    .ok()
-                    .and_then(|value| value.filter(|token| !token.trim().is_empty()));
-                return Ok(Some(OpenAiOAuthTokens {
-                    access_token,
-                    refresh_token,
-                }));
-            }
-
-            load_openai_oauth_tokens_from_file_with_path(&credentials_path())
-        }
-    }
-}
-
-pub fn store_openai_oauth_tokens(
-    access_token: &str,
-    refresh_token: Option<&str>,
-) -> Result<(), String> {
-    if access_token.trim().is_empty() {
-        return clear_openai_oauth_tokens();
-    }
-
-    match configured_secret_store_mode() {
-        Some(SecretStoreMode::File) => store_openai_oauth_tokens_in_file_with_path(
-            &credentials_path(),
-            access_token,
-            refresh_token,
-        ),
-        Some(SecretStoreMode::Keychain) => {
-            keychain_set(OPENAI_OAUTH_ACCESS_KEY, access_token)?;
-            match refresh_token {
-                Some(token) if !token.trim().is_empty() => {
-                    keychain_set(OPENAI_OAUTH_REFRESH_KEY, token)?
-                }
-                _ => {
-                    keychain_delete(OPENAI_OAUTH_REFRESH_KEY)?;
-                }
-            }
-            let _ = clear_openai_oauth_tokens_in_file_with_path(&credentials_path());
-            Ok(())
-        }
-        None => {
-            let keychain_access_result = keychain_set(OPENAI_OAUTH_ACCESS_KEY, access_token);
-            let keychain_refresh_result = match refresh_token {
-                Some(token) if !token.trim().is_empty() => {
-                    keychain_set(OPENAI_OAUTH_REFRESH_KEY, token)
-                }
-                _ => keychain_delete(OPENAI_OAUTH_REFRESH_KEY),
-            };
-
-            if keychain_access_result.is_ok() && keychain_refresh_result.is_ok() {
-                let _ = clear_openai_oauth_tokens_in_file_with_path(&credentials_path());
-                return Ok(());
-            }
-
-            store_openai_oauth_tokens_in_file_with_path(
-                &credentials_path(),
-                access_token,
-                refresh_token,
-            )
-        }
-    }
-}
-
-pub fn clear_openai_oauth_tokens() -> Result<(), String> {
-    let _ = keychain_delete(OPENAI_OAUTH_ACCESS_KEY);
-    let _ = keychain_delete(OPENAI_OAUTH_REFRESH_KEY);
-    clear_openai_oauth_tokens_in_file_with_path(&credentials_path())
 }
 
 #[cfg(test)]

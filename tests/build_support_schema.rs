@@ -54,7 +54,10 @@ fn rejects_nested_arrays_with_actionable_path() {
 
 #[test]
 fn rejects_union_types_with_actionable_path() {
-    let cfg = config_with(r#""value": { "type": ["string", "integer"] }"#, "[]");
+    let cfg = config_with(
+        r#""value": { "type": ["string", "integer"] }"#,
+        "[]",
+    );
 
     let err = build_support::generate_agent_model_from_str(&cfg)
         .unwrap_err()
@@ -66,7 +69,10 @@ fn rejects_union_types_with_actionable_path() {
 
 #[test]
 fn rejects_invalid_field_identifiers() {
-    let cfg = config_with(r#""bad-name": { "type": "string" }"#, "[]");
+    let cfg = config_with(
+        r#""bad-name": { "type": "string" }"#,
+        "[]",
+    );
 
     let err = build_support::generate_agent_model_from_str(&cfg)
         .unwrap_err()
@@ -78,7 +84,10 @@ fn rejects_invalid_field_identifiers() {
 
 #[test]
 fn rejects_reserved_keyword_field_identifiers() {
-    let cfg = config_with(r#""union": { "type": "string" }"#, "[]");
+    let cfg = config_with(
+        r#""union": { "type": "string" }"#,
+        "[]",
+    );
 
     let err = build_support::generate_agent_model_from_str(&cfg)
         .unwrap_err()

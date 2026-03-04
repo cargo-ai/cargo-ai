@@ -34,10 +34,7 @@ fn build_set_preferences_body(access_token: &str, all_emails_enabled: bool) -> V
 /// }
 ///
 /// Returns the raw JSON response from the infra API (success or failure).
-pub async fn fetch_preferences(
-    base_url: &str,
-    access_token: &str,
-) -> Result<Value, reqwest::Error> {
+pub async fn fetch_preferences(base_url: &str, access_token: &str) -> Result<Value, reqwest::Error> {
     let url = format!("{}/account", base_url.trim_end_matches('/'));
     let body = build_fetch_preferences_body(access_token);
 

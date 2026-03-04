@@ -9,8 +9,12 @@ pub fn add_profile(
     overwrite: bool,
     set_as_default: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // `profile add` is metadata-only: secret writes are handled by
-    // `cargo ai profile token set`.
+    let profile_name_for_secret = new_profile.name.clone();
+    let token_for_secret = new_profile
+        .token
+        .as_ref()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty());
     new_profile.token = None;
 
     let mut cfg = load_config().unwrap_or(Config {
@@ -19,7 +23,6 @@ pub fn add_profile(
         default_profile: None,
         secret_store: Some(default_secret_store_mode()),
         account: None,
-        openai_auth: None,
         web_resources: None,
         update_check: None,
         version_baseline: None,
@@ -67,6 +70,15 @@ pub fn add_profile(
     let serialized = toml::to_string_pretty(&cfg)?;
     fs::write(config_path(), serialized)?;
 
+    match token_for_secret {
+        Some(token) => {
+            store::store_profile_token(&profile_name_for_secret, token.as_str())
+                .map_err(io::Error::other)?;
+        }
+        None => {
+            store::clear_profile_token(&profile_name_for_secret).map_err(io::Error::other)?;
+        }
+    }
     Ok(())
 }
 
@@ -77,7 +89,6 @@ pub fn set_account_email(email: String, overwrite: bool) -> Result<(), Box<dyn s
         default_profile: None,
         secret_store: Some(default_secret_store_mode()),
         account: None,
-        openai_auth: None,
         web_resources: None,
         update_check: None,
         version_baseline: None,
@@ -153,7 +164,6 @@ pub fn set_account_tokens(
         default_profile: None,
         secret_store: Some(default_secret_store_mode()),
         account: None,
-        openai_auth: None,
         web_resources: None,
         update_check: None,
         version_baseline: None,

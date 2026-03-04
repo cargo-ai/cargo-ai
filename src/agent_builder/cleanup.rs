@@ -10,10 +10,7 @@ pub fn delete_agent_workspace(agent_name: &str) -> io::Result<()> {
         fs::remove_dir_all(&project_path)?;
         println!("🧹 Deleted agent workspace: {}", project_path.display());
     } else {
-        println!(
-            "ℹ️ Agent workspace does not exist: {}",
-            project_path.display()
-        );
+        println!("ℹ️ Agent workspace does not exist: {}", project_path.display());
     }
     Ok(())
 }
