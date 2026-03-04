@@ -1,4 +1,4 @@
-use crate::config::schema::Config;
+use crate::config::schema::{default_secret_store_mode, Config};
 use std::env;
 use std::fs;
 use std::io;
@@ -35,6 +35,7 @@ pub fn ensure_config_file_exists() -> Result<(), Box<dyn std::error::Error>> {
             profile: Vec::new(),
             cargo_ai_token: None,
             default_profile: None,
+            secret_store: Some(default_secret_store_mode()),
             account: None,
             web_resources: None,
             update_check: None,

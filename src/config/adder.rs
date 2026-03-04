@@ -1,5 +1,5 @@
 use crate::config::loader::{config_path, load_config};
-use crate::config::schema::{Account, Config, Profile};
+use crate::config::schema::{default_secret_store_mode, Account, Config, Profile};
 use crate::credentials::store;
 use std::fs;
 use std::io::{self, Write};
@@ -21,6 +21,7 @@ pub fn add_profile(
         profile: Vec::new(),
         cargo_ai_token: None,
         default_profile: None,
+        secret_store: Some(default_secret_store_mode()),
         account: None,
         web_resources: None,
         update_check: None,
@@ -86,6 +87,7 @@ pub fn set_account_email(email: String, overwrite: bool) -> Result<(), Box<dyn s
         profile: Vec::new(),
         cargo_ai_token: None,
         default_profile: None,
+        secret_store: Some(default_secret_store_mode()),
         account: None,
         web_resources: None,
         update_check: None,
@@ -160,6 +162,7 @@ pub fn set_account_tokens(
         profile: Vec::new(),
         cargo_ai_token: None,
         default_profile: None,
+        secret_store: Some(default_secret_store_mode()),
         account: None,
         web_resources: None,
         update_check: None,

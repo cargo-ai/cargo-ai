@@ -72,6 +72,8 @@ async fn main() {
             commands::account::run(sub_m).await
         } else if let Some(sub_m) = cmd_args.subcommand_matches("profile") {
             commands::profile::run(sub_m)
+        } else if let Some(sub_m) = cmd_args.subcommand_matches("settings") {
+            commands::settings::run(sub_m)
         } else {
             eprintln!("❌ Provide subcommand.");
             false

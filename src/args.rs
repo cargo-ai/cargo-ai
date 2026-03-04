@@ -10,6 +10,7 @@ mod init;
 mod new;
 mod preflight;
 mod profile;
+mod settings;
 mod shipyard;
 mod version;
 
@@ -28,6 +29,7 @@ fn cli_command(bin_name: &'static str) -> Command {
         .subcommand(init::command())
         .subcommand(hatch::command())
         .subcommand(profile::command())
+        .subcommand(settings::command())
         .subcommand(account::command())
         .subcommand(version::command())
         .subcommand(preflight::command())
@@ -108,7 +110,8 @@ mod tests {
         assert!(index_of("new") < index_of("init"));
         assert!(index_of("init") < index_of("hatch"));
         assert!(index_of("hatch") < index_of("profile"));
-        assert!(index_of("profile") < index_of("account"));
+        assert!(index_of("profile") < index_of("settings"));
+        assert!(index_of("settings") < index_of("account"));
         assert!(index_of("account") < index_of("version"));
     }
 
@@ -270,6 +273,50 @@ mod tests {
             Some("weather_agent_v2")
         );
         assert!(hatch_matches.get_flag("force"));
+    }
+
+    #[test]
+    fn settings_secret_store_set_parses_mode_and_flags() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "settings",
+                "secret-store",
+                "set",
+                "keychain",
+                "--migrate",
+                "--yes",
+            ])
+            .expect("settings secret-store set should parse");
+
+        let set_matches = matches
+            .subcommand_matches("settings")
+            .and_then(|m| m.subcommand_matches("secret-store"))
+            .and_then(|m| m.subcommand_matches("set"))
+            .expect("set subcommand should be available");
+
+        assert_eq!(
+            set_matches.get_one::<String>("mode").map(String::as_str),
+            Some("keychain")
+        );
+        assert!(set_matches.get_flag("migrate"));
+        assert!(set_matches.get_flag("yes"));
+    }
+
+    #[test]
+    fn settings_secret_store_dry_run_requires_migrate() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "settings",
+                "secret-store",
+                "set",
+                "file",
+                "--dry-run",
+            ])
+            .expect_err("dry-run without migrate should fail parsing");
+
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]

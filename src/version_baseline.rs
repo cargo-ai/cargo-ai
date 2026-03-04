@@ -5,7 +5,9 @@
 //! - Persist current template/schema version in global config.
 //! - Keep behavior deterministic and local-only (no network calls).
 use crate::config::loader::{config_path, load_config};
-use crate::config::schema::{Config, VersionBaseline as VersionBaselineConfig};
+use crate::config::schema::{
+    default_secret_store_mode, Config, VersionBaseline as VersionBaselineConfig,
+};
 use crate::schema_version;
 use std::fs;
 use std::path::Path;
@@ -15,6 +17,7 @@ fn default_config() -> Config {
         profile: Vec::new(),
         cargo_ai_token: None,
         default_profile: None,
+        secret_store: Some(default_secret_store_mode()),
         account: None,
         web_resources: None,
         update_check: None,
@@ -87,6 +90,7 @@ mod tests {
             profile: Vec::new(),
             cargo_ai_token: None,
             default_profile: None,
+            secret_store: Some(crate::config::schema::default_secret_store_mode()),
             account: None,
             web_resources: None,
             update_check: None,

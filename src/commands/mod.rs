@@ -10,5 +10,6 @@ pub mod preflight;
 pub mod preflight_actions;
 pub mod profile;
 pub mod scaffold;
+pub mod settings;
 pub mod shipyard;
 pub mod version;

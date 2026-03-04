@@ -31,9 +31,14 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
 }
 
 fn resolve_profile_token(profile: &Profile) -> String {
-    credentials::store::load_profile_token(&profile.name)
-        .or_else(|| profile.token.clone())
-        .unwrap_or_default()
+    match credentials::store::load_profile_token(&profile.name) {
+        Ok(Some(token)) => token,
+        Ok(None) => profile.token.clone().unwrap_or_default(),
+        Err(error) => {
+            eprintln!("⚠️ Failed to load profile token from credential store: {error}");
+            profile.token.clone().unwrap_or_default()
+        }
+    }
 }
 
 // Initialize Tokio runtime macro

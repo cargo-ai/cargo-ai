@@ -7,6 +7,26 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretStoreMode {
+    File,
+    Keychain,
+}
+
+impl SecretStoreMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Keychain => "keychain",
+        }
+    }
+}
+
+pub fn default_secret_store_mode() -> SecretStoreMode {
+    SecretStoreMode::File
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub profile: Vec<Profile>,
@@ -17,6 +37,9 @@ pub struct Config {
 
     #[serde(default)]
     pub default_profile: Option<String>,
+
+    #[serde(default)]
+    pub secret_store: Option<SecretStoreMode>,
 
     #[serde(default)]
     pub account: Option<Account>,

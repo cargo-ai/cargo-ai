@@ -85,12 +85,19 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 #### Credential Storage (Phase 1)
 
 - `config.toml` is metadata-only and no longer persists profile/account secret values.
-- Secrets (profile API tokens and account access/refresh tokens) are resolved keychain-first through Rust `keyring` (3.x stable).
-- When keychain is unavailable, Cargo-AI falls back to `credentials.toml` at:
+- Default secret-store mode is `file` for new installs.
+- `file` mode stores secrets in `credentials.toml` at:
   - `$CARGO_HOME/.cargo-ai/credentials.toml`, or
   - `~/.cargo/.cargo-ai/credentials.toml`.
-- Legacy secrets found in `config.toml` are migrated once at startup into the credential store path.
-- Generated agents use the same credential lookup behavior, so default-profile token usage remains compatible.
+- `keychain` mode stores secrets in OS keychain backends through Rust `keyring` (3.x stable).
+- Manage mode with:
+  - `cargo ai settings secret-store status`
+  - `cargo ai settings secret-store set <file|keychain>`
+  - `cargo ai settings secret-store set <file|keychain> --migrate --yes`
+- Use `--migrate --dry-run` to preview migration without writes.
+- Fresh installs can switch to `keychain` before any secrets are created (metadata-only switch).
+- Legacy secrets found in `config.toml` are migrated once at startup into the active secret-store path.
+- Generated agents use the same secret-store mode behavior, so default-profile token usage remains compatible.
 
 ### Create a Sample Agent
 
