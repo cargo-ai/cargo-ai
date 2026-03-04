@@ -30,6 +30,12 @@ struct SelectedProfile {
     legacy_token: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedOpenAiToken {
+    token: String,
+    uses_account_session: bool,
+}
+
 fn resolve_profile_api_token(profile: &SelectedProfile) -> Result<String, String> {
     match store::load_profile_token(&profile.name) {
         Ok(Some(token)) if !token.trim().is_empty() => Ok(token),
@@ -56,16 +62,19 @@ fn resolve_profile_api_token(profile: &SelectedProfile) -> Result<String, String
 
 async fn resolve_openai_token_for_request(
     selected_profile: Option<&SelectedProfile>,
-) -> Result<String, String> {
+) -> Result<ResolvedOpenAiToken, String> {
     match selected_profile {
         Some(profile) => match profile.auth_mode {
-            ProfileAuthMode::ApiKey => resolve_profile_api_token(profile),
+            ProfileAuthMode::ApiKey => Ok(ResolvedOpenAiToken {
+                token: resolve_profile_api_token(profile)?,
+                uses_account_session: false,
+            }),
             ProfileAuthMode::OpenaiAccount => {
                 let session = openai_oauth::resolve_session_for_runtime().await?;
-                if session.refreshed {
-                    println!("Refreshed OpenAI account session for this invocation.");
-                }
-                Ok(session.access_token)
+                Ok(ResolvedOpenAiToken {
+                    token: session.access_token,
+                    uses_account_session: true,
+                })
             }
             ProfileAuthMode::None => Err(format!(
                 "Profile '{}' auth mode is '{}'. Set it to '{}' or '{}' before using OpenAI without `--token`.",
@@ -76,14 +85,11 @@ async fn resolve_openai_token_for_request(
             )),
         },
         None => {
-            let session = openai_oauth::resolve_session_for_runtime().await.map_err(|_| {
-                "OpenAI authentication is missing. Use `cargo ai auth login openai`, configure a profile with `profile auth set <name> openai_account`, or pass `--token`."
-                    .to_string()
-            })?;
-            if session.refreshed {
-                println!("Refreshed OpenAI account session for this invocation.");
-            }
-            Ok(session.access_token)
+            let session = openai_oauth::resolve_session_for_runtime().await?;
+            Ok(ResolvedOpenAiToken {
+                token: session.access_token,
+                uses_account_session: true,
+            })
         }
     }
 }
@@ -104,6 +110,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     let mut token = String::new();
     let mut timeout_in_sec: u64 = 60; // Default
     let mut selected_profile: Option<SelectedProfile> = None;
+    let mut use_openai_account_transport = false;
 
     // 1️⃣ If profile is set, load values from config
     if let Some(profile_name) = sub_m.get_one::<String>("profile") {
@@ -184,11 +191,6 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         }
     };
 
-    // Final URL fallback based on resolved server.
-    if url.is_empty() {
-        url = provider.default_url().to_string();
-    }
-
     if let Some(cmd_token) = explicit_token_override {
         if provider == ProviderKind::OpenAi {
             println!("Using explicit --token override; bypassing profile auth-mode resolution.");
@@ -196,12 +198,24 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         token = cmd_token;
     } else if provider == ProviderKind::OpenAi {
         token = match resolve_openai_token_for_request(selected_profile.as_ref()).await {
-            Ok(resolved_token) => resolved_token,
+            Ok(resolved_token) => {
+                use_openai_account_transport = resolved_token.uses_account_session;
+                resolved_token.token
+            }
             Err(error) => {
                 eprintln!("❌ {error}");
                 return false;
             }
         };
+    }
+
+    // Final URL fallback based on resolved server/auth mode.
+    if url.is_empty() {
+        if provider == ProviderKind::OpenAi && use_openai_account_transport {
+            url = openai_oauth::OPENAI_ACCOUNT_RESPONSES_URL.to_string();
+        } else {
+            url = provider.default_url().to_string();
+        }
     }
 
     if let Err(validation_issues) = validate_provider_request(provider, &model, &url, &token) {

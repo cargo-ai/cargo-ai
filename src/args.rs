@@ -584,6 +584,32 @@ mod tests {
     }
 
     #[test]
+    fn auth_logout_global_and_alias_flags_parse() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "auth", "logout", "--global", "--yes"])
+            .expect("auth logout --global should parse");
+
+        let logout = matches
+            .subcommand_matches("auth")
+            .and_then(|m| m.subcommand_matches("logout"))
+            .expect("auth logout should be available");
+
+        assert!(logout.get_flag("global"));
+        assert!(logout.get_flag("yes"));
+
+        let alias_matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "auth", "logout", "--revoke"])
+            .expect("auth logout --revoke alias should parse");
+
+        let alias_logout = alias_matches
+            .subcommand_matches("auth")
+            .and_then(|m| m.subcommand_matches("logout"))
+            .expect("auth logout should be available");
+
+        assert!(alias_logout.get_flag("revoke"));
+    }
+
+    #[test]
     fn profile_token_set_env_parses() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from([

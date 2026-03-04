@@ -90,6 +90,8 @@ cargo ai auth login openai --profile openai --set-default
 cargo ai profile auth set openai openai_account
 ```
 
+`cargo ai auth login openai` follows OpenAI/Codex browser sign-in semantics and reads session tokens from Codex local auth storage (`$CODEX_HOME/auth.json`, or `~/.codex/auth.json` by default) without importing duplicate OpenAI account tokens into Cargo AI secret stores.
+
 Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change the default URL, use:
 ```bash
 --url <custom_llm_endpoint>
@@ -110,7 +112,9 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 - Manage OpenAI auth session with:
   - `cargo ai auth login openai [--profile <name>] [--set-default]`
   - `cargo ai auth status [--json]`
-  - `cargo ai auth logout [--revoke] [--yes]`
+  - `cargo ai auth logout [--global] [--yes]`
+- `cargo ai auth logout` is local-only by default (Cargo AI stops using OpenAI account auth, Codex remains signed in).
+- Use `cargo ai auth logout --global` to also run `codex logout`.
 - Manage profile auth/token material with:
   - `cargo ai profile auth set <name> <none|api_key|openai_account>`
   - `cargo ai profile auth status [<name>]`

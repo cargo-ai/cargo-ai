@@ -1,29 +1,13 @@
 //! Runtime behavior for `cargo ai auth`.
 use clap::ArgMatches;
 use serde::Serialize;
-use serde_json::Value;
 use std::io::{self, Write};
 use std::process::Command;
-use std::time::Duration;
 
 use crate::config::loader::load_config;
-use crate::config::schema::{
-    default_profile_auth_mode, default_secret_store_mode, ProfileAuthMode,
-};
+use crate::config::schema::{default_profile_auth_mode, default_secret_store_mode, ProfileAuthMode};
 use crate::config::settings as config_settings;
 use crate::credentials::{openai_oauth, store};
-use crate::infra_api;
-
-const DEFAULT_POLL_INTERVAL_SECONDS: u64 = 2;
-const MAX_LOGIN_POLL_ATTEMPTS: usize = 180;
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum PollLoginState {
-    Pending,
-    Succeeded,
-    Failed,
-    Unknown,
-}
 
 #[derive(Debug, Serialize)]
 struct AuthStatusJson {
@@ -43,28 +27,6 @@ fn now_unix_seconds() -> i64 {
         .unwrap_or(0)
 }
 
-fn parse_poll_login_state(status: &str) -> PollLoginState {
-    let normalized = status.trim().to_ascii_lowercase();
-    if normalized.contains("pending") || normalized.contains("wait") {
-        PollLoginState::Pending
-    } else if normalized.contains("success")
-        || normalized.contains("succeed")
-        || normalized.contains("complete")
-        || normalized.contains("authorized")
-    {
-        PollLoginState::Succeeded
-    } else if normalized.contains("error")
-        || normalized.contains("fail")
-        || normalized.contains("deny")
-        || normalized.contains("cancel")
-        || normalized.contains("expire")
-    {
-        PollLoginState::Failed
-    } else {
-        PollLoginState::Unknown
-    }
-}
-
 fn confirm(message: &str) -> Result<bool, String> {
     print!("{message} [y/N]: ");
     io::stdout()
@@ -79,40 +41,6 @@ fn confirm(message: &str) -> Result<bool, String> {
         input.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
-}
-
-fn open_browser(url: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = Command::new("open");
-        command.arg(url);
-        command
-    };
-
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "start", "", url]);
-        command
-    };
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut command = {
-        let mut command = Command::new("xdg-open");
-        command.arg(url);
-        command
-    };
-
-    let status = command
-        .status()
-        .map_err(|error| format!("failed to launch browser command: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "browser launch command exited with status {status}"
-        ))
-    }
 }
 
 fn validate_profile_target(profile_name: &str) -> Result<(), String> {
@@ -169,28 +97,42 @@ fn effective_auth_mode_for_status() -> String {
 }
 
 fn local_session_state() -> Result<AuthStatusJson, String> {
-    let tokens = store::load_openai_oauth_tokens().map_err(|error| {
-        format!("failed to load OpenAI OAuth session from secret store: {error}")
-    })?;
-
-    let metadata = openai_oauth::load_metadata();
+    let session = openai_oauth::load_codex_session()?;
     let now = now_unix_seconds();
-    let access_token_expires_at_unix = openai_oauth::expires_at_unix(metadata);
+    let locally_disabled = openai_oauth::openai_account_locally_disabled();
 
-    let session_state = if tokens.is_none() {
-        "logged_out".to_string()
-    } else if openai_oauth::token_expired_or_near(metadata, now) {
-        "expiring".to_string()
-    } else if access_token_expires_at_unix.is_some() {
-        "active".to_string()
+    let access_token_expires_at_unix = if locally_disabled {
+        None
     } else {
-        "active_unknown_expiry".to_string()
+        session
+            .as_ref()
+            .and_then(|session| session.access_token_expires_at_unix)
     };
 
-    let has_refresh_token = tokens
-        .as_ref()
-        .and_then(|tokens| tokens.refresh_token.as_ref())
-        .is_some();
+    let session_state = match session.as_ref() {
+        _ if locally_disabled => "logged_out_local".to_string(),
+        None => "logged_out".to_string(),
+        Some(session)
+            if openai_oauth::access_token_expired_or_near(
+                session.access_token_expires_at_unix,
+                now,
+            ) =>
+        {
+            "expiring".to_string()
+        }
+        Some(session) if session.access_token_expires_at_unix.is_some() => "active".to_string(),
+        Some(_) => "active_unknown_expiry".to_string(),
+    };
+
+    let has_refresh_token = if locally_disabled {
+        false
+    } else {
+        session
+            .as_ref()
+            .and_then(|session| session.refresh_token.as_ref())
+            .is_some()
+    };
+
     let configured_store_mode = store::configured_secret_store_mode()
         .unwrap_or(default_secret_store_mode())
         .as_str()
@@ -206,6 +148,45 @@ fn local_session_state() -> Result<AuthStatusJson, String> {
     })
 }
 
+fn run_codex_login() -> Result<(), String> {
+    let status = Command::new("codex")
+        .arg("login")
+        .status()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                "`codex` CLI was not found in PATH. Install Codex and run `codex login`, then retry `cargo ai auth login openai`.".to_string()
+            } else {
+                format!("failed to run `codex login`: {error}")
+            }
+        })?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("`codex login` exited with status {status}"))
+    }
+}
+
+fn run_codex_logout() -> Result<(), String> {
+    let status = Command::new("codex")
+        .arg("logout")
+        .status()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                "`codex` CLI was not found in PATH. Install Codex to use `cargo ai auth logout`."
+                    .to_string()
+            } else {
+                format!("failed to run `codex logout`: {error}")
+            }
+        })?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("`codex logout` exited with status {status}"))
+    }
+}
+
 async fn run_login_openai(login_openai_m: &ArgMatches) -> bool {
     let profile_name = login_openai_m
         .get_one::<String>("profile")
@@ -219,136 +200,61 @@ async fn run_login_openai(login_openai_m: &ArgMatches) -> bool {
         }
     }
 
-    println!("Starting OpenAI browser login...");
-    let start_response =
-        match infra_api::auth::openai::start_login(openai_oauth::OPENAI_INFRA_BASE_URL).await {
-            Ok(response) => response,
-            Err(error) => {
-                eprintln!("❌ Failed to initialize OpenAI login: {error}");
-                return false;
-            }
-        };
+    println!("Starting OpenAI browser login via Codex...");
+    if let Err(error) = run_codex_login() {
+        eprintln!("❌ {error}");
+        return false;
+    }
 
-    println!("OpenAI login URL:");
-    println!("{}", start_response.login_url);
-    match open_browser(start_response.login_url.as_str()) {
-        Ok(()) => println!("Opened your browser. Complete login there to continue."),
+    match openai_oauth::load_codex_session() {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            eprintln!(
+                "❌ Codex login completed, but no local auth session was found. Verify Codex is configured and run `codex login` again."
+            );
+            return false;
+        }
         Err(error) => {
-            eprintln!("⚠️ Could not open a browser automatically: {error}");
-            eprintln!("Use the URL above to complete login manually.");
+            eprintln!("❌ Failed to read Codex auth session: {error}");
+            return false;
         }
     }
 
-    let poll_interval = start_response
-        .poll_interval_seconds
-        .unwrap_or(DEFAULT_POLL_INTERVAL_SECONDS)
-        .max(1);
+    // Clean up any duplicated OpenAI session material from prior Cargo AI builds.
+    openai_oauth::clear_legacy_openai_session_tokens();
+    if let Err(error) = config_settings::set_openai_auth_locally_disabled(false) {
+        eprintln!("❌ Login succeeded, but failed to clear local logout state: {error}");
+        return false;
+    }
 
-    for _attempt in 0..MAX_LOGIN_POLL_ATTEMPTS {
-        tokio::time::sleep(Duration::from_secs(poll_interval)).await;
-
-        let poll_response = match infra_api::auth::openai::poll_login(
-            openai_oauth::OPENAI_INFRA_BASE_URL,
-            start_response.login_id.as_str(),
-        )
-        .await
+    if let Some(profile_name) = profile_name {
+        if let Err(error) =
+            config_settings::set_profile_auth_mode(profile_name, ProfileAuthMode::OpenaiAccount)
         {
-            Ok(response) => response,
-            Err(error) => {
-                eprintln!("❌ Failed while polling OpenAI login status: {error}");
-                return false;
-            }
-        };
-
-        if let Some(credentials) = poll_response.credentials {
-            let access_token = credentials.access_token.trim().to_string();
-            if access_token.is_empty() {
-                eprintln!("❌ OpenAI login succeeded but returned an empty access token.");
-                return false;
-            }
-
-            let refresh_token = credentials
-                .refresh_token
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
-
-            if let Err(error) =
-                store::store_openai_oauth_tokens(access_token.as_str(), refresh_token.as_deref())
-            {
-                eprintln!("❌ Failed to persist OpenAI session credentials: {error}");
-                return false;
-            }
-
-            let issued_at = if credentials.expires_in.is_some() {
-                Some(now_unix_seconds())
-            } else {
-                None
-            };
-            if let Err(error) =
-                config_settings::set_openai_auth_metadata(credentials.expires_in, issued_at)
-            {
-                eprintln!("❌ Failed to persist OpenAI session metadata: {error}");
-                return false;
-            }
-
-            if let Some(profile_name) = profile_name {
-                if let Err(error) = config_settings::set_profile_auth_mode(
-                    profile_name,
-                    ProfileAuthMode::OpenaiAccount,
-                ) {
-                    eprintln!(
-                        "❌ Login succeeded, but failed to update profile auth mode: {error}"
-                    );
-                    return false;
-                }
-
-                if set_default {
-                    if let Err(error) = config_settings::set_default_profile(profile_name) {
-                        eprintln!("❌ Login succeeded, but failed to set default profile: {error}");
-                        return false;
-                    }
-                }
-            }
-
-            println!("✅ OpenAI login complete.");
-            if let Some(profile_name) = profile_name {
-                println!(
-                    "Profile '{profile_name}' auth mode set to '{}'.",
-                    ProfileAuthMode::OpenaiAccount.as_str()
-                );
-                if set_default {
-                    println!("Profile '{profile_name}' set as default.");
-                }
-            }
-            return true;
+            eprintln!("❌ Login succeeded, but failed to update profile auth mode: {error}");
+            return false;
         }
 
-        if let Some(status) = poll_response.status.as_deref() {
-            match parse_poll_login_state(status) {
-                PollLoginState::Pending => continue,
-                PollLoginState::Succeeded => {
-                    eprintln!("❌ OpenAI login reported success but returned no credentials.");
-                    return false;
-                }
-                PollLoginState::Failed => {
-                    let message = poll_response
-                        .message
-                        .unwrap_or_else(|| "OpenAI login failed.".to_string());
-                    eprintln!("❌ {message}");
-                    return false;
-                }
-                PollLoginState::Unknown => {
-                    let _ = status;
-                    continue;
-                }
+        if set_default {
+            if let Err(error) = config_settings::set_default_profile(profile_name) {
+                eprintln!("❌ Login succeeded, but failed to set default profile: {error}");
+                return false;
             }
         }
     }
 
-    eprintln!("❌ Timed out waiting for OpenAI login to complete.");
-    false
+    println!("✅ OpenAI login complete (Codex session detected).");
+    if let Some(profile_name) = profile_name {
+        println!(
+            "Profile '{profile_name}' auth mode set to '{}'.",
+            ProfileAuthMode::OpenaiAccount.as_str()
+        );
+        if set_default {
+            println!("Profile '{profile_name}' set as default.");
+        }
+    }
+
+    true
 }
 
 fn render_status_text(status: &AuthStatusJson) {
@@ -357,11 +263,7 @@ fn render_status_text(status: &AuthStatusJson) {
     println!("Effective auth mode: {}", status.auth_mode_effective);
     println!(
         "Refresh token present: {}",
-        if status.has_refresh_token {
-            "yes"
-        } else {
-            "no"
-        }
+        if status.has_refresh_token { "yes" } else { "no" }
     );
     println!(
         "Access token expires at (unix): {}",
@@ -371,14 +273,6 @@ fn render_status_text(status: &AuthStatusJson) {
             .unwrap_or_else(|| "(unknown)".to_string())
     );
     println!("Secret-store mode: {}", status.secret_store_mode);
-}
-
-fn value_indicates_success(payload: &Value) -> bool {
-    payload
-        .get("status")
-        .and_then(Value::as_str)
-        .map(|status| status.eq_ignore_ascii_case("success"))
-        .unwrap_or(false)
 }
 
 async fn run_status(status_m: &ArgMatches) -> bool {
@@ -406,14 +300,14 @@ async fn run_status(status_m: &ArgMatches) -> bool {
 }
 
 async fn run_logout(logout_m: &ArgMatches) -> bool {
-    let revoke = logout_m.get_flag("revoke");
+    let global = logout_m.get_flag("global") || logout_m.get_flag("revoke");
     let yes = logout_m.get_flag("yes");
 
     if !yes {
-        let prompt = if revoke {
-            "Log out of OpenAI and request remote revoke?"
+        let prompt = if global {
+            "Log out of OpenAI for Cargo AI and also log out Codex globally?"
         } else {
-            "Log out of OpenAI locally?"
+            "Log out of OpenAI for Cargo AI only? (Codex stays signed in)"
         };
         let confirmed = match confirm(prompt) {
             Ok(confirmed) => confirmed,
@@ -428,58 +322,27 @@ async fn run_logout(logout_m: &ArgMatches) -> bool {
         }
     }
 
-    let local_tokens = match store::load_openai_oauth_tokens() {
-        Ok(tokens) => tokens,
-        Err(error) => {
-            eprintln!("❌ Failed to load OpenAI session from secret store: {error}");
+    if global {
+        if let Err(error) = run_codex_logout() {
+            eprintln!("❌ {error}");
             return false;
-        }
-    };
-
-    let mut revoke_warning: Option<String> = None;
-    if revoke {
-        if let Some(tokens) = local_tokens.as_ref() {
-            match infra_api::auth::openai::logout(
-                openai_oauth::OPENAI_INFRA_BASE_URL,
-                tokens.access_token.as_str(),
-                tokens.refresh_token.as_deref(),
-                true,
-            )
-            .await
-            {
-                Ok(response) => {
-                    if !value_indicates_success(&response) {
-                        let detail = response
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("remote revoke returned a non-success status");
-                        revoke_warning = Some(format!(
-                            "Remote revoke did not complete successfully: {detail}"
-                        ));
-                    }
-                }
-                Err(error) => {
-                    revoke_warning = Some(format!("Remote revoke failed: {error}"));
-                }
-            }
-        } else {
-            revoke_warning = Some(
-                "No local OpenAI session was found, so remote revoke was not attempted."
-                    .to_string(),
-            );
         }
     }
 
     if let Err(error) = openai_oauth::clear_local_session() {
-        eprintln!("❌ Failed to clear local OpenAI session: {error}");
+        eprintln!("❌ Failed to clear local OpenAI metadata: {error}");
+        return false;
+    }
+    if let Err(error) = config_settings::set_openai_auth_locally_disabled(true) {
+        eprintln!("❌ Failed to persist local Cargo AI logout state: {error}");
         return false;
     }
 
-    println!("✅ Local OpenAI session cleared.");
-    if let Some(warning) = revoke_warning {
-        eprintln!("⚠️ {warning}");
+    if global {
+        println!("✅ OpenAI logged out globally via Codex and logged out for Cargo AI.");
+    } else {
+        println!("✅ OpenAI logged out for Cargo AI only. Codex session remains signed in.");
     }
-
     true
 }
 
@@ -498,21 +361,8 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         run_logout(logout_m).await
     } else {
         eprintln!(
-            "No auth subcommand found. Try 'cargo ai auth login openai', 'cargo ai auth status [--json]', or 'cargo ai auth logout [--revoke] [--yes]'."
+            "No auth subcommand found. Try 'cargo ai auth login openai', 'cargo ai auth status [--json]', or 'cargo ai auth logout [--global] [--yes]'."
         );
         false
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{parse_poll_login_state, PollLoginState};
-
-    #[test]
-    fn parse_poll_login_state_maps_known_variants() {
-        assert_eq!(parse_poll_login_state("pending"), PollLoginState::Pending);
-        assert_eq!(parse_poll_login_state("success"), PollLoginState::Succeeded);
-        assert_eq!(parse_poll_login_state("failed"), PollLoginState::Failed);
-        assert_eq!(parse_poll_login_state("wat"), PollLoginState::Unknown);
     }
 }

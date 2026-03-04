@@ -42,11 +42,18 @@ pub fn command() -> Command {
         )
         .subcommand(
             Command::new("logout")
-                .about("Clear OpenAI account-login session")
+                .about("Log out of OpenAI for Cargo AI (local by default)")
+                .arg(
+                    Arg::new("global")
+                        .long("global")
+                        .help("Also log out Codex/OpenAI session globally via `codex logout`")
+                        .required(false)
+                        .action(ArgAction::SetTrue),
+                )
                 .arg(
                     Arg::new("revoke")
                         .long("revoke")
-                        .help("Request remote session revocation before local clear")
+                        .help("Deprecated alias for --global")
                         .required(false)
                         .action(ArgAction::SetTrue),
                 )

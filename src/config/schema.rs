@@ -130,6 +130,9 @@ pub struct OpenAiAuth {
 
     #[serde(default)]
     pub access_token_issued_at: Option<i64>,
+
+    #[serde(default)]
+    pub locally_disabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

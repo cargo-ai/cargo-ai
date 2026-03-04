@@ -1,50 +1,131 @@
 // External Crates
 use super::{ProviderError, ProviderKind};
-use reqwest::ClientBuilder; // HTTP client builder
-use serde::{Deserialize, Serialize}; // Data format (e.g.,JSON, TOML) (de)serialization
-use std::time::Duration; // Duration for timeout handling
+use reqwest::ClientBuilder;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+const CHATGPT_CODEX_ENDPOINT_MARKER: &str = "chatgpt.com/backend-api/codex";
 
 #[derive(Serialize, Debug)]
-pub struct Request {
-    pub model: String,          // Model name for OpenAI
-    pub messages: Vec<Message>, // List of messages for chat format
-    pub temperature: f64,       // Temperature setting
+pub struct ChatCompletionsRequest {
+    pub model: String,
+    pub messages: Vec<Message>,
+    pub temperature: f64,
     pub response_format: serde_json::Value,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Message {
-    pub role: String,    // "user", "assistant", or "system"
-    pub content: String, // The actual prompt or message content
+    pub role: String,
+    pub content: String,
 }
 
 #[derive(Deserialize, Debug)]
-#[allow(dead_code)] // Currently not using all response fields
-pub struct Response {
-    pub id: String,           // Unique identifier for the chat session
-    pub object: String,       // Object type, usually "chat.completion"
-    pub created: u64,         // Timestamp when the response was created
-    pub model: String,        // Model name used for the response
-    pub choices: Vec<Choice>, // List of choices (contains the actual answer)
-    pub usage: Usage,         // Information about token usage
+#[allow(dead_code)]
+pub struct ChatCompletionsResponse {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<Choice>,
+    pub usage: Usage,
 }
 
 #[derive(Deserialize, Debug)]
-#[allow(dead_code)] // Currently not using all response fields
+#[allow(dead_code)]
 pub struct Choice {
-    pub message: Message,              // Contains the assistant's message
-    pub finish_reason: Option<String>, // Reason for stopping (e.g., "stop")
-    pub index: usize,                  // Index of the choice
+    pub message: Message,
+    pub finish_reason: Option<String>,
+    pub index: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Usage {
-    pub prompt_tokens: u32,     // Number of tokens in the prompt
-    pub completion_tokens: u32, // Number of tokens in the completion
-    pub total_tokens: u32,      // Total number of tokens used
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
 }
 
-pub async fn send_request(
+fn is_chatgpt_codex_responses_endpoint(url: &str) -> bool {
+    url.contains(CHATGPT_CODEX_ENDPOINT_MARKER)
+}
+
+fn normalize_chatgpt_responses_url(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    if trimmed.ends_with("/responses") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/responses")
+    }
+}
+
+fn responses_text_format_from_chat_response_format(
+    response_format: &serde_json::Value,
+) -> serde_json::Value {
+    if response_format
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        == Some("json_schema")
+    {
+        if let Some(json_schema) = response_format.get("json_schema") {
+            let mut format = serde_json::Map::new();
+            format.insert(
+                "type".to_string(),
+                serde_json::Value::String("json_schema".to_string()),
+            );
+
+            if let Some(name) = json_schema.get("name") {
+                format.insert("name".to_string(), name.clone());
+            }
+            if let Some(schema) = json_schema.get("schema") {
+                format.insert("schema".to_string(), schema.clone());
+            }
+            if let Some(strict) = json_schema.get("strict") {
+                format.insert("strict".to_string(), strict.clone());
+            }
+
+            return serde_json::Value::Object(format);
+        }
+    }
+
+    serde_json::json!({ "type": "text" })
+}
+
+fn parse_stream_failure_message(payload: &serde_json::Value) -> Option<String> {
+    payload
+        .get("error")
+        .and_then(|error| {
+            error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .or_else(|| {
+                    error
+                        .get("code")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+        })
+        .or_else(|| {
+            payload
+                .get("response")
+                .and_then(|response| response.get("error"))
+                .and_then(|error| {
+                    error
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+        })
+        .or_else(|| {
+            payload
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+async fn send_chat_completions_request(
     url: &String,
     model: &String,
     prompt: &String,
@@ -55,7 +136,7 @@ pub async fn send_request(
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()
-        .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?; // 30 sec Default too short for some requests.
+        .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
 
     let temperature = if model.starts_with("gpt-5") {
         1.0
@@ -63,26 +144,17 @@ pub async fn send_request(
         super::DEFAULT_TEMPERATURE
     };
 
-    let role = String::from("user");
-
     let message = Message {
-        role,
+        role: "user".to_string(),
         content: prompt.clone(),
     };
 
-    let messages = vec![message];
-
-    // When `structured` is true, request JSON-only output (OpenAI: response_format = json_object).
-    // This is equivalent to Ollama's `format: "json"` and enforces valid JSON shape at the transport level.
-    let request = Request {
+    let request = ChatCompletionsRequest {
         model: model.clone(),
-        messages,
+        messages: vec![message],
         temperature,
-        response_format: response_format.clone(),
+        response_format,
     };
-
-    // Print the request JSON before sending
-    // println!("OpenAI request JSON:\n{}", serde_json::to_string_pretty(&request)?);
 
     let http_resp = client
         .post(url)
@@ -108,27 +180,176 @@ pub async fn send_request(
         ));
     }
 
-    // Parse as usual from the captured bytes
-    let response: Response = match serde_json::from_slice(&body_bytes) {
+    let response: ChatCompletionsResponse = match serde_json::from_slice(&body_bytes) {
         Ok(resp) => resp,
-        Err(e) => {
+        Err(error) => {
             let raw = String::from_utf8_lossy(&body_bytes);
             return Err(ProviderError::invalid_response(
                 ProviderKind::OpenAi,
-                format!("Failed to parse JSON: {e}\nRaw response:\n{raw}"),
+                format!("Failed to parse JSON: {error}\\nRaw response:\\n{raw}"),
             ));
         }
     };
 
-    let response_content = match response.choices.first() {
-        Some(choice) => choice.message.content.clone(),
-        None => {
+    match response.choices.first() {
+        Some(choice) => Ok(choice.message.content.clone()),
+        None => Err(ProviderError::invalid_response(
+            ProviderKind::OpenAi,
+            "No ChatGPT response choice at index 0.",
+        )),
+    }
+}
+
+async fn send_chatgpt_codex_responses_request(
+    url: &String,
+    model: &String,
+    prompt: &String,
+    timeout_in_sec: u64,
+    token: &String,
+    response_format: serde_json::Value,
+) -> Result<String, ProviderError> {
+    let client = ClientBuilder::new()
+        .timeout(Duration::from_secs(timeout_in_sec))
+        .build()
+        .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
+
+    let request_payload = serde_json::json!({
+        "model": model,
+        "instructions": "Return a valid response for the provided prompt.",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": prompt
+                    }
+                ]
+            }
+        ],
+        "text": {
+            "format": responses_text_format_from_chat_response_format(&response_format)
+        },
+        "store": false,
+        "stream": true
+    });
+
+    let endpoint = normalize_chatgpt_responses_url(url);
+    let http_resp = client
+        .post(endpoint.as_str())
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&request_payload)
+        .send()
+        .await
+        .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
+
+    let status = http_resp.status();
+    if !status.is_success() {
+        let raw = http_resp
+            .text()
+            .await
+            .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
+        return Err(ProviderError::from_http_status(
+            ProviderKind::OpenAi,
+            status,
+            raw.as_str(),
+        ));
+    }
+
+    let raw_stream = http_resp
+        .text()
+        .await
+        .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
+
+    let mut accumulated_text = String::new();
+    let mut completed_text: Option<String> = None;
+
+    for raw_line in raw_stream.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        let Some(payload) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        if payload.trim().is_empty() || payload.trim() == "[DONE]" {
+            continue;
+        }
+
+        let event_json = serde_json::from_str::<serde_json::Value>(payload).map_err(|error| {
+            ProviderError::invalid_response(
+                ProviderKind::OpenAi,
+                format!("Failed to parse streaming payload: {error}\\nPayload: {payload}"),
+            )
+        })?;
+
+        let event_type = event_json
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+
+        if event_type == "response.output_text.delta" {
+            if let Some(delta) = event_json.get("delta").and_then(serde_json::Value::as_str) {
+                accumulated_text.push_str(delta);
+            }
+            continue;
+        }
+
+        if event_type == "response.output_text.done" {
+            if let Some(text) = event_json
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
+                completed_text = Some(text.to_string());
+            }
+            continue;
+        }
+
+        if event_type == "response.failed" || event_type == "error" {
+            let detail =
+                parse_stream_failure_message(&event_json).unwrap_or_else(|| payload.to_string());
             return Err(ProviderError::invalid_response(
                 ProviderKind::OpenAi,
-                "No ChatGPT response choice at index 0.",
-            ))
+                format!("OpenAI stream failed: {detail}"),
+            ));
         }
-    };
+    }
 
-    Ok(response_content)
+    if let Some(done) = completed_text {
+        return Ok(done);
+    }
+
+    let fallback = accumulated_text.trim().to_string();
+    if !fallback.is_empty() {
+        return Ok(fallback);
+    }
+
+    Err(ProviderError::invalid_response(
+        ProviderKind::OpenAi,
+        "OpenAI stream completed without output text.",
+    ))
+}
+
+pub async fn send_request(
+    url: &String,
+    model: &String,
+    prompt: &String,
+    timeout_in_sec: u64,
+    token: &String,
+    response_format: serde_json::Value,
+) -> Result<String, ProviderError> {
+    if is_chatgpt_codex_responses_endpoint(url) {
+        send_chatgpt_codex_responses_request(
+            url,
+            model,
+            prompt,
+            timeout_in_sec,
+            token,
+            response_format,
+        )
+        .await
+    } else {
+        send_chat_completions_request(url, model, prompt, timeout_in_sec, token, response_format)
+            .await
+    }
 }

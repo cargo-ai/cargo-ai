@@ -5,5 +5,4 @@
 // into a standalone library later.
 
 pub mod account;
-pub mod auth;
 // pub mod public; // placeholder for later

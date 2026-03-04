@@ -84,14 +84,20 @@ pub fn set_profile_auth_mode(profile_name: &str, mode: ProfileAuthMode) -> Resul
     })
 }
 
+#[allow(dead_code)]
 pub fn set_openai_auth_metadata(
     access_token_expires_in: Option<i32>,
     access_token_issued_at: Option<i64>,
 ) -> Result<(), String> {
     mutate_config(|cfg| {
+        let locally_disabled = cfg
+            .openai_auth
+            .as_ref()
+            .and_then(|auth| auth.locally_disabled);
         cfg.openai_auth = Some(OpenAiAuth {
             access_token_expires_in,
             access_token_issued_at,
+            locally_disabled,
         });
         Ok(())
     })
@@ -100,6 +106,15 @@ pub fn set_openai_auth_metadata(
 pub fn clear_openai_auth_metadata() -> Result<(), String> {
     mutate_config(|cfg| {
         cfg.openai_auth = None;
+        Ok(())
+    })
+}
+
+pub fn set_openai_auth_locally_disabled(disabled: bool) -> Result<(), String> {
+    mutate_config(|cfg| {
+        let mut openai_auth = cfg.openai_auth.take().unwrap_or_default();
+        openai_auth.locally_disabled = Some(disabled);
+        cfg.openai_auth = Some(openai_auth);
         Ok(())
     })
 }

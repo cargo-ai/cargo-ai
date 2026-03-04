@@ -458,6 +458,7 @@ fn clear_account_tokens_in_file_with_path(path: &Path) -> Result<(), String> {
     write_credentials_file(path, &credentials)
 }
 
+#[allow(dead_code)]
 fn load_openai_oauth_tokens_from_file_with_path(
     path: &Path,
 ) -> Result<Option<OpenAiOAuthTokens>, String> {
@@ -487,6 +488,7 @@ fn load_openai_oauth_tokens_from_file_with_path(
     }))
 }
 
+#[allow(dead_code)]
 fn store_openai_oauth_tokens_in_file_with_path(
     path: &Path,
     access_token: &str,
@@ -938,6 +940,7 @@ pub fn clear_account_tokens() -> Result<(), String> {
     clear_account_tokens_in_file_with_path(&credentials_path())
 }
 
+#[allow(dead_code)]
 pub fn load_openai_oauth_tokens() -> Result<Option<OpenAiOAuthTokens>, String> {
     match configured_secret_store_mode() {
         Some(SecretStoreMode::File) => {
@@ -963,6 +966,7 @@ pub fn load_openai_oauth_tokens() -> Result<Option<OpenAiOAuthTokens>, String> {
     }
 }
 
+#[allow(dead_code)]
 pub fn store_openai_oauth_tokens(
     access_token: &str,
     refresh_token: Option<&str>,

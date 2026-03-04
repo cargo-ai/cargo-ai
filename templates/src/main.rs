@@ -6,6 +6,8 @@ mod providers;
 
 use jsonlogic::apply;
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
 
 use config::loader::{find_profile, load_config};
 use config::schema::{Profile, ProfileAuthMode};
@@ -13,7 +15,7 @@ use providers::{provider_error_messages, validate_provider_request, ProviderKind
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
-const OPENAI_INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
+const OPENAI_ACCOUNT_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const OPENAI_REFRESH_BUFFER_SEC: i64 = 30;
 
 fn unknown_server_messages(server: &str) -> Vec<String> {
@@ -38,6 +40,12 @@ struct SelectedProfile {
     name: String,
     auth_mode: ProfileAuthMode,
     legacy_token: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedOpenAiToken {
+    token: String,
+    uses_account_session: bool,
 }
 
 fn resolve_profile_api_token(profile: &SelectedProfile) -> Result<String, String> {
@@ -70,132 +78,157 @@ fn now_unix_seconds() -> i64 {
         .unwrap_or(0)
 }
 
-fn openai_token_expired_or_near(config: Option<&config::schema::Config>) -> bool {
-    let Some(config) = config else {
-        return false;
-    };
-    let Some(openai_auth) = config.openai_auth.as_ref() else {
-        return false;
-    };
-    let Some(issued_at) = openai_auth.access_token_issued_at else {
-        return false;
-    };
-    let Some(expires_in) = openai_auth.access_token_expires_in else {
-        return false;
-    };
+#[derive(Debug, Clone)]
+struct CodexSession {
+    access_token: String,
+    access_token_expires_at_unix: Option<i64>,
+}
 
-    if issued_at <= 0 || expires_in <= 0 {
-        return false;
+fn parse_unix_timestamp(value: &serde_json::Value) -> Option<i64> {
+    if let Some(seconds) = value.as_i64() {
+        return Some(if seconds > 1_000_000_000_000 {
+            seconds / 1000
+        } else {
+            seconds
+        });
     }
 
-    let expires_at = issued_at.saturating_add(expires_in as i64);
-    expires_at.saturating_sub(OPENAI_REFRESH_BUFFER_SEC) <= now_unix_seconds()
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiSessionStatusResponse {
-    #[serde(default)]
-    session: Option<OpenAiSessionStatusSession>,
-
-    #[serde(default)]
-    message: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiSessionStatusSession {
-    #[serde(default)]
-    access_token: Option<String>,
-}
-
-async fn refresh_openai_oauth_access_token(
-    access_token: &str,
-    refresh_token: &str,
-) -> Result<String, String> {
-    let payload = serde_json::json!({
-        "action": "session_status",
-        "credentials": {
-            "access_token": access_token,
-            "refresh_token": refresh_token
-        }
-    });
-
-    let url = format!("{}/auth/openai", OPENAI_INFRA_BASE_URL.trim_end_matches('/'));
-    let response = reqwest::Client::new()
-        .post(url)
-        .header("Content-Type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|error| format!("request failed: {error}"))?;
-
-    let body = response
-        .json::<OpenAiSessionStatusResponse>()
-        .await
-        .map_err(|error| format!("failed to parse response JSON: {error}"))?;
-
-    body.session
-        .and_then(|session| session.access_token)
-        .map(|access_token| access_token.trim().to_string())
-        .filter(|access_token| !access_token.is_empty())
-        .ok_or_else(|| {
-            body.message.unwrap_or_else(|| {
-                "OpenAI session refresh succeeded but no access token was returned.".to_string()
-            })
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .map(|seconds| {
+            if seconds > 1_000_000_000_000 {
+                seconds / 1000
+            } else {
+                seconds
+            }
         })
+}
+
+fn parse_non_empty_token(container: &serde_json::Value, key: &str) -> Option<String> {
+    container
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+}
+
+fn parse_access_token_expires_at_unix(tokens: &serde_json::Value) -> Option<i64> {
+    let keys = [
+        "access_token_expires_at_unix",
+        "access_token_expires_at",
+        "expires_at",
+        "expiresAt",
+    ];
+
+    for key in keys {
+        if let Some(value) = tokens.get(key) {
+            if let Some(parsed) = parse_unix_timestamp(value) {
+                return Some(parsed);
+            }
+        }
+    }
+
+    None
+}
+
+fn codex_auth_path() -> Result<PathBuf, String> {
+    if let Ok(codex_home) = std::env::var("CODEX_HOME") {
+        let trimmed = codex_home.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed).join("auth.json"));
+        }
+    }
+
+    let home_dir = dirs::home_dir()
+        .ok_or_else(|| "failed to resolve home directory for Codex auth lookup".to_string())?;
+    Ok(home_dir.join(".codex").join("auth.json"))
+}
+
+fn load_codex_session() -> Result<Option<CodexSession>, String> {
+    let path = codex_auth_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
+    let parsed = serde_json::from_str::<serde_json::Value>(&raw)
+        .map_err(|error| format!("failed to parse Codex auth JSON: {error}"))?;
+
+    let tokens = parsed.get("tokens").ok_or_else(|| {
+        "Codex auth payload did not include a `tokens` object. Re-run `codex login`.".to_string()
+    })?;
+
+    let access_token = parse_non_empty_token(tokens, "access_token").ok_or_else(|| {
+        "Codex auth payload did not include a non-empty access token. Re-run `codex login`."
+            .to_string()
+    })?;
+
+    Ok(Some(CodexSession {
+        access_token,
+        access_token_expires_at_unix: parse_access_token_expires_at_unix(tokens),
+    }))
+}
+
+fn codex_access_token_expired_or_near(expires_at_unix: Option<i64>) -> bool {
+    match expires_at_unix {
+        Some(expires_at) => expires_at.saturating_sub(OPENAI_REFRESH_BUFFER_SEC) <= now_unix_seconds(),
+        None => false,
+    }
+}
+
+fn openai_account_locally_disabled(config: Option<&config::schema::Config>) -> bool {
+    config
+        .and_then(|cfg| cfg.openai_auth.as_ref())
+        .and_then(|auth| auth.locally_disabled)
+        .unwrap_or(false)
 }
 
 async fn resolve_openai_oauth_access_token(
     config: Option<&config::schema::Config>,
 ) -> Result<String, String> {
-    let tokens = credentials::store::load_openai_oauth_tokens().map_err(|error| {
-        format!("failed to load OpenAI OAuth session from secret store: {error}")
-    })?;
-
-    let Some(tokens) = tokens else {
+    if openai_account_locally_disabled(config) {
         return Err(
-            "OpenAI authentication is missing. Run `cargo ai auth login openai` or pass `--token`."
+            "OpenAI account auth is logged out for Cargo AI locally. Run `cargo ai auth login openai` to re-enable, or pass `--token`."
+                .to_string(),
+        );
+    }
+
+    let Some(session) = load_codex_session()? else {
+        return Err(
+            "OpenAI authentication is missing. Install Codex and run `codex login`, or pass `--token`."
                 .to_string(),
         );
     };
 
-    let access_token = tokens.access_token.trim().to_string();
-    if access_token.is_empty() {
+    if codex_access_token_expired_or_near(session.access_token_expires_at_unix) {
         return Err(
-            "OpenAI OAuth session exists but access token is empty. Re-run `cargo ai auth login openai`."
+            "OpenAI account session in Codex cache is expired or near expiry. Re-run `codex login`."
                 .to_string(),
         );
     }
 
-    if openai_token_expired_or_near(config) {
-        let Some(refresh_token) = tokens
-            .refresh_token
-            .as_deref()
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-        else {
-            return Err(
-                "OpenAI access token is expired/near expiry and no refresh token is available. Re-run `cargo ai auth login openai`."
-                    .to_string(),
-            );
-        };
-
-        let refreshed_token =
-            refresh_openai_oauth_access_token(access_token.as_str(), refresh_token).await?;
-        println!("Refreshed OpenAI account session for this invocation.");
-        return Ok(refreshed_token);
-    }
-
-    Ok(access_token)
+    Ok(session.access_token)
 }
 
 async fn resolve_openai_token_for_request(
     selected_profile: Option<&SelectedProfile>,
     config: Option<&config::schema::Config>,
-) -> Result<String, String> {
+) -> Result<ResolvedOpenAiToken, String> {
     match selected_profile {
         Some(profile) => match profile.auth_mode {
-            ProfileAuthMode::ApiKey => resolve_profile_api_token(profile),
-            ProfileAuthMode::OpenaiAccount => resolve_openai_oauth_access_token(config).await,
+            ProfileAuthMode::ApiKey => Ok(ResolvedOpenAiToken {
+                token: resolve_profile_api_token(profile)?,
+                uses_account_session: false,
+            }),
+            ProfileAuthMode::OpenaiAccount => Ok(ResolvedOpenAiToken {
+                token: resolve_openai_oauth_access_token(config).await?,
+                uses_account_session: true,
+            }),
             ProfileAuthMode::None => Err(format!(
                 "Profile '{}' auth mode is '{}'. Set it to '{}' or '{}' before using OpenAI without `--token`.",
                 profile.name,
@@ -204,7 +237,10 @@ async fn resolve_openai_token_for_request(
                 ProfileAuthMode::OpenaiAccount.as_str()
             )),
         },
-        None => resolve_openai_oauth_access_token(config).await,
+        None => Ok(ResolvedOpenAiToken {
+            token: resolve_openai_oauth_access_token(config).await?,
+            uses_account_session: true,
+        }),
     }
 }
 
@@ -233,6 +269,7 @@ async fn main() {
     let mut token = String::new();
     let mut timeout_in_sec: u64 = 60;
     let mut selected_profile: Option<SelectedProfile> = None;
+    let mut use_openai_account_transport = false;
 
     if let Some(profile_name) = cmd_args.get_one::<String>("profile") {
         if let Some(profile) = config
@@ -302,10 +339,6 @@ async fn main() {
         }
     };
 
-    if url.is_empty() {
-        url = provider.default_url().to_string();
-    }
-
     let explicit_token_override = cmd_args.get_one::<String>("token").map(|token| token.to_string());
     if let Some(cmd_token) = explicit_token_override {
         if provider == ProviderKind::OpenAi {
@@ -314,12 +347,23 @@ async fn main() {
         token = cmd_token;
     } else if provider == ProviderKind::OpenAi {
         token = match resolve_openai_token_for_request(selected_profile.as_ref(), config.as_ref()).await {
-            Ok(token) => token,
+            Ok(resolved) => {
+                use_openai_account_transport = resolved.uses_account_session;
+                resolved.token
+            }
             Err(error) => {
                 eprintln!("❌ {error}");
                 return;
             }
         };
+    }
+
+    if url.is_empty() {
+        if provider == ProviderKind::OpenAi && use_openai_account_transport {
+            url = OPENAI_ACCOUNT_RESPONSES_URL.to_string();
+        } else {
+            url = provider.default_url().to_string();
+        }
     }
 
     if let Err(validation_issues) = validate_provider_request(provider, &model, &url, &token) {

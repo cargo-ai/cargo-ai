@@ -139,7 +139,7 @@ fn provider_hint(kind: ProviderErrorKind, provider: ProviderKind) -> Option<&'st
         },
         ProviderErrorKind::Unauthorized => match provider {
             ProviderKind::OpenAi => {
-                Some("Verify your OpenAI token (`--token` or profile token) and model access.")
+                Some("Verify your OpenAI token (`--token` or profile token), or re-run `cargo ai auth login openai`, and confirm model access.")
             }
             ProviderKind::Ollama => Some(
                 "Verify your Ollama endpoint and credentials (if your deployment requires auth).",
