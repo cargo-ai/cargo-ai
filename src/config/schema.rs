@@ -27,6 +27,28 @@ pub fn default_secret_store_mode() -> SecretStoreMode {
     SecretStoreMode::File
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileAuthMode {
+    None,
+    ApiKey,
+    OpenaiAccount,
+}
+
+impl ProfileAuthMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ApiKey => "api_key",
+            Self::OpenaiAccount => "openai_account",
+        }
+    }
+}
+
+pub fn default_profile_auth_mode() -> ProfileAuthMode {
+    ProfileAuthMode::None
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub profile: Vec<Profile>,
@@ -43,6 +65,9 @@ pub struct Config {
 
     #[serde(default)]
     pub account: Option<Account>,
+
+    #[serde(default)]
+    pub openai_auth: Option<OpenAiAuth>,
 
     #[serde(default)]
     pub web_resources: Option<WebResources>,
@@ -72,6 +97,9 @@ pub struct Profile {
 
     #[serde(default)]
     pub description: Option<String>,
+
+    #[serde(default = "default_profile_auth_mode")]
+    pub auth_mode: ProfileAuthMode,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -91,6 +119,15 @@ pub struct Account {
     pub access_token_expires_in: Option<i32>,
 
     // Unix epoch seconds when the access token was last obtained.
+    #[serde(default)]
+    pub access_token_issued_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct OpenAiAuth {
+    #[serde(default)]
+    pub access_token_expires_in: Option<i32>,
+
     #[serde(default)]
     pub access_token_issued_at: Option<i64>,
 }

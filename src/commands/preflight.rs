@@ -2,8 +2,8 @@
 use clap::ArgMatches;
 
 use crate::config::loader::{find_profile, load_config};
-use crate::config::schema::Profile;
-use crate::credentials::store;
+use crate::config::schema::ProfileAuthMode;
+use crate::credentials::{openai_oauth, store};
 use crate::providers::{provider_error_messages, validate_provider_request, ProviderKind};
 
 fn unknown_server_messages(server: &str) -> Vec<String> {
@@ -23,13 +23,67 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
     ]
 }
 
-fn resolve_profile_token(profile: &Profile) -> String {
+#[derive(Debug, Clone)]
+struct SelectedProfile {
+    name: String,
+    auth_mode: ProfileAuthMode,
+    legacy_token: Option<String>,
+}
+
+fn resolve_profile_api_token(profile: &SelectedProfile) -> Result<String, String> {
     match store::load_profile_token(&profile.name) {
-        Ok(Some(token)) => token,
-        Ok(None) => profile.token.clone().unwrap_or_default(),
+        Ok(Some(token)) if !token.trim().is_empty() => Ok(token),
+        Ok(Some(_)) | Ok(None) => profile
+            .legacy_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                format!(
+                    "Missing API token for profile '{}'. Use `cargo ai profile token set {} --token <TOKEN>`.",
+                    profile.name, profile.name
+                )
+            }),
         Err(error) => {
-            eprintln!("⚠️ Failed to load profile token from credential store: {error}");
-            profile.token.clone().unwrap_or_default()
+            Err(format!(
+                "Failed to load profile token for '{}': {error}",
+                profile.name
+            ))
+        }
+    }
+}
+
+async fn resolve_openai_token_for_request(
+    selected_profile: Option<&SelectedProfile>,
+) -> Result<String, String> {
+    match selected_profile {
+        Some(profile) => match profile.auth_mode {
+            ProfileAuthMode::ApiKey => resolve_profile_api_token(profile),
+            ProfileAuthMode::OpenaiAccount => {
+                let session = openai_oauth::resolve_session_for_runtime().await?;
+                if session.refreshed {
+                    println!("Refreshed OpenAI account session for this invocation.");
+                }
+                Ok(session.access_token)
+            }
+            ProfileAuthMode::None => Err(format!(
+                "Profile '{}' auth mode is '{}'. Set it to '{}' or '{}' before using OpenAI without `--token`.",
+                profile.name,
+                ProfileAuthMode::None.as_str(),
+                ProfileAuthMode::ApiKey.as_str(),
+                ProfileAuthMode::OpenaiAccount.as_str()
+            )),
+        },
+        None => {
+            let session = openai_oauth::resolve_session_for_runtime().await.map_err(|_| {
+                "OpenAI authentication is missing. Use `cargo ai auth login openai`, configure a profile with `profile auth set <name> openai_account`, or pass `--token`."
+                    .to_string()
+            })?;
+            if session.refreshed {
+                println!("Refreshed OpenAI account session for this invocation.");
+            }
+            Ok(session.access_token)
         }
     }
 }
@@ -49,6 +103,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     let mut url = String::new();
     let mut token = String::new();
     let mut timeout_in_sec: u64 = 60; // Default
+    let mut selected_profile: Option<SelectedProfile> = None;
 
     // 1️⃣ If profile is set, load values from config
     if let Some(profile_name) = sub_m.get_one::<String>("profile") {
@@ -56,10 +111,14 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             if let Some(profile) = find_profile(&cfg, profile_name) {
                 server = profile.server.clone().to_lowercase();
                 model = profile.model.clone();
-                token = resolve_profile_token(profile);
                 timeout_in_sec = profile.timeout_in_sec;
                 // Updated URL assignment logic:
                 url = profile.url.clone().unwrap_or_default();
+                selected_profile = Some(SelectedProfile {
+                    name: profile.name.clone(),
+                    auth_mode: profile.auth_mode,
+                    legacy_token: profile.token.clone(),
+                });
                 println!("Using profile '{}'", profile_name);
             } else {
                 eprintln!("Profile '{}' not found.", profile_name);
@@ -81,9 +140,13 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                 if let Some(profile) = find_profile(&cfg, default_profile_name) {
                     server = profile.server.clone().to_lowercase();
                     model = profile.model.clone();
-                    token = resolve_profile_token(profile);
                     timeout_in_sec = profile.timeout_in_sec;
                     url = profile.url.clone().unwrap_or_default();
+                    selected_profile = Some(SelectedProfile {
+                        name: profile.name.clone(),
+                        auth_mode: profile.auth_mode,
+                        legacy_token: profile.token.clone(),
+                    });
                     println!("Using default profile '{}'", default_profile_name);
                 }
             }
@@ -103,9 +166,9 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         url = url_arg.to_string();
     }
 
-    if let Some(cmd_token) = sub_m.get_one::<String>("token") {
-        token = cmd_token.to_string();
-    }
+    let explicit_token_override = sub_m
+        .get_one::<String>("token")
+        .map(|token| token.to_string());
 
     if let Some(timeout_arg) = sub_m.get_one::<String>("timeout_in_sec") {
         timeout_in_sec = timeout_arg.parse::<u64>().unwrap_or(60);
@@ -124,6 +187,21 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     // Final URL fallback based on resolved server.
     if url.is_empty() {
         url = provider.default_url().to_string();
+    }
+
+    if let Some(cmd_token) = explicit_token_override {
+        if provider == ProviderKind::OpenAi {
+            println!("Using explicit --token override; bypassing profile auth-mode resolution.");
+        }
+        token = cmd_token;
+    } else if provider == ProviderKind::OpenAi {
+        token = match resolve_openai_token_for_request(selected_profile.as_ref()).await {
+            Ok(resolved_token) => resolved_token,
+            Err(error) => {
+                eprintln!("❌ {error}");
+                return false;
+            }
+        };
     }
 
     if let Err(validation_issues) = validate_provider_request(provider, &model, &url, &token) {
