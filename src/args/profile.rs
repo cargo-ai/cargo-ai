@@ -42,6 +42,14 @@ pub fn command() -> Command {
                         .value_name("MODEL"),
                 )
                 .arg(
+                    Arg::new("auth")
+                        .long("auth")
+                        .help("Optional auth mode (default: none)")
+                        .required(false)
+                        .value_name("MODE")
+                        .value_parser(["none", "api_key", "openai_account"]),
+                )
+                .arg(
                     Arg::new("url")
                         .long("url")
                         .help("Custom transformer server URL (HTTPS preferred)")

@@ -177,6 +177,18 @@ fn run_add(add_m: &ArgMatches) -> bool {
         .get_one::<String>("description")
         .map(String::as_str)
         .unwrap_or("(none)");
+    let auth_mode = if let Some(raw_mode) = add_m.get_one::<String>("auth") {
+        let Some(mode) = parse_auth_mode(raw_mode) else {
+            eprintln!(
+                "❌ Invalid auth mode '{}'. Use none|api_key|openai_account.",
+                raw_mode
+            );
+            return false;
+        };
+        mode
+    } else {
+        default_profile_auth_mode()
+    };
 
     let new_profile = Profile {
         name: name.to_string(),
@@ -194,7 +206,7 @@ fn run_add(add_m: &ArgMatches) -> bool {
         } else {
             Some(description.to_string())
         },
-        auth_mode: default_profile_auth_mode(),
+        auth_mode,
     };
 
     let set_as_default = add_m.get_flag("default");
@@ -204,9 +216,9 @@ fn run_add(add_m: &ArgMatches) -> bool {
         false
     } else {
         println!(
-            "✅ Profile '{}' saved. Auth mode defaults to '{}'.",
+            "✅ Profile '{}' saved. Auth mode: '{}'.",
             name,
-            default_profile_auth_mode().as_str()
+            auth_mode.as_str()
         );
         true
     }

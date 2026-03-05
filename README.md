@@ -73,21 +73,21 @@ Example (using OpenAI GPT 4o):
 cargo ai profile add openai \
     --server openai \
     --model gpt-4o \
+    --auth api_key \
     --default
 ```
 
-Set profile auth mode and token-based credentials:
+Set token-based credentials:
 
 ```bash
-cargo ai profile auth set openai api_key
 cargo ai profile token set openai --token sk-***
 ```
 
 Or use OpenAI account login instead of API key:
 
 ```bash
-cargo ai auth login openai --profile openai --set-default
-cargo ai profile auth set openai openai_account
+cargo ai profile add openai-account --server openai --model gpt-5.2 --auth openai_account --default
+cargo ai auth login openai --profile openai-account --set-default
 ```
 
 `cargo ai auth login openai` follows OpenAI/Codex browser sign-in semantics and reads session tokens from Codex local auth storage (`$CODEX_HOME/auth.json`, or `~/.codex/auth.json` by default) without importing duplicate OpenAI account tokens into Cargo AI secret stores.

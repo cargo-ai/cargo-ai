@@ -640,6 +640,38 @@ mod tests {
     }
 
     #[test]
+    fn profile_add_auth_flag_parses() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "profile",
+                "add",
+                "openai-prod",
+                "--server",
+                "openai",
+                "--model",
+                "gpt-5.2",
+                "--auth",
+                "openai_account",
+            ])
+            .expect("profile add --auth should parse");
+
+        let profile_add = matches
+            .subcommand_matches("profile")
+            .and_then(|m| m.subcommand_matches("add"))
+            .expect("profile add should be available");
+
+        assert_eq!(
+            profile_add.get_one::<String>("name").map(String::as_str),
+            Some("openai-prod")
+        );
+        assert_eq!(
+            profile_add.get_one::<String>("auth").map(String::as_str),
+            Some("openai_account")
+        );
+    }
+
+    #[test]
     fn profile_add_rejects_legacy_token_flag() {
         let err = cli_command("cargo-ai")
             .try_get_matches_from([
