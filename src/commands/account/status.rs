@@ -4,7 +4,7 @@ use crate::config::setup::config_path;
 use crate::infra_api;
 use crate::ui;
 
-use super::helpers::{persist_refreshed_access_token, INFRA_BASE_URL};
+use super::helpers::{load_account_auth, persist_refreshed_access_token, INFRA_BASE_URL};
 
 /// Queries account/session status and persists refreshed access tokens.
 pub async fn run() -> bool {
@@ -38,20 +38,17 @@ pub async fn run() -> bool {
         }
     };
 
-    // 3. Extract tokens and token metadata
-    let access_token = match acct.access_token.as_ref() {
-        Some(t) => t,
-        None => {
-            eprintln!(
-                "❌ No access token found in config. Run `cargo ai account confirm <code>` first."
-            );
+    // 3. Extract token metadata from config and secret tokens from credential store.
+    let auth = match load_account_auth() {
+        Ok(auth) => auth,
+        Err(error) => {
+            eprintln!("{error}");
             return false;
         }
     };
 
-    let refresh_token = acct.refresh_token.as_ref();
-    if refresh_token.is_none() {
-        eprintln!("⚠️ No refresh token found in config. Status will work only while the access token remains valid.");
+    if auth.refresh_token.is_none() {
+        eprintln!("⚠️ No refresh token found in credential store. Status will work only while the access token remains valid.");
     }
 
     // Compute token expiration using consistent integer types.
@@ -85,8 +82,8 @@ pub async fn run() -> bool {
     let mut used_refresh = false;
 
     // Own the tokens so any futures we create don't borrow locals with tricky lifetimes.
-    let access_token_owned = access_token.clone();
-    let refresh_token_owned: Option<String> = refresh_token.cloned();
+    let access_token_owned = auth.access_token;
+    let refresh_token_owned: Option<String> = auth.refresh_token;
 
     let first_refresh_token_opt: Option<&str> = if token_expired_or_near {
         used_refresh = refresh_token_owned.is_some();
@@ -122,7 +119,7 @@ pub async fn run() -> bool {
             .unwrap_or(false);
 
     if is_expired_error && !used_refresh {
-        if let Some(rt) = refresh_token.map(|s| s.as_str()) {
+        if let Some(rt) = refresh_token_owned.as_deref() {
             match infra_api::account::status::fetch_status(
                 INFRA_BASE_URL,
                 access_token_owned.as_str(),
@@ -164,17 +161,17 @@ pub async fn run() -> bool {
 
         if let (Some(at), Some(expires_in)) = (new_access_token, new_expires_in_seconds) {
             // We only update if the access token actually changed.
-            if at != access_token {
-                let rt = match refresh_token {
-                    Some(rt) => rt.clone(),
+            if at != access_token_owned {
+                let rt = match refresh_token_owned.as_deref() {
+                    Some(rt) => rt,
                     None => {
                         // Shouldn't happen in the refresh scenario, but don't clobber anything.
-                        eprintln!("⚠️ Refreshed access token returned, but no refresh token exists in config to persist alongside it.");
+                        eprintln!("⚠️ Refreshed access token returned, but no refresh token exists in credential store to persist alongside it.");
                         return false;
                     }
                 };
 
-                persist_refreshed_access_token(at, rt.as_str(), Some(expires_in));
+                persist_refreshed_access_token(at, rt, Some(expires_in));
             }
         }
     }

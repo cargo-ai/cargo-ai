@@ -19,7 +19,7 @@ Supports both **OpenAI‑API‑compatible servers** and **Ollama**.
 - **Full CLI Integration** – Conformed agent outputs can run an arbitrary command-line program
 - **Rust-Powered** – Safe, fast, and portable across environments  
 - **Fully Local & Secure** – All logic executes client-side (no phoning home)  
-- **LLM Connection Profiles** – Store reusable settings for servers, models, tokens, and timeouts so you don't re-enter them each run
+- **LLM Connection Profiles** – Store reusable settings for servers, models, auth modes, and timeouts so you don't re-enter them each run
 - **Repository Integration** – Download JSON configurations directly from Cargo-AI and hatch agents without needing local files
 - **Cross‑Platform Support** – Runs on any Linux, macOS, or Windows device
 
@@ -73,14 +73,58 @@ Example (using OpenAI GPT 4o):
 cargo ai profile add openai \
     --server openai \
     --model gpt-4o \
-    --token sk-*** \
+    --auth api_key \
     --default
 ```
+
+Set token-based credentials:
+
+```bash
+cargo ai profile set openai --token sk-*** --auth api_key
+```
+
+Or use OpenAI account login instead of API key:
+
+```bash
+cargo ai profile add openai-account --server openai --model gpt-5.2 --auth openai_account --default
+cargo ai auth login openai --profile openai-account --set-default
+```
+
+`cargo ai auth login openai` follows OpenAI/Codex browser sign-in semantics and reads session tokens from Codex local auth storage (`$CODEX_HOME/auth.json`, or `~/.codex/auth.json` by default) without importing duplicate OpenAI account tokens into Cargo AI secret stores.
 
 Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change the default URL, use:
 ```bash
 --url <custom_llm_endpoint>
 ```
+
+#### Credential Storage (Phase 1)
+
+- `config.toml` is metadata-only and no longer persists profile/account secret values.
+- Default secret-store mode is `file` for new installs.
+- `file` mode stores secrets in `credentials.toml` at:
+  - `$CARGO_HOME/.cargo-ai/credentials.toml`, or
+  - `~/.cargo/.cargo-ai/credentials.toml`.
+- `keychain` mode stores secrets in OS keychain backends through Rust `keyring` (3.x stable).
+- Manage mode with:
+  - `cargo ai credentials store status`
+  - `cargo ai credentials store set <file|keychain>`
+  - `cargo ai credentials store set <file|keychain> --migrate --yes`
+- Manage OpenAI auth session with:
+  - `cargo ai auth login openai [--profile <name>] [--set-default]`
+  - `cargo ai auth status [--json]`
+  - `cargo ai auth logout [--global] [--yes]`
+- `cargo ai auth logout` is local-only by default (Cargo AI stops using OpenAI account auth, Codex remains signed in).
+- Use `cargo ai auth logout --global` to also run `codex logout`.
+- Manage profile metadata/auth/token material with:
+  - `cargo ai profile add <name> --server <server> --model <model> [--auth <none|api_key|openai_account>] [--default]`
+  - `cargo ai profile set <name> [--server <server>] [--model <model>] [--auth <none|api_key|openai_account>] [--url <URL> | --clear-url] [--description <TEXT> | --clear-description] [--token <TOKEN> | --stdin | --env <ENV_VAR> | --clear-token] [--default]`
+  - `cargo ai profile list`
+  - `cargo ai profile show <name>`
+  - `cargo ai profile remove <name>`
+- Use `--migrate --dry-run` to preview migration without writes.
+- Fresh installs can switch to `keychain` before any secrets are created (metadata-only switch).
+- Legacy secrets found in `config.toml` are migrated once at startup into the active secret-store path.
+- Generated agents use the same secret-store mode behavior, so default-profile token usage remains compatible.
 
 ### Create a Sample Agent
 
@@ -416,3 +460,7 @@ Example from [weather_agent.json](./weather_agent.json):
 In this example:
 - If `raining` is true, the agent prints “bring an umbrella.”
 - If `raining` is false, the agent prints “bring sunglasses.”
+
+---
+
+`cargo-ai™` is an independent project and is not affiliated with, endorsed by, or sponsored by the Rust Foundation.

@@ -6,7 +6,7 @@
 //! - `cargo ai version --check` forced checks
 //! - persisted local state in `config.toml`
 use crate::config::loader::{config_path, load_config};
-use crate::config::schema::{Config, UpdateCheck as UpdateCheckConfig};
+use crate::config::schema::{default_secret_store_mode, Config, UpdateCheck as UpdateCheckConfig};
 use reqwest::header::{ACCEPT, USER_AGENT};
 use semver::Version;
 use serde::Deserialize;
@@ -80,7 +80,9 @@ fn default_config() -> Config {
         profile: Vec::new(),
         cargo_ai_token: None,
         default_profile: None,
+        secret_store: Some(default_secret_store_mode()),
         account: None,
+        openai_auth: None,
         web_resources: None,
         update_check: None,
         version_baseline: None,

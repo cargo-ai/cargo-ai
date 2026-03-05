@@ -6,7 +6,11 @@ use serde_json::{json, Value};
 /// { "action": "confirm", "email": "<email>", "code": "<code>" }
 ///
 /// Returns the raw JSON response from the infra API (success or failure).
-pub async fn confirm_email(base_url: &str, email: &str, code: &str) -> Result<Value, reqwest::Error> {
+pub async fn confirm_email(
+    base_url: &str,
+    email: &str,
+    code: &str,
+) -> Result<Value, reqwest::Error> {
     let url = format!("{}/account", base_url.trim_end_matches('/'));
 
     let body = json!({

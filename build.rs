@@ -68,6 +68,14 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
         destination: "src/config/schema.rs",
         source: "src/config/schema.rs",
     },
+    TemplateSource {
+        destination: "src/credentials/mod.rs",
+        source: "src/credentials/mod.rs",
+    },
+    TemplateSource {
+        destination: "src/credentials/store.rs",
+        source: "src/credentials/store.rs",
+    },
 ];
 
 fn main() -> Result<(), build_support::BuildError> {

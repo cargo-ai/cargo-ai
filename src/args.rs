@@ -5,6 +5,8 @@
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
 mod account;
+mod auth;
+mod credentials;
 mod hatch;
 mod init;
 mod new;
@@ -28,6 +30,8 @@ fn cli_command(bin_name: &'static str) -> Command {
         .subcommand(init::command())
         .subcommand(hatch::command())
         .subcommand(profile::command())
+        .subcommand(auth::command())
+        .subcommand(credentials::command())
         .subcommand(account::command())
         .subcommand(version::command())
         .subcommand(preflight::command())
@@ -108,7 +112,9 @@ mod tests {
         assert!(index_of("new") < index_of("init"));
         assert!(index_of("init") < index_of("hatch"));
         assert!(index_of("hatch") < index_of("profile"));
-        assert!(index_of("profile") < index_of("account"));
+        assert!(index_of("profile") < index_of("auth"));
+        assert!(index_of("auth") < index_of("credentials"));
+        assert!(index_of("credentials") < index_of("account"));
         assert!(index_of("account") < index_of("version"));
     }
 
@@ -270,6 +276,50 @@ mod tests {
             Some("weather_agent_v2")
         );
         assert!(hatch_matches.get_flag("force"));
+    }
+
+    #[test]
+    fn credentials_store_set_parses_mode_and_flags() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "credentials",
+                "store",
+                "set",
+                "keychain",
+                "--migrate",
+                "--yes",
+            ])
+            .expect("credentials store set should parse");
+
+        let set_matches = matches
+            .subcommand_matches("credentials")
+            .and_then(|m| m.subcommand_matches("store"))
+            .and_then(|m| m.subcommand_matches("set"))
+            .expect("set subcommand should be available");
+
+        assert_eq!(
+            set_matches.get_one::<String>("mode").map(String::as_str),
+            Some("keychain")
+        );
+        assert!(set_matches.get_flag("migrate"));
+        assert!(set_matches.get_flag("yes"));
+    }
+
+    #[test]
+    fn credentials_store_dry_run_requires_migrate() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "credentials",
+                "store",
+                "set",
+                "file",
+                "--dry-run",
+            ])
+            .expect_err("dry-run without migrate should fail parsing");
+
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]
@@ -502,5 +552,173 @@ mod tests {
             new.get_one::<String>("vcs").map(String::as_str),
             Some("none")
         );
+    }
+
+    #[test]
+    fn auth_login_openai_profile_flags_parse() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "auth",
+                "login",
+                "openai",
+                "--profile",
+                "openai-prod",
+                "--set-default",
+            ])
+            .expect("auth login openai flags should parse");
+
+        let login_openai = matches
+            .subcommand_matches("auth")
+            .and_then(|m| m.subcommand_matches("login"))
+            .and_then(|m| m.subcommand_matches("openai"))
+            .expect("auth login openai should be available");
+
+        assert_eq!(
+            login_openai
+                .get_one::<String>("profile")
+                .map(String::as_str),
+            Some("openai-prod")
+        );
+        assert!(login_openai.get_flag("set_default"));
+    }
+
+    #[test]
+    fn auth_logout_global_and_alias_flags_parse() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "auth", "logout", "--global", "--yes"])
+            .expect("auth logout --global should parse");
+
+        let logout = matches
+            .subcommand_matches("auth")
+            .and_then(|m| m.subcommand_matches("logout"))
+            .expect("auth logout should be available");
+
+        assert!(logout.get_flag("global"));
+        assert!(logout.get_flag("yes"));
+
+        let alias_matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "auth", "logout", "--revoke"])
+            .expect("auth logout --revoke alias should parse");
+
+        let alias_logout = alias_matches
+            .subcommand_matches("auth")
+            .and_then(|m| m.subcommand_matches("logout"))
+            .expect("auth logout should be available");
+
+        assert!(alias_logout.get_flag("revoke"));
+    }
+
+    #[test]
+    fn profile_set_token_env_parses() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "profile",
+                "set",
+                "openai-prod",
+                "--env",
+                "OPENAI_API_KEY",
+            ])
+            .expect("profile set --env should parse");
+
+        let profile_set = matches
+            .subcommand_matches("profile")
+            .and_then(|m| m.subcommand_matches("set"))
+            .expect("profile set should be available");
+
+        assert_eq!(
+            profile_set.get_one::<String>("name").map(String::as_str),
+            Some("openai-prod")
+        );
+        assert_eq!(
+            profile_set.get_one::<String>("env").map(String::as_str),
+            Some("OPENAI_API_KEY")
+        );
+    }
+
+    #[test]
+    fn profile_set_rejects_legacy_auth_subcommand() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "profile",
+                "auth",
+                "set",
+                "openai-prod",
+                "openai_account",
+            ])
+            .expect_err("profile auth should be removed");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn profile_set_rejects_legacy_token_subcommand() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "profile",
+                "token",
+                "set",
+                "openai-prod",
+                "--token",
+                "sk-test",
+            ])
+            .expect_err("profile token should be removed");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn profile_add_auth_flag_parses() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "profile",
+                "add",
+                "openai-prod",
+                "--server",
+                "openai",
+                "--model",
+                "gpt-5.2",
+                "--auth",
+                "openai_account",
+            ])
+            .expect("profile add --auth should parse");
+
+        let profile_add = matches
+            .subcommand_matches("profile")
+            .and_then(|m| m.subcommand_matches("add"))
+            .expect("profile add should be available");
+
+        assert_eq!(
+            profile_add.get_one::<String>("name").map(String::as_str),
+            Some("openai-prod")
+        );
+        assert_eq!(
+            profile_add.get_one::<String>("auth").map(String::as_str),
+            Some("openai_account")
+        );
+    }
+
+    #[test]
+    fn profile_add_rejects_legacy_token_flag() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "profile",
+                "add",
+                "openai-prod",
+                "--server",
+                "openai",
+                "--model",
+                "gpt-4o",
+                "--token",
+                "sk-test",
+            ])
+            .expect_err("legacy --token flag should be rejected for profile add");
+
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
     }
 }

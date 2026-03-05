@@ -1,4 +1,5 @@
-use crate::config::loader::{load_config, config_path};
+use crate::config::loader::{config_path, load_config};
+use crate::credentials::store;
 use std::fs;
 
 pub fn remove_profile(name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -19,6 +20,12 @@ pub fn remove_profile(name: &str) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             let serialized = toml::to_string_pretty(&cfg)?;
             fs::write(config_path(), serialized)?;
+            if let Err(error) = store::clear_profile_token(name) {
+                eprintln!(
+                    "⚠️ Profile removed from config, but token cleanup failed for '{}': {}",
+                    name, error
+                );
+            }
 
             if removed_default {
                 println!(

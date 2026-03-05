@@ -33,6 +33,18 @@ slint = { version = "1.15.1", default-features = false, features = ["backend-win
 tokio = { version = "1.44.1", features = ["full"] }
 toml = "0.9.8"
 
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["linux-native"] }
+
+[target.'cfg(any(target_os = "freebsd", target_os = "openbsd"))'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service"] }
+
 [dev-dependencies]
 mockito = "1.7.0"
 
