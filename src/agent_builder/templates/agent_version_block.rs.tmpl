@@ -28,7 +28,7 @@ fn cargo_ai_config_path_for_agent() -> std::path::PathBuf {
 }
 
 #[allow(dead_code)]
-fn read_local_version_baseline() -> (Option<String>, Option<String>) {
+fn read_local_cargo_ai_metadata() -> (Option<String>, Option<String>) {
     let config_path = cargo_ai_config_path_for_agent();
     let contents = match std::fs::read_to_string(config_path) {
         Ok(value) => value,
@@ -40,17 +40,17 @@ fn read_local_version_baseline() -> (Option<String>, Option<String>) {
         Err(_) => return (None, None),
     };
 
-    let version_baseline = parsed
-        .get("version_baseline")
+    let cargo_ai_metadata = parsed
+        .get("cargo_ai_metadata")
         .and_then(|value| value.as_table());
 
-    let cargo_ai_version = version_baseline
+    let cargo_ai_version = cargo_ai_metadata
         .and_then(|table| table.get("cargo_ai_version"))
         .and_then(|value| value.as_str())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
-    let template_schema_version = version_baseline
+    let template_schema_version = cargo_ai_metadata
         .and_then(|table| table.get("template_schema_version"))
         .and_then(|value| value.as_str())
         .map(|value| value.trim().to_string())
@@ -94,7 +94,7 @@ fn print_agent_version_status() {
         .map(|(_, value)| *value)
         .unwrap_or("unknown");
 
-    let (local_cargo_ai_version, local_template_version) = read_local_version_baseline();
+    let (local_cargo_ai_version, local_template_version) = read_local_cargo_ai_metadata();
     let status = agent_sync_status(
         generated_by_version,
         generated_template_version,
@@ -121,14 +121,14 @@ fn print_agent_version_status() {
     );
 
     if status == __SYNC_STATUS_IN_SYNC__ {
-        println!("guidance = \"Agent provenance matches local Cargo-AI baseline.\"");
+        println!("guidance = \"Agent provenance matches local Cargo-AI metadata.\"");
     } else if status == __SYNC_STATUS_OUT_OF_SYNC__ {
         println!(
-            "guidance = \"Agent is out of sync with local Cargo-AI baseline. Re-hatch this agent with the latest cargo-ai (use --force to overwrite).\""
+            "guidance = \"Agent is out of sync with local Cargo-AI metadata. Re-hatch this agent with the latest cargo-ai (use --force to overwrite).\""
         );
     } else {
         println!(
-            "guidance = \"Local Cargo-AI baseline is unavailable. Run cargo ai version on this machine, then re-run this command.\""
+            "guidance = \"Local Cargo-AI metadata is unavailable. Run cargo ai version on this machine, then re-run this command.\""
         );
     }
 }

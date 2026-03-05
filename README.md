@@ -100,6 +100,7 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 #### Credential Storage (Phase 1)
 
 - `config.toml` is metadata-only and no longer persists profile/account secret values.
+- `config.toml` also carries non-secret local Cargo AI metadata in `[cargo_ai_metadata]`, including the installed Cargo AI version, template schema version, build target, install ID, and binary SHA-256.
 - Default secret-store mode is `file` for new installs.
 - `file` mode stores secrets in `credentials.toml` at:
   - `$CARGO_HOME/.cargo-ai/credentials.toml`, or

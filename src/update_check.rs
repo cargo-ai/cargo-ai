@@ -85,7 +85,7 @@ fn default_config() -> Config {
         openai_auth: None,
         web_resources: None,
         update_check: None,
-        version_baseline: None,
+        cargo_ai_metadata: None,
     }
 }
 

@@ -76,7 +76,7 @@ pub struct Config {
     pub update_check: Option<UpdateCheck>,
 
     #[serde(default)]
-    pub version_baseline: Option<VersionBaseline>,
+    pub cargo_ai_metadata: Option<CargoAiMetadata>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -159,14 +159,23 @@ pub struct UpdateCheck {
     pub latest_version: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct VersionBaseline {
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CargoAiMetadata {
     #[serde(default)]
     pub cargo_ai_version: Option<String>,
 
     // Agent-definition schema version (format: YYYY-MM-DD.rN), decoupled from cargo-ai semver.
     #[serde(default)]
     pub template_schema_version: Option<String>,
+
+    #[serde(default)]
+    pub cargo_ai_build_target: Option<String>,
+
+    #[serde(default)]
+    pub cargo_ai_install_id: Option<String>,
+
+    #[serde(default)]
+    pub cargo_ai_binary_sha256: Option<String>,
 }
 
 fn default_timeout() -> u64 {

@@ -227,6 +227,7 @@ mod tests {
         assert!(rendered.contains("generated_agent_provenance"));
         assert!(rendered.contains("generated_by_cargo_ai_version"));
         assert!(rendered.contains("generated_with_template_schema_version"));
+        assert!(rendered.contains("cargo_ai_metadata"));
         assert!(rendered.contains("0.0.11"));
         assert!(rendered.contains("2026-03-03.r1"));
     }
