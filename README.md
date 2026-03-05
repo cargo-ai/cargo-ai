@@ -460,3 +460,7 @@ Example from [weather_agent.json](./weather_agent.json):
 In this example:
 - If `raining` is true, the agent prints “bring an umbrella.”
 - If `raining` is false, the agent prints “bring sunglasses.”
+
+---
+
+`cargo-ai™` is an independent project and is not affiliated with, endorsed by, or sponsored by the Rust Foundation.
