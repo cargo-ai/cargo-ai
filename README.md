@@ -117,7 +117,7 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 - Use `cargo ai auth logout --global` to also run `codex logout`.
 - Manage profile metadata/auth/token material with:
   - `cargo ai profile add <name> --server <server> --model <model> [--auth <none|api_key|openai_account>] [--default]`
-  - `cargo ai profile set <name> [--server <server>] [--model <model>] [--auth <none|api_key|openai_account>] [--token <TOKEN> | --stdin | --env <ENV_VAR> | --clear-token] [--default]`
+  - `cargo ai profile set <name> [--server <server>] [--model <model>] [--auth <none|api_key|openai_account>] [--url <URL> | --clear-url] [--description <TEXT> | --clear-description] [--token <TOKEN> | --stdin | --env <ENV_VAR> | --clear-token] [--default]`
   - `cargo ai profile list`
   - `cargo ai profile show <name>`
   - `cargo ai profile remove <name>`
