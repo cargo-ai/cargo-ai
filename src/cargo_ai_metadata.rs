@@ -160,10 +160,44 @@ pub fn persist_current_metadata() -> Result<(), String> {
     )
 }
 
+fn trim_optional_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn normalized_metadata(mut metadata: CargoAiMetadataConfig) -> Option<CargoAiMetadataConfig> {
+    metadata.cargo_ai_version = trim_optional_string(metadata.cargo_ai_version);
+    metadata.template_schema_version = trim_optional_string(metadata.template_schema_version);
+    metadata.cargo_ai_build_target = trim_optional_string(metadata.cargo_ai_build_target);
+    metadata.cargo_ai_install_id = trim_optional_string(metadata.cargo_ai_install_id);
+    metadata.cargo_ai_binary_sha256 = trim_optional_string(metadata.cargo_ai_binary_sha256);
+
+    if metadata.cargo_ai_version.is_none()
+        && metadata.template_schema_version.is_none()
+        && metadata.cargo_ai_build_target.is_none()
+        && metadata.cargo_ai_install_id.is_none()
+        && metadata.cargo_ai_binary_sha256.is_none()
+    {
+        None
+    } else {
+        Some(metadata)
+    }
+}
+
+pub fn load_request_metadata() -> Option<CargoAiMetadataConfig> {
+    load_config()
+        .and_then(|cfg| cfg.cargo_ai_metadata)
+        .and_then(normalized_metadata)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{binary_sha256_for_path, persist_metadata_in_config, write_config_at_path};
-    use crate::config::schema::Config;
+    use super::{
+        binary_sha256_for_path, normalized_metadata, persist_metadata_in_config,
+        write_config_at_path,
+    };
+    use crate::config::schema::{CargoAiMetadata, Config};
     use crate::schema_version;
     use std::fs;
     use std::path::PathBuf;
@@ -332,5 +366,40 @@ mod tests {
         assert!(written.contains("cargo_ai_binary_sha256 = \"abc123\""));
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn normalized_metadata_trims_values_and_omits_empty_fields() {
+        let metadata = CargoAiMetadata {
+            cargo_ai_version: Some(" 0.0.11 ".to_string()),
+            template_schema_version: Some(" ".to_string()),
+            cargo_ai_build_target: Some(" aarch64-apple-darwin ".to_string()),
+            cargo_ai_install_id: Some(String::new()),
+            cargo_ai_binary_sha256: Some(" abc123 ".to_string()),
+        };
+
+        let normalized = normalized_metadata(metadata).expect("metadata should remain present");
+
+        assert_eq!(normalized.cargo_ai_version.as_deref(), Some("0.0.11"));
+        assert!(normalized.template_schema_version.is_none());
+        assert_eq!(
+            normalized.cargo_ai_build_target.as_deref(),
+            Some("aarch64-apple-darwin")
+        );
+        assert!(normalized.cargo_ai_install_id.is_none());
+        assert_eq!(normalized.cargo_ai_binary_sha256.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn normalized_metadata_returns_none_when_all_fields_are_empty() {
+        let metadata = CargoAiMetadata {
+            cargo_ai_version: Some(" ".to_string()),
+            template_schema_version: None,
+            cargo_ai_build_target: Some(String::new()),
+            cargo_ai_install_id: None,
+            cargo_ai_binary_sha256: Some("\n".to_string()),
+        };
+
+        assert!(normalized_metadata(metadata).is_none());
     }
 }

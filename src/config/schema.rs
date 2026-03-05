@@ -159,7 +159,7 @@ pub struct UpdateCheck {
     pub latest_version: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CargoAiMetadata {
     #[serde(default)]
     pub cargo_ai_version: Option<String>,
