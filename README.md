@@ -80,7 +80,7 @@ cargo ai profile add openai \
 Set token-based credentials:
 
 ```bash
-cargo ai profile token set openai --token sk-***
+cargo ai profile set openai --token sk-*** --auth api_key
 ```
 
 Or use OpenAI account login instead of API key:
@@ -106,21 +106,21 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
   - `~/.cargo/.cargo-ai/credentials.toml`.
 - `keychain` mode stores secrets in OS keychain backends through Rust `keyring` (3.x stable).
 - Manage mode with:
-  - `cargo ai settings secret-store status`
-  - `cargo ai settings secret-store set <file|keychain>`
-  - `cargo ai settings secret-store set <file|keychain> --migrate --yes`
+  - `cargo ai credentials store status`
+  - `cargo ai credentials store set <file|keychain>`
+  - `cargo ai credentials store set <file|keychain> --migrate --yes`
 - Manage OpenAI auth session with:
   - `cargo ai auth login openai [--profile <name>] [--set-default]`
   - `cargo ai auth status [--json]`
   - `cargo ai auth logout [--global] [--yes]`
 - `cargo ai auth logout` is local-only by default (Cargo AI stops using OpenAI account auth, Codex remains signed in).
 - Use `cargo ai auth logout --global` to also run `codex logout`.
-- Manage profile auth/token material with:
-  - `cargo ai profile auth set <name> <none|api_key|openai_account>`
-  - `cargo ai profile auth status [<name>]`
-  - `cargo ai profile token set <name> (--token <TOKEN> | --stdin | --env <ENV_VAR>)`
-  - `cargo ai profile token clear <name> [--yes]`
-  - `cargo ai profile token status <name>`
+- Manage profile metadata/auth/token material with:
+  - `cargo ai profile add <name> --server <server> --model <model> [--auth <none|api_key|openai_account>] [--default]`
+  - `cargo ai profile set <name> [--server <server>] [--model <model>] [--auth <none|api_key|openai_account>] [--token <TOKEN> | --stdin | --env <ENV_VAR> | --clear-token] [--default]`
+  - `cargo ai profile list`
+  - `cargo ai profile show <name>`
+  - `cargo ai profile remove <name>`
 - Use `--migrate --dry-run` to preview migration without writes.
 - Fresh installs can switch to `keychain` before any secrets are created (metadata-only switch).
 - Legacy secrets found in `config.toml` are migrated once at startup into the active secret-store path.

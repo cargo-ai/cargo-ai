@@ -4,8 +4,8 @@
 //! `openai_account` mode and does not import/persist duplicated OpenAI account
 //! session tokens in Cargo AI credential backends.
 
-use crate::config::settings as config_settings;
 use crate::config::loader::load_config;
+use crate::config::settings as config_settings;
 use crate::credentials::store;
 use serde_json::Value;
 use std::fs;
@@ -156,14 +156,14 @@ pub fn openai_account_locally_disabled() -> bool {
 pub async fn resolve_session_for_runtime() -> Result<ResolvedSession, String> {
     if openai_account_locally_disabled() {
         return Err(
-            "OpenAI account auth is logged out for Cargo AI locally. Run `cargo ai auth login openai` to re-enable, or use `profile token set` for api_key mode."
+            "OpenAI account auth is logged out for Cargo AI locally. Run `cargo ai auth login openai` to re-enable, or use `cargo ai profile set <name> --token <TOKEN> --auth api_key`."
                 .to_string(),
         );
     }
 
     let Some(session) = load_codex_session()? else {
         return Err(
-            "OpenAI authentication is missing. Install Codex and run `codex login`, or use `profile token set` for api_key mode."
+            "OpenAI authentication is missing. Install Codex and run `codex login`, or use `cargo ai profile set <name> --token <TOKEN> --auth api_key`."
                 .to_string(),
         );
     };

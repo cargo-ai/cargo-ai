@@ -59,7 +59,7 @@ fn resolve_profile_api_token(profile: &SelectedProfile) -> Result<String, String
             .map(str::to_string)
             .ok_or_else(|| {
                 format!(
-                    "Missing API token for profile '{}'. Use `cargo ai profile token set {} --token <TOKEN>`.",
+                    "Missing API token for profile '{}'. Use `cargo ai profile set {} --token <TOKEN> --auth api_key`.",
                     profile.name, profile.name
                 )
             }),

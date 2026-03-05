@@ -1,4 +1,4 @@
-//! Runtime behavior for `cargo ai settings secret-store`.
+//! Runtime behavior for `cargo ai credentials store`.
 use clap::ArgMatches;
 use std::io::{self, Write};
 
@@ -44,7 +44,7 @@ fn run_status() -> bool {
     let status = match store::secret_store_status() {
         Ok(status) => status,
         Err(error) => {
-            eprintln!("❌ Failed to inspect secret-store status: {error}");
+            eprintln!("❌ Failed to inspect credential-store status: {error}");
             return false;
         }
     };
@@ -96,7 +96,7 @@ fn run_status() -> bool {
 
 fn run_set(sub_m: &ArgMatches) -> bool {
     let Some(raw_mode) = sub_m.get_one::<String>("mode") else {
-        eprintln!("❌ Missing mode. Use `cargo ai settings secret-store set <file|keychain>`.");
+        eprintln!("❌ Missing mode. Use `cargo ai credentials store set <file|keychain>`.");
         return false;
     };
 
@@ -112,7 +112,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
     let status = match store::secret_store_status() {
         Ok(status) => status,
         Err(error) => {
-            eprintln!("❌ Failed to inspect secret-store status: {error}");
+            eprintln!("❌ Failed to inspect credential-store status: {error}");
             return false;
         }
     };
@@ -151,7 +151,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
 
     if migrate {
         if !dry_run && !yes {
-            let confirmed = match confirm("Migrate credentials and switch secret-store mode?") {
+            let confirmed = match confirm("Migrate credentials and switch credential-store mode?") {
                 Ok(confirmed) => confirmed,
                 Err(error) => {
                     eprintln!("❌ {error}");
@@ -167,7 +167,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
         let outcome = match store::migrate_secret_store(target_mode, dry_run) {
             Ok(outcome) => outcome,
             Err(error) => {
-                eprintln!("❌ Failed to migrate secret store: {error}");
+                eprintln!("❌ Failed to migrate credential store: {error}");
                 return false;
             }
         };
@@ -206,12 +206,12 @@ fn run_set(sub_m: &ArgMatches) -> bool {
         }
 
         if let Err(error) = config_settings::set_secret_store_mode(target_mode) {
-            eprintln!("❌ Failed to persist secret-store mode: {error}");
+            eprintln!("❌ Failed to persist credential-store mode: {error}");
             return false;
         }
 
         println!(
-            "✅ Secret-store mode set to '{}'. Migrated {} profile token(s); account tokens migrated: {}.",
+            "✅ Credential-store mode set to '{}'. Migrated {} profile token(s); account tokens migrated: {}.",
             target_mode.as_str(),
             outcome.migrated_profile_tokens,
             if outcome.migrated_account_tokens {
@@ -224,23 +224,26 @@ fn run_set(sub_m: &ArgMatches) -> bool {
     }
 
     if let Err(error) = config_settings::set_secret_store_mode(target_mode) {
-        eprintln!("❌ Failed to persist secret-store mode: {error}");
+        eprintln!("❌ Failed to persist credential-store mode: {error}");
         return false;
     }
 
     if changing_mode {
         println!(
-            "✅ Secret-store mode set to '{}'. No credentials required migration.",
+            "✅ Credential-store mode set to '{}'. No credentials required migration.",
             target_mode.as_str()
         );
     } else {
-        println!("Secret-store mode is already '{}'.", target_mode.as_str());
+        println!(
+            "Credential-store mode is already '{}'.",
+            target_mode.as_str()
+        );
     }
 
     true
 }
 
-/// Executes `cargo ai settings secret-store ...`.
+/// Executes `cargo ai credentials store ...`.
 pub fn run(sub_m: &ArgMatches) -> bool {
     if sub_m.subcommand_matches("status").is_some() {
         run_status()
@@ -248,7 +251,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         run_set(set_m)
     } else {
         eprintln!(
-            "No secret-store subcommand found. Try 'cargo ai settings secret-store status' or 'cargo ai settings secret-store set <file|keychain>'."
+            "No credential-store subcommand found. Try 'cargo ai credentials store status' or 'cargo ai credentials store set <file|keychain>'."
         );
         false
     }

@@ -221,7 +221,7 @@ pub(crate) fn validate_provider_request(
 
     if provider == ProviderKind::OpenAi && token.trim().is_empty() {
         issues.push(
-            "❌ Missing OpenAI token. Provide `--token <TOKEN>`, run `cargo ai auth login openai`, or configure `profile auth` + `profile token`."
+            "❌ Missing OpenAI token. Provide `--token <TOKEN>`, run `cargo ai auth login openai`, or configure `cargo ai profile set <name> --token <TOKEN> --auth api_key`."
                 .to_string(),
         );
     }

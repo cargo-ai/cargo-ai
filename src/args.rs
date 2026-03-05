@@ -6,12 +6,12 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 
 mod account;
 mod auth;
+mod credentials;
 mod hatch;
 mod init;
 mod new;
 mod preflight;
 mod profile;
-mod settings;
 mod shipyard;
 mod version;
 
@@ -31,7 +31,7 @@ fn cli_command(bin_name: &'static str) -> Command {
         .subcommand(hatch::command())
         .subcommand(profile::command())
         .subcommand(auth::command())
-        .subcommand(settings::command())
+        .subcommand(credentials::command())
         .subcommand(account::command())
         .subcommand(version::command())
         .subcommand(preflight::command())
@@ -113,8 +113,8 @@ mod tests {
         assert!(index_of("init") < index_of("hatch"));
         assert!(index_of("hatch") < index_of("profile"));
         assert!(index_of("profile") < index_of("auth"));
-        assert!(index_of("auth") < index_of("settings"));
-        assert!(index_of("settings") < index_of("account"));
+        assert!(index_of("auth") < index_of("credentials"));
+        assert!(index_of("credentials") < index_of("account"));
         assert!(index_of("account") < index_of("version"));
     }
 
@@ -279,22 +279,22 @@ mod tests {
     }
 
     #[test]
-    fn settings_secret_store_set_parses_mode_and_flags() {
+    fn credentials_store_set_parses_mode_and_flags() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "settings",
-                "secret-store",
+                "credentials",
+                "store",
                 "set",
                 "keychain",
                 "--migrate",
                 "--yes",
             ])
-            .expect("settings secret-store set should parse");
+            .expect("credentials store set should parse");
 
         let set_matches = matches
-            .subcommand_matches("settings")
-            .and_then(|m| m.subcommand_matches("secret-store"))
+            .subcommand_matches("credentials")
+            .and_then(|m| m.subcommand_matches("store"))
             .and_then(|m| m.subcommand_matches("set"))
             .expect("set subcommand should be available");
 
@@ -307,12 +307,12 @@ mod tests {
     }
 
     #[test]
-    fn settings_secret_store_dry_run_requires_migrate() {
+    fn credentials_store_dry_run_requires_migrate() {
         let err = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "settings",
-                "secret-store",
+                "credentials",
+                "store",
                 "set",
                 "file",
                 "--dry-run",
@@ -610,33 +610,64 @@ mod tests {
     }
 
     #[test]
-    fn profile_token_set_env_parses() {
+    fn profile_set_token_env_parses() {
         let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "profile",
+                "set",
+                "openai-prod",
+                "--env",
+                "OPENAI_API_KEY",
+            ])
+            .expect("profile set --env should parse");
+
+        let profile_set = matches
+            .subcommand_matches("profile")
+            .and_then(|m| m.subcommand_matches("set"))
+            .expect("profile set should be available");
+
+        assert_eq!(
+            profile_set.get_one::<String>("name").map(String::as_str),
+            Some("openai-prod")
+        );
+        assert_eq!(
+            profile_set.get_one::<String>("env").map(String::as_str),
+            Some("OPENAI_API_KEY")
+        );
+    }
+
+    #[test]
+    fn profile_set_rejects_legacy_auth_subcommand() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "profile",
+                "auth",
+                "set",
+                "openai-prod",
+                "openai_account",
+            ])
+            .expect_err("profile auth should be removed");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn profile_set_rejects_legacy_token_subcommand() {
+        let err = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
                 "profile",
                 "token",
                 "set",
                 "openai-prod",
-                "--env",
-                "OPENAI_API_KEY",
+                "--token",
+                "sk-test",
             ])
-            .expect("profile token set --env should parse");
+            .expect_err("profile token should be removed");
 
-        let token_set = matches
-            .subcommand_matches("profile")
-            .and_then(|m| m.subcommand_matches("token"))
-            .and_then(|m| m.subcommand_matches("set"))
-            .expect("profile token set should be available");
-
-        assert_eq!(
-            token_set.get_one::<String>("name").map(String::as_str),
-            Some("openai-prod")
-        );
-        assert_eq!(
-            token_set.get_one::<String>("env").map(String::as_str),
-            Some("OPENAI_API_KEY")
-        );
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     }
 
     #[test]

@@ -1,12 +1,12 @@
 //! Runtime behavior for `cargo ai profile`.
 use clap::ArgMatches;
+use std::fs;
 use std::io::{self, Read, Write};
 
 use crate::config::adder::add_profile;
-use crate::config::loader::{find_profile, load_config};
+use crate::config::loader::{config_path, find_profile, load_config};
 use crate::config::remover::remove_profile;
-use crate::config::schema::{default_profile_auth_mode, Profile, ProfileAuthMode};
-use crate::config::settings as config_settings;
+use crate::config::schema::{Profile, ProfileAuthMode};
 use crate::credentials::store;
 
 fn parse_auth_mode(raw: &str) -> Option<ProfileAuthMode> {
@@ -71,6 +71,14 @@ fn resolve_token_input(set_m: &ArgMatches) -> Result<String, String> {
     }
 
     Err("no token source provided".to_string())
+}
+
+fn write_config(cfg: &crate::config::schema::Config) -> Result<(), String> {
+    let path = config_path();
+    let serialized = toml::to_string_pretty(cfg)
+        .map_err(|error| format!("failed to serialize config: {error}"))?;
+    fs::write(&path, serialized)
+        .map_err(|error| format!("failed to write '{}': {error}", path.display()))
 }
 
 fn run_list() -> bool {
@@ -165,47 +173,23 @@ fn run_add(add_m: &ArgMatches) -> bool {
         return false;
     };
     let Some(model) = add_m.get_one::<String>("model") else {
-        eprintln!("Please provide --model (for example: gpt-4o or mistral).");
+        eprintln!("Please provide --model (for example: gpt-5.2 or mistral).");
         return false;
     };
 
-    let url = add_m
-        .get_one::<String>("url")
-        .map(String::as_str)
-        .unwrap_or("(none)");
-    let description = add_m
-        .get_one::<String>("description")
-        .map(String::as_str)
-        .unwrap_or("(none)");
-    let auth_mode = if let Some(raw_mode) = add_m.get_one::<String>("auth") {
-        let Some(mode) = parse_auth_mode(raw_mode) else {
-            eprintln!(
-                "❌ Invalid auth mode '{}'. Use none|api_key|openai_account.",
-                raw_mode
-            );
-            return false;
-        };
-        mode
-    } else {
-        default_profile_auth_mode()
-    };
+    let auth_mode = add_m
+        .get_one::<String>("auth")
+        .and_then(|raw_mode| parse_auth_mode(raw_mode))
+        .unwrap_or(ProfileAuthMode::None);
 
     let new_profile = Profile {
         name: name.to_string(),
         server: server.to_string(),
         model: model.to_string(),
-        url: if url == "(none)" {
-            None
-        } else {
-            Some(url.to_string())
-        },
+        url: add_m.get_one::<String>("url").cloned(),
         token: None,
         timeout_in_sec: 60,
-        description: if description == "(none)" {
-            None
-        } else {
-            Some(description.to_string())
-        },
+        description: add_m.get_one::<String>("description").cloned(),
         auth_mode,
     };
 
@@ -224,83 +208,13 @@ fn run_add(add_m: &ArgMatches) -> bool {
     }
 }
 
-fn run_remove(remove_m: &ArgMatches) -> bool {
-    if let Some(name) = remove_m.get_one::<String>("name") {
-        if let Some(cfg) = load_config() {
-            if cfg.profile.iter().any(|profile| profile.name == *name) {
-                print!(
-                    "Are you sure you want to remove profile '{}'? [y/N]: ",
-                    name
-                );
-                if let Err(error) = io::stdout().flush() {
-                    eprintln!("Failed to flush stdout: {error}");
-                    return false;
-                }
-
-                let mut input = String::new();
-                if let Err(error) = io::stdin().read_line(&mut input) {
-                    eprintln!("Failed to read input: {error}");
-                    return false;
-                }
-
-                if input.trim().eq_ignore_ascii_case("y")
-                    || input.trim().eq_ignore_ascii_case("yes")
-                {
-                    if let Err(error) = remove_profile(name) {
-                        eprintln!("Failed to remove profile '{}': {error}", name);
-                        return false;
-                    }
-                    true
-                } else {
-                    println!("Operation canceled.");
-                    true
-                }
-            } else {
-                eprintln!("❌ Profile '{}' not found.", name);
-                false
-            }
-        } else {
-            eprintln!("❌ No config file found.");
-            false
-        }
-    } else {
-        eprintln!("❌ Please provide a profile name to remove. Example: cargo ai profile remove openai-prod");
-        false
-    }
-}
-
-fn run_auth_set(auth_set_m: &ArgMatches) -> bool {
-    let Some(name) = auth_set_m.get_one::<String>("name") else {
+fn run_set(set_m: &ArgMatches) -> bool {
+    let Some(name) = set_m.get_one::<String>("name") else {
         eprintln!("❌ Missing profile name.");
         return false;
     };
-    let Some(raw_mode) = auth_set_m.get_one::<String>("mode") else {
-        eprintln!("❌ Missing auth mode.");
-        return false;
-    };
-    let Some(mode) = parse_auth_mode(raw_mode) else {
-        eprintln!(
-            "❌ Invalid auth mode '{}'. Use none|api_key|openai_account.",
-            raw_mode
-        );
-        return false;
-    };
 
-    if let Err(error) = config_settings::set_profile_auth_mode(name, mode) {
-        eprintln!("❌ Failed to set auth mode for profile '{}': {error}", name);
-        return false;
-    }
-
-    println!(
-        "✅ Profile '{}' auth mode set to '{}'.",
-        name,
-        mode.as_str()
-    );
-    true
-}
-
-fn run_auth_status(auth_status_m: &ArgMatches) -> bool {
-    let cfg = match load_config() {
+    let mut cfg = match load_config() {
         Some(cfg) => cfg,
         None => {
             eprintln!("❌ No config file found.");
@@ -308,147 +222,148 @@ fn run_auth_status(auth_status_m: &ArgMatches) -> bool {
         }
     };
 
-    if let Some(name) = auth_status_m.get_one::<String>("name") {
-        if let Some(profile) = cfg.profile.iter().find(|profile| profile.name == *name) {
-            println!(
-                "Profile '{}' auth mode: {}",
-                profile.name,
-                profile.auth_mode.as_str()
-            );
-            true
-        } else {
-            eprintln!("❌ Profile '{}' not found.", name);
-            false
-        }
-    } else {
-        println!("Profile auth modes:");
-        println!("{:<20} {:<10} {}", "Name", "Server", "Auth mode");
-        println!("{:-<55}", "");
-        for profile in cfg.profile {
-            println!(
-                "{:<20} {:<10} {}",
-                profile.name,
-                profile.server,
-                profile.auth_mode.as_str()
-            );
-        }
-        true
-    }
-}
-
-fn run_token_set(token_set_m: &ArgMatches) -> bool {
-    let Some(name) = token_set_m.get_one::<String>("name") else {
-        eprintln!("❌ Missing profile name.");
-        return false;
-    };
-
-    if !profile_exists(name) {
+    let Some(profile) = cfg.profile.iter_mut().find(|profile| profile.name == *name) else {
         eprintln!("❌ Profile '{}' not found.", name);
         return false;
-    }
-
-    let token = match resolve_token_input(token_set_m) {
-        Ok(token) => token,
-        Err(error) => {
-            eprintln!("❌ Failed to read token input: {error}");
-            return false;
-        }
     };
 
-    if let Err(error) = store::store_profile_token(name, token.as_str()) {
-        eprintln!("❌ Failed to store token for profile '{}': {error}", name);
-        return false;
+    let mut metadata_changes: Vec<&str> = Vec::new();
+
+    if let Some(server) = set_m.get_one::<String>("server") {
+        profile.server = server.to_string();
+        metadata_changes.push("server");
     }
 
-    println!("✅ Stored API token for profile '{}'.", name);
+    if let Some(model) = set_m.get_one::<String>("model") {
+        profile.model = model.to_string();
+        metadata_changes.push("model");
+    }
 
-    if let Some(cfg) = load_config() {
-        if let Some(profile) = cfg.profile.iter().find(|profile| profile.name == *name) {
-            if profile.auth_mode != ProfileAuthMode::ApiKey {
-                println!(
-                    "ℹ️ Profile '{}' auth mode is '{}'. Set it to '{}' when you want to use this token by default:",
-                    name,
-                    profile.auth_mode.as_str(),
-                    ProfileAuthMode::ApiKey.as_str()
-                );
-                println!(
-                    "   cargo ai profile auth set {} {}",
-                    name,
-                    ProfileAuthMode::ApiKey.as_str()
-                );
+    if let Some(raw_mode) = set_m.get_one::<String>("auth") {
+        let Some(mode) = parse_auth_mode(raw_mode) else {
+            eprintln!(
+                "❌ Invalid auth mode '{}'. Use none|api_key|openai_account.",
+                raw_mode
+            );
+            return false;
+        };
+        profile.auth_mode = mode;
+        metadata_changes.push("auth");
+    }
+
+    if let Some(url) = set_m.get_one::<String>("url") {
+        profile.url = Some(url.to_string());
+        metadata_changes.push("url");
+    } else if set_m.get_flag("clear_url") {
+        profile.url = None;
+        metadata_changes.push("url");
+    }
+
+    if let Some(description) = set_m.get_one::<String>("description") {
+        profile.description = Some(description.to_string());
+        metadata_changes.push("description");
+    } else if set_m.get_flag("clear_description") {
+        profile.description = None;
+        metadata_changes.push("description");
+    }
+
+    if set_m.get_flag("default") {
+        cfg.default_profile = Some(name.to_string());
+        metadata_changes.push("default");
+    }
+
+    let mut token_change: Option<&str> = None;
+    if set_m.get_flag("clear_token") {
+        if let Err(error) = store::clear_profile_token(name) {
+            eprintln!("❌ Failed to clear token for profile '{}': {error}", name);
+            return false;
+        }
+        token_change = Some("cleared");
+    } else if set_m.get_one::<String>("token").is_some()
+        || set_m.get_flag("stdin")
+        || set_m.get_one::<String>("env").is_some()
+    {
+        let token = match resolve_token_input(set_m) {
+            Ok(token) => token,
+            Err(error) => {
+                eprintln!("❌ Failed to read token input: {error}");
+                return false;
             }
+        };
+        if let Err(error) = store::store_profile_token(name, token.as_str()) {
+            eprintln!("❌ Failed to store token for profile '{}': {error}", name);
+            return false;
+        }
+        token_change = Some("updated");
+    }
+
+    if !metadata_changes.is_empty() {
+        if let Err(error) = write_config(&cfg) {
+            eprintln!("❌ Failed to persist profile updates: {error}");
+            return false;
+        }
+    }
+
+    println!("✅ Profile '{}' updated.", name);
+    if !metadata_changes.is_empty() {
+        println!("Metadata updates: {}", metadata_changes.join(", "));
+    }
+    if let Some(token_change) = token_change {
+        println!("Token: {token_change}");
+        let auth_mode = cfg
+            .profile
+            .iter()
+            .find(|profile| profile.name == *name)
+            .map(|profile| profile.auth_mode)
+            .unwrap_or(ProfileAuthMode::None);
+        if auth_mode != ProfileAuthMode::ApiKey {
+            println!(
+                "ℹ️ Profile auth mode is '{}'. Set `--auth api_key` to use stored API token by default.",
+                auth_mode.as_str()
+            );
         }
     }
 
     true
 }
 
-fn run_token_clear(token_clear_m: &ArgMatches) -> bool {
-    let Some(name) = token_clear_m.get_one::<String>("name") else {
-        eprintln!("❌ Missing profile name.");
-        return false;
-    };
+fn run_remove(remove_m: &ArgMatches) -> bool {
+    if let Some(name) = remove_m.get_one::<String>("name") {
+        if !profile_exists(name) {
+            eprintln!("❌ Profile '{}' not found.", name);
+            return false;
+        }
 
-    if !profile_exists(name) {
-        eprintln!("❌ Profile '{}' not found.", name);
-        return false;
-    }
-
-    if !token_clear_m.get_flag("yes") {
-        let confirmed = match confirm(&format!("Clear API token for profile '{name}'?")) {
+        let confirmed = match confirm(&format!(
+            "Are you sure you want to remove profile '{name}'?"
+        )) {
             Ok(confirmed) => confirmed,
             Err(error) => {
                 eprintln!("❌ {error}");
                 return false;
             }
         };
+
         if !confirmed {
             println!("Operation canceled.");
             return true;
         }
-    }
 
-    if let Err(error) = store::clear_profile_token(name) {
-        eprintln!("❌ Failed to clear token for profile '{}': {error}", name);
-        return false;
-    }
-
-    println!("✅ Cleared API token for profile '{}'.", name);
-    true
-}
-
-fn run_token_status(token_status_m: &ArgMatches) -> bool {
-    let Some(name) = token_status_m.get_one::<String>("name") else {
-        eprintln!("❌ Missing profile name.");
-        return false;
-    };
-
-    if !profile_exists(name) {
-        eprintln!("❌ Profile '{}' not found.", name);
-        return false;
-    }
-
-    let token_present = match store::load_profile_token(name) {
-        Ok(Some(token)) => !token.trim().is_empty(),
-        Ok(None) => false,
-        Err(error) => {
-            eprintln!(
-                "❌ Failed to inspect token status for profile '{}': {error}",
-                name
-            );
-            return false;
+        if let Err(error) = remove_profile(name) {
+            eprintln!("Failed to remove profile '{}': {error}", name);
+            false
+        } else {
+            true
         }
-    };
-
-    println!(
-        "Profile '{}' token status: {}",
-        name,
-        if token_present { "present" } else { "missing" }
-    );
-    true
+    } else {
+        eprintln!(
+            "❌ Please provide a profile name to remove. Example: cargo ai profile remove openai-prod"
+        );
+        false
+    }
 }
 
-/// Executes profile list/show/add/remove operations.
+/// Executes profile list/show/add/set/remove operations.
 pub fn run(sub_m: &ArgMatches) -> bool {
     if sub_m.subcommand_matches("list").is_some() {
         run_list()
@@ -456,35 +371,13 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         run_show(show_m)
     } else if let Some(add_m) = sub_m.subcommand_matches("add") {
         run_add(add_m)
+    } else if let Some(set_m) = sub_m.subcommand_matches("set") {
+        run_set(set_m)
     } else if let Some(remove_m) = sub_m.subcommand_matches("remove") {
         run_remove(remove_m)
-    } else if let Some(auth_m) = sub_m.subcommand_matches("auth") {
-        if let Some(auth_set_m) = auth_m.subcommand_matches("set") {
-            run_auth_set(auth_set_m)
-        } else if let Some(auth_status_m) = auth_m.subcommand_matches("status") {
-            run_auth_status(auth_status_m)
-        } else {
-            eprintln!(
-                "❌ No profile auth subcommand found. Try 'cargo ai profile auth set <name> <none|api_key|openai_account>' or 'cargo ai profile auth status [name]'."
-            );
-            false
-        }
-    } else if let Some(token_m) = sub_m.subcommand_matches("token") {
-        if let Some(token_set_m) = token_m.subcommand_matches("set") {
-            run_token_set(token_set_m)
-        } else if let Some(token_clear_m) = token_m.subcommand_matches("clear") {
-            run_token_clear(token_clear_m)
-        } else if let Some(token_status_m) = token_m.subcommand_matches("status") {
-            run_token_status(token_status_m)
-        } else {
-            eprintln!(
-                "❌ No profile token subcommand found. Try 'cargo ai profile token set|clear|status ...'."
-            );
-            false
-        }
     } else {
         eprintln!(
-            "❌ No profile subcommand found. Try 'cargo ai profile list', 'cargo ai profile auth ...', or 'cargo ai profile token ...'."
+            "❌ No profile subcommand found. Try 'cargo ai profile list', 'cargo ai profile show <name>', 'cargo ai profile add ...', or 'cargo ai profile set ...'."
         );
         false
     }

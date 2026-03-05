@@ -5,7 +5,9 @@ use std::io::{self, Write};
 use std::process::Command;
 
 use crate::config::loader::load_config;
-use crate::config::schema::{default_profile_auth_mode, default_secret_store_mode, ProfileAuthMode};
+use crate::config::schema::{
+    default_profile_auth_mode, default_secret_store_mode, ProfileAuthMode,
+};
 use crate::config::settings as config_settings;
 use crate::credentials::{openai_oauth, store};
 
@@ -263,7 +265,11 @@ fn render_status_text(status: &AuthStatusJson) {
     println!("Effective auth mode: {}", status.auth_mode_effective);
     println!(
         "Refresh token present: {}",
-        if status.has_refresh_token { "yes" } else { "no" }
+        if status.has_refresh_token {
+            "yes"
+        } else {
+            "no"
+        }
     );
     println!(
         "Access token expires at (unix): {}",

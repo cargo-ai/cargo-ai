@@ -1,20 +1,20 @@
-//! CLI parser definition for `cargo ai settings`.
+//! CLI parser definition for `cargo ai credentials`.
 use clap::{Arg, ArgAction, Command};
 
-/// Builds the `settings` command schema.
+/// Builds the `credentials` command schema.
 pub fn command() -> Command {
-    Command::new("settings")
-        .about("Manage global Cargo-AI settings")
+    Command::new("credentials")
+        .about("Manage credential storage behavior")
         .subcommand(
-            Command::new("secret-store")
+            Command::new("store")
                 .about("Manage credential storage mode")
                 .subcommand(
                     Command::new("status")
-                        .about("Show current secret-store mode and backend state"),
+                        .about("Show current credential-store mode and backend state"),
                 )
                 .subcommand(
                     Command::new("set")
-                        .about("Set secret-store mode")
+                        .about("Set credential-store mode")
                         .arg(
                             Arg::new("mode")
                                 .help("Target storage mode")

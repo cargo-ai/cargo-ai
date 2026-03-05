@@ -10,7 +10,7 @@ pub fn add_profile(
     set_as_default: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // `profile add` is metadata-only: secret writes are handled by
-    // `cargo ai profile token set`.
+    // `cargo ai profile set ... --token`.
     new_profile.token = None;
 
     let mut cfg = load_config().unwrap_or(Config {
