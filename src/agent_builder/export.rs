@@ -1,4 +1,4 @@
-//! Handles exporting the compiled agent binary to the current working directory.
+//! Handles exporting the compiled agent binary to the requested output directory.
 
 use super::build_target::BuildTarget;
 use std::fs;
@@ -36,15 +36,34 @@ fn export_binary_to_path(
 }
 
 /// Copies the built binary from `.cargo-ai/agents/{agent}/target/...`
-/// into the directory where the `cargo-ai` command was invoked.
+/// into either the requested output directory or the current working directory.
 pub fn export_binary(
     agent_name: &str,
     force_overwrite: bool,
     build_target: &BuildTarget,
+    output_dir: Option<&Path>,
 ) -> io::Result<()> {
     let project_path = super::agent_workspace_path(agent_name);
     let source_path = build_target.compiled_binary_path(&project_path, agent_name);
-    let dest_dir = std::env::current_dir()?;
+    let dest_dir = match output_dir {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+
+    if dest_dir.exists() {
+        if !dest_dir.is_dir() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "Output directory {:?} is not a directory. Re-run with --output-dir <DIR>.",
+                    dest_dir
+                ),
+            ));
+        }
+    } else {
+        fs::create_dir_all(&dest_dir)?;
+    }
+
     let dest_path = build_target.exported_binary_path(&dest_dir, agent_name);
 
     export_binary_to_path(&source_path, &dest_path, force_overwrite)
@@ -52,10 +71,11 @@ pub fn export_binary(
 
 #[cfg(test)]
 mod tests {
-    use super::export_binary_to_path;
+    use super::{export_binary, export_binary_to_path};
+    use crate::agent_builder::build_target::BuildTarget;
     use std::fs;
     use std::io::ErrorKind;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -100,5 +120,60 @@ mod tests {
         assert_eq!(copied, b"source");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_creates_missing_output_directory() {
+        let workspace = super::super::agent_workspace_path("export_create_dir");
+        let build_target = BuildTarget::from_cli(None).expect("default target should resolve");
+        let source_path = build_target.compiled_binary_path(&workspace, "export_create_dir");
+        let source_parent = source_path
+            .parent()
+            .expect("compiled binary should have a parent directory");
+        fs::create_dir_all(source_parent).expect("source parent should be creatable");
+        fs::write(&source_path, b"binary").expect("source binary should be writable");
+
+        let output_dir = temp_test_dir().join("nested").join("bin");
+        export_binary(
+            "export_create_dir",
+            false,
+            &build_target,
+            Some(Path::new(&output_dir)),
+        )
+        .expect("export should create missing output directory");
+
+        let exported = build_target.exported_binary_path(&output_dir, "export_create_dir");
+        assert!(exported.exists());
+
+        let _ = fs::remove_dir_all(output_dir.parent().unwrap().parent().unwrap());
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn export_rejects_output_dir_that_is_a_file() {
+        let workspace = super::super::agent_workspace_path("export_bad_output_dir");
+        let build_target = BuildTarget::from_cli(None).expect("default target should resolve");
+        let source_path = build_target.compiled_binary_path(&workspace, "export_bad_output_dir");
+        let source_parent = source_path
+            .parent()
+            .expect("compiled binary should have a parent directory");
+        fs::create_dir_all(source_parent).expect("source parent should be creatable");
+        fs::write(&source_path, b"binary").expect("source binary should be writable");
+
+        let file_path = temp_test_dir().join("not-a-dir");
+        fs::write(&file_path, b"file").expect("file path should be writable");
+
+        let err = export_binary(
+            "export_bad_output_dir",
+            false,
+            &build_target,
+            Some(Path::new(&file_path)),
+        )
+        .expect_err("file output path should fail");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("--output-dir"));
+
+        let _ = fs::remove_file(file_path);
+        let _ = fs::remove_dir_all(workspace);
     }
 }

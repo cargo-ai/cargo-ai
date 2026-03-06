@@ -195,6 +195,12 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
   cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json --target aarch64-apple-darwin
   ```
 
+  To export the built binary to a specific directory while keeping the binary name based on `<name>`:
+
+  ```bash
+  cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json --output-dir ./dist
+  ```
+
   Cargo AI does not install Rust targets automatically. Generated agents now use Rustls-backed `reqwest` in the default template to avoid the prior common OpenSSL cross-compilation blocker, but if the requested target is missing or the linker/SDK/sysroot toolchain for that target is incomplete, Cargo AI still surfaces the underlying Cargo/Rust error directly.
 
   By default, Cargo AI still deletes the internal workspace after build/check. To keep it for inspection:
@@ -220,8 +226,11 @@ cargo ai account hatch weather_agent
 # Validate scaffold and compile path only (no binary export)
 cargo ai account hatch weather_agent --check
 
-# Override the local output/workspace name
-cargo ai account agents hatch weather_agent --local-name weather_agent_v2
+# Use a different remote account agent while keeping a local output name
+cargo ai account hatch weather_agent_local --agent weather_agent_remote
+
+# Export the built binary to a specific directory
+cargo ai account hatch weather_agent --output-dir ./dist
 
 # Overwrite existing local output binary
 cargo ai account agents hatch weather_agent --force

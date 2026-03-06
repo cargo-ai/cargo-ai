@@ -5,7 +5,7 @@ use crate::agent_builder::build_target::BuildTarget;
 use crate::infra_api;
 use crate::ui;
 
-use std::{fs, path::Path};
+use std::{fs, path::{Path, PathBuf}};
 
 use super::helpers::{
     apply_agents_list_display_limit, load_account_auth, persist_refreshed_access_token,
@@ -22,6 +22,7 @@ struct AccountHatchCommand {
     force_overwrite: bool,
     keep_project: bool,
     build_target: BuildTarget,
+    output_dir: Option<PathBuf>,
 }
 
 fn hatch_mode_from_check_flag(check_only: bool) -> crate::commands::hatch_pipeline::HatchMode {
@@ -47,31 +48,20 @@ fn looks_like_local_path_input(input: &str) -> bool {
         || input.contains('\\')
 }
 
-fn resolve_local_hatch_name(
-    source_name: &str,
-    local_name_override: Option<&str>,
-) -> Result<String, String> {
-    let Some(source_trimmed) = Some(source_name.trim()).filter(|s| !s.is_empty()) else {
-        return Err("Missing agent name. Provide positional AGENT.".to_string());
-    };
-
-    let Some(local_name) = local_name_override else {
-        return Ok(source_trimmed.to_string());
-    };
-
-    let trimmed = local_name.trim();
+fn validate_account_hatch_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
     if trimmed.is_empty() {
-        return Err("Local name cannot be empty. Provide --local-name <NAME>.".to_string());
+        return Err("Missing account hatch name. Provide positional NAME.".to_string());
     }
-    if looks_like_local_path_input(trimmed) {
+    if looks_like_local_path_input(trimmed) || trimmed.ends_with(".json") {
         return Err(format!(
-            "Local name '{}' looks like a path. Use --local-name for name-only local output and --definition-path for remote account definition path selection.",
+            "Account hatch name '{}' looks like a path or .json file. Use positional NAME only for the local output/workspace name, use --agent <AGENT> for a different remote source, and use --output-dir <DIR> for export location.",
             trimmed
         ));
     }
     if !is_supported_local_hatch_name(trimmed) {
         return Err(format!(
-            "Local name '{}' is invalid. Use only letters, numbers, '-' or '_' for --local-name.",
+            "Account hatch name '{}' is invalid. Use only letters, numbers, '-' or '_'.",
             trimmed
         ));
     }
@@ -79,20 +69,36 @@ fn resolve_local_hatch_name(
     Ok(trimmed.to_string())
 }
 
-fn parse_hatch_command(hatch_m: &ArgMatches) -> Result<AccountHatchCommand, String> {
-    let source_name = hatch_m
-        .get_one::<String>("agent")
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "Missing agent name. Provide positional AGENT.".to_string())?;
+fn resolve_account_hatch_names(
+    local_name_input: &str,
+    source_name_override: Option<&str>,
+) -> Result<(String, String), String> {
+    let local_name = validate_account_hatch_name(local_name_input)?;
 
-    let local_name = resolve_local_hatch_name(
-        &source_name,
-        hatch_m.get_one::<String>("local_name").map(String::as_str),
+    let source_name = match source_name_override {
+        Some(source_name_override) => validate_account_hatch_name(source_name_override)?,
+        None => local_name.clone(),
+    };
+
+    Ok((source_name, local_name))
+}
+
+fn parse_hatch_command(hatch_m: &ArgMatches) -> Result<AccountHatchCommand, String> {
+    let name = hatch_m
+        .get_one::<String>("name")
+        .map(String::as_str)
+        .ok_or_else(|| "Missing account hatch name. Provide positional NAME.".to_string())?;
+
+    let (source_name, local_name) = resolve_account_hatch_names(
+        name,
+        hatch_m.get_one::<String>("agent").map(String::as_str),
     )?;
 
     let build_target =
         BuildTarget::from_cli(hatch_m.get_one::<String>("target").map(String::as_str))?;
+    let output_dir = crate::commands::hatch_pipeline::resolve_output_dir(
+        hatch_m.get_one::<String>("output_dir").map(String::as_str),
+    )?;
 
     Ok(AccountHatchCommand {
         source_name,
@@ -107,6 +113,7 @@ fn parse_hatch_command(hatch_m: &ArgMatches) -> Result<AccountHatchCommand, Stri
         force_overwrite: hatch_m.get_flag("force"),
         keep_project: hatch_m.get_flag("keep_project"),
         build_target,
+        output_dir,
     })
 }
 
@@ -168,7 +175,7 @@ fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &serde_js
     );
     if hatch.local_name != hatch.source_name {
         println!(
-            "ℹ️ Local hatch name override: source='{}' local='{}'.",
+            "ℹ️ Remote source override: remote='{}' local='{}'.",
             hatch.source_name, hatch.local_name
         );
     }
@@ -189,6 +196,7 @@ fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &serde_js
         hatch.force_overwrite,
         hatch.keep_project,
         hatch.build_target.clone(),
+        hatch.output_dir.clone(),
     );
 
     crate::commands::hatch_pipeline::run_hatch_pipeline(request)
@@ -901,33 +909,43 @@ pub async fn run_hatch(hatch_m: &ArgMatches) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{hatch_mode_from_check_flag, resolve_local_hatch_name};
+    use super::{hatch_mode_from_check_flag, resolve_account_hatch_names};
 
     #[test]
-    fn local_hatch_name_defaults_to_source_name() {
-        let resolved = resolve_local_hatch_name("weather_agent", None)
-            .expect("default local hatch name should resolve");
-        assert_eq!(resolved, "weather_agent");
+    fn account_hatch_name_defaults_remote_source_to_local_name() {
+        let (source_name, local_name) = resolve_account_hatch_names("weather_agent", None)
+            .expect("default account hatch names should resolve");
+        assert_eq!(source_name, "weather_agent");
+        assert_eq!(local_name, "weather_agent");
     }
 
     #[test]
-    fn local_hatch_name_accepts_valid_override() {
-        let resolved = resolve_local_hatch_name("weather_agent", Some("weather_agent_v2"))
-            .expect("valid local hatch override should resolve");
-        assert_eq!(resolved, "weather_agent_v2");
+    fn account_hatch_name_accepts_remote_source_override() {
+        let (source_name, local_name) =
+            resolve_account_hatch_names("weather_agent_local", Some("weather_agent_remote"))
+                .expect("remote source override should resolve");
+        assert_eq!(source_name, "weather_agent_remote");
+        assert_eq!(local_name, "weather_agent_local");
     }
 
     #[test]
-    fn local_hatch_name_rejects_path_like_override() {
-        let err = resolve_local_hatch_name("weather_agent", Some("./bin/weather_agent_v2"))
-            .expect_err("path-like override should fail");
+    fn account_hatch_name_rejects_path_like_local_name() {
+        let err = resolve_account_hatch_names("./bin/weather_agent", None)
+            .expect_err("path-like local name should fail");
         assert!(err.contains("looks like a path"));
     }
 
     #[test]
-    fn local_hatch_name_rejects_invalid_name_override() {
-        let err = resolve_local_hatch_name("weather_agent", Some("weather.agent.v2"))
-            .expect_err("invalid override should fail");
+    fn account_hatch_name_rejects_json_like_local_name() {
+        let err = resolve_account_hatch_names("weather_agent.json", None)
+            .expect_err(".json-like local name should fail");
+        assert!(err.contains(".json"));
+    }
+
+    #[test]
+    fn account_hatch_name_rejects_invalid_remote_source_override() {
+        let err = resolve_account_hatch_names("weather_agent", Some("weather.agent.v2"))
+            .expect_err("invalid remote source override should fail");
         assert!(err.contains("invalid"));
     }
 

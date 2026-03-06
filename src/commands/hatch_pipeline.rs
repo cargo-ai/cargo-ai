@@ -4,6 +4,7 @@
 //! source resolution for hatch-style flows.
 use std::fs;
 use std::io::{Error, ErrorKind};
+use std::path::PathBuf;
 
 use crate::agent_builder::build_target::BuildTarget;
 
@@ -22,6 +23,7 @@ pub(crate) struct HatchRequest {
     pub force_overwrite: bool,
     pub keep_project: bool,
     pub build_target: BuildTarget,
+    pub output_dir: Option<PathBuf>,
 }
 
 impl HatchRequest {
@@ -32,6 +34,7 @@ impl HatchRequest {
         force_overwrite: bool,
         keep_project: bool,
         build_target: BuildTarget,
+        output_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             project_name,
@@ -40,8 +43,23 @@ impl HatchRequest {
             force_overwrite,
             keep_project,
             build_target,
+            output_dir,
         }
     }
+}
+
+/// Parses `--output-dir` into an optional directory path.
+pub(crate) fn resolve_output_dir(raw_output_dir: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let Some(raw_output_dir) = raw_output_dir else {
+        return Ok(None);
+    };
+
+    let trimmed = raw_output_dir.trim();
+    if trimmed.is_empty() {
+        return Err("Output directory cannot be empty. Provide --output-dir <DIR>.".to_string());
+    }
+
+    Ok(Some(PathBuf::from(trimmed)))
 }
 
 /// Runs the hatch execution pipeline for a single agent definition.
@@ -60,6 +78,7 @@ where
         force_overwrite,
         keep_project,
         build_target,
+        output_dir,
     } = request;
 
     let _agent_lock = match acquire_lock(project_name.as_str()) {
@@ -154,6 +173,7 @@ where
                 project_name.as_str(),
                 force_overwrite,
                 &build_target,
+                output_dir.as_deref(),
             ) {
                 Ok(_) => println!("✅ Project binary exported successfully."),
                 Err(e) => {
@@ -285,11 +305,13 @@ pub(crate) fn fetch_from_registry(name: &str) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        prepare_workspace_for_hatch, run_hatch_pipeline_with_lock, HatchMode, HatchRequest,
+        prepare_workspace_for_hatch, resolve_output_dir, run_hatch_pipeline_with_lock, HatchMode,
+        HatchRequest,
     };
     use crate::agent_builder::build_target::BuildTarget;
     use std::cell::Cell;
     use std::io;
+    use std::path::PathBuf;
 
     #[test]
     fn lock_conflict_fails_fast_before_project_mutation() {
@@ -301,6 +323,7 @@ mod tests {
                 false,
                 false,
                 BuildTarget::from_cli(None).expect("default target should resolve"),
+                None,
             ),
             |_| {
                 Err(io::Error::new(
@@ -336,5 +359,18 @@ mod tests {
         .expect("force replacement should succeed");
 
         assert!(deleted.get());
+    }
+
+    #[test]
+    fn output_dir_rejects_empty_value() {
+        let err = resolve_output_dir(Some("   ")).expect_err("empty output dir should fail");
+        assert!(err.contains("--output-dir"));
+    }
+
+    #[test]
+    fn output_dir_accepts_non_empty_value() {
+        let output_dir =
+            resolve_output_dir(Some("./dist")).expect("non-empty output dir should parse");
+        assert_eq!(output_dir, Some(PathBuf::from("./dist")));
     }
 }

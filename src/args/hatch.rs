@@ -33,6 +33,13 @@ pub fn command() -> Command {
                 .num_args(1),
         )
         .arg(
+            Arg::new("output_dir")
+                .long("output-dir")
+                .help("Destination directory for the exported binary (defaults to current directory)")
+                .value_name("DIR")
+                .num_args(1),
+        )
+        .arg(
             Arg::new("force")
                 .long("force")
                 .short('f')

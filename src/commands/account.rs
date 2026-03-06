@@ -30,7 +30,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         agents::run(agents_m).await
     } else {
         eprintln!(
-            "No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', 'cargo ai account mail test [--subject <text>] [--text <text>]', 'cargo ai account mail prefs [--disable-all|--enable-all]', 'cargo ai account handle [--set <handle>]', 'cargo ai account hatch <agent>', or 'cargo ai account agents <list|push|pull|hatch|visibility|archive>'."
+            "No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', 'cargo ai account mail test [--subject <text>] [--text <text>]', 'cargo ai account mail prefs [--disable-all|--enable-all]', 'cargo ai account handle [--set <handle>]', 'cargo ai account hatch <name>', or 'cargo ai account agents <list|push|pull|hatch|visibility|archive>'."
         );
         false
     }

@@ -5,10 +5,10 @@ pub(crate) fn hatch_command() -> Command {
     Command::new("hatch")
         .about("Build an executable from an account agent definition")
         .arg(
-            Arg::new("agent")
-                .help("Agent name")
+            Arg::new("name")
+                .help("Local output/workspace name")
                 .required(true)
-                .value_name("AGENT")
+                .value_name("NAME")
                 .num_args(1),
         )
         .arg(
@@ -35,11 +35,11 @@ pub(crate) fn hatch_command() -> Command {
                 .num_args(1),
         )
         .arg(
-            Arg::new("local_name")
-                .long("local-name")
-                .help("Local output/workspace name override (name only; no path)")
+            Arg::new("agent")
+                .long("agent")
+                .help("Remote/account agent name override (defaults to positional NAME)")
                 .required(false)
-                .value_name("NAME")
+                .value_name("AGENT")
                 .num_args(1),
         )
         .arg(
@@ -48,6 +48,14 @@ pub(crate) fn hatch_command() -> Command {
                 .help("Rust target triple to pass through to cargo build/check")
                 .required(false)
                 .value_name("TRIPLE")
+                .num_args(1),
+        )
+        .arg(
+            Arg::new("output_dir")
+                .long("output-dir")
+                .help("Destination directory for the exported binary (defaults to current directory)")
+                .required(false)
+                .value_name("DIR")
                 .num_args(1),
         )
         .arg(
@@ -66,7 +74,7 @@ pub(crate) fn hatch_command() -> Command {
                 .action(clap::ArgAction::SetTrue),
         )
         .after_help(
-            "Notes:\n  - AGENT is the account source identifier.\n  - --local-name sets only local workspace/output naming (not remote path selection).\n  - --definition-path selects account-side definition namespace path (defaults to '/'; not local filesystem path).\n  - Owner defaults to your authenticated account when --owner-handle is omitted.\n  - --check validates scaffold and compile behavior without exporting a binary.\n  - --target passes a Rust target triple through to cargo build/check (install targets/toolchains separately when needed).\n  - --keep-project preserves the internal workspace under ~/.cargo/.cargo-ai/agents/<name>.\n  - Existing output binaries or kept workspaces require --force/-f to replace.",
+            "Notes:\n  - NAME is the local output/workspace name and defaults the remote account agent name when --agent is omitted.\n  - --agent overrides only the remote/account agent source identifier.\n  - --definition-path selects account-side definition namespace path (defaults to '/'; not local filesystem path).\n  - Owner defaults to your authenticated account when --owner-handle is omitted.\n  - --check validates scaffold and compile behavior without exporting a binary.\n  - --target passes a Rust target triple through to cargo build/check (install targets/toolchains separately when needed).\n  - --output-dir controls where the exported binary is written; NAME still controls the filename.\n  - --keep-project preserves the internal workspace under ~/.cargo/.cargo-ai/agents/<name>.\n  - Existing output binaries or kept workspaces require --force/-f to replace.",
         )
 }
 
