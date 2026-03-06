@@ -195,7 +195,7 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
   cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json --target aarch64-apple-darwin
   ```
 
-  Cargo AI does not install Rust targets automatically. If the requested target is missing, or the linker/SDK toolchain for that target is incomplete, Cargo AI surfaces the underlying Cargo/Rust error directly.
+  Cargo AI does not install Rust targets automatically. Generated agents now use Rustls-backed `reqwest` in the default template to avoid the prior common OpenSSL cross-compilation blocker, but if the requested target is missing or the linker/SDK/sysroot toolchain for that target is incomplete, Cargo AI still surfaces the underlying Cargo/Rust error directly.
 
   By default, Cargo AI still deletes the internal workspace after build/check. To keep it for inspection:
 
