@@ -3,6 +3,8 @@ const GENERATED_BY_CARGO_AI_VERSION: &str = __GENERATED_BY_CARGO_AI_VERSION__;
 #[allow(dead_code)]
 const GENERATED_WITH_TEMPLATE_SCHEMA_VERSION: &str = __GENERATED_WITH_TEMPLATE_SCHEMA_VERSION__;
 
+include!(concat!(env!("OUT_DIR"), "/agent_build_provenance.rs"));
+
 #[allow(dead_code)]
 pub fn generated_agent_provenance() -> [(&'static str, &'static str); 2] {
     [
@@ -81,6 +83,24 @@ fn agent_sync_status(
 }
 
 #[allow(dead_code)]
+fn generated_agent_definition_json_value() -> serde_json::Value {
+    serde_json::from_str(AGENT_EMBEDDED_DEFINITION_JSON).unwrap_or(serde_json::Value::Null)
+}
+
+#[allow(dead_code)]
+fn generated_agent_inspect_value() -> serde_json::Value {
+    serde_json::json!({
+        "generated_by_cargo_ai_version": GENERATED_BY_CARGO_AI_VERSION,
+        "generated_with_template_schema_version": GENERATED_WITH_TEMPLATE_SCHEMA_VERSION,
+        "agent_build_id": AGENT_BUILD_ID,
+        "target_triple": AGENT_TARGET_TRIPLE,
+        "definition_sha256": AGENT_DEFINITION_SHA256,
+        "embedded_definition_json": generated_agent_definition_json_value(),
+        "build_timestamp_utc": AGENT_BUILD_TIMESTAMP_UTC
+    })
+}
+
+#[allow(dead_code)]
 fn print_agent_version_status() {
     let provenance = generated_agent_provenance();
     let generated_by_version = provenance
@@ -131,4 +151,40 @@ fn print_agent_version_status() {
             "guidance = \"Local Cargo-AI metadata is unavailable. Run cargo ai version on this machine, then re-run this command.\""
         );
     }
+}
+
+#[allow(dead_code)]
+fn print_agent_inspect(as_json: bool) {
+    let inspect_value = generated_agent_inspect_value();
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&inspect_value).unwrap_or_else(|_| "{}".to_string())
+        );
+        return;
+    }
+
+    println!(
+        "generated_by_cargo_ai_version = \"{}\"",
+        GENERATED_BY_CARGO_AI_VERSION
+    );
+    println!(
+        "generated_with_template_schema_version = \"{}\"",
+        GENERATED_WITH_TEMPLATE_SCHEMA_VERSION
+    );
+    println!("agent_build_id = \"{}\"", AGENT_BUILD_ID);
+    println!("target_triple = \"{}\"", AGENT_TARGET_TRIPLE);
+    println!("definition_sha256 = \"{}\"", AGENT_DEFINITION_SHA256);
+    println!("build_timestamp_utc = \"{}\"", AGENT_BUILD_TIMESTAMP_UTC);
+    println!("embedded_definition_json =");
+
+    let embedded_definition = inspect_value
+        .get("embedded_definition_json")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&embedded_definition).unwrap_or_else(|_| "null".to_string())
+    );
 }

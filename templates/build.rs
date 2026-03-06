@@ -4,5 +4,5 @@
 mod build_support;
 
 fn main() -> Result<(), build_support::BuildError> {
-    build_support::run_agent_codegen(&[".agentcfg", "build.rs", "build_support.rs"])
+    build_support::run_agent_codegen_with_build_provenance()
 }

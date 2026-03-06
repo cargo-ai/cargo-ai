@@ -1,5 +1,5 @@
 // clap - Command Line Arguement Parsing
-use clap::{Arg, ArgMatches, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command};
 
 pub fn build_cli() -> ArgMatches {
     // Collect the original command-line arguments
@@ -18,6 +18,16 @@ pub fn build_cli() -> ArgMatches {
         .bin_name(bin_name)
         .subcommand(
             Command::new("version").about("Print generated-agent provenance and sync status"),
+        )
+        .subcommand(
+            Command::new("inspect")
+                .about("Print generated-agent build provenance and embedded definition")
+                .arg(
+                    Arg::new("json")
+                        .long("json")
+                        .help("Emit inspect output as pretty JSON")
+                        .action(ArgAction::SetTrue),
+                ),
         )
         .arg(
             Arg::new("profile")
