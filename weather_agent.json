@@ -28,9 +28,16 @@
       },
       "run": [
         {
+          "platform": ["macos", "linux"],
           "kind": "exec",
           "program": "echo",
           "args": ["bring an umbrella"]
+        },
+        {
+          "platform": "windows",
+          "kind": "exec",
+          "program": "powershell",
+          "args": ["-Command", "Write-Output 'bring an umbrella'"]
         }
       ]
     },

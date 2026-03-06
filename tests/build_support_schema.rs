@@ -137,6 +137,152 @@ fn rejects_non_string_action_args_with_actionable_path() {
 }
 
 #[test]
+fn normalizes_platform_string_and_array_values() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "platforms",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "exec",
+                "platform": "MacOS",
+                "program": "echo",
+                "args": ["one"]
+              },
+              {
+                "kind": "exec",
+                "platform": ["LINUX", "windows"],
+                "program": "echo",
+                "args": ["two"]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains("platforms: Some(vec![\"macos\".to_string()])"));
+    assert!(
+        generated.contains("platforms: Some(vec![\"linux\".to_string(), \"windows\".to_string()])")
+    );
+}
+
+#[test]
+fn rejects_unknown_platform_with_actionable_path() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_platform",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "exec",
+                "platform": "freebsd",
+                "program": "echo",
+                "args": ["ok"]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].platform"));
+    assert!(err.contains("supported: `macos`, `linux`, `windows`"));
+}
+
+#[test]
+fn rejects_empty_platform_array_with_actionable_path() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "empty_platforms",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "exec",
+                "platform": [],
+                "program": "echo",
+                "args": ["ok"]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].platform"));
+    assert!(err.contains("expected at least one platform entry"));
+}
+
+#[test]
+fn rejects_duplicate_platforms_after_normalization() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "duplicate_platforms",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "exec",
+                "platform": ["macos", "MacOS"],
+                "program": "echo",
+                "args": ["ok"]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].platform[1]"));
+    assert!(err.contains("duplicate platform `macos`"));
+}
+
+#[test]
+fn rejects_non_string_platform_entries_with_actionable_path() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_platform_entry",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "exec",
+                "platform": ["macos", 1],
+                "program": "echo",
+                "args": ["ok"]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].platform[1]"));
+    assert!(err.contains("expected a string platform value"));
+}
+
+#[test]
 fn rejects_non_object_action_logic_with_actionable_path() {
     let cfg = config_with(
         r#""value": { "type": "integer" }"#,

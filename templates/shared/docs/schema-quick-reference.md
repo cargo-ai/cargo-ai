@@ -32,6 +32,11 @@ These should fail fast during `hatch --check`:
 - each action includes `name`, `logic`, and `run`
 - each run step currently supports `kind: "exec"` only
 - `run[*].args` must be an array of strings
+- `run[*].platform` is optional
+- `run[*].platform` may be a single string or an array of strings
+- supported platform values are `macos`, `linux`, and `windows`
+- platform values are normalized case-insensitively and should be authored in lowercase in configs/docs
+- omitted `platform` means the step runs on every runtime OS
 
 ## Logic validation expectations
 - every `{ "var": "..." }` must match a key in `agent_schema.properties`

@@ -468,11 +468,22 @@ async fn main() {
 
 pub fn apply_actions(output: &Output, actions: &[Action]) {
     let data = serde_json::to_value(output).unwrap();
+    let current_platform = current_action_platform();
 
     for action in actions {
         if let Ok(result) = apply(&action.logic, &data) {
             if result.as_bool() == Some(true) {
-                for step in &action.run {
+                let matching_steps = matching_run_steps(&action.run, current_platform);
+                if matching_steps.is_empty() {
+                    println!(
+                        "⚠️ No run steps matched the current platform for action '{}' (current platform: {}).",
+                        action.name,
+                        current_platform.unwrap_or("unsupported")
+                    );
+                    continue;
+                }
+
+                for step in matching_steps {
                     println!("Running '{}': {} {:?}", action.name, step.program, step.args);
 
                     let status = std::process::Command::new(&step.program)
@@ -495,5 +506,36 @@ pub fn apply_actions(output: &Output, actions: &[Action]) {
         } else {
             println!("Failed to evaluate logic for action: {}", action.name);
         }
+    }
+}
+
+fn current_action_platform() -> Option<&'static str> {
+    if cfg!(target_os = "macos") {
+        Some("macos")
+    } else if cfg!(target_os = "linux") {
+        Some("linux")
+    } else if cfg!(target_os = "windows") {
+        Some("windows")
+    } else {
+        None
+    }
+}
+
+fn matching_run_steps<'a>(
+    run_steps: &'a [RunStep],
+    current_platform: Option<&str>,
+) -> Vec<&'a RunStep> {
+    run_steps
+        .iter()
+        .filter(|step| step_matches_platform(step.platforms.as_deref(), current_platform))
+        .collect()
+}
+
+fn step_matches_platform(platforms: Option<&[String]>, current_platform: Option<&str>) -> bool {
+    match platforms {
+        None => true,
+        Some(platforms) => current_platform.is_some_and(|platform| {
+            platforms.iter().any(|candidate| candidate == platform)
+        }),
     }
 }

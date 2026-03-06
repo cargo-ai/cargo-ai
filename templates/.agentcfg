@@ -19,9 +19,16 @@
       },
       "run": [
         {
+          "platform": ["macos", "linux"],
           "kind": "exec",
           "program": "echo",
           "args": ["Value return is equal to 4."]
+        },
+        {
+          "platform": "windows",
+          "kind": "exec",
+          "program": "powershell",
+          "args": ["-Command", "Write-Output 'Value return is equal to 4.'"]
         }
       ]
     },

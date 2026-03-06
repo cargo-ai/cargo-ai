@@ -457,15 +457,19 @@ Action object schema:
 
 ```json
 {
+  "platform": ["macos", "linux"],
   "kind": "exec",
   "program": "echo",
   "args": ["hello", "world"]
 }
 ```
 
+- `platform`: Optional OS selector. Use `macos`, `linux`, or `windows` as a string or array. Omit it to run the step on every runtime OS.
 - `kind`: Step type. Use `"exec"` for command execution.
 - `program`: Executable name or path to run.
 - `args`: Argument tokens passed directly as argv entries (no shell splitting).
+
+Platform values are matched at the OS level, not by full target triple. For example, both Apple Silicon and Intel macOS builds match `macos`.
 
 Example from [weather_agent.json](./weather_agent.json):
 
@@ -478,9 +482,16 @@ Example from [weather_agent.json](./weather_agent.json):
     },
     "run": [
       {
+        "platform": ["macos", "linux"],
         "kind": "exec",
         "program": "echo",
         "args": ["bring an umbrella"]
+      },
+      {
+        "platform": "windows",
+        "kind": "exec",
+        "program": "powershell",
+        "args": ["-Command", "Write-Output 'bring an umbrella'"]
       }
     ]
   },
@@ -503,6 +514,7 @@ Example from [weather_agent.json](./weather_agent.json):
 In this example:
 - If `raining` is true, the agent prints “bring an umbrella.”
 - If `raining` is false, the agent prints “bring sunglasses.”
+- Platformless steps run everywhere. Platform-targeted steps run only when the current runtime OS matches one of the configured platform values, and matching steps run in listed order.
 
 ---
 
