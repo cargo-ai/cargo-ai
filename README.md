@@ -188,6 +188,14 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
   Hatch builds now seed from a Cargo AI-owned warmed template cache under `~/.cargo/.cargo-ai/templates/<cargo-ai-binary-sha256>/<rustc-version>/<target-triple>/`.
   The first hatch for a new cache key builds that internal template once; later hatches for the same key reuse it.
 
+  To build for an explicit Rust target triple, pass `--target` through to Cargo:
+
+  ```bash
+  cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json --target aarch64-apple-darwin
+  ```
+
+  Cargo AI does not install Rust targets automatically. If the requested target is missing, or the linker/SDK toolchain for that target is incomplete, Cargo AI surfaces the underlying Cargo/Rust error directly.
+
   By default, Cargo AI still deletes the internal workspace after build/check. To keep it for inspection:
 
   ```bash
@@ -213,6 +221,9 @@ cargo ai account agents hatch weather_agent --force
 
 # Preserve the internal project workspace for inspection
 cargo ai account agents hatch weather_agent --keep-project
+
+# Build an account-hosted agent for an explicit Rust target triple
+cargo ai account agents hatch weather_agent --target aarch64-apple-darwin
 ```
 
 To hatch a public agent from another owner:

@@ -23,8 +23,10 @@ pub(crate) struct WarmedTemplate {
     pub created: bool,
 }
 
-pub(crate) fn ensure_warmed_template() -> Result<WarmedTemplate, String> {
-    let key = resolve_template_cache_key()?;
+pub(crate) fn ensure_warmed_template(
+    explicit_target_triple: Option<&str>,
+) -> Result<WarmedTemplate, String> {
+    let key = resolve_template_cache_key(explicit_target_triple)?;
     let path = template_workspace_path(&key);
 
     if template_workspace_ready(&path) {
@@ -54,18 +56,14 @@ pub(crate) fn ensure_warmed_template() -> Result<WarmedTemplate, String> {
     }
 
     let creation_result = (|| -> Result<(), String> {
-        project::create_template_project(
-            &path,
-            TEMPLATE_SEED_AGENT_NAME,
-            TEMPLATE_SEED_AGENTCFG,
-        )
-        .map_err(|error| {
+        project::create_template_project(&path, TEMPLATE_SEED_AGENT_NAME, TEMPLATE_SEED_AGENTCFG)
+            .map_err(|error| {
             format!(
                 "Failed to create warmed template workspace '{}': {error}",
                 path.display()
             )
         })?;
-        build::build_workspace(&path).map_err(|error| {
+        build::build_workspace(&path, explicit_target_triple).map_err(|error| {
             format!(
                 "Failed to warm template workspace '{}': {error}",
                 path.display()
@@ -101,11 +99,13 @@ pub(crate) fn template_workspace_path(key: &TemplateCacheKey) -> PathBuf {
         .join(&key.target_triple)
 }
 
-fn resolve_template_cache_key() -> Result<TemplateCacheKey, String> {
+fn resolve_template_cache_key(
+    explicit_target_triple: Option<&str>,
+) -> Result<TemplateCacheKey, String> {
     Ok(TemplateCacheKey {
         binary_sha256: cargo_ai_metadata::current_binary_sha256()?,
         rustc_version: normalized_rustc_version()?,
-        target_triple: crate::agent_builder::requested_target_triple(),
+        target_triple: crate::agent_builder::requested_target_triple(explicit_target_triple),
     })
 }
 

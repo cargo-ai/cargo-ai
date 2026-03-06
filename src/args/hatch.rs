@@ -26,6 +26,13 @@ pub fn command() -> Command {
                 .num_args(1),
         )
         .arg(
+            Arg::new("target")
+                .long("target")
+                .help("Rust target triple to pass through to cargo build/check")
+                .value_name("TRIPLE")
+                .num_args(1),
+        )
+        .arg(
             Arg::new("force")
                 .long("force")
                 .short('f')

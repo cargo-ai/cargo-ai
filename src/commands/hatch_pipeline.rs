@@ -19,6 +19,7 @@ pub(crate) fn run_hatch_pipeline(
     mode: HatchMode,
     force_overwrite: bool,
     keep_project: bool,
+    explicit_target_triple: Option<&str>,
 ) -> bool {
     run_hatch_pipeline_with_lock(
         new_project_name,
@@ -26,8 +27,21 @@ pub(crate) fn run_hatch_pipeline(
         mode,
         force_overwrite,
         keep_project,
+        explicit_target_triple,
         crate::agent_builder::lock::try_acquire_agent_lock,
     )
+}
+
+pub(crate) fn resolve_explicit_target_triple(
+    raw_target_triple: Option<&str>,
+) -> Result<Option<String>, String> {
+    match raw_target_triple {
+        Some(value) if value.trim().is_empty() => {
+            Err("Target triple cannot be empty. Provide --target <TRIPLE>.".to_string())
+        }
+        Some(value) => Ok(Some(value.trim().to_string())),
+        None => Ok(None),
+    }
 }
 
 fn run_hatch_pipeline_with_lock<F>(
@@ -36,6 +50,7 @@ fn run_hatch_pipeline_with_lock<F>(
     mode: HatchMode,
     force_overwrite: bool,
     keep_project: bool,
+    explicit_target_triple: Option<&str>,
     acquire_lock: F,
 ) -> bool
 where
@@ -66,6 +81,12 @@ where
         _agent_lock.path().display()
     );
 
+    if let Some(target_triple) =
+        crate::agent_builder::resolved_target_triple(explicit_target_triple)
+    {
+        println!("🎯 Requested build target: {target_triple}");
+    }
+
     if let Err(message) = prepare_workspace_for_hatch(
         new_project_name,
         force_overwrite,
@@ -76,7 +97,9 @@ where
         return false;
     }
 
-    let warmed_template = match crate::agent_builder::template_cache::ensure_warmed_template() {
+    let warmed_template = match crate::agent_builder::template_cache::ensure_warmed_template(
+        explicit_target_triple,
+    ) {
         Ok(template) => {
             if template.created {
                 println!("🧱 Created warmed template: {}", template.path.display());
@@ -106,7 +129,10 @@ where
 
     match mode {
         HatchMode::Build => {
-            match crate::agent_builder::build::build_agent_project(new_project_name) {
+            match crate::agent_builder::build::build_agent_project(
+                new_project_name,
+                explicit_target_triple,
+            ) {
                 Ok(_) => println!("✅ Project built successfully."),
                 Err(e) => {
                     println!("❌ Build failed: {e}");
@@ -115,7 +141,11 @@ where
                 }
             }
 
-            match crate::agent_builder::export::export_binary(new_project_name, force_overwrite) {
+            match crate::agent_builder::export::export_binary(
+                new_project_name,
+                force_overwrite,
+                explicit_target_triple,
+            ) {
                 Ok(_) => println!("✅ Project binary exported successfully."),
                 Err(e) => {
                     println!("❌ Export failed: {e}");
@@ -125,7 +155,10 @@ where
             }
         }
         HatchMode::Check => {
-            match crate::agent_builder::build::check_agent_project(new_project_name) {
+            match crate::agent_builder::build::check_agent_project(
+                new_project_name,
+                explicit_target_triple,
+            ) {
                 Ok(_) => println!("✅ Project checked successfully."),
                 Err(e) => {
                     println!("❌ Check failed: {e}");
@@ -242,7 +275,10 @@ pub(crate) fn fetch_from_registry(name: &str) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_workspace_for_hatch, run_hatch_pipeline_with_lock, HatchMode};
+    use super::{
+        prepare_workspace_for_hatch, resolve_explicit_target_triple, run_hatch_pipeline_with_lock,
+        HatchMode,
+    };
     use std::cell::Cell;
     use std::io;
 
@@ -254,6 +290,7 @@ mod tests {
             HatchMode::Check,
             false,
             false,
+            None,
             |_| {
                 Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
@@ -288,5 +325,12 @@ mod tests {
         .expect("force replacement should succeed");
 
         assert!(deleted.get());
+    }
+
+    #[test]
+    fn empty_target_triple_is_rejected() {
+        let err = resolve_explicit_target_triple(Some("   "))
+            .expect_err("empty target triple should be rejected");
+        assert!(err.contains("--target"));
     }
 }

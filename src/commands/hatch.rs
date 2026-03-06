@@ -141,6 +141,15 @@ pub fn run(sub_m: &ArgMatches) -> bool {
     let check_only = sub_m.get_flag("check");
     let force_overwrite = sub_m.get_flag("force");
     let keep_project = sub_m.get_flag("keep_project");
+    let explicit_target_triple = match super::hatch_pipeline::resolve_explicit_target_triple(
+        sub_m.get_one::<String>("target").map(String::as_str),
+    ) {
+        Ok(target_triple) => target_triple,
+        Err(error) => {
+            eprintln!("❌ {}", error);
+            return false;
+        }
+    };
     let resolution = match resolve_hatch_input(
         name_or_path,
         sub_m.get_one::<String>("config").map(String::as_str),
@@ -210,6 +219,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         hatch_mode,
         force_overwrite,
         keep_project,
+        explicit_target_triple.as_deref(),
     )
 }
 

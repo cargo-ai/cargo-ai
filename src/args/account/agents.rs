@@ -196,6 +196,14 @@ pub fn command() -> Command {
                         .num_args(1),
                 )
                 .arg(
+                    Arg::new("target")
+                        .long("target")
+                        .help("Rust target triple to pass through to cargo build")
+                        .required(false)
+                        .value_name("TRIPLE")
+                        .num_args(1),
+                )
+                .arg(
                     Arg::new("force")
                         .long("force")
                         .short('f')
@@ -211,7 +219,7 @@ pub fn command() -> Command {
                         .action(clap::ArgAction::SetTrue),
                 )
                 .after_help(
-                    "Notes:\n  - AGENT is the account source identifier.\n  - --local-name sets only local workspace/output naming (not remote path selection).\n  - --definition-path selects account-side definition namespace path (defaults to '/'; not local filesystem path).\n  - Owner defaults to your authenticated account when --owner-handle is omitted.\n  - --keep-project preserves the internal workspace under ~/.cargo/.cargo-ai/agents/<name>.\n  - Existing output binaries or kept workspaces require --force/-f to replace.",
+                    "Notes:\n  - AGENT is the account source identifier.\n  - --local-name sets only local workspace/output naming (not remote path selection).\n  - --definition-path selects account-side definition namespace path (defaults to '/'; not local filesystem path).\n  - Owner defaults to your authenticated account when --owner-handle is omitted.\n  - --target passes a Rust target triple through to cargo build (install targets/toolchains separately when needed).\n  - --keep-project preserves the internal workspace under ~/.cargo/.cargo-ai/agents/<name>.\n  - Existing output binaries or kept workspaces require --force/-f to replace.",
                 ),
         )
         .subcommand(

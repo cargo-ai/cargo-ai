@@ -86,6 +86,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             definition_path: Option<String>,
             force_overwrite: bool,
             keep_project: bool,
+            target_triple: Option<String>,
         },
         Visibility {
             name: String,
@@ -288,6 +289,15 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                 .map(|s| s.to_string()),
             force_overwrite: hatch_m.get_flag("force"),
             keep_project: hatch_m.get_flag("keep_project"),
+            target_triple: match crate::commands::hatch_pipeline::resolve_explicit_target_triple(
+                hatch_m.get_one::<String>("target").map(String::as_str),
+            ) {
+                Ok(target_triple) => target_triple,
+                Err(error) => {
+                    eprintln!("❌ {}", error);
+                    return false;
+                }
+            },
         }
     } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
         let Some(name) = visibility_m.get_one::<String>("name") else {
@@ -710,6 +720,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         definition_path,
         force_overwrite,
         keep_project,
+        target_triple,
     } = &agents_command
     {
         let is_pull_success = response
@@ -756,6 +767,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                 crate::commands::hatch_pipeline::HatchMode::Build,
                 *force_overwrite,
                 *keep_project,
+                target_triple.as_deref(),
             );
         }
     }
