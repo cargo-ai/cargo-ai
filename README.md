@@ -460,16 +460,17 @@ Action object schema:
   "platform": ["macos", "linux"],
   "kind": "exec",
   "program": "echo",
-  "args": ["hello", "world"]
+  "args": ["hello", { "var": "answer" }]
 }
 ```
 
 - `platform`: Optional OS selector. Use `macos`, `linux`, or `windows` as a string or array. Omit it to run the step on every runtime OS.
 - `kind`: Step type. Use `"exec"` for command execution.
 - `program`: Executable name or path to run.
-- `args`: Argument tokens passed directly as argv entries (no shell splitting).
+- `args`: Argument tokens passed directly as argv entries (no shell splitting). Each entry may be a literal string or a `{ "var": "field_name" }` object that pulls from a top-level schema field at runtime.
 
 Platform values are matched at the OS level, not by full target triple. For example, both Apple Silicon and Intel macOS builds match `macos`.
+Variable args are limited to top-level scalar fields (`string`, `integer`, `number`, `boolean`). Array fields are not supported for arg substitution in this story.
 
 Example from [weather_agent.json](./weather_agent.json):
 
@@ -485,13 +486,13 @@ Example from [weather_agent.json](./weather_agent.json):
         "platform": ["macos", "linux"],
         "kind": "exec",
         "program": "echo",
-        "args": ["bring an umbrella"]
+        "args": ["bring an umbrella because raining=", { "var": "raining" }]
       },
       {
         "platform": "windows",
         "kind": "exec",
-        "program": "powershell",
-        "args": ["-Command", "Write-Output 'bring an umbrella'"]
+        "program": "cmd",
+        "args": ["/C", "echo", "bring an umbrella because raining=", { "var": "raining" }]
       }
     ]
   },
@@ -515,6 +516,7 @@ In this example:
 - If `raining` is true, the agent prints “bring an umbrella.”
 - If `raining` is false, the agent prints “bring sunglasses.”
 - Platformless steps run everywhere. Platform-targeted steps run only when the current runtime OS matches one of the configured platform values, and matching steps run in listed order.
+- Variable args let a command consume the validated model output directly without shell expansion. `{ "var": "raining" }` resolves to the typed runtime value and is passed as a normal argv token.
 
 ---
 

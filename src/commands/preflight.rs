@@ -328,8 +328,13 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     let actions = crate::actions();
     // println!("Actions {:?}", actions);
 
-    super::preflight_actions::apply_actions(&output, &actions);
-    true
+    match super::preflight_actions::apply_actions(&output, &actions) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            false
+        }
+    }
 }
 
 #[cfg(test)]

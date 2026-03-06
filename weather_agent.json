@@ -31,13 +31,13 @@
           "platform": ["macos", "linux"],
           "kind": "exec",
           "program": "echo",
-          "args": ["bring an umbrella"]
+          "args": ["bring an umbrella because raining=", { "var": "raining" }]
         },
         {
           "platform": "windows",
           "kind": "exec",
-          "program": "powershell",
-          "args": ["-Command", "Write-Output 'bring an umbrella'"]
+          "program": "cmd",
+          "args": ["/C", "echo", "bring an umbrella because raining=", { "var": "raining" }]
         }
       ]
     },

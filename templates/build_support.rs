@@ -94,8 +94,14 @@ struct ResourceUrl {
 struct RunStep {
     kind: String,
     program: String,
-    args: Vec<String>,
+    args: Vec<RunArg>,
     platforms: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+enum RunArg {
+    Literal(String),
+    Variable(String),
 }
 
 #[derive(Debug, Clone)]
@@ -488,18 +494,7 @@ fn parse_actions(
                 ));
             }
 
-            let args = get_required_array(run_obj, "args", &run_path)?
-                .iter()
-                .enumerate()
-                .map(|(arg_idx, arg)| {
-                    arg.as_str().map(|s| s.to_string()).ok_or_else(|| {
-                        BuildError::config(
-                            format!("{run_path}.args[{arg_idx}]"),
-                            "expected a string argument",
-                        )
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let args = parse_run_args(run_obj, &run_path, schema_field_types)?;
 
             let platforms = parse_optional_platforms(run_obj, &run_path)?;
 
@@ -519,6 +514,83 @@ fn parse_actions(
     }
 
     Ok(parsed)
+}
+
+fn parse_run_args(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<Vec<RunArg>, BuildError> {
+    get_required_array(run_obj, "args", run_path)?
+        .iter()
+        .enumerate()
+        .map(|(arg_idx, arg)| parse_run_arg(arg, &format!("{run_path}.args[{arg_idx}]"), schema_field_types))
+        .collect()
+}
+
+fn parse_run_arg(
+    value: &Value,
+    path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<RunArg, BuildError> {
+    match value {
+        Value::String(literal) => Ok(RunArg::Literal(literal.to_string())),
+        Value::Object(map) => {
+            if map.len() != 1 {
+                return Err(BuildError::config(
+                    path,
+                    "expected an arg object with exactly one key (`var`)",
+                ));
+            }
+
+            let Some((key, variable_value)) = map.iter().next() else {
+                return Err(BuildError::config(
+                    path,
+                    "expected an arg object with exactly one key (`var`)",
+                ));
+            };
+
+            if key != "var" {
+                return Err(BuildError::config(
+                    path,
+                    format!("unsupported arg object key `{key}` (supported: `var`)"),
+                ));
+            }
+
+            let variable_path = format!("{path}.var");
+            let variable_name = variable_value.as_str().ok_or_else(|| {
+                BuildError::config(&variable_path, "expected `var` to be a string field name")
+            })?;
+            let normalized_name = variable_name.trim();
+            if normalized_name.is_empty() {
+                return Err(BuildError::config(
+                    &variable_path,
+                    "variable name cannot be empty",
+                ));
+            }
+
+            let field_type = resolve_var_field_type(
+                &Value::String(normalized_name.to_string()),
+                schema_field_types,
+                &variable_path,
+            )?;
+            if field_type == FieldType::Array {
+                return Err(BuildError::config(
+                    &variable_path,
+                    format!(
+                        "array-valued field `{}` cannot be used as an action arg variable in this story",
+                        normalized_name
+                    ),
+                ));
+            }
+
+            Ok(RunArg::Variable(normalized_name.to_string()))
+        }
+        _ => Err(BuildError::config(
+            path,
+            "expected a string literal arg or an object of the form `{ \"var\": \"field_name\" }`",
+        )),
+    }
 }
 
 fn parse_optional_platforms(
@@ -1116,7 +1188,16 @@ fn render_agent_model(config: &AgentConfig) -> String {
                 let args = run_step
                     .args
                     .iter()
-                    .map(|arg| format!("{}.to_string()", rust_string_literal(arg)))
+                    .map(|arg| match arg {
+                        RunArg::Literal(literal) => format!(
+                            "RunArg::Literal({}.to_string())",
+                            rust_string_literal(literal)
+                        ),
+                        RunArg::Variable(variable) => format!(
+                            "RunArg::Variable({}.to_string())",
+                            rust_string_literal(variable)
+                        ),
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 let platforms = run_step
@@ -1210,8 +1291,14 @@ pub fn json_schema_value() -> serde_json::Value {{
 pub struct RunStep {{
     kind: String,
     program: String,
-    args: Vec<String>,
+    args: Vec<RunArg>,
     platforms: Option<Vec<String>>,
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum RunArg {{
+    Literal(String),
+    Variable(String),
 }}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

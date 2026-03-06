@@ -463,10 +463,13 @@ async fn main() {
     };
 
     let actions = actions();
-    apply_actions(&output, &actions);
+    if let Err(error) = apply_actions(&output, &actions) {
+        eprintln!("❌ {error}");
+        std::process::exit(1);
+    }
 }
 
-pub fn apply_actions(output: &Output, actions: &[Action]) {
+pub fn apply_actions(output: &Output, actions: &[Action]) -> Result<(), String> {
     let data = serde_json::to_value(output).unwrap();
     let current_platform = current_action_platform();
 
@@ -484,10 +487,11 @@ pub fn apply_actions(output: &Output, actions: &[Action]) {
                 }
 
                 for step in matching_steps {
-                    println!("Running '{}': {} {:?}", action.name, step.program, step.args);
+                    let resolved_args = resolve_run_args(&step.args, &data, &action.name)?;
+                    println!("Running '{}': {} {:?}", action.name, step.program, resolved_args);
 
                     let status = std::process::Command::new(&step.program)
-                        .args(&step.args)
+                        .args(&resolved_args)
                         .status();
 
                     match status {
@@ -507,6 +511,8 @@ pub fn apply_actions(output: &Output, actions: &[Action]) {
             println!("Failed to evaluate logic for action: {}", action.name);
         }
     }
+
+    Ok(())
 }
 
 fn current_action_platform() -> Option<&'static str> {
@@ -537,5 +543,53 @@ fn step_matches_platform(platforms: Option<&[String]>, current_platform: Option<
         Some(platforms) => current_platform.is_some_and(|platform| {
             platforms.iter().any(|candidate| candidate == platform)
         }),
+    }
+}
+
+fn resolve_run_args(
+    args: &[RunArg],
+    data: &serde_json::Value,
+    action_name: &str,
+) -> Result<Vec<String>, String> {
+    args.iter()
+        .enumerate()
+        .map(|(index, arg)| resolve_run_arg(arg, data, action_name, index))
+        .collect()
+}
+
+fn resolve_run_arg(
+    arg: &RunArg,
+    data: &serde_json::Value,
+    action_name: &str,
+    index: usize,
+) -> Result<String, String> {
+    match arg {
+        RunArg::Literal(literal) => Ok(literal.clone()),
+        RunArg::Variable(variable) => {
+            let Some(value) = data.get(variable) else {
+                return Err(format!(
+                    "Action '{}' arg {} references missing output field '{}'.",
+                    action_name, index, variable
+                ));
+            };
+
+            match value {
+                serde_json::Value::String(text) => Ok(text.clone()),
+                serde_json::Value::Bool(boolean) => Ok(boolean.to_string()),
+                serde_json::Value::Number(number) => Ok(number.to_string()),
+                serde_json::Value::Array(_) => Err(format!(
+                    "Action '{}' arg {} references array-valued field '{}', which is unsupported for arg substitution.",
+                    action_name, index, variable
+                )),
+                serde_json::Value::Object(_) => Err(format!(
+                    "Action '{}' arg {} references object-valued field '{}', which is unsupported for arg substitution.",
+                    action_name, index, variable
+                )),
+                serde_json::Value::Null => Err(format!(
+                    "Action '{}' arg {} references null field '{}', which is unsupported for arg substitution.",
+                    action_name, index, variable
+                )),
+            }
+        }
     }
 }

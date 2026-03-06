@@ -114,26 +114,28 @@ fn rejects_unsupported_action_kind_with_actionable_path() {
 }
 
 #[test]
-fn rejects_non_string_action_args_with_actionable_path() {
+fn accepts_mixed_literal_and_variable_action_args() {
     let cfg = config_with(
         r#""value": { "type": "integer" }"#,
         r#"[
           {
-            "name": "bad_args",
+            "name": "mixed_args",
             "logic": { "==": [ { "var": "value" }, 1 ] },
             "run": [
-              { "kind": "exec", "program": "echo", "args": [1, "ok"] }
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["value=", { "var": "value" }]
+              }
             ]
           }
         ]"#,
     );
 
-    let err = build_support::generate_agent_model_from_str(&cfg)
-        .unwrap_err()
-        .to_string();
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
 
-    assert!(err.contains("$.actions[0].run[0].args[0]"));
-    assert!(err.contains("expected a string argument"));
+    assert!(generated.contains("RunArg::Literal(\"value=\".to_string())"));
+    assert!(generated.contains("RunArg::Variable(\"value\".to_string())"));
 }
 
 #[test]
@@ -280,6 +282,114 @@ fn rejects_non_string_platform_entries_with_actionable_path() {
 
     assert!(err.contains("$.actions[0].run[0].platform[1]"));
     assert!(err.contains("expected a string platform value"));
+}
+
+#[test]
+fn rejects_invalid_action_arg_object_shape_with_actionable_path() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_arg_object",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": [{ "field": "value" }]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].args[0]"));
+    assert!(err.contains("supported: `var`"));
+}
+
+#[test]
+fn rejects_non_string_var_name_with_actionable_path() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_var_name",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": [{ "var": 1 }]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].args[0].var"));
+    assert!(err.contains("expected `var` to be a string field name"));
+}
+
+#[test]
+fn rejects_unknown_action_arg_variable_with_actionable_path() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "unknown_arg_var",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": [{ "var": "missing_field" }]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].args[0].var"));
+    assert!(err.contains("unknown variable `missing_field`"));
+}
+
+#[test]
+fn rejects_array_typed_action_arg_variable_with_actionable_path() {
+    let cfg = config_with(
+        r#""numbers": { "type": "array", "items": { "type": "integer" } }"#,
+        r#"[
+          {
+            "name": "array_arg_var",
+            "logic": { "literal": true },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": [{ "var": "numbers" }]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].args[0].var"));
+    assert!(err.contains("array-valued field `numbers`"));
 }
 
 #[test]

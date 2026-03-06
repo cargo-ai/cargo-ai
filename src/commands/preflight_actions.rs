@@ -2,14 +2,16 @@
 use jsonlogic::apply;
 
 /// Applies configured action rules to model output and executes matching steps.
-pub(crate) fn apply_actions(output: &crate::Output, actions: &[crate::Action]) {
+pub(crate) fn apply_actions(output: &crate::Output, actions: &[crate::Action]) -> Result<(), String> {
     // println!("DEBUG: Applying actions -> {:?}", actions);
 
     let data = match serde_json::to_value(output) {
         Ok(data) => data,
         Err(error) => {
             eprintln!("❌ Failed to serialize output for action evaluation: {error}");
-            return;
+            return Err(format!(
+                "Failed to serialize output for action evaluation: {error}"
+            ));
         }
     };
     let current_platform = current_action_platform();
@@ -38,14 +40,15 @@ pub(crate) fn apply_actions(output: &crate::Output, actions: &[crate::Action]) {
                             continue;
                         }
 
+                        let resolved_args = resolve_run_args(&step.args, &data, &action.name)?;
                         println!(
                             "Running '{}': {} {:?}",
-                            action.name, step.program, step.args
+                            action.name, step.program, resolved_args
                         );
 
                         // Execute the command
                         let status = std::process::Command::new(&step.program)
-                            .args(&step.args)
+                            .args(&resolved_args)
                             .status();
 
                         match status {
@@ -70,6 +73,8 @@ pub(crate) fn apply_actions(output: &crate::Output, actions: &[crate::Action]) {
             }
         }
     }
+
+    Ok(())
 }
 
 fn current_action_platform() -> Option<&'static str> {
@@ -103,15 +108,68 @@ fn step_matches_platform(platforms: Option<&[String]>, current_platform: Option<
     }
 }
 
+fn resolve_run_args(
+    args: &[crate::RunArg],
+    data: &serde_json::Value,
+    action_name: &str,
+) -> Result<Vec<String>, String> {
+    args.iter()
+        .enumerate()
+        .map(|(index, arg)| resolve_run_arg(arg, data, action_name, index))
+        .collect()
+}
+
+fn resolve_run_arg(
+    arg: &crate::RunArg,
+    data: &serde_json::Value,
+    action_name: &str,
+    index: usize,
+) -> Result<String, String> {
+    match arg {
+        crate::RunArg::Literal(literal) => Ok(literal.clone()),
+        crate::RunArg::Variable(variable) => {
+            let Some(value) = data.get(variable) else {
+                return Err(format!(
+                    "Action '{}' arg {} references missing output field '{}'.",
+                    action_name, index, variable
+                ));
+            };
+
+            match value {
+                serde_json::Value::String(text) => Ok(text.clone()),
+                serde_json::Value::Bool(boolean) => Ok(boolean.to_string()),
+                serde_json::Value::Number(number) => Ok(number.to_string()),
+                serde_json::Value::Array(_) => Err(format!(
+                    "Action '{}' arg {} references array-valued field '{}', which is unsupported for arg substitution.",
+                    action_name, index, variable
+                )),
+                serde_json::Value::Object(_) => Err(format!(
+                    "Action '{}' arg {} references object-valued field '{}', which is unsupported for arg substitution.",
+                    action_name, index, variable
+                )),
+                serde_json::Value::Null => Err(format!(
+                    "Action '{}' arg {} references null field '{}', which is unsupported for arg substitution.",
+                    action_name, index, variable
+                )),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{matching_run_steps, step_matches_platform};
+    use super::{matching_run_steps, resolve_run_args, step_matches_platform};
+    use serde_json::json;
 
-    fn run_step(program: &str, platforms: Option<&[&str]>) -> crate::RunStep {
+    fn run_step(
+        program: &str,
+        platforms: Option<&[&str]>,
+        args: Vec<crate::RunArg>,
+    ) -> crate::RunStep {
         crate::RunStep {
             kind: "exec".to_string(),
             program: program.to_string(),
-            args: vec![],
+            args,
             platforms: platforms.map(|platforms| {
                 platforms.iter().map(|platform| platform.to_string()).collect()
             }),
@@ -137,10 +195,10 @@ mod tests {
     #[test]
     fn matching_run_steps_preserve_declared_order() {
         let run_steps = vec![
-            run_step("first", Some(&["windows"])),
-            run_step("second", None),
-            run_step("third", Some(&["macos", "linux"])),
-            run_step("fourth", None),
+            run_step("first", Some(&["windows"]), vec![]),
+            run_step("second", None, vec![]),
+            run_step("third", Some(&["macos", "linux"]), vec![]),
+            run_step("fourth", None, vec![]),
         ];
 
         let matching = matching_run_steps(&run_steps, Some("macos"));
@@ -150,5 +208,50 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(programs, vec!["second", "third", "fourth"]);
+    }
+
+    #[test]
+    fn resolves_literal_and_variable_args() {
+        let resolved = resolve_run_args(
+            &[
+                crate::RunArg::Literal("value=".to_string()),
+                crate::RunArg::Variable("answer".to_string()),
+                crate::RunArg::Variable("raining".to_string()),
+            ],
+            &json!({
+                "answer": 4,
+                "raining": true
+            }),
+            "demo",
+        )
+        .expect("args should resolve");
+
+        assert_eq!(resolved, vec!["value=", "4", "true"]);
+    }
+
+    #[test]
+    fn rejects_missing_variable_args() {
+        let error = resolve_run_args(
+            &[crate::RunArg::Variable("answer".to_string())],
+            &json!({}),
+            "demo",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("missing output field 'answer'"));
+    }
+
+    #[test]
+    fn rejects_array_valued_variable_args() {
+        let error = resolve_run_args(
+            &[crate::RunArg::Variable("numbers".to_string())],
+            &json!({
+                "numbers": [1, 2, 3]
+            }),
+            "demo",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("array-valued field 'numbers'"));
     }
 }
