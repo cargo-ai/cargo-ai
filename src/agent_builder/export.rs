@@ -1,8 +1,9 @@
 //! Handles exporting the compiled agent binary to the current working directory.
 
+use super::build_target::BuildTarget;
 use std::fs;
 use std::io::{self, ErrorKind};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 fn export_binary_to_path(
     source_path: &Path,
@@ -34,55 +35,27 @@ fn export_binary_to_path(
     Ok(())
 }
 
-fn compiled_binary_path(
-    project_path: &Path,
-    agent_name: &str,
-    explicit_target_triple: Option<&str>,
-) -> PathBuf {
-    let mut source_path = project_path.join("target");
-    if let Some(target_triple) = super::resolved_target_triple(explicit_target_triple) {
-        source_path = source_path.join(target_triple);
-    }
-    source_path = source_path.join("debug").join(agent_name);
-    if super::target_uses_windows_exe(explicit_target_triple) {
-        source_path.set_extension("exe");
-    }
-    source_path
-}
-
-fn exported_binary_path(
-    dest_dir: &Path,
-    agent_name: &str,
-    explicit_target_triple: Option<&str>,
-) -> PathBuf {
-    let mut dest_path = dest_dir.join(agent_name);
-    if super::target_uses_windows_exe(explicit_target_triple) {
-        dest_path.set_extension("exe");
-    }
-    dest_path
-}
-
 /// Copies the built binary from `.cargo-ai/agents/{agent}/target/...`
 /// into the directory where the `cargo-ai` command was invoked.
 pub fn export_binary(
     agent_name: &str,
     force_overwrite: bool,
-    explicit_target_triple: Option<&str>,
+    build_target: &BuildTarget,
 ) -> io::Result<()> {
     let project_path = super::agent_workspace_path(agent_name);
-    let source_path = compiled_binary_path(&project_path, agent_name, explicit_target_triple);
+    let source_path = build_target.compiled_binary_path(&project_path, agent_name);
     let dest_dir = std::env::current_dir()?;
-    let dest_path = exported_binary_path(&dest_dir, agent_name, explicit_target_triple);
+    let dest_path = build_target.exported_binary_path(&dest_dir, agent_name);
 
     export_binary_to_path(&source_path, &dest_path, force_overwrite)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{compiled_binary_path, export_binary_to_path, exported_binary_path};
+    use super::export_binary_to_path;
     use std::fs;
     use std::io::ErrorKind;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -127,49 +100,5 @@ mod tests {
         assert_eq!(copied, b"source");
 
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn target_specific_source_path_uses_nested_target_directory() {
-        let project_path = PathBuf::from("/tmp/demo-agent");
-        let compiled = compiled_binary_path(
-            &project_path,
-            "weather_agent",
-            Some("x86_64-unknown-linux-gnu"),
-        );
-
-        assert_eq!(
-            compiled,
-            project_path
-                .join("target")
-                .join("x86_64-unknown-linux-gnu")
-                .join("debug")
-                .join("weather_agent")
-        );
-    }
-
-    #[test]
-    fn windows_target_export_paths_use_exe_extension() {
-        let project_path = PathBuf::from("/tmp/demo-agent");
-        let source = compiled_binary_path(
-            &project_path,
-            "weather_agent",
-            Some("x86_64-pc-windows-msvc"),
-        );
-        let dest = exported_binary_path(
-            Path::new("/tmp/out"),
-            "weather_agent",
-            Some("x86_64-pc-windows-msvc"),
-        );
-
-        assert_eq!(
-            source,
-            project_path
-                .join("target")
-                .join("x86_64-pc-windows-msvc")
-                .join("debug")
-                .join("weather_agent.exe")
-        );
-        assert_eq!(dest, Path::new("/tmp/out").join("weather_agent.exe"));
     }
 }

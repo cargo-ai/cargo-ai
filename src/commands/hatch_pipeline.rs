@@ -5,6 +5,8 @@
 use std::fs;
 use std::io::{Error, ErrorKind};
 
+use crate::agent_builder::build_target::BuildTarget;
+
 /// Execution mode for hatch pipeline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HatchMode {
@@ -12,64 +14,68 @@ pub(crate) enum HatchMode {
     Check,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct HatchRequest {
+    pub project_name: String,
+    pub file_contents: String,
+    pub mode: HatchMode,
+    pub force_overwrite: bool,
+    pub keep_project: bool,
+    pub build_target: BuildTarget,
+}
+
+impl HatchRequest {
+    pub(crate) fn new(
+        project_name: String,
+        file_contents: String,
+        mode: HatchMode,
+        force_overwrite: bool,
+        keep_project: bool,
+        build_target: BuildTarget,
+    ) -> Self {
+        Self {
+            project_name,
+            file_contents,
+            mode,
+            force_overwrite,
+            keep_project,
+            build_target,
+        }
+    }
+}
+
 /// Runs the hatch execution pipeline for a single agent definition.
-pub(crate) fn run_hatch_pipeline(
-    new_project_name: &str,
-    file_contents: String,
-    mode: HatchMode,
-    force_overwrite: bool,
-    keep_project: bool,
-    explicit_target_triple: Option<&str>,
-) -> bool {
-    run_hatch_pipeline_with_lock(
-        new_project_name,
+pub(crate) fn run_hatch_pipeline(request: HatchRequest) -> bool {
+    run_hatch_pipeline_with_lock(request, crate::agent_builder::lock::try_acquire_agent_lock)
+}
+
+fn run_hatch_pipeline_with_lock<F>(request: HatchRequest, acquire_lock: F) -> bool
+where
+    F: FnOnce(&str) -> std::io::Result<crate::agent_builder::lock::AgentLockGuard>,
+{
+    let HatchRequest {
+        project_name,
         file_contents,
         mode,
         force_overwrite,
         keep_project,
-        explicit_target_triple,
-        crate::agent_builder::lock::try_acquire_agent_lock,
-    )
-}
+        build_target,
+    } = request;
 
-pub(crate) fn resolve_explicit_target_triple(
-    raw_target_triple: Option<&str>,
-) -> Result<Option<String>, String> {
-    match raw_target_triple {
-        Some(value) if value.trim().is_empty() => {
-            Err("Target triple cannot be empty. Provide --target <TRIPLE>.".to_string())
-        }
-        Some(value) => Ok(Some(value.trim().to_string())),
-        None => Ok(None),
-    }
-}
-
-fn run_hatch_pipeline_with_lock<F>(
-    new_project_name: &str,
-    file_contents: String,
-    mode: HatchMode,
-    force_overwrite: bool,
-    keep_project: bool,
-    explicit_target_triple: Option<&str>,
-    acquire_lock: F,
-) -> bool
-where
-    F: FnOnce(&str) -> std::io::Result<crate::agent_builder::lock::AgentLockGuard>,
-{
-    let _agent_lock = match acquire_lock(new_project_name) {
+    let _agent_lock = match acquire_lock(project_name.as_str()) {
         Ok(lock) => lock,
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             println!(
                 "❌ Agent '{}' is already running a hatch/check operation in another process.",
-                new_project_name
+                project_name
             );
             return false;
         }
         Err(error) => {
             println!(
                 "❌ Failed to acquire lock for agent '{}' ({}): {}",
-                new_project_name,
-                crate::agent_builder::agent_workspace_path(new_project_name).display(),
+                project_name,
+                crate::agent_builder::agent_workspace_path(project_name.as_str()).display(),
                 error
             );
             return false;
@@ -81,14 +87,12 @@ where
         _agent_lock.path().display()
     );
 
-    if let Some(target_triple) =
-        crate::agent_builder::resolved_target_triple(explicit_target_triple)
-    {
+    if let Some(target_triple) = build_target.cargo_target() {
         println!("🎯 Requested build target: {target_triple}");
     }
 
     if let Err(message) = prepare_workspace_for_hatch(
-        new_project_name,
+        project_name.as_str(),
         force_overwrite,
         |agent_name| crate::agent_builder::agent_workspace_path(agent_name).exists(),
         crate::agent_builder::cleanup::delete_agent_workspace,
@@ -97,38 +101,37 @@ where
         return false;
     }
 
-    let warmed_template = match crate::agent_builder::template_cache::ensure_warmed_template(
-        explicit_target_triple,
-    ) {
-        Ok(template) => {
-            if template.created {
-                println!("🧱 Created warmed template: {}", template.path.display());
-            } else {
-                println!("🧱 Reusing warmed template: {}", template.path.display());
+    let warmed_template =
+        match crate::agent_builder::template_cache::ensure_warmed_template(&build_target) {
+            Ok(template) => {
+                if template.created {
+                    println!("🧱 Created warmed template: {}", template.path.display());
+                } else {
+                    println!("🧱 Reusing warmed template: {}", template.path.display());
+                }
+                if template.pruned_parent_count > 0 {
+                    println!(
+                        "🧹 Pruned {} stale template cache parent(s).",
+                        template.pruned_parent_count
+                    );
+                }
+                template
             }
-            if template.pruned_parent_count > 0 {
-                println!(
-                    "🧹 Pruned {} stale template cache parent(s).",
-                    template.pruned_parent_count
-                );
+            Err(error) => {
+                println!("❌ Failed to prepare warmed template: {error}");
+                return false;
             }
-            template
-        }
-        Err(error) => {
-            println!("❌ Failed to prepare warmed template: {error}");
-            return false;
-        }
-    };
+        };
 
     match crate::agent_builder::project::create_new_agent_project(
         &warmed_template.path,
-        new_project_name,
+        project_name.as_str(),
         Ok(file_contents),
     ) {
         Ok(_) => println!("✅ Project created successfully."),
         Err(e) => {
             println!("❌ Failed to create project: {e}");
-            finalize_workspace(new_project_name, keep_project);
+            finalize_workspace(project_name.as_str(), keep_project);
             return false;
         }
     }
@@ -136,46 +139,46 @@ where
     match mode {
         HatchMode::Build => {
             match crate::agent_builder::build::build_agent_project(
-                new_project_name,
-                explicit_target_triple,
+                project_name.as_str(),
+                &build_target,
             ) {
                 Ok(_) => println!("✅ Project built successfully."),
                 Err(e) => {
                     println!("❌ Build failed: {e}");
-                    finalize_workspace(new_project_name, keep_project);
+                    finalize_workspace(project_name.as_str(), keep_project);
                     return false;
                 }
             }
 
             match crate::agent_builder::export::export_binary(
-                new_project_name,
+                project_name.as_str(),
                 force_overwrite,
-                explicit_target_triple,
+                &build_target,
             ) {
                 Ok(_) => println!("✅ Project binary exported successfully."),
                 Err(e) => {
                     println!("❌ Export failed: {e}");
-                    finalize_workspace(new_project_name, keep_project);
+                    finalize_workspace(project_name.as_str(), keep_project);
                     return false;
                 }
             }
         }
         HatchMode::Check => {
             match crate::agent_builder::build::check_agent_project(
-                new_project_name,
-                explicit_target_triple,
+                project_name.as_str(),
+                &build_target,
             ) {
                 Ok(_) => println!("✅ Project checked successfully."),
                 Err(e) => {
                     println!("❌ Check failed: {e}");
-                    finalize_workspace(new_project_name, keep_project);
+                    finalize_workspace(project_name.as_str(), keep_project);
                     return false;
                 }
             }
         }
     }
 
-    finalize_workspace(new_project_name, keep_project);
+    finalize_workspace(project_name.as_str(), keep_project);
     true
 }
 
@@ -282,21 +285,23 @@ pub(crate) fn fetch_from_registry(name: &str) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        prepare_workspace_for_hatch, resolve_explicit_target_triple, run_hatch_pipeline_with_lock,
-        HatchMode,
+        prepare_workspace_for_hatch, run_hatch_pipeline_with_lock, HatchMode, HatchRequest,
     };
+    use crate::agent_builder::build_target::BuildTarget;
     use std::cell::Cell;
     use std::io;
 
     #[test]
     fn lock_conflict_fails_fast_before_project_mutation() {
         let result = run_hatch_pipeline_with_lock(
-            "agent_lock_conflict_test",
-            r#"{"version":"2026-03-03.r1"}"#.to_string(),
-            HatchMode::Check,
-            false,
-            false,
-            None,
+            HatchRequest::new(
+                "agent_lock_conflict_test".to_string(),
+                r#"{"version":"2026-03-03.r1"}"#.to_string(),
+                HatchMode::Check,
+                false,
+                false,
+                BuildTarget::from_cli(None).expect("default target should resolve"),
+            ),
             |_| {
                 Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
@@ -331,12 +336,5 @@ mod tests {
         .expect("force replacement should succeed");
 
         assert!(deleted.get());
-    }
-
-    #[test]
-    fn empty_target_triple_is_rejected() {
-        let err = resolve_explicit_target_triple(Some("   "))
-            .expect_err("empty target triple should be rejected");
-        assert!(err.contains("--target"));
     }
 }

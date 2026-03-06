@@ -141,10 +141,10 @@ pub fn run(sub_m: &ArgMatches) -> bool {
     let check_only = sub_m.get_flag("check");
     let force_overwrite = sub_m.get_flag("force");
     let keep_project = sub_m.get_flag("keep_project");
-    let explicit_target_triple = match super::hatch_pipeline::resolve_explicit_target_triple(
+    let build_target = match crate::agent_builder::build_target::BuildTarget::from_cli(
         sub_m.get_one::<String>("target").map(String::as_str),
     ) {
-        Ok(target_triple) => target_triple,
+        Ok(build_target) => build_target,
         Err(error) => {
             eprintln!("❌ {}", error);
             return false;
@@ -213,14 +213,16 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         }
     };
 
-    super::hatch_pipeline::run_hatch_pipeline(
-        &new_project_name,
+    let request = super::hatch_pipeline::HatchRequest::new(
+        new_project_name,
         file_contents,
         hatch_mode,
         force_overwrite,
         keep_project,
-        explicit_target_triple.as_deref(),
-    )
+        build_target,
+    );
+
+    super::hatch_pipeline::run_hatch_pipeline(request)
 }
 
 #[cfg(test)]

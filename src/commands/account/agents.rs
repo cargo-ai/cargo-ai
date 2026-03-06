@@ -1,6 +1,7 @@
 //! Runtime behavior for `cargo ai account agents`.
 use clap::ArgMatches;
 
+use crate::agent_builder::build_target::BuildTarget;
 use crate::infra_api;
 use crate::ui;
 
@@ -86,7 +87,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             definition_path: Option<String>,
             force_overwrite: bool,
             keep_project: bool,
-            target_triple: Option<String>,
+            build_target: BuildTarget,
         },
         Visibility {
             name: String,
@@ -289,10 +290,10 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                 .map(|s| s.to_string()),
             force_overwrite: hatch_m.get_flag("force"),
             keep_project: hatch_m.get_flag("keep_project"),
-            target_triple: match crate::commands::hatch_pipeline::resolve_explicit_target_triple(
+            build_target: match BuildTarget::from_cli(
                 hatch_m.get_one::<String>("target").map(String::as_str),
             ) {
-                Ok(target_triple) => target_triple,
+                Ok(build_target) => build_target,
                 Err(error) => {
                     eprintln!("❌ {}", error);
                     return false;
@@ -720,7 +721,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         definition_path,
         force_overwrite,
         keep_project,
-        target_triple,
+        build_target,
     } = &agents_command
     {
         let is_pull_success = response
@@ -761,14 +762,15 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                 );
             }
             println!("Build new cargo agent: {local_name}");
-            return crate::commands::hatch_pipeline::run_hatch_pipeline(
-                local_name,
+            let request = crate::commands::hatch_pipeline::HatchRequest::new(
+                local_name.to_string(),
                 definition_json_str,
                 crate::commands::hatch_pipeline::HatchMode::Build,
                 *force_overwrite,
                 *keep_project,
-                target_triple.as_deref(),
+                build_target.clone(),
             );
+            return crate::commands::hatch_pipeline::run_hatch_pipeline(request);
         }
     }
 
