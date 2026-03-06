@@ -185,6 +185,33 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 
   This will create a new agent project named `adder_test2` using the contents of your local JSON file.
 
+  Hatch builds now seed from a Cargo AI-owned warmed template cache under `~/.cargo/.cargo-ai/templates/<cargo-ai-binary-sha256>/<rustc-version>/<target-triple>/`.
+  The first hatch for a new cache key builds that internal template once; later hatches for the same key reuse it.
+  After the active template bucket is confirmed good, Cargo AI prunes stale older Cargo AI hash and `rustc` parent cache directories while preserving sibling target-triple buckets under the active parent.
+
+  To build for an explicit Rust target triple, pass `--target` through to Cargo:
+
+  ```bash
+  cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json --target aarch64-apple-darwin
+  ```
+
+  To export the built binary to a specific directory while keeping the binary name based on `<name>`:
+
+  ```bash
+  cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json --output-dir ./dist
+  ```
+
+  Cargo AI does not install Rust targets automatically. Generated agents now use Rustls-backed `reqwest` in the default template to avoid the prior common OpenSSL cross-compilation blocker, but if the requested target is missing or the linker/SDK/sysroot toolchain for that target is incomplete, Cargo AI still surfaces the underlying Cargo/Rust error directly.
+
+  By default, Cargo AI still deletes the internal workspace after build/check. To keep it for inspection:
+
+  ```bash
+  cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json --keep-project
+  ```
+
+  This preserves the internal project under `~/.cargo/.cargo-ai/agents/<name>/`.
+  If a kept workspace already exists, re-run with `--force` to replace it.
+
 ### Hatch from Account Agents
 
 When you are signed in, you can hatch an agent directly from account-hosted definitions:
@@ -193,11 +220,26 @@ When you are signed in, you can hatch an agent directly from account-hosted defi
 # Hatch your own account agent (path defaults to "/")
 cargo ai account agents hatch weather_agent
 
-# Override the local output/workspace name
-cargo ai account agents hatch weather_agent --local-name weather_agent_v2
+# Shortcut alias for the same account-hosted hatch flow
+cargo ai account hatch weather_agent
+
+# Validate scaffold and compile path only (no binary export)
+cargo ai account hatch weather_agent --check
+
+# Use a different remote account agent while keeping a local output name
+cargo ai account hatch weather_agent_local --agent weather_agent_remote
+
+# Export the built binary to a specific directory
+cargo ai account hatch weather_agent --output-dir ./dist
 
 # Overwrite existing local output binary
 cargo ai account agents hatch weather_agent --force
+
+# Preserve the internal project workspace for inspection
+cargo ai account agents hatch weather_agent --keep-project
+
+# Build an account-hosted agent for an explicit Rust target triple
+cargo ai account agents hatch weather_agent --target aarch64-apple-darwin
 ```
 
 To hatch a public agent from another owner:

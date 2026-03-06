@@ -1,15 +1,37 @@
 //! Runtime behavior for `cargo ai account agents`.
 use clap::ArgMatches;
 
+use crate::agent_builder::build_target::BuildTarget;
 use crate::infra_api;
 use crate::ui;
 
-use std::{fs, path::Path};
+use std::{fs, path::{Path, PathBuf}};
 
 use super::helpers::{
     apply_agents_list_display_limit, load_account_auth, persist_refreshed_access_token,
     refresh_access_token_for_retry, RefreshAccessError, INFRA_BASE_URL,
 };
+
+#[derive(Clone, Debug)]
+struct AccountHatchCommand {
+    source_name: String,
+    local_name: String,
+    owner_handle: Option<String>,
+    definition_path: Option<String>,
+    mode: crate::commands::hatch_pipeline::HatchMode,
+    force_overwrite: bool,
+    keep_project: bool,
+    build_target: BuildTarget,
+    output_dir: Option<PathBuf>,
+}
+
+fn hatch_mode_from_check_flag(check_only: bool) -> crate::commands::hatch_pipeline::HatchMode {
+    if check_only {
+        crate::commands::hatch_pipeline::HatchMode::Check
+    } else {
+        crate::commands::hatch_pipeline::HatchMode::Build
+    }
+}
 
 fn is_supported_local_hatch_name(name: &str) -> bool {
     !name.is_empty()
@@ -26,36 +48,158 @@ fn looks_like_local_path_input(input: &str) -> bool {
         || input.contains('\\')
 }
 
-fn resolve_local_hatch_name(
-    source_name: &str,
-    local_name_override: Option<&str>,
-) -> Result<String, String> {
-    let Some(source_trimmed) = Some(source_name.trim()).filter(|s| !s.is_empty()) else {
-        return Err("Missing agent name. Provide positional AGENT.".to_string());
-    };
-
-    let Some(local_name) = local_name_override else {
-        return Ok(source_trimmed.to_string());
-    };
-
-    let trimmed = local_name.trim();
+fn validate_account_hatch_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
     if trimmed.is_empty() {
-        return Err("Local name cannot be empty. Provide --local-name <NAME>.".to_string());
+        return Err("Missing account hatch name. Provide positional NAME.".to_string());
     }
-    if looks_like_local_path_input(trimmed) {
+    if looks_like_local_path_input(trimmed) || trimmed.ends_with(".json") {
         return Err(format!(
-            "Local name '{}' looks like a path. Use --local-name for name-only local output and --definition-path for remote account definition path selection.",
+            "Account hatch name '{}' looks like a path or .json file. Use positional NAME only for the local output/workspace name, use --agent <AGENT> for a different remote source, and use --output-dir <DIR> for export location.",
             trimmed
         ));
     }
     if !is_supported_local_hatch_name(trimmed) {
         return Err(format!(
-            "Local name '{}' is invalid. Use only letters, numbers, '-' or '_' for --local-name.",
+            "Account hatch name '{}' is invalid. Use only letters, numbers, '-' or '_'.",
             trimmed
         ));
     }
 
     Ok(trimmed.to_string())
+}
+
+fn resolve_account_hatch_names(
+    local_name_input: &str,
+    source_name_override: Option<&str>,
+) -> Result<(String, String), String> {
+    let local_name = validate_account_hatch_name(local_name_input)?;
+
+    let source_name = match source_name_override {
+        Some(source_name_override) => validate_account_hatch_name(source_name_override)?,
+        None => local_name.clone(),
+    };
+
+    Ok((source_name, local_name))
+}
+
+fn parse_hatch_command(hatch_m: &ArgMatches) -> Result<AccountHatchCommand, String> {
+    let name = hatch_m
+        .get_one::<String>("name")
+        .map(String::as_str)
+        .ok_or_else(|| "Missing account hatch name. Provide positional NAME.".to_string())?;
+
+    let (source_name, local_name) = resolve_account_hatch_names(
+        name,
+        hatch_m.get_one::<String>("agent").map(String::as_str),
+    )?;
+
+    let build_target =
+        BuildTarget::from_cli(hatch_m.get_one::<String>("target").map(String::as_str))?;
+    let output_dir = crate::commands::hatch_pipeline::resolve_output_dir(
+        hatch_m.get_one::<String>("output_dir").map(String::as_str),
+    )?;
+
+    Ok(AccountHatchCommand {
+        source_name,
+        local_name,
+        owner_handle: hatch_m
+            .get_one::<String>("owner_handle")
+            .map(|s| s.to_string()),
+        definition_path: hatch_m
+            .get_one::<String>("definition_path")
+            .map(|s| s.to_string()),
+        mode: hatch_mode_from_check_flag(hatch_m.get_flag("check")),
+        force_overwrite: hatch_m.get_flag("force"),
+        keep_project: hatch_m.get_flag("keep_project"),
+        build_target,
+        output_dir,
+    })
+}
+
+async fn request_hatch_pull(
+    access_token: &str,
+    hatch: &AccountHatchCommand,
+) -> Result<serde_json::Value, String> {
+    infra_api::account::agents::pull_agent(
+        INFRA_BASE_URL,
+        access_token,
+        &hatch.source_name,
+        hatch.owner_handle.as_deref(),
+        hatch.definition_path.as_deref(),
+    )
+    .await
+    .map_err(|error| format!("{error:?}"))
+}
+
+fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &serde_json::Value) -> bool {
+    let is_pull_success = response
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(|t| t == "account_agents_pull_succeeded")
+        .unwrap_or(false);
+
+    if !is_pull_success {
+        if !ui::account_status::render_backend_ui(response) {
+            match serde_json::to_string_pretty(response) {
+                Ok(pretty) => println!("{pretty}"),
+                Err(_) => println!("{response:?}"),
+            }
+        }
+        return false;
+    }
+
+    let definition_json = match response.get("definition_json") {
+        Some(value) => value,
+        None => {
+            eprintln!(
+                "❌ Hatch could not continue because response did not include 'definition_json'."
+            );
+            return false;
+        }
+    };
+
+    let definition_json_str = match serde_json::to_string_pretty(definition_json) {
+        Ok(pretty) => pretty,
+        Err(error) => {
+            eprintln!("❌ Failed to serialize pulled definition JSON: {error}");
+            return false;
+        }
+    };
+
+    let owner_label = hatch.owner_handle.as_deref().unwrap_or("self");
+    let path_label = hatch.definition_path.as_deref().unwrap_or("/");
+    println!(
+        "📦 Using account agent definition: owner='{}', name='{}', path='{}'",
+        owner_label, hatch.source_name, path_label
+    );
+    if hatch.local_name != hatch.source_name {
+        println!(
+            "ℹ️ Remote source override: remote='{}' local='{}'.",
+            hatch.source_name, hatch.local_name
+        );
+    }
+
+    match hatch.mode {
+        crate::commands::hatch_pipeline::HatchMode::Build => {
+            println!("Build new cargo agent: {}", hatch.local_name);
+        }
+        crate::commands::hatch_pipeline::HatchMode::Check => {
+            println!("Check new cargo agent: {}", hatch.local_name);
+        }
+    }
+
+    let request = crate::commands::hatch_pipeline::HatchRequest::new(
+        hatch.local_name.clone(),
+        definition_json_str,
+        hatch.mode,
+        hatch.force_overwrite,
+        hatch.keep_project,
+        hatch.build_target.clone(),
+        hatch.output_dir.clone(),
+    );
+
+    crate::commands::hatch_pipeline::run_hatch_pipeline(request)
 }
 
 /// Executes account-agent operations (list/push/pull/hatch/visibility/archive).
@@ -79,13 +223,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             stdout: bool,
             force: bool,
         },
-        Hatch {
-            source_name: String,
-            local_name: String,
-            owner_handle: Option<String>,
-            definition_path: Option<String>,
-            force_overwrite: bool,
-        },
+        Hatch(AccountHatchCommand),
         Visibility {
             name: String,
             definition_path: Option<String>,
@@ -253,39 +391,12 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             force: pull_m.get_flag("force"),
         }
     } else if let Some(hatch_m) = agents_m.subcommand_matches("hatch") {
-        let source_name = hatch_m
-            .get_one::<String>("agent")
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                eprintln!("❌ Missing agent name. Provide positional AGENT.");
-                String::new()
-            });
-        if source_name.is_empty() {
-            return false;
-        }
-
-        let local_name = match resolve_local_hatch_name(
-            &source_name,
-            hatch_m.get_one::<String>("local_name").map(String::as_str),
-        ) {
-            Ok(name) => name,
+        match parse_hatch_command(hatch_m) {
+            Ok(hatch) => AgentsCommand::Hatch(hatch),
             Err(error) => {
                 eprintln!("❌ {}", error);
                 return false;
             }
-        };
-
-        AgentsCommand::Hatch {
-            source_name,
-            local_name,
-            owner_handle: hatch_m
-                .get_one::<String>("owner_handle")
-                .map(|s| s.to_string()),
-            definition_path: hatch_m
-                .get_one::<String>("definition_path")
-                .map(|s| s.to_string()),
-            force_overwrite: hatch_m.get_flag("force"),
         }
     } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
         let Some(name) = visibility_m.get_one::<String>("name") else {
@@ -393,26 +504,15 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                 return false;
             }
         },
-        AgentsCommand::Hatch {
-            source_name,
-            owner_handle,
-            definition_path,
-            ..
-        } => match infra_api::account::agents::pull_agent(
-            INFRA_BASE_URL,
-            access_token_owned.as_str(),
-            source_name,
-            owner_handle.as_deref(),
-            definition_path.as_deref(),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("❌ Request failed: {e:?}");
-                return false;
+        AgentsCommand::Hatch(hatch) => {
+            match request_hatch_pull(access_token_owned.as_str(), hatch).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("❌ Request failed: {e}");
+                    return false;
+                }
             }
-        },
+        }
         AgentsCommand::Visibility {
             name,
             definition_path,
@@ -559,26 +659,15 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                             return false;
                         }
                     },
-                    AgentsCommand::Hatch {
-                        source_name,
-                        owner_handle,
-                        definition_path,
-                        ..
-                    } => match infra_api::account::agents::pull_agent(
-                        INFRA_BASE_URL,
-                        retry_access_token.as_str(),
-                        source_name,
-                        owner_handle.as_deref(),
-                        definition_path.as_deref(),
-                    )
-                    .await
-                    {
-                        Ok(r) => r,
-                        Err(e) => {
-                            eprintln!("❌ Request failed after session refresh: {e:?}");
-                            return false;
+                    AgentsCommand::Hatch(hatch) => {
+                        match request_hatch_pull(retry_access_token.as_str(), hatch).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                eprintln!("❌ Request failed after session refresh: {e}");
+                                return false;
+                            }
                         }
-                    },
+                    }
                     AgentsCommand::Visibility {
                         name,
                         definition_path,
@@ -701,59 +790,8 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         return true;
     }
 
-    if let AgentsCommand::Hatch {
-        source_name,
-        local_name,
-        owner_handle,
-        definition_path,
-        force_overwrite,
-    } = &agents_command
-    {
-        let is_pull_success = response
-            .get("type")
-            .and_then(|v| v.as_str())
-            .map(|t| t == "account_agents_pull_succeeded")
-            .unwrap_or(false);
-
-        if is_pull_success {
-            let definition_json = match response.get("definition_json") {
-                Some(value) => value,
-                None => {
-                    eprintln!(
-                        "❌ Hatch could not continue because response did not include 'definition_json'."
-                    );
-                    return false;
-                }
-            };
-
-            let definition_json_str = match serde_json::to_string_pretty(definition_json) {
-                Ok(pretty) => pretty,
-                Err(e) => {
-                    eprintln!("❌ Failed to serialize pulled definition JSON: {e}");
-                    return false;
-                }
-            };
-
-            let owner_label = owner_handle.as_deref().unwrap_or("self");
-            let path_label = definition_path.as_deref().unwrap_or("/");
-            println!(
-                "📦 Using account agent definition: owner='{}', name='{}', path='{}'",
-                owner_label, source_name, path_label
-            );
-            if local_name != source_name {
-                println!(
-                    "ℹ️ Local hatch name override: source='{}' local='{}'.",
-                    source_name, local_name
-                );
-            }
-            println!("Build new cargo agent: {local_name}");
-            return crate::commands::hatch_pipeline::run_hatch_pipeline(
-                local_name,
-                definition_json_str,
-                crate::commands::hatch_pipeline::HatchMode::Build,
-                *force_overwrite,
-            );
-        }
+    if let AgentsCommand::Hatch(hatch) = &agents_command {
+        return continue_hatch_from_response(hatch, &response);
     }
 
     let list_display_truncation = match &agents_command {
@@ -785,35 +823,141 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         .unwrap_or(false)
 }
 
+pub async fn run_hatch(hatch_m: &ArgMatches) -> bool {
+    let hatch = match parse_hatch_command(hatch_m) {
+        Ok(hatch) => hatch,
+        Err(error) => {
+            eprintln!("❌ {}", error);
+            return false;
+        }
+    };
+
+    let auth = match load_account_auth() {
+        Ok(auth) => auth,
+        Err(message) => {
+            eprintln!("{message}");
+            return false;
+        }
+    };
+    let access_token_owned = auth.access_token;
+    let refresh_token = auth.refresh_token;
+
+    let mut response = match request_hatch_pull(access_token_owned.as_str(), &hatch).await {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("❌ Request failed: {error}");
+            return false;
+        }
+    };
+
+    let is_expired_error = response
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(|t| t == "access_token_expired")
+        .unwrap_or(false);
+
+    if is_expired_error {
+        match refresh_access_token_for_retry(access_token_owned.as_str(), refresh_token.as_deref())
+            .await
+        {
+            Err(RefreshAccessError::MissingRefreshToken) => {
+                eprintln!("⚠️ Access token expired, and no refresh token exists in credential store. Run `cargo ai account status` or re-confirm account.");
+                if !ui::account_status::render_backend_ui(&response) {
+                    match serde_json::to_string_pretty(&response) {
+                        Ok(pretty) => println!("{pretty}"),
+                        Err(_) => println!("{response:?}"),
+                    }
+                }
+                return false;
+            }
+            Err(RefreshAccessError::RequestFailed(error)) => {
+                eprintln!("❌ Request failed while refreshing session: {error}");
+                return false;
+            }
+            Err(RefreshAccessError::MissingRefreshedToken(refresh_response)) => {
+                eprintln!("⚠️ Session refresh did not return a new access token. Cannot retry account hatch.");
+                if !ui::account_status::render_backend_ui(&refresh_response) {
+                    match serde_json::to_string_pretty(&refresh_response) {
+                        Ok(pretty) => println!("{pretty}"),
+                        Err(_) => println!("{refresh_response:?}"),
+                    }
+                }
+                return false;
+            }
+            Ok((retry_access_token, refreshed_expires_in)) => {
+                if let Some(rt) = refresh_token.as_deref() {
+                    persist_refreshed_access_token(
+                        retry_access_token.as_str(),
+                        rt,
+                        refreshed_expires_in,
+                    );
+                }
+
+                response = match request_hatch_pull(retry_access_token.as_str(), &hatch).await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        eprintln!("❌ Request failed after session refresh: {error}");
+                        return false;
+                    }
+                };
+            }
+        }
+    }
+
+    continue_hatch_from_response(&hatch, &response)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve_local_hatch_name;
+    use super::{hatch_mode_from_check_flag, resolve_account_hatch_names};
 
     #[test]
-    fn local_hatch_name_defaults_to_source_name() {
-        let resolved = resolve_local_hatch_name("weather_agent", None)
-            .expect("default local hatch name should resolve");
-        assert_eq!(resolved, "weather_agent");
+    fn account_hatch_name_defaults_remote_source_to_local_name() {
+        let (source_name, local_name) = resolve_account_hatch_names("weather_agent", None)
+            .expect("default account hatch names should resolve");
+        assert_eq!(source_name, "weather_agent");
+        assert_eq!(local_name, "weather_agent");
     }
 
     #[test]
-    fn local_hatch_name_accepts_valid_override() {
-        let resolved = resolve_local_hatch_name("weather_agent", Some("weather_agent_v2"))
-            .expect("valid local hatch override should resolve");
-        assert_eq!(resolved, "weather_agent_v2");
+    fn account_hatch_name_accepts_remote_source_override() {
+        let (source_name, local_name) =
+            resolve_account_hatch_names("weather_agent_local", Some("weather_agent_remote"))
+                .expect("remote source override should resolve");
+        assert_eq!(source_name, "weather_agent_remote");
+        assert_eq!(local_name, "weather_agent_local");
     }
 
     #[test]
-    fn local_hatch_name_rejects_path_like_override() {
-        let err = resolve_local_hatch_name("weather_agent", Some("./bin/weather_agent_v2"))
-            .expect_err("path-like override should fail");
+    fn account_hatch_name_rejects_path_like_local_name() {
+        let err = resolve_account_hatch_names("./bin/weather_agent", None)
+            .expect_err("path-like local name should fail");
         assert!(err.contains("looks like a path"));
     }
 
     #[test]
-    fn local_hatch_name_rejects_invalid_name_override() {
-        let err = resolve_local_hatch_name("weather_agent", Some("weather.agent.v2"))
-            .expect_err("invalid override should fail");
+    fn account_hatch_name_rejects_json_like_local_name() {
+        let err = resolve_account_hatch_names("weather_agent.json", None)
+            .expect_err(".json-like local name should fail");
+        assert!(err.contains(".json"));
+    }
+
+    #[test]
+    fn account_hatch_name_rejects_invalid_remote_source_override() {
+        let err = resolve_account_hatch_names("weather_agent", Some("weather.agent.v2"))
+            .expect_err("invalid remote source override should fail");
         assert!(err.contains("invalid"));
+    }
+
+    #[test]
+    fn hatch_check_flag_maps_to_check_mode() {
+        assert_eq!(
+            hatch_mode_from_check_flag(true),
+            crate::commands::hatch_pipeline::HatchMode::Check
+        );
+        assert_eq!(
+            hatch_mode_from_check_flag(false),
+            crate::commands::hatch_pipeline::HatchMode::Build
+        );
     }
 }

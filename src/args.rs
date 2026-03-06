@@ -237,19 +237,86 @@ mod tests {
     }
 
     #[test]
-    fn account_agents_hatch_parses_local_name_and_force_flags() {
+    fn hatch_keep_project_flag_parses() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "hatch", "adder_keep", "--keep-project"])
+            .expect("hatch --keep-project should parse");
+
+        let hatch_matches = matches
+            .subcommand_matches("hatch")
+            .expect("hatch subcommand should be available");
+
+        assert!(hatch_matches.get_flag("keep_project"));
+    }
+
+    #[test]
+    fn hatch_target_flag_parses() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "hatch",
+                "adder_target",
+                "--target",
+                "x86_64-pc-windows-msvc",
+            ])
+            .expect("hatch --target should parse");
+
+        let hatch_matches = matches
+            .subcommand_matches("hatch")
+            .expect("hatch subcommand should be available");
+
+        assert_eq!(
+            hatch_matches
+                .get_one::<String>("target")
+                .map(String::as_str),
+            Some("x86_64-pc-windows-msvc")
+        );
+    }
+
+    #[test]
+    fn hatch_output_dir_flag_parses() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "hatch",
+                "adder_target",
+                "--output-dir",
+                "./dist",
+            ])
+            .expect("hatch --output-dir should parse");
+
+        let hatch_matches = matches
+            .subcommand_matches("hatch")
+            .expect("hatch subcommand should be available");
+
+        assert_eq!(
+            hatch_matches
+                .get_one::<String>("output_dir")
+                .map(String::as_str),
+            Some("./dist")
+        );
+    }
+
+    #[test]
+    fn account_agents_hatch_parses_agent_output_dir_check_force_keep_project_and_target_flags() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
                 "account",
                 "agents",
                 "hatch",
-                "weather_agent",
+                "weather_local",
+                "--check",
                 "--definition-path",
                 "/team/ops",
-                "--local-name",
-                "weather_agent_v2",
+                "--agent",
+                "weather_remote",
+                "--target",
+                "x86_64-pc-windows-msvc",
+                "--output-dir",
+                "./dist",
                 "--force",
+                "--keep-project",
             ])
             .expect("account agents hatch flags should parse");
 
@@ -260,8 +327,14 @@ mod tests {
             .expect("account agents hatch should be available");
 
         assert_eq!(
-            hatch_matches.get_one::<String>("agent").map(String::as_str),
-            Some("weather_agent")
+            hatch_matches.get_one::<String>("name").map(String::as_str),
+            Some("weather_local")
+        );
+        assert_eq!(
+            hatch_matches
+                .get_one::<String>("agent")
+                .map(String::as_str),
+            Some("weather_remote")
         );
         assert_eq!(
             hatch_matches
@@ -271,11 +344,79 @@ mod tests {
         );
         assert_eq!(
             hatch_matches
-                .get_one::<String>("local_name")
+                .get_one::<String>("target")
                 .map(String::as_str),
-            Some("weather_agent_v2")
+            Some("x86_64-pc-windows-msvc")
         );
+        assert_eq!(
+            hatch_matches
+                .get_one::<String>("output_dir")
+                .map(String::as_str),
+            Some("./dist")
+        );
+        assert!(hatch_matches.get_flag("check"));
         assert!(hatch_matches.get_flag("force"));
+        assert!(hatch_matches.get_flag("keep_project"));
+    }
+
+    #[test]
+    fn account_hatch_alias_parses_agent_output_dir_check_force_keep_project_and_target_flags() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "hatch",
+                "weather_local",
+                "--check",
+                "--definition-path",
+                "/team/ops",
+                "--agent",
+                "weather_remote",
+                "--target",
+                "x86_64-pc-windows-msvc",
+                "--output-dir",
+                "./dist",
+                "--force",
+                "--keep-project",
+            ])
+            .expect("account hatch alias flags should parse");
+
+        let hatch_matches = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("hatch"))
+            .expect("account hatch alias should be available");
+
+        assert_eq!(
+            hatch_matches.get_one::<String>("name").map(String::as_str),
+            Some("weather_local")
+        );
+        assert_eq!(
+            hatch_matches
+                .get_one::<String>("agent")
+                .map(String::as_str),
+            Some("weather_remote")
+        );
+        assert_eq!(
+            hatch_matches
+                .get_one::<String>("definition_path")
+                .map(String::as_str),
+            Some("/team/ops")
+        );
+        assert_eq!(
+            hatch_matches
+                .get_one::<String>("target")
+                .map(String::as_str),
+            Some("x86_64-pc-windows-msvc")
+        );
+        assert_eq!(
+            hatch_matches
+                .get_one::<String>("output_dir")
+                .map(String::as_str),
+            Some("./dist")
+        );
+        assert!(hatch_matches.get_flag("check"));
+        assert!(hatch_matches.get_flag("force"));
+        assert!(hatch_matches.get_flag("keep_project"));
     }
 
     #[test]
@@ -345,6 +486,20 @@ mod tests {
     }
 
     #[test]
+    fn account_hatch_alias_supports_short_force_flag() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "account", "hatch", "weather_agent", "-f"])
+            .expect("account hatch alias -f should parse");
+
+        let hatch_matches = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("hatch"))
+            .expect("account hatch alias should be available");
+
+        assert!(hatch_matches.get_flag("force"));
+    }
+
+    #[test]
     fn account_agents_hatch_rejects_removed_name_flag() {
         let err = cli_command("cargo-ai")
             .try_get_matches_from([
@@ -356,6 +511,23 @@ mod tests {
                 "weather_agent",
             ])
             .expect_err("--name should be rejected for account agents hatch");
+
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn account_agents_hatch_rejects_local_name_flag() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "hatch",
+                "weather_agent",
+                "--local-name",
+                "weather_agent_v2",
+            ])
+            .expect_err("--local-name should be rejected for account agents hatch");
 
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
     }
