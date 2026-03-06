@@ -1,16 +1,18 @@
+#[cfg(test)]
+use crate::config::schema::CargoAiMetadata;
 use serde_json::{json, Value};
 
 fn build_fetch_preferences_body(access_token: &str) -> Value {
-    json!({
+    super::with_cargo_ai_metadata(json!({
         "action": "mail_preferences",
         "credentials": {
             "access_token": access_token
         }
-    })
+    }))
 }
 
 fn build_set_preferences_body(access_token: &str, all_emails_enabled: bool) -> Value {
-    json!({
+    super::with_cargo_ai_metadata(json!({
         "action": "mail_preferences",
         "credentials": {
             "access_token": access_token
@@ -20,7 +22,45 @@ fn build_set_preferences_body(access_token: &str, all_emails_enabled: bool) -> V
                 "all_emails_enabled": all_emails_enabled
             }
         }
-    })
+    }))
+}
+
+#[cfg(test)]
+fn build_fetch_preferences_body_with_metadata(
+    access_token: &str,
+    metadata: Option<CargoAiMetadata>,
+) -> Value {
+    super::with_cargo_ai_metadata_override(
+        json!({
+            "action": "mail_preferences",
+            "credentials": {
+                "access_token": access_token
+            }
+        }),
+        metadata,
+    )
+}
+
+#[cfg(test)]
+fn build_set_preferences_body_with_metadata(
+    access_token: &str,
+    all_emails_enabled: bool,
+    metadata: Option<CargoAiMetadata>,
+) -> Value {
+    super::with_cargo_ai_metadata_override(
+        json!({
+            "action": "mail_preferences",
+            "credentials": {
+                "access_token": access_token
+            },
+            "mail_preferences": {
+                "set": {
+                    "all_emails_enabled": all_emails_enabled
+                }
+            }
+        }),
+        metadata,
+    )
 }
 
 /// Fetch current account mail preferences using an access token.
@@ -89,12 +129,26 @@ pub async fn set_all_emails_enabled(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_fetch_preferences_body, build_set_preferences_body};
+    use super::{
+        build_fetch_preferences_body_with_metadata, build_set_preferences_body_with_metadata,
+    };
+    use crate::config::schema::CargoAiMetadata;
     use serde_json::json;
+
+    fn sample_metadata() -> CargoAiMetadata {
+        CargoAiMetadata {
+            cargo_ai_version: Some("0.0.10".to_string()),
+            template_schema_version: Some("2026-03-03.r1".to_string()),
+            cargo_ai_build_target: Some("aarch64-apple-darwin".to_string()),
+            cargo_ai_install_id: Some("install-123".to_string()),
+            cargo_ai_binary_sha256: Some("hash-456".to_string()),
+        }
+    }
 
     #[test]
     fn build_fetch_preferences_body_matches_contract() {
-        let body = build_fetch_preferences_body("access-token-123");
+        let body =
+            build_fetch_preferences_body_with_metadata("access-token-123", Some(sample_metadata()));
 
         assert_eq!(
             body,
@@ -102,6 +156,13 @@ mod tests {
                 "action": "mail_preferences",
                 "credentials": {
                     "access_token": "access-token-123"
+                },
+                "cargo_ai_metadata": {
+                    "cargo_ai_version": "0.0.10",
+                    "template_schema_version": "2026-03-03.r1",
+                    "cargo_ai_build_target": "aarch64-apple-darwin",
+                    "cargo_ai_install_id": "install-123",
+                    "cargo_ai_binary_sha256": "hash-456"
                 }
             })
         );
@@ -109,7 +170,11 @@ mod tests {
 
     #[test]
     fn build_set_preferences_body_matches_contract_for_disable() {
-        let body = build_set_preferences_body("access-token-123", false);
+        let body = build_set_preferences_body_with_metadata(
+            "access-token-123",
+            false,
+            Some(sample_metadata()),
+        );
 
         assert_eq!(
             body,
@@ -122,6 +187,13 @@ mod tests {
                     "set": {
                         "all_emails_enabled": false
                     }
+                },
+                "cargo_ai_metadata": {
+                    "cargo_ai_version": "0.0.10",
+                    "template_schema_version": "2026-03-03.r1",
+                    "cargo_ai_build_target": "aarch64-apple-darwin",
+                    "cargo_ai_install_id": "install-123",
+                    "cargo_ai_binary_sha256": "hash-456"
                 }
             })
         );
@@ -129,7 +201,11 @@ mod tests {
 
     #[test]
     fn build_set_preferences_body_matches_contract_for_enable() {
-        let body = build_set_preferences_body("access-token-123", true);
+        let body = build_set_preferences_body_with_metadata(
+            "access-token-123",
+            true,
+            Some(sample_metadata()),
+        );
 
         assert_eq!(
             body,
@@ -142,6 +218,13 @@ mod tests {
                     "set": {
                         "all_emails_enabled": true
                     }
+                },
+                "cargo_ai_metadata": {
+                    "cargo_ai_version": "0.0.10",
+                    "template_schema_version": "2026-03-03.r1",
+                    "cargo_ai_build_target": "aarch64-apple-darwin",
+                    "cargo_ai_install_id": "install-123",
+                    "cargo_ai_binary_sha256": "hash-456"
                 }
             })
         );

@@ -4,6 +4,7 @@
 //! into command modules, while command behavior lives in `src/commands/*`.
 mod agent_builder;
 mod args;
+mod cargo_ai_metadata;
 mod commands;
 mod config;
 mod credentials;
@@ -14,7 +15,6 @@ mod schema_version;
 mod shipyard_ui;
 mod ui;
 mod update_check;
-mod version_baseline;
 mod web_resources;
 
 use serde::{Deserialize, Serialize};
@@ -47,8 +47,8 @@ async fn main() {
         }
     }
 
-    if let Err(error) = version_baseline::persist_current_baseline() {
-        eprintln!("⚠️ Failed to persist local version baseline: {error}");
+    if let Err(error) = cargo_ai_metadata::persist_current_metadata() {
+        eprintln!("⚠️ Failed to persist local Cargo-AI metadata: {error}");
     }
 
     let command_succeeded = if let Some(sub_m) = cmd_args.subcommand_matches("version") {

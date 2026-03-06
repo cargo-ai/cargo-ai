@@ -4,6 +4,8 @@
 #[path = "../templates/build_support.rs"]
 mod build_support;
 
+use sha2::{Digest, Sha256};
+
 /// Constructs a minimal `.agentcfg` JSON document with caller-provided schema
 /// properties and actions sections.
 fn config_with(properties: &str, actions: &str) -> String {
@@ -255,4 +257,53 @@ fn escapes_action_literals_and_logic_payload_safely() {
     assert!(generated.contains("\"quote \\\" arg\".to_string()"));
     assert!(generated.contains("\"line\\nbreak\".to_string()"));
     assert!(generated.contains("\"hash#\\\"marker\".to_string()"));
+}
+
+#[test]
+fn generates_canonical_build_provenance_constants() {
+    let cfg = r#"{
+      "resource_urls": [],
+      "prompt": "Return a numeric answer.",
+      "actions": [],
+      "version": "2026-03-03.r1",
+      "agent_schema": {
+        "properties": {
+          "answer": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    }"#;
+
+    let generated = build_support::generate_agent_build_provenance_source_with_values(
+        cfg,
+        "aarch64-apple-darwin",
+        "11111111-2222-4333-8444-555555555555",
+        "2026-03-05T23:14:29Z",
+    )
+    .expect("build provenance source should be generated");
+
+    let expected_definition = r#"{"actions":[],"agent_schema":{"properties":{"answer":{"type":"integer"}},"type":"object"},"prompt":"Return a numeric answer.","resource_urls":[],"version":"2026-03-03.r1"}"#;
+    let mut hasher = Sha256::new();
+    hasher.update(expected_definition.as_bytes());
+    let expected_hash = format!("{:x}", hasher.finalize());
+
+    assert!(generated.contains(
+        r#"const AGENT_BUILD_ID: &str = "11111111-2222-4333-8444-555555555555";"#
+    ));
+    assert!(generated.contains(
+        r#"const AGENT_TARGET_TRIPLE: &str = "aarch64-apple-darwin";"#
+    ));
+    assert!(generated.contains(
+        r#"const AGENT_BUILD_TIMESTAMP_UTC: &str = "2026-03-05T23:14:29Z";"#
+    ));
+    assert!(generated.contains(&format!(
+        r#"const AGENT_DEFINITION_SHA256: &str = "{}";"#,
+        expected_hash
+    )));
+    assert!(generated.contains(&format!(
+        r#"const AGENT_EMBEDDED_DEFINITION_JSON: &str = "{}";"#,
+        expected_definition.replace('"', "\\\"")
+    )));
 }

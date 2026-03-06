@@ -40,7 +40,7 @@ pub fn ensure_config_file_exists() -> Result<(), Box<dyn std::error::Error>> {
             openai_auth: None,
             web_resources: None,
             update_check: None,
-            version_baseline: None,
+            cargo_ai_metadata: None,
         };
 
         let serialized = toml::to_string_pretty(&cfg)?;

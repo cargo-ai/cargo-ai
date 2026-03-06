@@ -10,9 +10,13 @@ use std::io::Error;
 include!(concat!(env!("OUT_DIR"), "/.generated_templates.rs"));
 
 const MAIN_ARGS_CALL: &str = "    let cmd_args = args::build_cli();";
-const VERSION_HOOK_SNIPPET: &str = r#"    let cmd_args = args::build_cli();
+const PROVENANCE_HOOK_SNIPPET: &str = r#"    let cmd_args = args::build_cli();
     if cmd_args.subcommand_matches("version").is_some() {
         print_agent_version_status();
+        return;
+    }
+    if let Some(sub_m) = cmd_args.subcommand_matches("inspect") {
+        print_agent_inspect(sub_m.get_flag("json"));
         return;
     }"#;
 const GENERATED_AGENT_VERSION_BLOCK_TEMPLATE: &str =
@@ -87,7 +91,7 @@ fn inject_version_command_hook(main_source: &str) -> String {
         return main_source.to_string();
     }
 
-    main_source.replacen(MAIN_ARGS_CALL, VERSION_HOOK_SNIPPET, 1)
+    main_source.replacen(MAIN_ARGS_CALL, PROVENANCE_HOOK_SNIPPET, 1)
 }
 
 fn render_workspace_file_contents(
@@ -223,10 +227,19 @@ mod tests {
 
         assert!(rendered.contains("print_agent_version_status();"));
         assert!(rendered.contains(r#"subcommand_matches("version")"#));
+        assert!(rendered.contains(r#"subcommand_matches("inspect")"#));
+        assert!(rendered.contains("print_agent_inspect(sub_m.get_flag(\"json\"));"));
         assert!(rendered.contains("agent_version_status ="));
         assert!(rendered.contains("generated_agent_provenance"));
+        assert!(rendered.contains("generated_agent_inspect_value"));
         assert!(rendered.contains("generated_by_cargo_ai_version"));
         assert!(rendered.contains("generated_with_template_schema_version"));
+        assert!(rendered.contains("agent_build_id"));
+        assert!(rendered.contains("target_triple"));
+        assert!(rendered.contains("definition_sha256"));
+        assert!(rendered.contains("embedded_definition_json"));
+        assert!(rendered.contains("build_timestamp_utc"));
+        assert!(rendered.contains("cargo_ai_metadata"));
         assert!(rendered.contains("0.0.11"));
         assert!(rendered.contains("2026-03-03.r1"));
     }
