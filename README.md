@@ -187,6 +187,7 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 
   Hatch builds now seed from a Cargo AI-owned warmed template cache under `~/.cargo/.cargo-ai/templates/<cargo-ai-binary-sha256>/<rustc-version>/<target-triple>/`.
   The first hatch for a new cache key builds that internal template once; later hatches for the same key reuse it.
+  After the active template bucket is confirmed good, Cargo AI prunes stale older Cargo AI hash and `rustc` parent cache directories while preserving sibling target-triple buckets under the active parent.
 
   To build for an explicit Rust target triple, pass `--target` through to Cargo:
 

@@ -106,6 +106,12 @@ where
             } else {
                 println!("🧱 Reusing warmed template: {}", template.path.display());
             }
+            if template.pruned_parent_count > 0 {
+                println!(
+                    "🧹 Pruned {} stale template cache parent(s).",
+                    template.pruned_parent_count
+                );
+            }
             template
         }
         Err(error) => {
