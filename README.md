@@ -214,6 +214,12 @@ When you are signed in, you can hatch an agent directly from account-hosted defi
 # Hatch your own account agent (path defaults to "/")
 cargo ai account agents hatch weather_agent
 
+# Shortcut alias for the same account-hosted hatch flow
+cargo ai account hatch weather_agent
+
+# Validate scaffold and compile path only (no binary export)
+cargo ai account hatch weather_agent --check
+
 # Override the local output/workspace name
 cargo ai account agents hatch weather_agent --local-name weather_agent_v2
 

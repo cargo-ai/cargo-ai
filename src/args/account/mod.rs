@@ -44,5 +44,6 @@ pub fn command() -> Command {
                         .num_args(1),
                 ),
         )
+        .subcommand(agents::hatch_command())
         .subcommand(agents::command())
 }
