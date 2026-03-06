@@ -85,6 +85,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             owner_handle: Option<String>,
             definition_path: Option<String>,
             force_overwrite: bool,
+            keep_project: bool,
         },
         Visibility {
             name: String,
@@ -286,6 +287,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                 .get_one::<String>("definition_path")
                 .map(|s| s.to_string()),
             force_overwrite: hatch_m.get_flag("force"),
+            keep_project: hatch_m.get_flag("keep_project"),
         }
     } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
         let Some(name) = visibility_m.get_one::<String>("name") else {
@@ -707,6 +709,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         owner_handle,
         definition_path,
         force_overwrite,
+        keep_project,
     } = &agents_command
     {
         let is_pull_success = response
@@ -752,6 +755,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                 definition_json_str,
                 crate::commands::hatch_pipeline::HatchMode::Build,
                 *force_overwrite,
+                *keep_project,
             );
         }
     }

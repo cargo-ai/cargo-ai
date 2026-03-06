@@ -140,6 +140,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
     };
     let check_only = sub_m.get_flag("check");
     let force_overwrite = sub_m.get_flag("force");
+    let keep_project = sub_m.get_flag("keep_project");
     let resolution = match resolve_hatch_input(
         name_or_path,
         sub_m.get_one::<String>("config").map(String::as_str),
@@ -208,6 +209,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         file_contents,
         hatch_mode,
         force_overwrite,
+        keep_project,
     )
 }
 

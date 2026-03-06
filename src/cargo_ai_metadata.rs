@@ -33,7 +33,7 @@ fn current_template_schema_version() -> String {
     schema_version::current_schema_version()
 }
 
-fn current_build_target() -> String {
+pub fn current_build_target() -> String {
     let arch = std::env::consts::ARCH;
     let vendor = if cfg!(target_vendor = "apple") {
         "apple"
@@ -86,7 +86,7 @@ fn binary_sha256_for_path(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn current_binary_sha256() -> Result<String, String> {
+pub fn current_binary_sha256() -> Result<String, String> {
     let path = current_binary_path()?;
     binary_sha256_for_path(&path)
 }

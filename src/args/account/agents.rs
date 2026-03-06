@@ -199,12 +199,19 @@ pub fn command() -> Command {
                     Arg::new("force")
                         .long("force")
                         .short('f')
-                        .help("Overwrite output binary if it already exists")
+                        .help("Overwrite output binary and replace any kept internal workspace")
+                        .required(false)
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("keep_project")
+                        .long("keep-project")
+                        .help("Preserve the internal hatched project workspace for inspection")
                         .required(false)
                         .action(clap::ArgAction::SetTrue),
                 )
                 .after_help(
-                    "Notes:\n  - AGENT is the account source identifier.\n  - --local-name sets only local workspace/output naming (not remote path selection).\n  - --definition-path selects account-side definition namespace path (defaults to '/'; not local filesystem path).\n  - Owner defaults to your authenticated account when --owner-handle is omitted.\n  - Existing output binaries require --force/-f to overwrite.",
+                    "Notes:\n  - AGENT is the account source identifier.\n  - --local-name sets only local workspace/output naming (not remote path selection).\n  - --definition-path selects account-side definition namespace path (defaults to '/'; not local filesystem path).\n  - Owner defaults to your authenticated account when --owner-handle is omitted.\n  - --keep-project preserves the internal workspace under ~/.cargo/.cargo-ai/agents/<name>.\n  - Existing output binaries or kept workspaces require --force/-f to replace.",
                 ),
         )
         .subcommand(

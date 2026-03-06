@@ -237,7 +237,20 @@ mod tests {
     }
 
     #[test]
-    fn account_agents_hatch_parses_local_name_and_force_flags() {
+    fn hatch_keep_project_flag_parses() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "hatch", "adder_keep", "--keep-project"])
+            .expect("hatch --keep-project should parse");
+
+        let hatch_matches = matches
+            .subcommand_matches("hatch")
+            .expect("hatch subcommand should be available");
+
+        assert!(hatch_matches.get_flag("keep_project"));
+    }
+
+    #[test]
+    fn account_agents_hatch_parses_local_name_force_and_keep_project_flags() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
@@ -250,6 +263,7 @@ mod tests {
                 "--local-name",
                 "weather_agent_v2",
                 "--force",
+                "--keep-project",
             ])
             .expect("account agents hatch flags should parse");
 
@@ -276,6 +290,7 @@ mod tests {
             Some("weather_agent_v2")
         );
         assert!(hatch_matches.get_flag("force"));
+        assert!(hatch_matches.get_flag("keep_project"));
     }
 
     #[test]

@@ -18,12 +18,14 @@ pub(crate) fn run_hatch_pipeline(
     file_contents: String,
     mode: HatchMode,
     force_overwrite: bool,
+    keep_project: bool,
 ) -> bool {
     run_hatch_pipeline_with_lock(
         new_project_name,
         file_contents,
         mode,
         force_overwrite,
+        keep_project,
         crate::agent_builder::lock::try_acquire_agent_lock,
     )
 }
@@ -33,6 +35,7 @@ fn run_hatch_pipeline_with_lock<F>(
     file_contents: String,
     mode: HatchMode,
     force_overwrite: bool,
+    keep_project: bool,
     acquire_lock: F,
 ) -> bool
 where
@@ -63,14 +66,40 @@ where
         _agent_lock.path().display()
     );
 
+    if let Err(message) = prepare_workspace_for_hatch(
+        new_project_name,
+        force_overwrite,
+        |agent_name| crate::agent_builder::agent_workspace_path(agent_name).exists(),
+        crate::agent_builder::cleanup::delete_agent_workspace,
+    ) {
+        println!("❌ {message}");
+        return false;
+    }
+
+    let warmed_template = match crate::agent_builder::template_cache::ensure_warmed_template() {
+        Ok(template) => {
+            if template.created {
+                println!("🧱 Created warmed template: {}", template.path.display());
+            } else {
+                println!("🧱 Reusing warmed template: {}", template.path.display());
+            }
+            template
+        }
+        Err(error) => {
+            println!("❌ Failed to prepare warmed template: {error}");
+            return false;
+        }
+    };
+
     match crate::agent_builder::project::create_new_agent_project(
+        &warmed_template.path,
         new_project_name,
         Ok(file_contents),
     ) {
         Ok(_) => println!("✅ Project created successfully."),
         Err(e) => {
             println!("❌ Failed to create project: {e}");
-            cleanup_workspace(new_project_name);
+            finalize_workspace(new_project_name, keep_project);
             return false;
         }
     }
@@ -81,7 +110,7 @@ where
                 Ok(_) => println!("✅ Project built successfully."),
                 Err(e) => {
                     println!("❌ Build failed: {e}");
-                    cleanup_workspace(new_project_name);
+                    finalize_workspace(new_project_name, keep_project);
                     return false;
                 }
             }
@@ -90,7 +119,7 @@ where
                 Ok(_) => println!("✅ Project binary exported successfully."),
                 Err(e) => {
                     println!("❌ Export failed: {e}");
-                    cleanup_workspace(new_project_name);
+                    finalize_workspace(new_project_name, keep_project);
                     return false;
                 }
             }
@@ -100,14 +129,14 @@ where
                 Ok(_) => println!("✅ Project checked successfully."),
                 Err(e) => {
                     println!("❌ Check failed: {e}");
-                    cleanup_workspace(new_project_name);
+                    finalize_workspace(new_project_name, keep_project);
                     return false;
                 }
             }
         }
     }
 
-    cleanup_workspace(new_project_name);
+    finalize_workspace(new_project_name, keep_project);
     true
 }
 
@@ -116,6 +145,53 @@ fn cleanup_workspace(new_project_name: &str) {
         Ok(_) => println!("🧼 Agent workspace removed."),
         Err(e) => println!("⚠️ Failed to clean up workspace: {e}"),
     }
+}
+
+fn finalize_workspace(new_project_name: &str, keep_project: bool) {
+    if keep_project {
+        let workspace_path = crate::agent_builder::agent_workspace_path(new_project_name);
+        if workspace_path.exists() {
+            println!("ℹ️ Preserved agent workspace: {}", workspace_path.display());
+        }
+        return;
+    }
+
+    cleanup_workspace(new_project_name);
+}
+
+fn prepare_workspace_for_hatch<FExists, FDelete>(
+    new_project_name: &str,
+    force_overwrite: bool,
+    workspace_exists: FExists,
+    delete_workspace: FDelete,
+) -> Result<(), String>
+where
+    FExists: FnOnce(&str) -> bool,
+    FDelete: FnOnce(&str) -> std::io::Result<()>,
+{
+    let workspace_path = crate::agent_builder::agent_workspace_path(new_project_name);
+    if !workspace_exists(new_project_name) {
+        return Ok(());
+    }
+
+    if !force_overwrite {
+        return Err(format!(
+            "Agent project already exists:\n{}\n\nRe-run with --force to replace it, or choose a different local agent name.",
+            workspace_path.display()
+        ));
+    }
+
+    delete_workspace(new_project_name).map_err(|error| {
+        format!(
+            "Failed to replace existing agent workspace '{}': {error}",
+            workspace_path.display()
+        )
+    })?;
+    println!(
+        "ℹ️ Existing internal agent workspace removed: {}",
+        workspace_path.display()
+    );
+    Ok(())
 }
 
 /// Reads a local agent config file as UTF-8 text.
@@ -166,7 +242,8 @@ pub(crate) fn fetch_from_registry(name: &str) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_hatch_pipeline_with_lock, HatchMode};
+    use super::{prepare_workspace_for_hatch, run_hatch_pipeline_with_lock, HatchMode};
+    use std::cell::Cell;
     use std::io;
 
     #[test]
@@ -175,6 +252,7 @@ mod tests {
             "agent_lock_conflict_test",
             r#"{"version":"2026-03-03.r1"}"#.to_string(),
             HatchMode::Check,
+            false,
             false,
             |_| {
                 Err(io::Error::new(
@@ -185,5 +263,30 @@ mod tests {
         );
 
         assert!(!result);
+    }
+
+    #[test]
+    fn existing_workspace_requires_force() {
+        let err = prepare_workspace_for_hatch("weather_agent", false, |_| true, |_| Ok(()))
+            .expect_err("existing workspace without force should fail");
+        assert!(err.contains("Agent project already exists"));
+        assert!(err.contains("--force"));
+    }
+
+    #[test]
+    fn force_replaces_existing_workspace_before_build() {
+        let deleted = Cell::new(false);
+        prepare_workspace_for_hatch(
+            "weather_agent",
+            true,
+            |_| true,
+            |_| {
+                deleted.set(true);
+                Ok(())
+            },
+        )
+        .expect("force replacement should succeed");
+
+        assert!(deleted.get());
     }
 }

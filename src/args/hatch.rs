@@ -29,7 +29,14 @@ pub fn command() -> Command {
             Arg::new("force")
                 .long("force")
                 .short('f')
-                .help("Overwrite existing output binary if it already exists")
+                .help("Overwrite existing output binary and replace any kept internal workspace")
+                .required(false)
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("keep_project")
+                .long("keep-project")
+                .help("Preserve the internal hatched project workspace for inspection")
                 .required(false)
                 .action(clap::ArgAction::SetTrue),
         )

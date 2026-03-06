@@ -6,6 +6,7 @@
 use crate::schema_version;
 use std::fs;
 use std::io::Error;
+use std::path::Path;
 
 include!(concat!(env!("OUT_DIR"), "/.generated_templates.rs"));
 
@@ -118,11 +119,13 @@ fn render_workspace_file_contents(
 
 /// Creates a new agent project directory and initializes required files.
 pub fn create_new_agent_project(
+    template_path: &Path,
     agent_name: &str,
     agentcfg: Result<String, Error>,
 ) -> Result<(), Error> {
     create_agent_workspace(agent_name)?;
-    load_agent_workspace(agent_name, agentcfg)?;
+    seed_agent_workspace(template_path, agent_name)?;
+    rewrite_agent_generated_files(&super::agent_workspace_path(agent_name), agent_name, agentcfg)?;
     Ok(())
 }
 
@@ -135,13 +138,58 @@ fn create_agent_workspace(agent_name: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// Writes template files (`build.rs`, `.agentcfg`) to the agent workspace.
-fn load_agent_workspace(agent_name: &str, agentcfg: Result<String, Error>) -> Result<(), Error> {
-    let base_path = super::agent_workspace_path(agent_name);
+/// Creates a safe warmed-template workspace from Cargo AI-owned scaffold inputs.
+pub(crate) fn create_template_project(
+    base_path: &Path,
+    template_agent_name: &str,
+    template_agentcfg: &str,
+) -> Result<(), Error> {
+    if !base_path.exists() {
+        fs::create_dir_all(base_path)?;
+    }
+
+    write_workspace_files(
+        base_path,
+        template_agent_name,
+        Some(template_agentcfg),
+        WorkspaceWriteMode::WriteAll,
+    )
+}
+
+fn seed_agent_workspace(template_path: &Path, agent_name: &str) -> Result<(), Error> {
+    copy_directory_recursive(template_path, &super::agent_workspace_path(agent_name))
+}
+
+/// Rewrites only the agent-generated scaffold files after template seeding.
+fn rewrite_agent_generated_files(
+    base_path: &Path,
+    agent_name: &str,
+    agentcfg: Result<String, Error>,
+) -> Result<(), Error> {
     let provided_agentcfg = agentcfg.ok();
+    write_workspace_files(
+        base_path,
+        agent_name,
+        provided_agentcfg.as_deref(),
+        WorkspaceWriteMode::GeneratedOnly,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkspaceWriteMode {
+    WriteAll,
+    GeneratedOnly,
+}
+
+/// Writes template files (`build.rs`, `.agentcfg`) to the target workspace.
+fn write_workspace_files(
+    base_path: &Path,
+    agent_name: &str,
+    provided_agentcfg: Option<&str>,
+    mode: WorkspaceWriteMode,
+) -> Result<(), Error> {
     let generated_by_version = env!("CARGO_PKG_VERSION");
     let template_schema_version = provided_agentcfg
-        .as_deref()
         .and_then(schema_version::extract_schema_version_from_agentcfg)
         .unwrap_or_else(schema_version::current_schema_version);
 
@@ -155,7 +203,7 @@ fn load_agent_workspace(agent_name: &str, agentcfg: Result<String, Error>) -> Re
 
         // Handle custom .agentcfg file
         if file_name == ".agentcfg" {
-            if let Some(contents) = provided_agentcfg.as_ref() {
+            if let Some(contents) = provided_agentcfg {
                 fs::write(file_path, contents)?;
                 continue;
             }
@@ -163,31 +211,70 @@ fn load_agent_workspace(agent_name: &str, agentcfg: Result<String, Error>) -> Re
 
         // Skip replacements for loader.rs so config paths remain shared
         if file_name.ends_with("loader.rs") {
-            fs::write(file_path, file_contents)?;
+            if mode == WorkspaceWriteMode::WriteAll {
+                fs::write(file_path, file_contents)?;
+            }
             continue;
         }
 
-        fs::write(
-            file_path,
-            render_workspace_file_contents(
-                file_name,
-                file_contents,
-                agent_name,
-                generated_by_version,
-                &template_schema_version,
-            ),
-        )?;
+        let rendered = render_workspace_file_contents(
+            file_name,
+            file_contents,
+            agent_name,
+            generated_by_version,
+            &template_schema_version,
+        );
+
+        let should_write = match mode {
+            WorkspaceWriteMode::WriteAll => true,
+            WorkspaceWriteMode::GeneratedOnly => rendered != file_contents,
+        };
+
+        if should_write {
+            fs::write(file_path, rendered)?;
+        }
     }
+    Ok(())
+}
+
+fn copy_directory_recursive(source: &Path, destination: &Path) -> Result<(), Error> {
+    fs::create_dir_all(destination)?;
+
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type()?;
+
+        if file_type.is_dir() {
+            fs::create_dir_all(&destination_path)?;
+            copy_directory_recursive(&source_path, &destination_path)?;
+        } else {
+            fs::copy(&source_path, &destination_path)?;
+        }
+    }
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        determine_agent_sync_state, render_workspace_file_contents, sync_state_label,
-        AgentSyncState,
+        copy_directory_recursive, determine_agent_sync_state, render_workspace_file_contents,
+        sync_state_label, AgentSyncState,
     };
     use crate::schema_version;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir_path(stem: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("cargo-ai-project-{stem}-{nanos}"))
+    }
 
     #[test]
     fn resolves_template_schema_version_from_agentcfg_version() {
@@ -288,5 +375,31 @@ mod tests {
             determine_agent_sync_state("0.0.11", "2026-03-03.r1", None, Some("2026-03-03.r1"));
         assert_eq!(state, AgentSyncState::Unknown);
         assert_eq!(sync_state_label(state), "unknown");
+    }
+
+    #[test]
+    fn recursive_copy_copies_nested_files() {
+        let source = temp_dir_path("copy-src");
+        let destination = temp_dir_path("copy-dst");
+        fs::create_dir_all(source.join("src")).expect("source tree should be creatable");
+        fs::write(source.join("Cargo.toml"), "name = 'seed'").expect("cargo file should write");
+        fs::write(source.join("src").join("main.rs"), "fn main() {}")
+            .expect("main file should write");
+
+        copy_directory_recursive(&source, &destination).expect("copy should succeed");
+
+        assert_eq!(
+            fs::read_to_string(destination.join("Cargo.toml")).ok().as_deref(),
+            Some("name = 'seed'")
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("src").join("main.rs"))
+                .ok()
+                .as_deref(),
+            Some("fn main() {}")
+        );
+
+        let _ = fs::remove_dir_all(source);
+        let _ = fs::remove_dir_all(destination);
     }
 }

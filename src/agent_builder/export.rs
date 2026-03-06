@@ -40,7 +40,11 @@ pub fn export_binary(agent_name: &str, force_overwrite: bool) -> io::Result<()> 
     let project_path = super::agent_workspace_path(agent_name);
 
     #[allow(unused_mut)]
-    let mut source_path = project_path.join("target").join("debug").join(agent_name);
+    let mut source_path = project_path.join("target");
+    if let Some(target_triple) = super::configured_target_triple() {
+        source_path = source_path.join(target_triple);
+    }
+    source_path = source_path.join("debug").join(agent_name);
 
     #[cfg(windows)]
     source_path.set_extension("exe");
@@ -62,14 +66,19 @@ mod tests {
     use std::fs;
     use std::io::ErrorKind;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_test_dir() -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("cargo-ai-export-test-{nanos}"));
+        let sequence = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("cargo-ai-export-test-{nanos}-{sequence}"));
         fs::create_dir_all(&path).expect("test directory should be creatable");
         path
     }
