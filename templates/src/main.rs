@@ -18,8 +18,12 @@ use providers::{
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
+const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
 const OPENAI_ACCOUNT_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const OPENAI_REFRESH_BUFFER_SEC: i64 = 30;
+const KEYCHAIN_SERVICE: &str = "cargo-ai";
+const ACCOUNT_ACCESS_KEY: &str = "account/access_token";
+const ACCOUNT_REFRESH_KEY: &str = "account/refresh_token";
 
 fn unknown_server_messages(server: &str) -> Vec<String> {
     let display_server = if server.trim().is_empty() {
@@ -49,6 +53,26 @@ struct SelectedProfile {
 struct ResolvedOpenAiToken {
     token: String,
     uses_account_session: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AccountAuth {
+    access_token: String,
+    refresh_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct CredentialsFile {
+    #[serde(default)]
+    account: Option<CredentialsAccount>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct CredentialsAccount {
+    #[serde(default)]
+    access_token: Option<String>,
+    #[serde(default)]
+    refresh_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -244,6 +268,271 @@ fn openai_account_locally_disabled(config: Option<&config::schema::Config>) -> b
         .and_then(|cfg| cfg.openai_auth.as_ref())
         .and_then(|auth| auth.locally_disabled)
         .unwrap_or(false)
+}
+
+fn resolve_credentials_path(cargo_home: Option<PathBuf>, home_dir: Option<PathBuf>) -> PathBuf {
+    if let Some(cargo_home) = cargo_home {
+        return cargo_home.join(".cargo-ai/credentials.toml");
+    }
+
+    if let Some(home_dir) = home_dir {
+        return home_dir.join(".cargo/.cargo-ai/credentials.toml");
+    }
+
+    PathBuf::from(".cargo/.cargo-ai/credentials.toml")
+}
+
+fn credentials_path() -> PathBuf {
+    resolve_credentials_path(
+        std::env::var_os("CARGO_HOME").map(PathBuf::from),
+        dirs::home_dir(),
+    )
+}
+
+fn keychain_enabled() -> bool {
+    match std::env::var("CARGO_AI_DISABLE_KEYCHAIN") {
+        Ok(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            normalized != "1" && normalized != "true" && normalized != "yes"
+        }
+        Err(_) => true,
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "windows",
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "openbsd"
+))]
+fn load_account_tokens_from_keychain() -> Result<Option<AccountAuth>, String> {
+    if !keychain_enabled() {
+        return Err("keychain usage is disabled by CARGO_AI_DISABLE_KEYCHAIN".to_string());
+    }
+
+    let access_entry = keyring::Entry::new(KEYCHAIN_SERVICE, ACCOUNT_ACCESS_KEY)
+        .map_err(|error| format!("failed to initialize account access-token keyring entry: {error}"))?;
+    let refresh_entry = keyring::Entry::new(KEYCHAIN_SERVICE, ACCOUNT_REFRESH_KEY)
+        .map_err(|error| format!("failed to initialize account refresh-token keyring entry: {error}"))?;
+
+    let access_token = match access_entry.get_password() {
+        Ok(token) if !token.trim().is_empty() => token,
+        Ok(_) | Err(keyring::Error::NoEntry) => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "keyring lookup failed for account access token: {error}"
+            ))
+        }
+    };
+
+    let refresh_token = match refresh_entry.get_password() {
+        Ok(token) if !token.trim().is_empty() => Some(token),
+        Ok(_) | Err(keyring::Error::NoEntry) => None,
+        Err(error) => {
+            return Err(format!(
+                "keyring lookup failed for account refresh token: {error}"
+            ))
+        }
+    };
+
+    Ok(Some(AccountAuth {
+        access_token,
+        refresh_token,
+    }))
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "windows",
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "openbsd"
+)))]
+fn load_account_tokens_from_keychain() -> Result<Option<AccountAuth>, String> {
+    Err("keychain backend is unavailable on this platform".to_string())
+}
+
+fn load_account_tokens_from_file() -> Result<Option<AccountAuth>, String> {
+    let path = credentials_path();
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
+    let parsed = toml::from_str::<CredentialsFile>(&raw)
+        .map_err(|error| format!("failed to parse '{}': {error}", path.display()))?;
+
+    let Some(account) = parsed.account else {
+        return Ok(None);
+    };
+
+    let access_token = account
+        .access_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string);
+
+    let refresh_token = account
+        .refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string);
+
+    Ok(access_token.map(|access_token| AccountAuth {
+        access_token,
+        refresh_token,
+    }))
+}
+
+fn load_account_auth(config: Option<&config::schema::Config>) -> Result<AccountAuth, String> {
+    let configured_mode = config.and_then(|cfg| cfg.secret_store);
+    let auth = match configured_mode {
+        Some(config::schema::SecretStoreMode::File) => load_account_tokens_from_file()?,
+        Some(config::schema::SecretStoreMode::Keychain) => load_account_tokens_from_keychain()?,
+        None => match load_account_tokens_from_keychain() {
+            Ok(Some(tokens)) => Some(tokens),
+            Ok(None) | Err(_) => load_account_tokens_from_file()?,
+        },
+    };
+
+    auth.ok_or_else(|| {
+        format!(
+            "No account access token found in '{}'. Run `cargo ai account confirm <code>` or `cargo ai account status` from Cargo AI first.",
+            credentials_path().display()
+        )
+    })
+}
+
+async fn fetch_account_status(
+    access_token: &str,
+    refresh_token: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let url = format!("{}/account", INFRA_BASE_URL.trim_end_matches('/'));
+    let mut credentials = serde_json::json!({
+        "access_token": access_token
+    });
+
+    if let Some(refresh_token) = refresh_token {
+        credentials["refresh_token"] = serde_json::json!(refresh_token);
+    }
+
+    let mut body = serde_json::json!({
+        "action": "status",
+        "credentials": credentials
+    });
+
+    if refresh_token.is_some() {
+        body["session_policy"] = serde_json::json!({
+            "allow_refresh": true
+        });
+    }
+
+    reqwest::Client::new()
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| format!("{error:?}"))?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("{error:?}"))
+}
+
+async fn send_account_mail_request(
+    access_token: &str,
+    subject: &str,
+    text: &str,
+) -> Result<serde_json::Value, String> {
+    let url = format!("{}/account", INFRA_BASE_URL.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "action": "send_mail",
+        "credentials": {
+            "access_token": access_token
+        },
+        "send_mail": {
+            "subject": subject,
+            "text": text
+        }
+    });
+
+    reqwest::Client::new()
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| format!("{error:?}"))?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("{error:?}"))
+}
+
+fn render_account_response(response: &serde_json::Value) {
+    match serde_json::to_string_pretty(response) {
+        Ok(pretty) => println!("{pretty}"),
+        Err(_) => println!("{response:?}"),
+    }
+}
+
+async fn run_email_me_action(
+    subject: &str,
+    text: &str,
+    config: Option<&config::schema::Config>,
+) -> Result<(), String> {
+    let auth = load_account_auth(config)?;
+    let access_token = auth.access_token;
+    let refresh_token = auth.refresh_token;
+
+    let mut response = send_account_mail_request(access_token.as_str(), subject, text).await?;
+
+    let is_expired_error = response
+        .get("type")
+        .and_then(|value| value.as_str())
+        .map(|value| value == "access_token_expired")
+        .unwrap_or(false);
+
+    if is_expired_error {
+        let refresh_token = refresh_token.as_deref().ok_or_else(|| {
+            "Access token expired, and no refresh token exists in credentials storage. Run `cargo ai account status` from Cargo AI first."
+                .to_string()
+        })?;
+
+        let refresh_response =
+            fetch_account_status(access_token.as_str(), Some(refresh_token)).await?;
+        let refreshed_access_token = refresh_response
+            .get("session")
+            .and_then(|session| session.get("access_token"))
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                render_account_response(&refresh_response);
+                "Session refresh did not return a new access token. Cannot retry email_me action."
+                    .to_string()
+            })?;
+
+        response =
+            send_account_mail_request(refreshed_access_token.as_str(), subject, text).await?;
+    }
+
+    render_account_response(&response);
+
+    let succeeded = response
+        .get("status")
+        .and_then(|value| value.as_str())
+        .map(|status| status.eq_ignore_ascii_case("success"))
+        .unwrap_or(false);
+
+    if succeeded {
+        Ok(())
+    } else {
+        Err("email_me request failed.".to_string())
+    }
 }
 
 async fn resolve_openai_oauth_access_token(
@@ -573,13 +862,17 @@ async fn main() {
     };
 
     let actions = actions();
-    if let Err(error) = apply_actions(&output, &actions) {
+    if let Err(error) = apply_actions(&output, &actions, config.as_ref()).await {
         eprintln!("❌ {error}");
         std::process::exit(1);
     }
 }
 
-pub fn apply_actions(output: &Output, actions: &[Action]) -> Result<(), String> {
+pub async fn apply_actions(
+    output: &Output,
+    actions: &[Action],
+    config: Option<&config::schema::Config>,
+) -> Result<(), String> {
     let data = serde_json::to_value(output).unwrap();
     let current_platform = current_action_platform();
 
@@ -597,23 +890,15 @@ pub fn apply_actions(output: &Output, actions: &[Action]) -> Result<(), String> 
                 }
 
                 for step in matching_steps {
-                    let resolved_args = resolve_run_args(&step.args, &data, &action.name)?;
-                    println!("Running '{}': {} {:?}", action.name, step.program, resolved_args);
-
-                    let status = std::process::Command::new(&step.program)
-                        .args(&resolved_args)
-                        .status();
-
-                    match status {
-                        Ok(status) if status.success() => {
-                            println!("Command completed successfully.");
-                        }
-                        Ok(status) => {
-                            println!("Command exited with status: {}", status);
-                        }
-                        Err(err) => {
-                            println!("Failed to execute command: {}", err);
-                        }
+                    if step.kind.eq_ignore_ascii_case("exec") {
+                        run_exec_step(step, &data, &action.name)?;
+                    } else if step.kind.eq_ignore_ascii_case("email_me") {
+                        run_email_me_step(step, &data, &action.name, config).await?;
+                    } else {
+                        println!(
+                            "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
+                            action.name, step.kind
+                        );
                     }
                 }
             }
@@ -623,6 +908,68 @@ pub fn apply_actions(output: &Output, actions: &[Action]) -> Result<(), String> 
     }
 
     Ok(())
+}
+
+fn run_exec_step(
+    step: &RunStep,
+    data: &serde_json::Value,
+    action_name: &str,
+) -> Result<(), String> {
+    let program = step.program.as_deref().ok_or_else(|| {
+        format!(
+            "Action '{}' exec step is missing required `program`.",
+            action_name
+        )
+    })?;
+
+    let resolved_args = resolve_run_args(&step.args, data, action_name)?;
+    println!("Running '{}': {} {:?}", action_name, program, resolved_args);
+
+    let status = std::process::Command::new(program)
+        .args(&resolved_args)
+        .status();
+
+    match status {
+        Ok(status) if status.success() => {
+            println!("Command completed successfully.");
+        }
+        Ok(status) => {
+            println!("Command exited with status: {}", status);
+        }
+        Err(err) => {
+            println!("Failed to execute command: {}", err);
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_email_me_step(
+    step: &RunStep,
+    data: &serde_json::Value,
+    action_name: &str,
+    config: Option<&config::schema::Config>,
+) -> Result<(), String> {
+    let subject_parts = step.subject.as_deref().ok_or_else(|| {
+        format!(
+            "Action '{}' email_me step is missing required `subject`.",
+            action_name
+        )
+    })?;
+    let text_parts = step.text.as_deref().ok_or_else(|| {
+        format!(
+            "Action '{}' email_me step is missing required `text`.",
+            action_name
+        )
+    })?;
+
+    let subject = resolve_string_parts(subject_parts, data, action_name, "subject")?;
+    let text = resolve_string_parts(text_parts, data, action_name, "text")?;
+    println!("Running '{}': email_me {:?}", action_name, subject);
+
+    run_email_me_action(subject.as_str(), text.as_str(), config)
+        .await
+        .map_err(|error| format!("Action '{}': {error}", action_name))
 }
 
 fn current_action_platform() -> Option<&'static str> {
@@ -665,6 +1012,29 @@ fn resolve_run_args(
         .enumerate()
         .map(|(index, arg)| resolve_run_arg(arg, data, action_name, index))
         .collect()
+}
+
+fn resolve_string_parts(
+    parts: &[RunArg],
+    data: &serde_json::Value,
+    action_name: &str,
+    field_name: &str,
+) -> Result<String, String> {
+    let mut resolved = String::new();
+
+    for (index, part) in parts.iter().enumerate() {
+        let value = resolve_run_arg(part, data, action_name, index)?;
+        resolved.push_str(&value);
+    }
+
+    if resolved.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' {} resolved to an empty string.",
+            action_name, field_name
+        ));
+    }
+
+    Ok(resolved)
 }
 
 fn resolve_run_arg(

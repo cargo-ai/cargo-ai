@@ -111,7 +111,7 @@ fn rejects_unsupported_action_kind_with_actionable_path() {
         .to_string();
 
     assert!(err.contains("$.actions[0].run[0].kind"));
-    assert!(err.contains("supported: `exec`"));
+    assert!(err.contains("supported: `exec`, `email_me`"));
 }
 
 #[test]
@@ -137,6 +137,87 @@ fn accepts_mixed_literal_and_variable_action_args() {
 
     assert!(generated.contains("RunArg::Literal(\"value=\".to_string())"));
     assert!(generated.contains("RunArg::Variable(\"value\".to_string())"));
+}
+
+#[test]
+fn accepts_email_me_string_and_variable_parts() {
+    let cfg = config_with(
+        r#""city": { "type": "string" }, "raining": { "type": "boolean" }"#,
+        r#"[
+          {
+            "name": "email_me",
+            "logic": { "==": [ { "var": "raining" }, true ] },
+            "run": [
+              {
+                "kind": "email_me",
+                "subject": ["Weather alert for ", { "var": "city" }],
+                "text": ["Bring an umbrella because raining=", { "var": "raining" }]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains("kind: \"email_me\".to_string()"));
+    assert!(generated.contains("subject: Some(vec![RunArg::Literal(\"Weather alert for \".to_string()), RunArg::Variable(\"city\".to_string())])"));
+    assert!(generated.contains("text: Some(vec![RunArg::Literal(\"Bring an umbrella because raining=\".to_string()), RunArg::Variable(\"raining\".to_string())])"));
+}
+
+#[test]
+fn rejects_email_me_program_field() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_email_me",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "email_me",
+                "program": "echo",
+                "subject": "Alert",
+                "text": "Body"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].program"));
+    assert!(err.contains("not supported for `email_me`"));
+}
+
+#[test]
+fn rejects_empty_email_me_subject_string() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_email_subject",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "email_me",
+                "subject": "   ",
+                "text": "Body"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].subject"));
+    assert!(err.contains("must be a non-empty string"));
 }
 
 #[test]
@@ -547,15 +628,12 @@ fn generates_canonical_build_provenance_constants() {
     hasher.update(expected_definition.as_bytes());
     let expected_hash = format!("{:x}", hasher.finalize());
 
-    assert!(generated.contains(
-        r#"const AGENT_BUILD_ID: &str = "11111111-2222-4333-8444-555555555555";"#
-    ));
-    assert!(generated.contains(
-        r#"const AGENT_TARGET_TRIPLE: &str = "aarch64-apple-darwin";"#
-    ));
-    assert!(generated.contains(
-        r#"const AGENT_BUILD_TIMESTAMP_UTC: &str = "2026-03-05T23:14:29Z";"#
-    ));
+    assert!(generated
+        .contains(r#"const AGENT_BUILD_ID: &str = "11111111-2222-4333-8444-555555555555";"#));
+    assert!(generated.contains(r#"const AGENT_TARGET_TRIPLE: &str = "aarch64-apple-darwin";"#));
+    assert!(
+        generated.contains(r#"const AGENT_BUILD_TIMESTAMP_UTC: &str = "2026-03-05T23:14:29Z";"#)
+    );
     assert!(generated.contains(&format!(
         r#"const AGENT_DEFINITION_SHA256: &str = "{}";"#,
         expected_hash

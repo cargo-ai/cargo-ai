@@ -212,7 +212,8 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                     auth_mode: profile.auth_mode,
                     legacy_token: profile.token.clone(),
                 });
-                loaded_profile_message = Some((LoadedProfileKind::Explicit, profile_name.to_string()));
+                loaded_profile_message =
+                    Some((LoadedProfileKind::Explicit, profile_name.to_string()));
             } else {
                 eprintln!("Profile '{}' not found.", profile_name);
             }
@@ -436,7 +437,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     let actions = crate::actions();
     // println!("Actions {:?}", actions);
 
-    match super::preflight_actions::apply_actions(&output, &actions) {
+    match super::preflight_actions::apply_actions(&output, &actions).await {
         Ok(()) => true,
         Err(error) => {
             eprintln!("❌ {error}");
@@ -487,7 +488,10 @@ mod tests {
             &["server=ollama".to_string(), "model=mistral".to_string()],
         );
 
-        assert_eq!(messages[0], "Using default profile 'my_open_ai' as fallback.");
+        assert_eq!(
+            messages[0],
+            "Using default profile 'my_open_ai' as fallback."
+        );
         assert_eq!(messages[1], "CLI overrides: server=ollama, model=mistral");
     }
 
