@@ -111,7 +111,7 @@ fn rejects_unsupported_action_kind_with_actionable_path() {
         .to_string();
 
     assert!(err.contains("$.actions[0].run[0].kind"));
-    assert!(err.contains("supported: `exec`, `email_me`"));
+    assert!(err.contains("supported: `exec`, `email_me`, `agent`"));
 }
 
 #[test]
@@ -218,6 +218,90 @@ fn rejects_empty_email_me_subject_string() {
 
     assert!(err.contains("$.actions[0].run[0].subject"));
     assert!(err.contains("must be a non-empty string"));
+}
+
+#[test]
+fn accepts_agent_step_with_relative_path_and_inputs() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./agents/summary_agent",
+                "inputs": [
+                  { "type": "text", "text": "Summarize this." },
+                  { "type": "url", "url": "https://example.com" }
+                ]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains("kind: \"agent\".to_string()"));
+    assert!(generated.contains("agent: Some(\"./agents/summary_agent\".to_string())"));
+    assert!(generated.contains(
+        "inputs: Some(vec![Input::Text { text: \"Summarize this.\".to_string() }, Input::Url { url: \"https://example.com\".to_string() }])"
+    ));
+}
+
+#[test]
+fn rejects_agent_absolute_path() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_agent",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "/tmp/summary_agent"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].agent"));
+    assert!(err.contains("must be a relative path"));
+}
+
+#[test]
+fn rejects_agent_program_field() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_agent",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./agents/summary_agent",
+                "program": "echo"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].program"));
+    assert!(err.contains("not supported for `agent`"));
 }
 
 #[test]

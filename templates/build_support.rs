@@ -98,6 +98,8 @@ struct RunStep {
     args: Vec<RunArg>,
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
+    agent: Option<String>,
+    inputs: Option<Vec<InputSpec>>,
     platforms: Option<Vec<String>>,
 }
 
@@ -451,9 +453,20 @@ fn parse_inputs(root_obj: &Map<String, Value>) -> Result<Vec<InputSpec>, BuildEr
         ));
     }
 
+    parse_input_specs(inputs, "$.inputs")
+}
+
+fn parse_input_specs(inputs: &[Value], base_path: &str) -> Result<Vec<InputSpec>, BuildError> {
+    if inputs.is_empty() {
+        return Err(BuildError::config(
+            base_path,
+            "must contain at least one entry",
+        ));
+    }
+
     let mut parsed = Vec::with_capacity(inputs.len());
     for (index, entry) in inputs.iter().enumerate() {
-        let path = format!("$.inputs[{index}]");
+        let path = format!("{base_path}[{index}]");
         let entry_obj = expect_object(entry, &path)?;
         let input_type = get_required_string(entry_obj, "type", &path)?
             .trim()
@@ -523,6 +536,18 @@ fn parse_actions(
                             "`text` is only supported for `email_me` actions",
                         ));
                     }
+                    if run_obj.contains_key("agent") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.agent"),
+                            "`agent` is only supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("inputs") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.inputs"),
+                            "`inputs` is only supported for `agent` actions",
+                        ));
+                    }
 
                     let program = get_required_string(run_obj, "program", &run_path)?.to_string();
                     if program.trim().is_empty() {
@@ -539,6 +564,8 @@ fn parse_actions(
                         args,
                         subject: None,
                         text: None,
+                        agent: None,
+                        inputs: None,
                         platforms,
                     }
                 }
@@ -553,6 +580,18 @@ fn parse_actions(
                         return Err(BuildError::config(
                             format!("{run_path}.args"),
                             "`args` is not supported for `email_me` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("agent") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.agent"),
+                            "`agent` is not supported for `email_me` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("inputs") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.inputs"),
+                            "`inputs` is not supported for `email_me` actions",
                         ));
                     }
 
@@ -571,13 +610,84 @@ fn parse_actions(
                         args: Vec::new(),
                         subject: Some(subject),
                         text: Some(text),
+                        agent: None,
+                        inputs: None,
+                        platforms,
+                    }
+                }
+                "agent" => {
+                    if run_obj.contains_key("program") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.program"),
+                            "`program` is not supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("args") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.args"),
+                            "`args` is not supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("subject") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.subject"),
+                            "`subject` is not supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("text") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.text"),
+                            "`text` is not supported for `agent` actions",
+                        ));
+                    }
+
+                    let agent = get_required_string(run_obj, "agent", &run_path)?
+                        .trim()
+                        .to_string();
+                    if agent.is_empty() {
+                        return Err(BuildError::config(
+                            format!("{run_path}.agent"),
+                            "must be a non-empty relative path",
+                        ));
+                    }
+                    if Path::new(&agent).is_absolute() {
+                        return Err(BuildError::config(
+                            format!("{run_path}.agent"),
+                            "must be a relative path in this story",
+                        ));
+                    }
+
+                    let inputs = match run_obj.get("inputs") {
+                        Some(input_value) => {
+                            let input_path = format!("{run_path}.inputs");
+                            let input_array = input_value.as_array().ok_or_else(|| {
+                                BuildError::config(
+                                    &input_path,
+                                    "expected `inputs` to be an array of ordered input parts",
+                                )
+                            })?;
+                            Some(parse_input_specs(input_array, &input_path)?)
+                        }
+                        None => None,
+                    };
+
+                    RunStep {
+                        kind,
+                        program: None,
+                        args: Vec::new(),
+                        subject: None,
+                        text: None,
+                        agent: Some(agent),
+                        inputs,
                         platforms,
                     }
                 }
                 _ => {
                     return Err(BuildError::config(
                         format!("{run_path}.kind"),
-                        format!("unsupported kind `{kind}` (supported: `exec`, `email_me`)"),
+                        format!(
+                            "unsupported kind `{kind}` (supported: `exec`, `email_me`, `agent`)"
+                        ),
                     ));
                 }
             };
@@ -1381,6 +1491,36 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         format!("Some(vec![{}])", rendered)
                     })
                     .unwrap_or_else(|| "None".to_string());
+                let agent = run_step
+                    .agent
+                    .as_ref()
+                    .map(|agent| format!("Some({}.to_string())", rust_string_literal(agent)))
+                    .unwrap_or_else(|| "None".to_string());
+                let inputs = run_step
+                    .inputs
+                    .as_ref()
+                    .map(|inputs| {
+                        let rendered = inputs
+                            .iter()
+                            .map(|input| match input {
+                                InputSpec::Text { text } => format!(
+                                    "Input::Text {{ text: {}.to_string() }}",
+                                    rust_string_literal(text)
+                                ),
+                                InputSpec::Url { url } => format!(
+                                    "Input::Url {{ url: {}.to_string() }}",
+                                    rust_string_literal(url)
+                                ),
+                                InputSpec::Image { path } => format!(
+                                    "Input::Image {{ path: {}.to_string() }}",
+                                    rust_string_literal(path)
+                                ),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("Some(vec![{}])", rendered)
+                    })
+                    .unwrap_or_else(|| "None".to_string());
                 let platforms = run_step
                     .platforms
                     .as_ref()
@@ -1403,6 +1543,8 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         args: vec![{}],
                         subject: {},
                         text: {},
+                        agent: {},
+                        inputs: {},
                         platforms: {},
                     }}",
                     rust_string_literal(&run_step.kind),
@@ -1416,6 +1558,8 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     args,
                     subject,
                     text,
+                    agent,
+                    inputs,
                     platforms
                 )
             })
@@ -1484,6 +1628,8 @@ pub struct RunStep {{
     args: Vec<RunArg>,
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
+    agent: Option<String>,
+    inputs: Option<Vec<Input>>,
     platforms: Option<Vec<String>>,
 }}
 

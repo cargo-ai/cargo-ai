@@ -7,7 +7,8 @@ mod providers;
 use jsonlogic::apply;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use config::loader::{find_profile, load_config};
 use config::schema::{Profile, ProfileAuthMode};
@@ -24,6 +25,8 @@ const OPENAI_REFRESH_BUFFER_SEC: i64 = 30;
 const KEYCHAIN_SERVICE: &str = "cargo-ai";
 const ACCOUNT_ACCESS_TOKEN_STORAGE_KEY: &str = "account/access_token";
 const ACCOUNT_REFRESH_TOKEN_STORAGE_KEY: &str = "account/refresh_token";
+const AGENT_ACTION_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_DEPTH";
+const DEFAULT_AGENT_ACTION_TIMEOUT_SECS: u64 = 90;
 
 fn unknown_server_messages(server: &str) -> Vec<String> {
     let display_server = if server.trim().is_empty() {
@@ -894,6 +897,8 @@ pub async fn apply_actions(
                         run_exec_step(step, &data, &action.name)?;
                     } else if step.kind.eq_ignore_ascii_case("email_me") {
                         run_email_me_step(step, &data, &action.name, config).await?;
+                    } else if step.kind.eq_ignore_ascii_case("agent") {
+                        run_agent_step(step, &action.name).await?;
                     } else {
                         println!(
                             "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
@@ -972,6 +977,72 @@ async fn run_email_me_step(
         .map_err(|error| format!("Action '{}': {error}", action_name))
 }
 
+async fn run_agent_step(step: &RunStep, action_name: &str) -> Result<(), String> {
+    let agent = step.agent.as_deref().ok_or_else(|| {
+        format!(
+            "Action '{}' agent step is missing required `agent`.",
+            action_name
+        )
+    })?;
+
+    if current_agent_action_depth() > 0 {
+        return Err(format!(
+            "Action '{}' attempted nested agent invocation, which is not supported in this story.",
+            action_name
+        ));
+    }
+
+    let agent_path = Path::new(agent);
+    if !agent_path.exists() {
+        return Err(format!(
+            "Action '{}' agent step target '{}' was not found relative to the current working directory.",
+            action_name, agent
+        ));
+    }
+
+    let mut command = tokio::process::Command::new(agent_path);
+    for argument in child_input_args(step.inputs.as_deref()) {
+        command.arg(argument);
+    }
+    command.env(
+        AGENT_ACTION_DEPTH_ENV,
+        (current_agent_action_depth() + 1).to_string(),
+    );
+
+    println!("Running '{}': agent {:?}", action_name, agent);
+
+    let mut child = command.spawn().map_err(|error| {
+        format!(
+            "Action '{}' failed to start child agent '{}': {}",
+            action_name, agent, error
+        )
+    })?;
+
+    match tokio::time::timeout(Duration::from_secs(DEFAULT_AGENT_ACTION_TIMEOUT_SECS), child.wait())
+        .await
+    {
+        Ok(Ok(status)) if status.success() => {
+            println!("Child agent completed successfully.");
+            Ok(())
+        }
+        Ok(Ok(status)) => Err(format!(
+            "Action '{}' child agent '{}' exited with status {}.",
+            action_name, agent, status
+        )),
+        Ok(Err(error)) => Err(format!(
+            "Action '{}' failed while waiting for child agent '{}': {}",
+            action_name, agent, error
+        )),
+        Err(_) => {
+            let _ = child.kill().await;
+            Err(format!(
+                "Action '{}' child agent '{}' timed out after {} seconds.",
+                action_name, agent, DEFAULT_AGENT_ACTION_TIMEOUT_SECS
+            ))
+        }
+    }
+}
+
 fn current_action_platform() -> Option<&'static str> {
     if cfg!(target_os = "macos") {
         Some("macos")
@@ -992,6 +1063,38 @@ fn matching_run_steps<'a>(
         .iter()
         .filter(|step| step_matches_platform(step.platforms.as_deref(), current_platform))
         .collect()
+}
+
+fn child_input_args(inputs: Option<&[Input]>) -> Vec<String> {
+    let mut args = Vec::new();
+
+    if let Some(inputs) = inputs {
+        for input in inputs {
+            match input {
+                Input::Text { text } => {
+                    args.push("--input-text".to_string());
+                    args.push(text.clone());
+                }
+                Input::Url { url } => {
+                    args.push("--input-url".to_string());
+                    args.push(url.clone());
+                }
+                Input::Image { path } => {
+                    args.push("--input-image".to_string());
+                    args.push(path.clone());
+                }
+            }
+        }
+    }
+
+    args
+}
+
+fn current_agent_action_depth() -> u32 {
+    std::env::var(AGENT_ACTION_DEPTH_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0)
 }
 
 fn step_matches_platform(platforms: Option<&[String]>, current_platform: Option<&str>) -> bool {

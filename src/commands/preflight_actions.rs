@@ -5,8 +5,12 @@ use crate::credentials::store;
 use crate::infra_api;
 use crate::ui;
 use jsonlogic::apply;
+use std::path::Path;
+use std::time::Duration;
 
 const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
+const AGENT_ACTION_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_DEPTH";
+const DEFAULT_AGENT_ACTION_TIMEOUT_SECS: u64 = 90;
 
 #[derive(Debug, Clone)]
 struct AccountAuth {
@@ -59,6 +63,8 @@ pub(crate) async fn apply_actions(
                             run_exec_step(step, &data, &action.name)?;
                         } else if step.kind.eq_ignore_ascii_case("email_me") {
                             run_email_me_step(step, &data, &action.name).await?;
+                        } else if step.kind.eq_ignore_ascii_case("agent") {
+                            run_agent_step(step, &action.name).await?;
                         } else {
                             eprintln!(
                                 "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
@@ -214,6 +220,75 @@ async fn run_email_me_step(
     }
 }
 
+async fn run_agent_step(step: &crate::RunStep, action_name: &str) -> Result<(), String> {
+    let agent = step.agent.as_deref().ok_or_else(|| {
+        format!(
+            "Action '{}' agent step is missing required `agent`.",
+            action_name
+        )
+    })?;
+
+    if current_agent_action_depth() > 0 {
+        return Err(format!(
+            "Action '{}' attempted nested agent invocation, which is not supported in this story.",
+            action_name
+        ));
+    }
+
+    let agent_path = Path::new(agent);
+    if !agent_path.exists() {
+        return Err(format!(
+            "Action '{}' agent step target '{}' was not found relative to the current working directory.",
+            action_name, agent
+        ));
+    }
+
+    let mut command = tokio::process::Command::new(agent_path);
+    for argument in child_input_args(step.inputs.as_deref()) {
+        command.arg(argument);
+    }
+    command.env(
+        AGENT_ACTION_DEPTH_ENV,
+        (current_agent_action_depth() + 1).to_string(),
+    );
+
+    println!("Running '{}': agent {:?}", action_name, agent);
+
+    let mut child = command.spawn().map_err(|error| {
+        format!(
+            "Action '{}' failed to start child agent '{}': {}",
+            action_name, agent, error
+        )
+    })?;
+
+    match tokio::time::timeout(
+        Duration::from_secs(DEFAULT_AGENT_ACTION_TIMEOUT_SECS),
+        child.wait(),
+    )
+    .await
+    {
+        Ok(Ok(status)) if status.success() => {
+            println!("Child agent completed successfully.");
+            Ok(())
+        }
+        Ok(Ok(status)) => Err(format!(
+            "Action '{}' child agent '{}' exited with status {}.",
+            action_name, agent, status
+        )),
+        Ok(Err(error)) => Err(format!(
+            "Action '{}' failed while waiting for child agent '{}': {}",
+            action_name, agent, error
+        )),
+        Err(_) => {
+            let _ = child.kill().await;
+            Err(format!(
+                "Action '{}' child agent '{}' timed out after {} seconds.",
+                action_name, agent, DEFAULT_AGENT_ACTION_TIMEOUT_SECS
+            ))
+        }
+    }
+}
+
 fn render_backend_ui_or_json(response: &serde_json::Value) {
     if !ui::account_status::render_backend_ui(response) {
         match serde_json::to_string_pretty(response) {
@@ -323,6 +398,38 @@ fn matching_run_steps<'a>(
         .collect()
 }
 
+fn child_input_args(inputs: Option<&[crate::Input]>) -> Vec<String> {
+    let mut args = Vec::new();
+
+    if let Some(inputs) = inputs {
+        for input in inputs {
+            match input {
+                crate::Input::Text { text } => {
+                    args.push("--input-text".to_string());
+                    args.push(text.clone());
+                }
+                crate::Input::Url { url } => {
+                    args.push("--input-url".to_string());
+                    args.push(url.clone());
+                }
+                crate::Input::Image { path } => {
+                    args.push("--input-image".to_string());
+                    args.push(path.clone());
+                }
+            }
+        }
+    }
+
+    args
+}
+
+fn current_agent_action_depth() -> u32 {
+    std::env::var(AGENT_ACTION_DEPTH_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
 fn step_matches_platform(platforms: Option<&[String]>, current_platform: Option<&str>) -> bool {
     match platforms {
         None => true,
@@ -405,7 +512,8 @@ fn resolve_run_arg(
 #[cfg(test)]
 mod tests {
     use super::{
-        matching_run_steps, resolve_run_args, resolve_string_parts, step_matches_platform,
+        child_input_args, matching_run_steps, resolve_run_args, resolve_string_parts,
+        run_agent_step, step_matches_platform,
     };
     use serde_json::json;
 
@@ -420,6 +528,8 @@ mod tests {
             args,
             subject: None,
             text: None,
+            agent: None,
+            inputs: None,
             platforms: platforms.map(|platforms| {
                 platforms
                     .iter()
@@ -528,5 +638,101 @@ mod tests {
         .expect("string parts should resolve");
 
         assert_eq!(resolved, "raining=true");
+    }
+
+    #[test]
+    fn child_input_args_map_to_runtime_flags() {
+        let args = child_input_args(Some(&[
+            crate::Input::Text {
+                text: "hello".to_string(),
+            },
+            crate::Input::Url {
+                url: "https://example.com".to_string(),
+            },
+            crate::Input::Image {
+                path: "./diagram.png".to_string(),
+            },
+        ]));
+
+        assert_eq!(
+            args,
+            vec![
+                "--input-text",
+                "hello",
+                "--input-url",
+                "https://example.com",
+                "--input-image",
+                "./diagram.png",
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_step_invokes_child_with_forwarded_inputs() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2032-agent-child-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+        let output_path = std::env::temp_dir().join(format!(
+            "cai2032-agent-child-args-{}.txt",
+            std::process::id()
+        ));
+
+        let script_body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+            output_path.display()
+        );
+
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            args: Vec::new(),
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", script_name)),
+            inputs: Some(vec![
+                crate::Input::Text {
+                    text: "hello".to_string(),
+                },
+                crate::Input::Url {
+                    url: "https://example.com".to_string(),
+                },
+                crate::Input::Image {
+                    path: "./diagram.png".to_string(),
+                },
+            ]),
+            platforms: None,
+        };
+
+        let result = run_agent_step(&step, "invoke_child").await;
+
+        let _ = fs::remove_file(&script_path);
+
+        assert!(result.is_ok(), "child agent invocation should succeed: {result:?}");
+
+        let args = fs::read_to_string(&output_path).expect("child output should be captured");
+        let _ = fs::remove_file(&output_path);
+
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec![
+                "--input-text",
+                "hello",
+                "--input-url",
+                "https://example.com",
+                "--input-image",
+                "./diagram.png",
+            ]
+        );
     }
 }
