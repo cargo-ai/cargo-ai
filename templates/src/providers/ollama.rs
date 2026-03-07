@@ -47,6 +47,25 @@ struct Response {
     choices: Vec<Choice>,
 }
 
+fn normalize_response_format(response_format: serde_json::Value) -> serde_json::Value {
+    if response_format
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        == Some("json_schema")
+    {
+        return response_format;
+    }
+
+    serde_json::json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "Output",
+            "schema": response_format,
+            "strict": true
+        }
+    })
+}
+
 pub async fn send_request(
     url: &String,
     model: &String,
@@ -61,7 +80,7 @@ pub async fn send_request(
             content: request_content_parts(content_parts),
         }],
         temperature: super::DEFAULT_TEMPERATURE,
-        response_format,
+        response_format: normalize_response_format(response_format),
     };
 
     let client = ClientBuilder::new()
@@ -123,4 +142,33 @@ fn request_content_parts(content_parts: &[ContentPart]) -> Vec<RequestContentPar
             },
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wraps_plain_schema_response_format_for_ollama_chat_completions() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ok": { "type": "boolean" }
+            },
+            "required": ["ok"]
+        });
+
+        let wrapped = normalize_response_format(schema.clone());
+        assert_eq!(
+            wrapped,
+            serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "Output",
+                    "schema": schema,
+                    "strict": true
+                }
+            })
+        );
+    }
 }
