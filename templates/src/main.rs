@@ -648,9 +648,10 @@ async fn run_email_me_action(
             .filter(|value| !value.is_empty())
             .map(str::to_string)
             .ok_or_else(|| {
-                render_account_response(&refresh_response);
-                "Session refresh did not return a new access token. Cannot retry email_me action."
-                    .to_string()
+                format_backend_error_message(&refresh_response).unwrap_or_else(|| {
+                    "Session refresh did not return a new access token. Cannot retry email_me action."
+                        .to_string()
+                })
             })?;
 
         if let Err(error) = persist_refreshed_account_tokens(
@@ -672,10 +673,11 @@ async fn run_email_me_action(
         .unwrap_or(false);
 
     if succeeded {
+        render_account_response(&response);
         Ok(())
     } else {
-        render_account_response(&response);
-        Err("email_me request failed.".to_string())
+        Err(format_backend_error_message(&response)
+            .unwrap_or_else(|| format!("email_me request failed.\n{}", pretty_backend_json(&response))))
     }
 }
 
@@ -1196,10 +1198,190 @@ fn print_action_success(action_name: &str, summary: &str) {
 }
 
 fn render_account_response(response: &serde_json::Value) {
-    match serde_json::to_string_pretty(response) {
-        Ok(pretty) => println!("{pretty}"),
-        Err(_) => println!("{response:?}"),
+    if let Some(message) = format_backend_ui_message(response, true) {
+        println!("{message}");
+    } else {
+        println!("{}", pretty_backend_json(response));
     }
+}
+
+fn format_backend_error_message(response: &serde_json::Value) -> Option<String> {
+    format_backend_ui_message(response, false)
+}
+
+fn format_backend_ui_message(
+    response: &serde_json::Value,
+    include_kind_prefix: bool,
+) -> Option<String> {
+    let ui = response.get("ui")?;
+    if ui.get("schema").and_then(|value| value.as_str()) != Some("1.0") {
+        return None;
+    }
+
+    let kind = ui.get("kind").and_then(|value| value.as_str()).unwrap_or("info");
+    let title = ui
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Status");
+    let summary = ui
+        .get("summary")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Status response received.");
+
+    let mut lines = Vec::new();
+    if include_kind_prefix {
+        let kind_prefix = match kind {
+            "success" => "✅",
+            "error" => "⚠️",
+            "failure" => "❌",
+            _ => "ℹ️",
+        };
+        lines.push(format!("{kind_prefix} {title}"));
+    } else {
+        lines.push(title.to_string());
+    }
+    lines.push(summary.to_string());
+
+    if let Some(variant) = ui.get("variant").and_then(|value| value.as_str()) {
+        if !variant.trim().is_empty() {
+            lines.push(format!("Variant: {variant}"));
+        }
+    }
+
+    if let Some(sections) = ui.get("sections").and_then(|value| value.as_array()) {
+        for section in sections {
+            append_backend_section_lines(section, &mut lines);
+        }
+    }
+
+    if let Some(actions) = ui.get("actions").and_then(|value| value.as_array()) {
+        let action_lines = actions
+            .iter()
+            .filter_map(|action| {
+                let label = action.get("label").and_then(|value| value.as_str()).unwrap_or("");
+                let command = action
+                    .get("command")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+
+                if label.is_empty() && command.is_empty() {
+                    None
+                } else if !label.is_empty() && !command.is_empty() {
+                    Some(format!("- {}: {}", label, command))
+                } else if !label.is_empty() {
+                    Some(format!("- {}", label))
+                } else {
+                    Some(format!("- {}", command))
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if !action_lines.is_empty() {
+            lines.push(String::new());
+            lines.push("Actions:".to_string());
+            lines.extend(action_lines);
+        }
+    }
+
+    if let Some(next_steps) = ui.get("next_steps").and_then(|value| value.as_array()) {
+        let step_lines = next_steps
+            .iter()
+            .filter_map(|step| step.as_str())
+            .map(str::trim)
+            .filter(|step| !step.is_empty())
+            .map(|step| format!("- {}", step))
+            .collect::<Vec<_>>();
+
+        if !step_lines.is_empty() {
+            lines.push(String::new());
+            lines.push("Next steps:".to_string());
+            lines.extend(step_lines);
+        }
+    }
+
+    Some(lines.join("\n"))
+}
+
+fn append_backend_section_lines(section: &serde_json::Value, lines: &mut Vec<String>) {
+    let section_type = section
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let title = section
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+
+    if !title.is_empty() {
+        lines.push(String::new());
+        lines.push(format!("{title}:"));
+    }
+
+    match section_type {
+        "kv" => {
+            if let Some(items) = section.get("items").and_then(|value| value.as_array()) {
+                for item in items {
+                    let label = item.get("label").and_then(|value| value.as_str()).unwrap_or("");
+                    let value = item
+                        .get("value")
+                        .map(backend_ui_value_to_string)
+                        .unwrap_or_default();
+
+                    if label.is_empty() && value.is_empty() {
+                        continue;
+                    }
+
+                    if label.is_empty() {
+                        lines.push(format!("- {}", value));
+                    } else {
+                        lines.push(format!("- {}: {}", label, value));
+                    }
+                }
+            }
+        }
+        "list" => {
+            if let Some(items) = section.get("items").and_then(|value| value.as_array()) {
+                for item in items {
+                    let value = backend_ui_value_to_string(item);
+                    if !value.is_empty() {
+                        lines.push(format!("- {}", value));
+                    }
+                }
+            }
+        }
+        "notice" => {
+            if let Some(message) = section.get("message").and_then(|value| value.as_str()) {
+                if !message.trim().is_empty() {
+                    lines.push(message.to_string());
+                }
+            }
+        }
+        "json" => {
+            if let Some(data) = section.get("data") {
+                match serde_json::to_string_pretty(data) {
+                    Ok(pretty) => lines.extend(pretty.lines().map(str::to_string)),
+                    Err(_) => lines.push(backend_ui_value_to_string(data)),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn backend_ui_value_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(boolean) => boolean.to_string(),
+        serde_json::Value::Number(number) => number.to_string(),
+        serde_json::Value::String(text) => text.to_string(),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            serde_json::to_string(value).unwrap_or_default()
+        }
+    }
+}
+
+fn pretty_backend_json(response: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(response).unwrap_or_else(|_| format!("{response:?}"))
 }
 
 fn current_action_platform() -> Option<&'static str> {
