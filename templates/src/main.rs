@@ -22,8 +22,8 @@ const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
 const OPENAI_ACCOUNT_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const OPENAI_REFRESH_BUFFER_SEC: i64 = 30;
 const KEYCHAIN_SERVICE: &str = "cargo-ai";
-const ACCOUNT_ACCESS_KEY: &str = "account/access_token";
-const ACCOUNT_REFRESH_KEY: &str = "account/refresh_token";
+const ACCOUNT_ACCESS_TOKEN_STORAGE_KEY: &str = "account/access_token";
+const ACCOUNT_REFRESH_TOKEN_STORAGE_KEY: &str = "account/refresh_token";
 
 fn unknown_server_messages(server: &str) -> Vec<String> {
     let display_server = if server.trim().is_empty() {
@@ -312,9 +312,9 @@ fn load_account_tokens_from_keychain() -> Result<Option<AccountAuth>, String> {
         return Err("keychain usage is disabled by CARGO_AI_DISABLE_KEYCHAIN".to_string());
     }
 
-    let access_entry = keyring::Entry::new(KEYCHAIN_SERVICE, ACCOUNT_ACCESS_KEY)
+    let access_entry = keyring::Entry::new(KEYCHAIN_SERVICE, ACCOUNT_ACCESS_TOKEN_STORAGE_KEY)
         .map_err(|error| format!("failed to initialize account access-token keyring entry: {error}"))?;
-    let refresh_entry = keyring::Entry::new(KEYCHAIN_SERVICE, ACCOUNT_REFRESH_KEY)
+    let refresh_entry = keyring::Entry::new(KEYCHAIN_SERVICE, ACCOUNT_REFRESH_TOKEN_STORAGE_KEY)
         .map_err(|error| format!("failed to initialize account refresh-token keyring entry: {error}"))?;
 
     let access_token = match access_entry.get_password() {
