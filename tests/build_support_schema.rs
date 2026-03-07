@@ -274,7 +274,33 @@ fn rejects_agent_absolute_path() {
         .to_string();
 
     assert!(err.contains("$.actions[0].run[0].agent"));
-    assert!(err.contains("must be a relative path"));
+    assert!(err.contains("explicit relative path"));
+}
+
+#[test]
+fn rejects_agent_bare_executable_name() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_agent",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "child_agent"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].agent"));
+    assert!(err.contains("bare executable names are not allowed"));
 }
 
 #[test]

@@ -133,7 +133,11 @@ pub fn create_new_agent_project(
 ) -> Result<(), Error> {
     create_agent_workspace(agent_name)?;
     seed_agent_workspace(template_path, agent_name)?;
-    rewrite_agent_generated_files(&super::agent_workspace_path(agent_name), agent_name, agentcfg)?;
+    rewrite_agent_generated_files(
+        &super::agent_workspace_path(agent_name),
+        agent_name,
+        agentcfg,
+    )?;
     Ok(())
 }
 
@@ -441,7 +445,9 @@ fn main() {
         copy_directory_recursive(&source, &destination).expect("copy should succeed");
 
         assert_eq!(
-            fs::read_to_string(destination.join("Cargo.toml")).ok().as_deref(),
+            fs::read_to_string(destination.join("Cargo.toml"))
+                .ok()
+                .as_deref(),
             Some("name = 'seed'")
         );
         assert_eq!(

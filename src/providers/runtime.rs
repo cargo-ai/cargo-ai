@@ -108,8 +108,12 @@ pub(crate) async fn resolve_inputs(inputs: &[crate::Input]) -> Result<Vec<Conten
 
 fn load_image_data_url(path: &str) -> Result<String, String> {
     let image_path = Path::new(path);
-    let image_bytes = fs::read(image_path)
-        .map_err(|error| format!("Failed to read image input '{}': {error}", image_path.display()))?;
+    let image_bytes = fs::read(image_path).map_err(|error| {
+        format!(
+            "Failed to read image input '{}': {error}",
+            image_path.display()
+        )
+    })?;
     let media_type = image_media_type(image_path)?;
     let encoded = BASE64_STANDARD.encode(image_bytes);
     Ok(format!("data:{media_type};base64,{encoded}"))
@@ -192,11 +196,9 @@ mod tests {
     #[test]
     fn detects_when_content_parts_include_images() {
         let text_only = [ContentPart::Text("x".to_string())];
-        assert!(
-            !text_only
-                .iter()
-                .any(|part| matches!(part, ContentPart::Image { .. }))
-        );
+        assert!(!text_only
+            .iter()
+            .any(|part| matches!(part, ContentPart::Image { .. })));
 
         let with_image = [
             ContentPart::Text("x".to_string()),
@@ -204,10 +206,8 @@ mod tests {
                 data_url: "data:image/png;base64,abc".to_string(),
             },
         ];
-        assert!(
-            with_image
-                .iter()
-                .any(|part| matches!(part, ContentPart::Image { .. }))
-        );
+        assert!(with_image
+            .iter()
+            .any(|part| matches!(part, ContentPart::Image { .. })));
     }
 }

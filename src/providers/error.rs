@@ -1,7 +1,7 @@
 //! Shared provider error taxonomy and user-facing diagnostics policy.
 
-use reqwest::StatusCode;
 use super::runtime::ContentPart;
+use reqwest::StatusCode;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

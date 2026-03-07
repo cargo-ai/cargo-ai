@@ -6,12 +6,13 @@ mod providers;
 
 use jsonlogic::apply;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use config::loader::{find_profile, load_config};
-use config::schema::{Profile, ProfileAuthMode};
+use config::schema::{Profile, ProfileAuthMode, SecretStoreMode};
 use providers::{
     provider_error_messages, validate_provider_content_parts, validate_provider_request,
     ProviderKind,
@@ -64,13 +65,19 @@ struct AccountAuth {
     refresh_token: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 struct CredentialsFile {
     #[serde(default)]
+    profile_tokens: BTreeMap<String, String>,
+
+    #[serde(default)]
     account: Option<CredentialsAccount>,
+
+    #[serde(default)]
+    openai_oauth: Option<CredentialsAccount>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 struct CredentialsAccount {
     #[serde(default)]
     access_token: Option<String>,
@@ -393,6 +400,140 @@ fn load_account_tokens_from_file() -> Result<Option<AccountAuth>, String> {
     }))
 }
 
+fn read_credentials_file(path: &Path) -> Result<CredentialsFile, String> {
+    if !path.exists() {
+        return Ok(CredentialsFile::default());
+    }
+
+    let raw = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
+    toml::from_str::<CredentialsFile>(&raw)
+        .map_err(|error| format!("failed to parse '{}': {error}", path.display()))
+}
+
+fn write_credentials_file(path: &Path, credentials: &CredentialsFile) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create credentials directory '{}': {error}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let serialized = toml::to_string_pretty(credentials)
+        .map_err(|error| format!("failed to serialize credentials: {error}"))?;
+    fs::write(path, serialized)
+        .map_err(|error| format!("failed to write '{}': {error}", path.display()))?;
+    lock_down_credentials_permissions(path)
+}
+
+#[cfg(unix)]
+fn lock_down_credentials_permissions(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)
+        .map_err(|error| format!("failed to read metadata for '{}': {error}", path.display()))?
+        .permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(path, permissions)
+        .map_err(|error| format!("failed to set permissions on '{}': {error}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn lock_down_credentials_permissions(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+fn persist_account_tokens_to_file(
+    access_token: &str,
+    refresh_token: Option<&str>,
+) -> Result<(), String> {
+    let path = credentials_path();
+    let mut credentials = read_credentials_file(&path)?;
+    credentials.account = Some(CredentialsAccount {
+        access_token: Some(access_token.to_string()),
+        refresh_token: refresh_token
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string),
+    });
+    write_credentials_file(&path, &credentials)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "windows",
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "openbsd"
+))]
+fn persist_account_tokens_to_keychain(
+    access_token: &str,
+    refresh_token: Option<&str>,
+) -> Result<(), String> {
+    if !keychain_enabled() {
+        return Err("keychain usage is disabled by CARGO_AI_DISABLE_KEYCHAIN".to_string());
+    }
+
+    let access_entry = keyring::Entry::new(KEYCHAIN_SERVICE, ACCOUNT_ACCESS_TOKEN_STORAGE_KEY)
+        .map_err(|error| format!("failed to initialize account access-token keyring entry: {error}"))?;
+    access_entry
+        .set_password(access_token)
+        .map_err(|error| format!("failed to update account access token in keychain: {error}"))?;
+
+    let refresh_entry = keyring::Entry::new(KEYCHAIN_SERVICE, ACCOUNT_REFRESH_TOKEN_STORAGE_KEY)
+        .map_err(|error| format!("failed to initialize account refresh-token keyring entry: {error}"))?;
+    match refresh_token.map(str::trim).filter(|token| !token.is_empty()) {
+        Some(token) => refresh_entry
+            .set_password(token)
+            .map_err(|error| format!("failed to update account refresh token in keychain: {error}"))?,
+        None => match refresh_entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(error) => {
+                return Err(format!(
+                    "failed to clear account refresh token from keychain: {error}"
+                ))
+            }
+        },
+    }
+
+    Ok(())
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "windows",
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "openbsd"
+)))]
+fn persist_account_tokens_to_keychain(
+    _access_token: &str,
+    _refresh_token: Option<&str>,
+) -> Result<(), String> {
+    Err("keychain backend is unavailable on this platform".to_string())
+}
+
+fn persist_refreshed_account_tokens(
+    access_token: &str,
+    refresh_token: Option<&str>,
+    config: Option<&config::schema::Config>,
+) -> Result<(), String> {
+    match config.and_then(|cfg| cfg.secret_store) {
+        Some(SecretStoreMode::File) => persist_account_tokens_to_file(access_token, refresh_token),
+        Some(SecretStoreMode::Keychain) => {
+            persist_account_tokens_to_keychain(access_token, refresh_token)
+        }
+        None => match persist_account_tokens_to_keychain(access_token, refresh_token) {
+            Ok(()) => Ok(()),
+            Err(_) => persist_account_tokens_to_file(access_token, refresh_token),
+        },
+    }
+}
+
 fn load_account_auth(config: Option<&config::schema::Config>) -> Result<AccountAuth, String> {
     let configured_mode = config.and_then(|cfg| cfg.secret_store);
     let auth = match configured_mode {
@@ -475,13 +616,6 @@ async fn send_account_mail_request(
         .map_err(|error| format!("{error:?}"))
 }
 
-fn render_account_response(response: &serde_json::Value) {
-    match serde_json::to_string_pretty(response) {
-        Ok(pretty) => println!("{pretty}"),
-        Err(_) => println!("{response:?}"),
-    }
-}
-
 async fn run_email_me_action(
     subject: &str,
     text: &str,
@@ -519,11 +653,17 @@ async fn run_email_me_action(
                     .to_string()
             })?;
 
+        if let Err(error) = persist_refreshed_account_tokens(
+            refreshed_access_token.as_str(),
+            Some(refresh_token),
+            config,
+        ) {
+            eprintln!("⚠️ Failed to update account tokens in credential store: {error}");
+        }
+
         response =
             send_account_mail_request(refreshed_access_token.as_str(), subject, text).await?;
     }
-
-    render_account_response(&response);
 
     let succeeded = response
         .get("status")
@@ -534,6 +674,7 @@ async fn run_email_me_action(
     if succeeded {
         Ok(())
     } else {
+        render_account_response(&response);
         Err("email_me request failed.".to_string())
     }
 }
@@ -928,7 +1069,7 @@ fn run_exec_step(
     })?;
 
     let resolved_args = resolve_run_args(&step.args, data, action_name)?;
-    println!("Running '{}': {} {:?}", action_name, program, resolved_args);
+    print_action_start(action_name);
 
     let status = std::process::Command::new(program)
         .args(&resolved_args)
@@ -936,13 +1077,13 @@ fn run_exec_step(
 
     match status {
         Ok(status) if status.success() => {
-            println!("Command completed successfully.");
+            print_action_success(action_name, "completed");
         }
         Ok(status) => {
-            println!("Command exited with status: {}", status);
+            println!("{action_name}: command exited with status {status}.");
         }
         Err(err) => {
-            println!("Failed to execute command: {}", err);
+            println!("{action_name}: failed to execute command: {err}.");
         }
     }
 
@@ -970,11 +1111,13 @@ async fn run_email_me_step(
 
     let subject = resolve_string_parts(subject_parts, data, action_name, "subject")?;
     let text = resolve_string_parts(text_parts, data, action_name, "text")?;
-    println!("Running '{}': email_me {:?}", action_name, subject);
+    print_action_start(action_name);
 
     run_email_me_action(subject.as_str(), text.as_str(), config)
         .await
-        .map_err(|error| format!("Action '{}': {error}", action_name))
+        .map_err(|error| format!("Action '{}': {error}", action_name))?;
+    print_action_success(action_name, "email sent");
+    Ok(())
 }
 
 async fn run_agent_step(step: &RunStep, action_name: &str) -> Result<(), String> {
@@ -992,6 +1135,7 @@ async fn run_agent_step(step: &RunStep, action_name: &str) -> Result<(), String>
         ));
     }
 
+    validate_agent_step_target(agent, action_name)?;
     let agent_path = Path::new(agent);
     if !agent_path.exists() {
         return Err(format!(
@@ -1009,7 +1153,7 @@ async fn run_agent_step(step: &RunStep, action_name: &str) -> Result<(), String>
         (current_agent_action_depth() + 1).to_string(),
     );
 
-    println!("Running '{}': agent {:?}", action_name, agent);
+    print_action_start(action_name);
 
     let mut child = command.spawn().map_err(|error| {
         format!(
@@ -1019,10 +1163,10 @@ async fn run_agent_step(step: &RunStep, action_name: &str) -> Result<(), String>
     })?;
 
     match tokio::time::timeout(Duration::from_secs(DEFAULT_AGENT_ACTION_TIMEOUT_SECS), child.wait())
-        .await
+    .await
     {
         Ok(Ok(status)) if status.success() => {
-            println!("Child agent completed successfully.");
+            print_action_success(action_name, "completed");
             Ok(())
         }
         Ok(Ok(status)) => Err(format!(
@@ -1040,6 +1184,21 @@ async fn run_agent_step(step: &RunStep, action_name: &str) -> Result<(), String>
                 action_name, agent, DEFAULT_AGENT_ACTION_TIMEOUT_SECS
             ))
         }
+    }
+}
+
+fn print_action_start(action_name: &str) {
+    println!("Running action: {}", action_name);
+}
+
+fn print_action_success(action_name: &str, summary: &str) {
+    println!("{action_name}: {summary}.");
+}
+
+fn render_account_response(response: &serde_json::Value) {
+    match serde_json::to_string_pretty(response) {
+        Ok(pretty) => println!("{pretty}"),
+        Err(_) => println!("{response:?}"),
     }
 }
 
@@ -1095,6 +1254,29 @@ fn current_agent_action_depth() -> u32 {
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(0)
+}
+
+fn validate_agent_step_target(agent: &str, action_name: &str) -> Result<(), String> {
+    let agent_path = Path::new(agent);
+    if agent_path.is_absolute() {
+        return Err(format!(
+            "Action '{}' agent step target '{}' must be an explicit relative path such as './child_agent'.",
+            action_name, agent
+        ));
+    }
+
+    if !contains_explicit_path_separator(agent) {
+        return Err(format!(
+            "Action '{}' agent step target '{}' must be an explicit relative path such as './child_agent'; bare executable names are not allowed because they may resolve through PATH.",
+            action_name, agent
+        ));
+    }
+
+    Ok(())
+}
+
+fn contains_explicit_path_separator(path: &str) -> bool {
+    path.contains('/') || path.contains('\\')
 }
 
 fn step_matches_platform(platforms: Option<&[String]>, current_platform: Option<&str>) -> bool {

@@ -331,9 +331,7 @@ mod tests {
             Some("weather_local")
         );
         assert_eq!(
-            hatch_matches
-                .get_one::<String>("agent")
-                .map(String::as_str),
+            hatch_matches.get_one::<String>("agent").map(String::as_str),
             Some("weather_remote")
         );
         assert_eq!(
@@ -391,9 +389,7 @@ mod tests {
             Some("weather_local")
         );
         assert_eq!(
-            hatch_matches
-                .get_one::<String>("agent")
-                .map(String::as_str),
+            hatch_matches.get_one::<String>("agent").map(String::as_str),
             Some("weather_remote")
         );
         assert_eq!(

@@ -647,13 +647,19 @@ fn parse_actions(
                     if agent.is_empty() {
                         return Err(BuildError::config(
                             format!("{run_path}.agent"),
-                            "must be a non-empty relative path",
+                            "must be a non-empty explicit relative path such as `./child_agent`",
                         ));
                     }
                     if Path::new(&agent).is_absolute() {
                         return Err(BuildError::config(
                             format!("{run_path}.agent"),
-                            "must be a relative path in this story",
+                            "must be an explicit relative path such as `./child_agent`",
+                        ));
+                    }
+                    if !contains_explicit_path_separator(&agent) {
+                        return Err(BuildError::config(
+                            format!("{run_path}.agent"),
+                            "must be an explicit relative path such as `./child_agent`; bare executable names are not allowed",
                         ));
                     }
 
@@ -761,6 +767,10 @@ fn parse_string_parts_field(
             "expected a string or an array of string/variable parts",
         )),
     }
+}
+
+fn contains_explicit_path_separator(path: &str) -> bool {
+    path.contains('/') || path.contains('\\')
 }
 
 fn parse_run_arg(

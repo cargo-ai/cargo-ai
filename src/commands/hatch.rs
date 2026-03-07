@@ -241,9 +241,11 @@ pub fn run(sub_m: &ArgMatches) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{mode_from_check_flag, resolve_hatch_input, resolve_local_output_dir, HatchConfigSource};
-    use clap::{Arg, ArgMatches, Command};
+    use super::{
+        mode_from_check_flag, resolve_hatch_input, resolve_local_output_dir, HatchConfigSource,
+    };
     use crate::commands::hatch_pipeline::HatchMode;
+    use clap::{Arg, ArgMatches, Command};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};

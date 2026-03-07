@@ -35,7 +35,9 @@ pub fn command() -> Command {
         .arg(
             Arg::new("output_dir")
                 .long("output-dir")
-                .help("Destination directory for the exported binary (defaults to current directory)")
+                .help(
+                    "Destination directory for the exported binary (defaults to current directory)",
+                )
                 .value_name("DIR")
                 .num_args(1),
         )

@@ -99,7 +99,7 @@ fn run_exec_step(
     })?;
 
     let resolved_args = resolve_run_args(&step.args, data, action_name)?;
-    println!("Running '{}': {} {:?}", action_name, program, resolved_args);
+    print_action_start(action_name);
 
     let status = std::process::Command::new(program)
         .args(&resolved_args)
@@ -107,13 +107,13 @@ fn run_exec_step(
 
     match status {
         Ok(status) if status.success() => {
-            println!("Command completed successfully.");
+            print_action_success(action_name, "completed");
         }
         Ok(status) => {
-            println!("Command exited with status: {}", status);
+            println!("{action_name}: command exited with status {status}.");
         }
         Err(err) => {
-            println!("Failed to execute command: {}", err);
+            println!("{action_name}: failed to execute command: {err}.");
         }
     }
 
@@ -140,7 +140,7 @@ async fn run_email_me_step(
 
     let subject = resolve_string_parts(subject_parts, data, action_name, "subject")?;
     let text = resolve_string_parts(text_parts, data, action_name, "text")?;
-    println!("Running '{}': email_me {:?}", action_name, subject);
+    print_action_start(action_name);
 
     let auth = load_account_auth()?;
     let access_token_owned = auth.access_token;
@@ -205,8 +205,6 @@ async fn run_email_me_step(
         };
     }
 
-    render_backend_ui_or_json(&response);
-
     let succeeded = response
         .get("status")
         .and_then(|v| v.as_str())
@@ -214,8 +212,10 @@ async fn run_email_me_step(
         .unwrap_or(false);
 
     if succeeded {
+        print_action_success(action_name, "email sent");
         Ok(())
     } else {
+        render_backend_ui_or_json(&response);
         Err(format!("Action '{}' email_me request failed.", action_name))
     }
 }
@@ -235,6 +235,7 @@ async fn run_agent_step(step: &crate::RunStep, action_name: &str) -> Result<(), 
         ));
     }
 
+    validate_agent_step_target(agent, action_name)?;
     let agent_path = Path::new(agent);
     if !agent_path.exists() {
         return Err(format!(
@@ -252,7 +253,7 @@ async fn run_agent_step(step: &crate::RunStep, action_name: &str) -> Result<(), 
         (current_agent_action_depth() + 1).to_string(),
     );
 
-    println!("Running '{}': agent {:?}", action_name, agent);
+    print_action_start(action_name);
 
     let mut child = command.spawn().map_err(|error| {
         format!(
@@ -268,7 +269,7 @@ async fn run_agent_step(step: &crate::RunStep, action_name: &str) -> Result<(), 
     .await
     {
         Ok(Ok(status)) if status.success() => {
-            println!("Child agent completed successfully.");
+            print_action_success(action_name, "completed");
             Ok(())
         }
         Ok(Ok(status)) => Err(format!(
@@ -287,6 +288,14 @@ async fn run_agent_step(step: &crate::RunStep, action_name: &str) -> Result<(), 
             ))
         }
     }
+}
+
+fn print_action_start(action_name: &str) {
+    println!("Running action: {}", action_name);
+}
+
+fn print_action_success(action_name: &str, summary: &str) {
+    println!("{action_name}: {summary}.");
 }
 
 fn render_backend_ui_or_json(response: &serde_json::Value) {
@@ -374,6 +383,29 @@ fn persist_refreshed_access_token(
             eprintln!("⚠️ Failed to update account tokens in credential store: {error}");
         }
     }
+}
+
+fn validate_agent_step_target(agent: &str, action_name: &str) -> Result<(), String> {
+    let agent_path = Path::new(agent);
+    if agent_path.is_absolute() {
+        return Err(format!(
+            "Action '{}' agent step target '{}' must be an explicit relative path such as './child_agent'.",
+            action_name, agent
+        ));
+    }
+
+    if !contains_explicit_path_separator(agent) {
+        return Err(format!(
+            "Action '{}' agent step target '{}' must be an explicit relative path such as './child_agent'; bare executable names are not allowed because they may resolve through PATH.",
+            action_name, agent
+        ));
+    }
+
+    Ok(())
+}
+
+fn contains_explicit_path_separator(path: &str) -> bool {
+    path.contains('/') || path.contains('\\')
 }
 
 fn current_action_platform() -> Option<&'static str> {
@@ -718,7 +750,10 @@ mod tests {
 
         let _ = fs::remove_file(&script_path);
 
-        assert!(result.is_ok(), "child agent invocation should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "child agent invocation should succeed: {result:?}"
+        );
 
         let args = fs::read_to_string(&output_path).expect("child output should be captured");
         let _ = fs::remove_file(&output_path);
@@ -734,5 +769,26 @@ mod tests {
                 "./diagram.png",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn agent_step_rejects_bare_child_name() {
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            args: Vec::new(),
+            subject: None,
+            text: None,
+            agent: Some("child_agent".to_string()),
+            inputs: None,
+            platforms: None,
+        };
+
+        let error = run_agent_step(&step, "invoke_child")
+            .await
+            .expect_err("bare child agent names should be rejected");
+
+        assert!(error.contains("explicit relative path"));
+        assert!(error.contains("PATH"));
     }
 }
