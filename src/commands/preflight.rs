@@ -39,6 +39,58 @@ struct ResolvedOpenAiToken {
     uses_account_session: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum LoadedProfileKind {
+    Explicit,
+    Default,
+}
+
+fn profile_selection_messages(
+    kind: LoadedProfileKind,
+    profile_name: &str,
+    overrides: &[String],
+) -> Vec<String> {
+    let base_message = match kind {
+        LoadedProfileKind::Explicit => format!("Using profile '{}'", profile_name),
+        LoadedProfileKind::Default => format!("Using default profile '{}'", profile_name),
+    };
+
+    if overrides.is_empty() {
+        vec![base_message]
+    } else {
+        vec![
+            format!("{base_message} as fallback."),
+            format!("CLI overrides: {}", overrides.join(", ")),
+        ]
+    }
+}
+
+fn cli_override_descriptions(sub_m: &ArgMatches, include_token_override: bool) -> Vec<String> {
+    let mut overrides = Vec::new();
+
+    if let Some(server) = sub_m.get_one::<String>("server") {
+        overrides.push(format!("server={}", server.to_lowercase()));
+    }
+
+    if let Some(model) = sub_m.get_one::<String>("model") {
+        overrides.push(format!("model={model}"));
+    }
+
+    if let Some(url) = sub_m.get_one::<String>("url") {
+        overrides.push(format!("url={url}"));
+    }
+
+    if let Some(timeout) = sub_m.get_one::<String>("timeout_in_sec") {
+        overrides.push(format!("timeout_in_sec={timeout}"));
+    }
+
+    if include_token_override {
+        overrides.push("token=(explicit)".to_string());
+    }
+
+    overrides
+}
+
 fn resolve_profile_api_token(profile: &SelectedProfile) -> Result<String, String> {
     match store::load_profile_token(&profile.name) {
         Ok(Some(token)) if !token.trim().is_empty() => Ok(token),
@@ -143,6 +195,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     let mut token = String::new();
     let mut timeout_in_sec: u64 = 60; // Default
     let mut selected_profile: Option<SelectedProfile> = None;
+    let mut loaded_profile_message: Option<(LoadedProfileKind, String)> = None;
     let mut use_openai_account_transport = false;
 
     // 1️⃣ If profile is set, load values from config
@@ -159,7 +212,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                     auth_mode: profile.auth_mode,
                     legacy_token: profile.token.clone(),
                 });
-                println!("Using profile '{}'", profile_name);
+                loaded_profile_message = Some((LoadedProfileKind::Explicit, profile_name.to_string()));
             } else {
                 eprintln!("Profile '{}' not found.", profile_name);
             }
@@ -187,7 +240,8 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                         auth_mode: profile.auth_mode,
                         legacy_token: profile.token.clone(),
                     });
-                    println!("Using default profile '{}'", default_profile_name);
+                    loaded_profile_message =
+                        Some((LoadedProfileKind::Default, default_profile_name.to_string()));
                 }
             }
         }
@@ -223,6 +277,19 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             return false;
         }
     };
+
+    if let Some((kind, profile_name)) = loaded_profile_message.as_ref() {
+        for line in profile_selection_messages(
+            *kind,
+            profile_name,
+            &cli_override_descriptions(
+                sub_m,
+                explicit_token_override.is_some() && provider == ProviderKind::OpenAi,
+            ),
+        ) {
+            println!("{line}");
+        }
+    }
 
     if let Some(cmd_token) = explicit_token_override {
         if provider == ProviderKind::OpenAi {
@@ -380,7 +447,10 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::unknown_server_messages;
+    use super::{
+        cli_override_descriptions, profile_selection_messages, unknown_server_messages,
+        LoadedProfileKind,
+    };
     use crate::args::test_cli_command;
 
     fn matches(args: &[&str]) -> clap::ArgMatches {
@@ -407,6 +477,48 @@ mod tests {
         assert!(messages
             .iter()
             .any(|line| line.contains("Unknown AI server '(not set)'")));
+    }
+
+    #[test]
+    fn profile_selection_messages_show_fallback_and_overrides() {
+        let messages = profile_selection_messages(
+            LoadedProfileKind::Default,
+            "my_open_ai",
+            &["server=ollama".to_string(), "model=mistral".to_string()],
+        );
+
+        assert_eq!(messages[0], "Using default profile 'my_open_ai' as fallback.");
+        assert_eq!(messages[1], "CLI overrides: server=ollama, model=mistral");
+    }
+
+    #[test]
+    fn cli_override_descriptions_capture_runtime_overrides() {
+        let cmd = matches(&[
+            "cargo-ai",
+            "preflight",
+            "--server",
+            "Ollama",
+            "--model",
+            "mistral",
+            "--timeout_in_sec",
+            "90",
+            "--input-text",
+            "Return 4",
+        ]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        let overrides = cli_override_descriptions(preflight, false);
+
+        assert_eq!(
+            overrides,
+            vec![
+                "server=ollama".to_string(),
+                "model=mistral".to_string(),
+                "timeout_in_sec=90".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]

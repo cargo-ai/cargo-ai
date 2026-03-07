@@ -51,6 +51,61 @@ struct ResolvedOpenAiToken {
     uses_account_session: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum LoadedProfileKind {
+    Explicit,
+    Default,
+}
+
+fn profile_selection_messages(
+    kind: LoadedProfileKind,
+    profile_name: &str,
+    overrides: &[String],
+) -> Vec<String> {
+    let base_message = match kind {
+        LoadedProfileKind::Explicit => format!("Using profile '{}'", profile_name),
+        LoadedProfileKind::Default => format!("Using default profile '{}'", profile_name),
+    };
+
+    if overrides.is_empty() {
+        vec![base_message]
+    } else {
+        vec![
+            format!("{base_message} as fallback."),
+            format!("CLI overrides: {}", overrides.join(", ")),
+        ]
+    }
+}
+
+fn cli_override_descriptions(
+    matches: &clap::ArgMatches,
+    include_token_override: bool,
+) -> Vec<String> {
+    let mut overrides = Vec::new();
+
+    if let Some(server) = matches.get_one::<String>("server") {
+        overrides.push(format!("server={}", server.to_lowercase()));
+    }
+
+    if let Some(model) = matches.get_one::<String>("model") {
+        overrides.push(format!("model={model}"));
+    }
+
+    if let Some(url) = matches.get_one::<String>("url") {
+        overrides.push(format!("url={url}"));
+    }
+
+    if let Some(timeout) = matches.get_one::<String>("timeout_in_sec") {
+        overrides.push(format!("timeout_in_sec={timeout}"));
+    }
+
+    if include_token_override {
+        overrides.push("token=(explicit)".to_string());
+    }
+
+    overrides
+}
+
 fn resolve_profile_api_token(profile: &SelectedProfile) -> Result<String, String> {
     match credentials::store::load_profile_token(&profile.name) {
         Ok(Some(token)) if !token.trim().is_empty() => Ok(token),
@@ -308,6 +363,7 @@ async fn main() {
     let mut token = String::new();
     let mut timeout_in_sec: u64 = 60;
     let mut selected_profile: Option<SelectedProfile> = None;
+    let mut loaded_profile_message: Option<(LoadedProfileKind, String)> = None;
     let mut use_openai_account_transport = false;
 
     if let Some(profile_name) = cmd_args.get_one::<String>("profile") {
@@ -322,7 +378,7 @@ async fn main() {
                 &mut timeout_in_sec,
                 &mut url,
             ));
-            println!("Using profile '{}'", profile_name);
+            loaded_profile_message = Some((LoadedProfileKind::Explicit, profile_name.to_string()));
         } else if config.is_some() {
             eprintln!("Profile '{}' not found.", profile_name);
         } else {
@@ -342,7 +398,7 @@ async fn main() {
                 &mut timeout_in_sec,
                 &mut url,
             ));
-            println!("Using default profile '{}'", profile.name);
+            loaded_profile_message = Some((LoadedProfileKind::Default, profile.name.clone()));
         }
     }
 
@@ -373,6 +429,19 @@ async fn main() {
     };
 
     let explicit_token_override = cmd_args.get_one::<String>("token").map(|token| token.to_string());
+    if let Some((kind, profile_name)) = loaded_profile_message.as_ref() {
+        for line in profile_selection_messages(
+            *kind,
+            profile_name,
+            &cli_override_descriptions(
+                &cmd_args,
+                explicit_token_override.is_some() && provider == ProviderKind::OpenAi,
+            ),
+        ) {
+            println!("{line}");
+        }
+    }
+
     if let Some(cmd_token) = explicit_token_override {
         if provider == ProviderKind::OpenAi {
             println!("Using explicit --token override; bypassing profile auth-mode resolution.");
