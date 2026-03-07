@@ -102,9 +102,13 @@ fn render_workspace_file_contents(
     generated_by_version: &str,
     template_schema_version: &str,
 ) -> String {
-    let mut rendered = template_contents
-        .replace("cargo-ai", agent_name)
-        .replace("cargo_ai", agent_name);
+    let mut rendered = if should_replace_agent_identity(file_name) {
+        template_contents
+            .replace("cargo-ai", agent_name)
+            .replace("cargo_ai", agent_name)
+    } else {
+        template_contents.to_string()
+    };
 
     if file_name == "src/main.rs" {
         rendered = inject_version_command_hook(&rendered);
@@ -115,6 +119,10 @@ fn render_workspace_file_contents(
     }
 
     rendered
+}
+
+fn should_replace_agent_identity(file_name: &str) -> bool {
+    matches!(file_name, "Cargo.toml" | "src/args.rs")
 }
 
 /// Creates a new agent project directory and initializes required files.
@@ -261,7 +269,7 @@ fn copy_directory_recursive(source: &Path, destination: &Path) -> Result<(), Err
 mod tests {
     use super::{
         copy_directory_recursive, determine_agent_sync_state, render_workspace_file_contents,
-        sync_state_label, AgentSyncState,
+        should_replace_agent_identity, sync_state_label, AgentSyncState,
     };
     use crate::schema_version;
     use std::fs;
@@ -343,6 +351,50 @@ mod tests {
 
         assert!(rendered.contains("adder_agent"));
         assert!(!rendered.contains("generated_agent_provenance"));
+    }
+
+    #[test]
+    fn replaces_agent_identity_only_in_manifest_and_cli_files() {
+        assert!(should_replace_agent_identity("Cargo.toml"));
+        assert!(should_replace_agent_identity("src/args.rs"));
+        assert!(!should_replace_agent_identity("src/main.rs"));
+        assert!(!should_replace_agent_identity("src/credentials/store.rs"));
+    }
+
+    #[test]
+    fn preserves_shared_cargo_ai_paths_and_urls_in_runtime_files() {
+        let rendered = render_workspace_file_contents(
+            "src/main.rs",
+            r#"const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
+const KEYCHAIN_SERVICE: &str = "cargo-ai";
+const PATH: &str = ".cargo/.cargo-ai/credentials.toml";
+fn main() {
+    let cmd_args = args::build_cli();
+}
+"#,
+            "number_2_email",
+            "0.0.11",
+            "2026-03-03.r1",
+        );
+
+        assert!(rendered.contains("https://api.cargo-ai.org"));
+        assert!(rendered.contains(r#"const KEYCHAIN_SERVICE: &str = "cargo-ai";"#));
+        assert!(rendered.contains(r#".cargo/.cargo-ai/credentials.toml"#));
+        assert!(!rendered.contains("https://api.number_2_email.org"));
+        assert!(!rendered.contains(".cargo/.number_2_email/credentials.toml"));
+    }
+
+    #[test]
+    fn still_rewrites_manifest_package_name() {
+        let rendered = render_workspace_file_contents(
+            "Cargo.toml",
+            "[package]\nname = \"cargo-ai\"\n",
+            "number_2_email",
+            "0.0.11",
+            "2026-03-03.r1",
+        );
+
+        assert!(rendered.contains("name = \"number_2_email\""));
     }
 
     #[test]
