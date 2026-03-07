@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 const SCHEMA_VERSION_FORMAT: &str = "YYYY-MM-DD.rN";
 const SCHEMA_VERSION_EXAMPLE: &str = "2026-03-03.r1";
+const SUPPORTED_ACTION_PLATFORMS: [&str; 3] = ["macos", "linux", "windows"];
 
 #[derive(Debug)]
 pub enum BuildError {
@@ -93,7 +94,14 @@ struct ResourceUrl {
 struct RunStep {
     kind: String,
     program: String,
-    args: Vec<String>,
+    args: Vec<RunArg>,
+    platforms: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+enum RunArg {
+    Literal(String),
+    Variable(String),
 }
 
 #[derive(Debug, Clone)]
@@ -486,23 +494,15 @@ fn parse_actions(
                 ));
             }
 
-            let args = get_required_array(run_obj, "args", &run_path)?
-                .iter()
-                .enumerate()
-                .map(|(arg_idx, arg)| {
-                    arg.as_str().map(|s| s.to_string()).ok_or_else(|| {
-                        BuildError::config(
-                            format!("{run_path}.args[{arg_idx}]"),
-                            "expected a string argument",
-                        )
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let args = parse_run_args(run_obj, &run_path, schema_field_types)?;
+
+            let platforms = parse_optional_platforms(run_obj, &run_path)?;
 
             run_steps.push(RunStep {
                 kind,
                 program,
                 args,
+                platforms,
             });
         }
 
@@ -514,6 +514,153 @@ fn parse_actions(
     }
 
     Ok(parsed)
+}
+
+fn parse_run_args(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<Vec<RunArg>, BuildError> {
+    get_required_array(run_obj, "args", run_path)?
+        .iter()
+        .enumerate()
+        .map(|(arg_idx, arg)| parse_run_arg(arg, &format!("{run_path}.args[{arg_idx}]"), schema_field_types))
+        .collect()
+}
+
+fn parse_run_arg(
+    value: &Value,
+    path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<RunArg, BuildError> {
+    match value {
+        Value::String(literal) => Ok(RunArg::Literal(literal.to_string())),
+        Value::Object(map) => {
+            if map.len() != 1 {
+                return Err(BuildError::config(
+                    path,
+                    "expected an arg object with exactly one key (`var`)",
+                ));
+            }
+
+            let Some((key, variable_value)) = map.iter().next() else {
+                return Err(BuildError::config(
+                    path,
+                    "expected an arg object with exactly one key (`var`)",
+                ));
+            };
+
+            if key != "var" {
+                return Err(BuildError::config(
+                    path,
+                    format!("unsupported arg object key `{key}` (supported: `var`)"),
+                ));
+            }
+
+            let variable_path = format!("{path}.var");
+            let variable_name = variable_value.as_str().ok_or_else(|| {
+                BuildError::config(&variable_path, "expected `var` to be a string field name")
+            })?;
+            let normalized_name = variable_name.trim();
+            if normalized_name.is_empty() {
+                return Err(BuildError::config(
+                    &variable_path,
+                    "variable name cannot be empty",
+                ));
+            }
+
+            let field_type = resolve_var_field_type(
+                &Value::String(normalized_name.to_string()),
+                schema_field_types,
+                &variable_path,
+            )?;
+            if field_type == FieldType::Array {
+                return Err(BuildError::config(
+                    &variable_path,
+                    format!(
+                        "array-valued field `{}` cannot be used as an action arg variable in this story",
+                        normalized_name
+                    ),
+                ));
+            }
+
+            Ok(RunArg::Variable(normalized_name.to_string()))
+        }
+        _ => Err(BuildError::config(
+            path,
+            "expected a string literal arg or an object of the form `{ \"var\": \"field_name\" }`",
+        )),
+    }
+}
+
+fn parse_optional_platforms(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+) -> Result<Option<Vec<String>>, BuildError> {
+    let Some(platform_value) = run_obj.get("platform") else {
+        return Ok(None);
+    };
+
+    let platform_path = format!("{run_path}.platform");
+    match platform_value {
+        Value::String(platform) => Ok(Some(vec![normalize_platform_value(platform, &platform_path)?])),
+        Value::Array(platforms) => {
+            if platforms.is_empty() {
+                return Err(BuildError::config(
+                    &platform_path,
+                    "expected at least one platform entry",
+                ));
+            }
+
+            let mut normalized = Vec::with_capacity(platforms.len());
+            for (index, platform_value) in platforms.iter().enumerate() {
+                let entry_path = format!("{platform_path}[{index}]");
+                let Some(platform) = platform_value.as_str() else {
+                    return Err(BuildError::config(
+                        &entry_path,
+                        "expected a string platform value",
+                    ));
+                };
+
+                let normalized_platform = normalize_platform_value(platform, &entry_path)?;
+                if normalized.contains(&normalized_platform) {
+                    return Err(BuildError::config(
+                        &entry_path,
+                        format!(
+                            "duplicate platform `{}` after normalization",
+                            normalized_platform
+                        ),
+                    ));
+                }
+                normalized.push(normalized_platform);
+            }
+
+            Ok(Some(normalized))
+        }
+        _ => Err(BuildError::config(
+            &platform_path,
+            "expected a string platform value or an array of string platform values",
+        )),
+    }
+}
+
+fn normalize_platform_value(value: &str, path: &str) -> Result<String, BuildError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(BuildError::config(path, "expected a non-empty platform value"));
+    }
+
+    if SUPPORTED_ACTION_PLATFORMS.contains(&normalized.as_str()) {
+        return Ok(normalized);
+    }
+
+    Err(BuildError::config(
+        path,
+        format!(
+            "unsupported platform `{}` (supported: `macos`, `linux`, `windows`)",
+            value
+        ),
+    ))
 }
 
 fn validate_logic_expression(
@@ -1041,19 +1188,42 @@ fn render_agent_model(config: &AgentConfig) -> String {
                 let args = run_step
                     .args
                     .iter()
-                    .map(|arg| format!("{}.to_string()", rust_string_literal(arg)))
+                    .map(|arg| match arg {
+                        RunArg::Literal(literal) => format!(
+                            "RunArg::Literal({}.to_string())",
+                            rust_string_literal(literal)
+                        ),
+                        RunArg::Variable(variable) => format!(
+                            "RunArg::Variable({}.to_string())",
+                            rust_string_literal(variable)
+                        ),
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
+                let platforms = run_step
+                    .platforms
+                    .as_ref()
+                    .map(|platforms| {
+                        let rendered = platforms
+                            .iter()
+                            .map(|platform| format!("{}.to_string()", rust_string_literal(platform)))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("Some(vec![{}])", rendered)
+                    })
+                    .unwrap_or_else(|| "None".to_string());
 
                 format!(
                     "RunStep {{
                         kind: {}.to_string(),
                         program: {}.to_string(),
                         args: vec![{}],
+                        platforms: {},
                     }}",
                     rust_string_literal(&run_step.kind),
                     rust_string_literal(&run_step.program),
-                    args
+                    args,
+                    platforms
                 )
             })
             .collect::<Vec<_>>()
@@ -1121,7 +1291,14 @@ pub fn json_schema_value() -> serde_json::Value {{
 pub struct RunStep {{
     kind: String,
     program: String,
-    args: Vec<String>,
+    args: Vec<RunArg>,
+    platforms: Option<Vec<String>>,
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum RunArg {{
+    Literal(String),
+    Variable(String),
 }}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -19,9 +19,16 @@
       },
       "run": [
         {
+          "platform": ["macos", "linux"],
           "kind": "exec",
           "program": "echo",
-          "args": ["Value return is equal to 4."]
+          "args": ["Value return is equal to", { "var": "answer" }]
+        },
+        {
+          "platform": "windows",
+          "kind": "exec",
+          "program": "cmd",
+          "args": ["/C", "echo", "Value return is equal to", { "var": "answer" }]
         }
       ]
     },

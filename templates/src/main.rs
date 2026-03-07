@@ -463,20 +463,35 @@ async fn main() {
     };
 
     let actions = actions();
-    apply_actions(&output, &actions);
+    if let Err(error) = apply_actions(&output, &actions) {
+        eprintln!("❌ {error}");
+        std::process::exit(1);
+    }
 }
 
-pub fn apply_actions(output: &Output, actions: &[Action]) {
+pub fn apply_actions(output: &Output, actions: &[Action]) -> Result<(), String> {
     let data = serde_json::to_value(output).unwrap();
+    let current_platform = current_action_platform();
 
     for action in actions {
         if let Ok(result) = apply(&action.logic, &data) {
             if result.as_bool() == Some(true) {
-                for step in &action.run {
-                    println!("Running '{}': {} {:?}", action.name, step.program, step.args);
+                let matching_steps = matching_run_steps(&action.run, current_platform);
+                if matching_steps.is_empty() {
+                    println!(
+                        "⚠️ No run steps matched the current platform for action '{}' (current platform: {}).",
+                        action.name,
+                        current_platform.unwrap_or("unsupported")
+                    );
+                    continue;
+                }
+
+                for step in matching_steps {
+                    let resolved_args = resolve_run_args(&step.args, &data, &action.name)?;
+                    println!("Running '{}': {} {:?}", action.name, step.program, resolved_args);
 
                     let status = std::process::Command::new(&step.program)
-                        .args(&step.args)
+                        .args(&resolved_args)
                         .status();
 
                     match status {
@@ -494,6 +509,87 @@ pub fn apply_actions(output: &Output, actions: &[Action]) {
             }
         } else {
             println!("Failed to evaluate logic for action: {}", action.name);
+        }
+    }
+
+    Ok(())
+}
+
+fn current_action_platform() -> Option<&'static str> {
+    if cfg!(target_os = "macos") {
+        Some("macos")
+    } else if cfg!(target_os = "linux") {
+        Some("linux")
+    } else if cfg!(target_os = "windows") {
+        Some("windows")
+    } else {
+        None
+    }
+}
+
+fn matching_run_steps<'a>(
+    run_steps: &'a [RunStep],
+    current_platform: Option<&str>,
+) -> Vec<&'a RunStep> {
+    run_steps
+        .iter()
+        .filter(|step| step_matches_platform(step.platforms.as_deref(), current_platform))
+        .collect()
+}
+
+fn step_matches_platform(platforms: Option<&[String]>, current_platform: Option<&str>) -> bool {
+    match platforms {
+        None => true,
+        Some(platforms) => current_platform.is_some_and(|platform| {
+            platforms.iter().any(|candidate| candidate == platform)
+        }),
+    }
+}
+
+fn resolve_run_args(
+    args: &[RunArg],
+    data: &serde_json::Value,
+    action_name: &str,
+) -> Result<Vec<String>, String> {
+    args.iter()
+        .enumerate()
+        .map(|(index, arg)| resolve_run_arg(arg, data, action_name, index))
+        .collect()
+}
+
+fn resolve_run_arg(
+    arg: &RunArg,
+    data: &serde_json::Value,
+    action_name: &str,
+    index: usize,
+) -> Result<String, String> {
+    match arg {
+        RunArg::Literal(literal) => Ok(literal.clone()),
+        RunArg::Variable(variable) => {
+            let Some(value) = data.get(variable) else {
+                return Err(format!(
+                    "Action '{}' arg {} references missing output field '{}'.",
+                    action_name, index, variable
+                ));
+            };
+
+            match value {
+                serde_json::Value::String(text) => Ok(text.clone()),
+                serde_json::Value::Bool(boolean) => Ok(boolean.to_string()),
+                serde_json::Value::Number(number) => Ok(number.to_string()),
+                serde_json::Value::Array(_) => Err(format!(
+                    "Action '{}' arg {} references array-valued field '{}', which is unsupported for arg substitution.",
+                    action_name, index, variable
+                )),
+                serde_json::Value::Object(_) => Err(format!(
+                    "Action '{}' arg {} references object-valued field '{}', which is unsupported for arg substitution.",
+                    action_name, index, variable
+                )),
+                serde_json::Value::Null => Err(format!(
+                    "Action '{}' arg {} references null field '{}', which is unsupported for arg substitution.",
+                    action_name, index, variable
+                )),
+            }
         }
     }
 }

@@ -31,7 +31,14 @@ These should fail fast during `hatch --check`:
 - `actions` is an array
 - each action includes `name`, `logic`, and `run`
 - each run step currently supports `kind: "exec"` only
-- `run[*].args` must be an array of strings
+- `run[*].args` must be an array of literal strings and/or `{ "var": "field_name" }` objects
+- `run[*].args[*].var` must reference a top-level field declared in `agent_schema.properties`
+- array-typed schema fields are not supported for arg substitution in this story
+- `run[*].platform` is optional
+- `run[*].platform` may be a single string or an array of strings
+- supported platform values are `macos`, `linux`, and `windows`
+- platform values are normalized case-insensitively and should be authored in lowercase in configs/docs
+- omitted `platform` means the step runs on every runtime OS
 
 ## Logic validation expectations
 - every `{ "var": "..." }` must match a key in `agent_schema.properties`
