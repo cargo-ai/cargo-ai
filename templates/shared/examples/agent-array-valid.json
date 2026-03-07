@@ -1,6 +1,11 @@
 {
   "version": "2026-03-03.r1",
-  "prompt": "Return one list of integer IDs for retry.",
+  "inputs": [
+    {
+      "type": "text",
+      "text": "Return one list of integer IDs for retry."
+    }
+  ],
   "agent_schema": {
     "type": "object",
     "properties": {
@@ -13,7 +18,6 @@
       }
     }
   },
-  "resource_urls": [],
   "actions": [
     {
       "name": "has_retries",

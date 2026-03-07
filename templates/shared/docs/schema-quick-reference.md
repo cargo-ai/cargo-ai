@@ -5,10 +5,24 @@ Use this as a concise reference while authoring agent configs.
 ## Required top-level fields
 - `version`
   - format: `YYYY-MM-DD.rN` (example: `2026-03-03.r1`)
-- `prompt`
+- `inputs`
 - `agent_schema`
-- `resource_urls`
 - `actions`
+
+## `inputs` expectations
+- `inputs` is an ordered array with at least one entry
+- supported input `type` values:
+  - `text`
+  - `url`
+  - `image`
+- `text` entries require `text`
+- `url` entries require `url`
+- `image` entries require `path`
+- runtime overrides use:
+  - `--input-text`
+  - `--input-url`
+  - `--input-image`
+- if any runtime input flags are provided, they replace config-defined `inputs`
 
 ## `agent_schema` expectations
 - `agent_schema.type` must be `"object"`

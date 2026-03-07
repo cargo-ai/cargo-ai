@@ -505,7 +505,7 @@ mod tests {
             "access-token-123",
             "demo_agent",
             Some("/team"),
-            json!({"prompt": "hello"}),
+            json!({"inputs": [{"type": "text", "text": "hello"}]}),
         );
 
         assert_eq!(body["agents"]["push"]["name"], "demo_agent");
@@ -518,7 +518,7 @@ mod tests {
             "access-token-123",
             "demo_agent",
             Some("/team"),
-            json!({"prompt": "hello"}),
+            json!({"inputs": [{"type": "text", "text": "hello"}]}),
             Some(sample_metadata()),
         );
 

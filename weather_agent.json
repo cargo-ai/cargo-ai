@@ -1,6 +1,19 @@
 {
   "version": "2026-03-03.r1",
-  "prompt": "Using the provided resources, determine if it will rain tomorrow between 9am and 5pm local time. Follow these exact steps: 1) Read the current local date and time from the time resource. 2) Determine the date for tomorrow. 3) From the weather data, examine precipitation probabilities for that specific date between 9:00 and 17:00 local time. 4) If any hourly probability exceeds 40%, answer true; otherwise, answer false.",
+  "inputs": [
+    {
+      "type": "text",
+      "text": "Using the provided resources, determine if it will rain tomorrow between 9am and 5pm local time. Follow these exact steps: 1) Read the current local date and time from the time resource. 2) Determine the date for tomorrow. 3) From the weather data, examine precipitation probabilities for that specific date between 9:00 and 17:00 local time. 4) If any hourly probability exceeds 40%, answer true; otherwise, answer false."
+    },
+    {
+      "type": "url",
+      "url": "https://gettimeapi.dev/v1/time?timezone=America/New_York"
+    },
+    {
+      "type": "url",
+      "url": "https://api.open-meteo.com/v1/forecast?latitude=39.10&longitude=-84.51&hourly=precipitation_probability&timezone=America/New_York"
+    }
+  ],
   "agent_schema": {
     "type": "object",
     "properties": {
@@ -10,16 +23,6 @@
       }
     }
   },
-  "resource_urls": [
-    {
-      "url": "https://gettimeapi.dev/v1/time?timezone=America/New_York",
-      "description": "Current local date and time for the Eastern Time zone."
-    },
-    {
-      "url": "https://api.open-meteo.com/v1/forecast?latitude=39.10&longitude=-84.51&hourly=precipitation_probability&timezone=America/New_York",
-      "description": "Hourly precipitation probability for Cincinnati, which is my area."
-    }
-  ],
   "actions": [
     {
       "name": "umbrella_hint_exec",

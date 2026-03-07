@@ -11,7 +11,10 @@ use std::path::PathBuf;
 
 use config::loader::{find_profile, load_config};
 use config::schema::{Profile, ProfileAuthMode};
-use providers::{provider_error_messages, validate_provider_request, ProviderKind};
+use providers::{
+    provider_error_messages, validate_provider_content_parts, validate_provider_request,
+    ProviderKind,
+};
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
@@ -30,7 +33,7 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
         "Use `--server ollama` or `--server openai`.".to_string(),
         "Hint: Set `--server` explicitly or configure a default profile with a supported server."
             .to_string(),
-        "Example: cargo ai preflight --server ollama --model mistral --prompt \"What is 2 + 2?\""
+        "Example: cargo ai preflight --server ollama --model mistral --input-text \"What is 2 + 2?\""
             .to_string(),
     ]
 }
@@ -257,6 +260,42 @@ fn apply_profile(profile: &Profile, server: &mut String, model: &mut String, tim
     }
 }
 
+fn runtime_input_overrides(cmd_args: &clap::ArgMatches) -> Vec<Input> {
+    let mut ordered = Vec::new();
+
+    collect_flagged_inputs(cmd_args, "input_text")
+        .into_iter()
+        .for_each(|(index, value)| ordered.push((index, Input::Text { text: value })));
+    collect_flagged_inputs(cmd_args, "input_url")
+        .into_iter()
+        .for_each(|(index, value)| ordered.push((index, Input::Url { url: value })));
+    collect_flagged_inputs(cmd_args, "input_image")
+        .into_iter()
+        .for_each(|(index, value)| ordered.push((index, Input::Image { path: value })));
+
+    ordered.sort_by_key(|(index, _)| *index);
+    ordered.into_iter().map(|(_, input)| input).collect()
+}
+
+fn collect_flagged_inputs(cmd_args: &clap::ArgMatches, id: &str) -> Vec<(usize, String)> {
+    match (cmd_args.indices_of(id), cmd_args.get_many::<String>(id)) {
+        (Some(indices), Some(values)) => indices
+            .zip(values)
+            .map(|(index, value)| (index, value.to_string()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn resolved_inputs_for_run(cmd_args: &clap::ArgMatches) -> Vec<Input> {
+    let runtime_inputs = runtime_input_overrides(cmd_args);
+    if runtime_inputs.is_empty() {
+        inputs()
+    } else {
+        runtime_inputs
+    }
+}
+
 // Initialize Tokio runtime macro
 #[tokio::main]
 async fn main() {
@@ -323,12 +362,6 @@ async fn main() {
         timeout_in_sec = timeout_arg.parse::<u64>().unwrap_or(60);
     }
 
-    let prompt = if let Some(prompt_arg) = cmd_args.get_one::<String>("prompt") {
-        prompt_arg.to_string()
-    } else {
-        prompt()
-    };
-
     let provider = match ProviderKind::from_server_value(&server) {
         Some(provider) => provider,
         None => {
@@ -373,30 +406,38 @@ async fn main() {
         return;
     }
 
-    let static_context =
-        "A question will be asked and you will need to return the answer in the specified JSON format.";
-
-    let resources = resource_urls();
-    let data_block = match web_resources::build_data_block(&resources).await {
-        Ok(data_block) => data_block,
+    let selected_inputs = resolved_inputs_for_run(&cmd_args);
+    let resolved_inputs = match crate::providers::resolve_provider_inputs(&selected_inputs).await {
+        Ok(resolved_inputs) => resolved_inputs,
         Err(error) => {
-            eprintln!("❌ Failed to fetch required web resources.");
+            eprintln!("❌ Failed to resolve runtime inputs.");
             eprintln!("Reason: {error}");
             return;
         }
     };
 
-    let context = format!("{}\n\n{}", static_context, data_block);
-    let mut ai_cargo = crate::providers::AgentCargo::<Output>::new(prompt.clone(), context);
+    if let Err(validation_issues) =
+        validate_provider_content_parts(provider, &url, &resolved_inputs)
+    {
+        for issue in validation_issues {
+            eprintln!("{issue}");
+        }
+        return;
+    }
 
-    let structured_prompt = ai_cargo.prompt();
+    let static_context =
+        "A question will be asked and you will need to return the answer in the specified JSON format.";
+    let mut ai_cargo =
+        crate::providers::AgentCargo::<Output>::new(resolved_inputs, static_context.to_string());
+
+    let content_parts = ai_cargo.content_parts();
     let mut response = String::new();
 
     if provider == ProviderKind::Ollama {
         match crate::providers::send_ollama_request(
             &url,
             &model,
-            &structured_prompt,
+            &content_parts,
             timeout_in_sec,
             json_schema_value(),
         )
@@ -430,7 +471,7 @@ async fn main() {
         match crate::providers::send_openai_request(
             &url,
             &model,
-            &structured_prompt,
+            &content_parts,
             timeout_in_sec,
             &token,
             fmt,

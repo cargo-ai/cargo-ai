@@ -256,15 +256,20 @@ cargo ai account agents hatch weather_agent --definition-path /team/ops
 
   To understand what is happening behind the scenes, we can look at the internal structure of the sample agent JSON file, [`adder_test.json`](./adder_test.json). 
 
-  ### 1. Prompt and Guaranteed Typed Response
+  ### 1. Inputs and Guaranteed Typed Response
 
-  Each agent defines a natural‑language **prompt** together with a strongly‑typed **response schema**.  
+  Each agent defines an ordered set of **inputs** together with a strongly‑typed **response schema**.  
   
   The schema is compiled into Rust types, guaranteeing that the agent will always receive data in the expected shape.
 
   ```json
   {
-    "prompt": "What is 2 + 2? Return the answer as a number.",
+    "inputs": [
+      {
+        "type": "text",
+        "text": "What is 2 + 2? Return the answer as a number."
+      }
+    ],
     "agent_schema": {
       "type": "object",
       "properties": {
@@ -336,13 +341,12 @@ In short:
 
 ## 🌦️🤖 Create Your Own Weather Agent with JSON
 
-We’ll walk through a [weather_agent.json](./weather_agent.json) example step-by-step—prompt, expected response schema, optional resource URLs, and actions.
+We’ll walk through a [weather_agent.json](./weather_agent.json) example step-by-step—ordered inputs, expected response schema, and actions.
 
 To define a custom agent, you’ll use a JSON file that specifies:
-1. The **prompt** to send to the AI/transformer server  
+1. The ordered **inputs** to send to the AI/transformer server  
 2. The **expected response schema** (properties returned)  
-3. (Optional) **Resource URLs** provided to the server alongside the prompt  
-4. A set of **actions** to run, depending on the agent’s response  
+3. A set of **actions** to run, depending on the agent’s response  
 
 The steps below show how to create the weather_agent, but once defined, running it is as simple as:
 
@@ -361,18 +365,31 @@ cargo ai hatch weather_agent --config weather_agent.json
 > **Note for Windows users:**  
 > Use `weather_agent` (or `weather_agent.exe`) instead of `./weather_agent`.
 
-### 1) Define the Prompt
+### 1) Define the Inputs
 
-  The `prompt` is the natural language instruction or question you send to the AI/transformer server.  
-  It frames what the agent is supposed to do. You can phrase it as a question, a request, or a directive.
+  The `inputs` array is the ordered model-facing input the agent sends at runtime.  
+  Start with `type: "text"` entries for plain instructions, and add `type: "url"` or `type: "image"` entries when the agent needs fetched web text or local image files.
 
   Example from [weather_agent.json](./weather_agent.json):
 
   ```json
-  "prompt": "Will it rain tomorrow between 9am and 5pm? (Consider true if over 40% for any given hour period.)"
+  "inputs": [
+    {
+      "type": "text",
+      "text": "Will it rain tomorrow between 9am and 5pm? (Consider true if over 40% for any given hour period.)"
+    },
+    {
+      "type": "url",
+      "url": "https://gettimeapi.dev/v1/time?timezone=UTC"
+    },
+    {
+      "type": "url",
+      "url": "https://api.open-meteo.com/v1/forecast?latitude=39.10&longitude=-84.51&hourly=precipitation_probability"
+    }
+  ]
   ```
 
-  You can edit the text to suit your agent’s purpose—for example, summarizing an article, checking stock prices, or answering domain-specific questions.
+  You can use multiple `text` inputs, multiple `url` inputs, and later local `image` inputs. Runtime flags such as `--input-text`, `--input-url`, and `--input-image` replace the config-defined inputs when present.
 
 ### 2) Define the Response Schema
 
@@ -399,33 +416,7 @@ cargo ai hatch weather_agent --config weather_agent.json
   }
    ```
 
-### 3) Define Resource URLs
-
-  The `resource_urls` section lists optional external data sources your agent can use.  
-  Each entry includes:
-  - `url`: the API endpoint or resource location  
-  - `description`: a short explanation of what the resource provides  
-
-  These URLs are passed to the AI/transformer server alongside the prompt, giving the agent more context to work with.  
-
-  Example from [weather_agent.json](./weather_agent.json):
-
-  ```json
-  "resource_urls": [
-    {
-      "url": "https://gettimeapi.dev/v1/time?timezone=UTC",
-      "description": "Current UTC date and time."
-    },
-    {
-      "url": "https://api.open-meteo.com/v1/forecast?latitude=39.10&longitude=-84.51&hourly=precipitation_probability",
-      "description": "Hourly precipitation probability for Cincinnati, which is my area."
-    }
-  ]
-  ```
-
-  *Note: The weather forecast URL in the example is configured for Cincinnati (latitude/longitude values). Update these values and the description to match your own location.*
-
-### 4) Define Actions
+### 3) Define Actions
 
 The `actions` section specifies what the agent should do based on the response.  
 It follows the [JSON Logic](http://jsonlogic.com/) format for conditions.  

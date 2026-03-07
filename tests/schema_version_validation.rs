@@ -6,7 +6,9 @@ fn minimal_agentcfg(version: &str) -> String {
     format!(
         r#"{{
   "version": "{version}",
-  "prompt": "Return a numeric answer.",
+  "inputs": [
+    {{ "type": "text", "text": "Return a numeric answer." }}
+  ],
   "agent_schema": {{
     "type": "object",
     "properties": {{
@@ -15,7 +17,6 @@ fn minimal_agentcfg(version: &str) -> String {
       }}
     }}
   }},
-  "resource_urls": [],
   "actions": []
 }}"#
     )

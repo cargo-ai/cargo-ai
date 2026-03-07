@@ -1,6 +1,7 @@
 //! Shared provider error taxonomy and user-facing diagnostics policy.
 
 use reqwest::StatusCode;
+use super::runtime::ContentPart;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -27,7 +28,7 @@ impl ProviderKind {
 
     pub(crate) fn default_url(self) -> &'static str {
         match self {
-            Self::Ollama => "http://localhost:11434/api/generate",
+            Self::Ollama => "http://localhost:11434/v1/chat/completions",
             Self::OpenAi => "https://api.openai.com/v1/chat/completions",
         }
     }
@@ -222,6 +223,38 @@ pub(crate) fn validate_provider_request(
     if provider == ProviderKind::OpenAi && token.trim().is_empty() {
         issues.push(
             "❌ Missing OpenAI token. Provide `--token <TOKEN>`, run `cargo ai auth login openai`, or configure `cargo ai profile set <name> --token <TOKEN> --auth api_key`."
+                .to_string(),
+        );
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(issues)
+    }
+}
+
+pub(crate) fn validate_provider_content_parts(
+    provider: ProviderKind,
+    url: &str,
+    content_parts: &[ContentPart],
+) -> Result<(), Vec<String>> {
+    let includes_images = content_parts
+        .iter()
+        .any(|part| matches!(part, ContentPart::Image { .. }));
+
+    if !includes_images {
+        return Ok(());
+    }
+
+    let normalized_url = url.trim().to_ascii_lowercase();
+    let mut issues = Vec::new();
+
+    if provider == ProviderKind::Ollama
+        && (normalized_url.contains("/api/generate") || normalized_url.contains("/api/chat"))
+    {
+        issues.push(
+            "❌ Image inputs require Ollama's OpenAI-compatible `/v1/chat/completions` transport. Update `--url` or your profile URL before retrying."
                 .to_string(),
         );
     }

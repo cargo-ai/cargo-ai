@@ -1,4 +1,3 @@
-use crate::ResourceUrl;
 use crate::config::loader::load_config;
 use crate::config::schema::WebResources as WebResourcesConfig;
 use futures::future::join_all;
@@ -168,26 +167,6 @@ async fn fetch_resources_parallel_with_policy(
 /// Returns a vector of response bodies as strings.
 pub async fn fetch_resources_parallel(urls: &[&str]) -> Result<Vec<String>, String> {
     fetch_resources_parallel_with_policy(urls, configured_retry_policy()).await
-}
-
-/// Build a formatted data block containing descriptions, URLs, and fetched content.
-pub async fn build_data_block(resources: &[ResourceUrl]) -> Result<String, String> {
-    let mut data_block = String::from("Here are some resources to aid in your response:\n");
-
-    if !resources.is_empty() {
-        let urls: Vec<&str> = resources.iter().map(|resource| resource.url).collect();
-        let results = fetch_resources_parallel(&urls).await?;
-        for (resource, content) in resources.iter().zip(results.iter()) {
-            data_block.push_str(&format!(
-                "- {} ({}): {}\n",
-                resource.description,
-                resource.url,
-                content.trim()
-            ));
-        }
-    }
-
-    Ok(data_block)
 }
 
 #[cfg(test)]
