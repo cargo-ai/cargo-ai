@@ -116,12 +116,12 @@ mod tests {
     #[test]
     fn extracts_only_valid_schema_versions_from_agentcfg() {
         let valid = extract_schema_version_from_agentcfg(
-            r#"{"version":"2026-03-03.r2","prompt":"x","agent_schema":{"type":"object","properties":{}},"resource_urls":[],"actions":[]}"#,
+            r#"{"version":"2026-03-03.r2","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
         );
         assert_eq!(valid.as_deref(), Some("2026-03-03.r2"));
 
         let invalid = extract_schema_version_from_agentcfg(
-            r#"{"version":"0.0.10","prompt":"x","agent_schema":{"type":"object","properties":{}},"resource_urls":[],"actions":[]}"#,
+            r#"{"version":"0.0.10","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
         );
         assert!(invalid.is_none());
     }

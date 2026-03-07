@@ -11,7 +11,10 @@ use std::path::PathBuf;
 
 use config::loader::{find_profile, load_config};
 use config::schema::{Profile, ProfileAuthMode};
-use providers::{provider_error_messages, validate_provider_request, ProviderKind};
+use providers::{
+    provider_error_messages, validate_provider_content_parts, validate_provider_request,
+    ProviderKind,
+};
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
@@ -30,7 +33,7 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
         "Use `--server ollama` or `--server openai`.".to_string(),
         "Hint: Set `--server` explicitly or configure a default profile with a supported server."
             .to_string(),
-        "Example: cargo ai preflight --server ollama --model mistral --prompt \"What is 2 + 2?\""
+        "Example: cargo ai preflight --server ollama --model mistral --input-text \"What is 2 + 2?\""
             .to_string(),
     ]
 }
@@ -46,6 +49,61 @@ struct SelectedProfile {
 struct ResolvedOpenAiToken {
     token: String,
     uses_account_session: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LoadedProfileKind {
+    Explicit,
+    Default,
+}
+
+fn profile_selection_messages(
+    kind: LoadedProfileKind,
+    profile_name: &str,
+    overrides: &[String],
+) -> Vec<String> {
+    let base_message = match kind {
+        LoadedProfileKind::Explicit => format!("Using profile '{}'", profile_name),
+        LoadedProfileKind::Default => format!("Using default profile '{}'", profile_name),
+    };
+
+    if overrides.is_empty() {
+        vec![base_message]
+    } else {
+        vec![
+            format!("{base_message} as fallback."),
+            format!("CLI overrides: {}", overrides.join(", ")),
+        ]
+    }
+}
+
+fn cli_override_descriptions(
+    matches: &clap::ArgMatches,
+    include_token_override: bool,
+) -> Vec<String> {
+    let mut overrides = Vec::new();
+
+    if let Some(server) = matches.get_one::<String>("server") {
+        overrides.push(format!("server={}", server.to_lowercase()));
+    }
+
+    if let Some(model) = matches.get_one::<String>("model") {
+        overrides.push(format!("model={model}"));
+    }
+
+    if let Some(url) = matches.get_one::<String>("url") {
+        overrides.push(format!("url={url}"));
+    }
+
+    if let Some(timeout) = matches.get_one::<String>("timeout_in_sec") {
+        overrides.push(format!("timeout_in_sec={timeout}"));
+    }
+
+    if include_token_override {
+        overrides.push("token=(explicit)".to_string());
+    }
+
+    overrides
 }
 
 fn resolve_profile_api_token(profile: &SelectedProfile) -> Result<String, String> {
@@ -257,6 +315,42 @@ fn apply_profile(profile: &Profile, server: &mut String, model: &mut String, tim
     }
 }
 
+fn runtime_input_overrides(cmd_args: &clap::ArgMatches) -> Vec<Input> {
+    let mut ordered = Vec::new();
+
+    collect_flagged_inputs(cmd_args, "input_text")
+        .into_iter()
+        .for_each(|(index, value)| ordered.push((index, Input::Text { text: value })));
+    collect_flagged_inputs(cmd_args, "input_url")
+        .into_iter()
+        .for_each(|(index, value)| ordered.push((index, Input::Url { url: value })));
+    collect_flagged_inputs(cmd_args, "input_image")
+        .into_iter()
+        .for_each(|(index, value)| ordered.push((index, Input::Image { path: value })));
+
+    ordered.sort_by_key(|(index, _)| *index);
+    ordered.into_iter().map(|(_, input)| input).collect()
+}
+
+fn collect_flagged_inputs(cmd_args: &clap::ArgMatches, id: &str) -> Vec<(usize, String)> {
+    match (cmd_args.indices_of(id), cmd_args.get_many::<String>(id)) {
+        (Some(indices), Some(values)) => indices
+            .zip(values)
+            .map(|(index, value)| (index, value.to_string()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn resolved_inputs_for_run(cmd_args: &clap::ArgMatches) -> Vec<Input> {
+    let runtime_inputs = runtime_input_overrides(cmd_args);
+    if runtime_inputs.is_empty() {
+        inputs()
+    } else {
+        runtime_inputs
+    }
+}
+
 // Initialize Tokio runtime macro
 #[tokio::main]
 async fn main() {
@@ -269,6 +363,7 @@ async fn main() {
     let mut token = String::new();
     let mut timeout_in_sec: u64 = 60;
     let mut selected_profile: Option<SelectedProfile> = None;
+    let mut loaded_profile_message: Option<(LoadedProfileKind, String)> = None;
     let mut use_openai_account_transport = false;
 
     if let Some(profile_name) = cmd_args.get_one::<String>("profile") {
@@ -283,7 +378,7 @@ async fn main() {
                 &mut timeout_in_sec,
                 &mut url,
             ));
-            println!("Using profile '{}'", profile_name);
+            loaded_profile_message = Some((LoadedProfileKind::Explicit, profile_name.to_string()));
         } else if config.is_some() {
             eprintln!("Profile '{}' not found.", profile_name);
         } else {
@@ -303,7 +398,7 @@ async fn main() {
                 &mut timeout_in_sec,
                 &mut url,
             ));
-            println!("Using default profile '{}'", profile.name);
+            loaded_profile_message = Some((LoadedProfileKind::Default, profile.name.clone()));
         }
     }
 
@@ -323,12 +418,6 @@ async fn main() {
         timeout_in_sec = timeout_arg.parse::<u64>().unwrap_or(60);
     }
 
-    let prompt = if let Some(prompt_arg) = cmd_args.get_one::<String>("prompt") {
-        prompt_arg.to_string()
-    } else {
-        prompt()
-    };
-
     let provider = match ProviderKind::from_server_value(&server) {
         Some(provider) => provider,
         None => {
@@ -340,6 +429,19 @@ async fn main() {
     };
 
     let explicit_token_override = cmd_args.get_one::<String>("token").map(|token| token.to_string());
+    if let Some((kind, profile_name)) = loaded_profile_message.as_ref() {
+        for line in profile_selection_messages(
+            *kind,
+            profile_name,
+            &cli_override_descriptions(
+                &cmd_args,
+                explicit_token_override.is_some() && provider == ProviderKind::OpenAi,
+            ),
+        ) {
+            println!("{line}");
+        }
+    }
+
     if let Some(cmd_token) = explicit_token_override {
         if provider == ProviderKind::OpenAi {
             println!("Using explicit --token override; bypassing profile auth-mode resolution.");
@@ -373,30 +475,38 @@ async fn main() {
         return;
     }
 
-    let static_context =
-        "A question will be asked and you will need to return the answer in the specified JSON format.";
-
-    let resources = resource_urls();
-    let data_block = match web_resources::build_data_block(&resources).await {
-        Ok(data_block) => data_block,
+    let selected_inputs = resolved_inputs_for_run(&cmd_args);
+    let resolved_inputs = match crate::providers::resolve_provider_inputs(&selected_inputs).await {
+        Ok(resolved_inputs) => resolved_inputs,
         Err(error) => {
-            eprintln!("❌ Failed to fetch required web resources.");
+            eprintln!("❌ Failed to resolve runtime inputs.");
             eprintln!("Reason: {error}");
             return;
         }
     };
 
-    let context = format!("{}\n\n{}", static_context, data_block);
-    let mut ai_cargo = crate::providers::AgentCargo::<Output>::new(prompt.clone(), context);
+    if let Err(validation_issues) =
+        validate_provider_content_parts(provider, &url, &resolved_inputs)
+    {
+        for issue in validation_issues {
+            eprintln!("{issue}");
+        }
+        return;
+    }
 
-    let structured_prompt = ai_cargo.prompt();
+    let static_context =
+        "A question will be asked and you will need to return the answer in the specified JSON format.";
+    let mut ai_cargo =
+        crate::providers::AgentCargo::<Output>::new(resolved_inputs, static_context.to_string());
+
+    let content_parts = ai_cargo.content_parts();
     let mut response = String::new();
 
     if provider == ProviderKind::Ollama {
         match crate::providers::send_ollama_request(
             &url,
             &model,
-            &structured_prompt,
+            &content_parts,
             timeout_in_sec,
             json_schema_value(),
         )
@@ -430,7 +540,7 @@ async fn main() {
         match crate::providers::send_openai_request(
             &url,
             &model,
-            &structured_prompt,
+            &content_parts,
             timeout_in_sec,
             &token,
             fmt,

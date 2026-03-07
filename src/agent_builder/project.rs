@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn resolves_template_schema_version_from_agentcfg_version() {
         let version = schema_version::extract_schema_version_from_agentcfg(
-            r#"{"version":"2026-03-03.r2","prompt":"x","agent_schema":{"type":"object","properties":{}},"resource_urls":[],"actions":[]}"#,
+            r#"{"version":"2026-03-03.r2","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
         );
         assert_eq!(version.as_deref(), Some("2026-03-03.r2"));
     }
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn rejects_legacy_semver_agentcfg_version() {
         let version = schema_version::extract_schema_version_from_agentcfg(
-            r#"{"version":"0.0.10","prompt":"x","agent_schema":{"type":"object","properties":{}},"resource_urls":[],"actions":[]}"#,
+            r#"{"version":"0.0.10","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
         );
         assert!(version.is_none());
     }
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn falls_back_to_current_schema_version_when_agentcfg_version_is_missing() {
         let version = schema_version::extract_schema_version_from_agentcfg(
-            r#"{"prompt":"x","agent_schema":{"type":"object","properties":{}},"resource_urls":[],"actions":[]}"#,
+            r#"{"inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
         );
         assert!(version.is_none());
         let fallback = schema_version::current_schema_version();

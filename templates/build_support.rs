@@ -85,9 +85,10 @@ impl Error for BuildError {
 }
 
 #[derive(Debug, Clone)]
-struct ResourceUrl {
-    url: String,
-    description: String,
+enum InputSpec {
+    Text { text: String },
+    Url { url: String },
+    Image { path: String },
 }
 
 #[derive(Debug, Clone)]
@@ -128,9 +129,8 @@ struct MappedPropertyType {
 
 #[derive(Debug, Clone)]
 struct AgentConfig {
-    prompt: String,
+    inputs: Vec<InputSpec>,
     fields: Vec<(String, String)>,
-    resource_urls: Vec<ResourceUrl>,
     actions: Vec<Action>,
 }
 
@@ -331,7 +331,7 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
     let schema_version = get_required_string(root_obj, "version", "$")?;
     validate_schema_version(schema_version, "$.version")?;
 
-    let prompt = get_required_string(root_obj, "prompt", "$")?.to_string();
+    let inputs = parse_inputs(root_obj)?;
 
     let schema = get_required_object(root_obj, "agent_schema", "$")?;
     let schema_type = get_required_string(schema, "type", "$.agent_schema")?;
@@ -354,13 +354,11 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
         fields.push((name.clone(), mapped_type.rust_type));
     }
 
-    let resource_urls = parse_resource_urls(root_obj)?;
     let actions = parse_actions(root_obj, &schema_field_types)?;
 
     Ok(AgentConfig {
-        prompt,
+        inputs,
         fields,
-        resource_urls,
         actions,
     })
 }
@@ -442,16 +440,42 @@ fn is_leap_year(year: u32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
-fn parse_resource_urls(root_obj: &Map<String, Value>) -> Result<Vec<ResourceUrl>, BuildError> {
-    let urls = get_required_array(root_obj, "resource_urls", "$")?;
-    let mut parsed = Vec::with_capacity(urls.len());
+fn parse_inputs(root_obj: &Map<String, Value>) -> Result<Vec<InputSpec>, BuildError> {
+    let inputs = get_required_array(root_obj, "inputs", "$")?;
+    if inputs.is_empty() {
+        return Err(BuildError::config(
+            "$.inputs",
+            "must contain at least one entry",
+        ));
+    }
 
-    for (index, entry) in urls.iter().enumerate() {
-        let path = format!("$.resource_urls[{index}]");
+    let mut parsed = Vec::with_capacity(inputs.len());
+    for (index, entry) in inputs.iter().enumerate() {
+        let path = format!("$.inputs[{index}]");
         let entry_obj = expect_object(entry, &path)?;
-        let url = get_required_string(entry_obj, "url", &path)?.to_string();
-        let description = get_required_string(entry_obj, "description", &path)?.to_string();
-        parsed.push(ResourceUrl { url, description });
+        let input_type = get_required_string(entry_obj, "type", &path)?
+            .trim()
+            .to_ascii_lowercase();
+
+        let input = match input_type.as_str() {
+            "text" => InputSpec::Text {
+                text: get_required_string(entry_obj, "text", &path)?.to_string(),
+            },
+            "url" => InputSpec::Url {
+                url: get_required_string(entry_obj, "url", &path)?.to_string(),
+            },
+            "image" => InputSpec::Image {
+                path: get_required_string(entry_obj, "path", &path)?.to_string(),
+            },
+            _ => {
+                return Err(BuildError::config(
+                    format!("{path}.type"),
+                    format!("unsupported input type `{input_type}` (supported: `text`, `url`, `image`)"),
+                ))
+            }
+        };
+
+        parsed.push(input);
     }
 
     Ok(parsed)
@@ -1167,15 +1191,23 @@ fn render_agent_model(config: &AgentConfig) -> String {
         struct_fields.push_str(&format!("    pub {name}: {rust_type},\n"));
     }
 
-    let prompt_literal = rust_string_literal(&config.prompt);
-
-    let mut url_list = String::new();
-    for url in &config.resource_urls {
-        url_list.push_str(&format!(
-            "        ResourceUrl {{ url: {url}, description: {description} }},\n",
-            url = rust_string_literal(&url.url),
-            description = rust_string_literal(&url.description)
-        ));
+    let mut input_list = String::new();
+    for input in &config.inputs {
+        let rendered = match input {
+            InputSpec::Text { text } => format!(
+                "        Input::Text {{ text: {}.to_string() }},\n",
+                rust_string_literal(text)
+            ),
+            InputSpec::Url { url } => format!(
+                "        Input::Url {{ url: {}.to_string() }},\n",
+                rust_string_literal(url)
+            ),
+            InputSpec::Image { path } => format!(
+                "        Input::Image {{ path: {}.to_string() }},\n",
+                rust_string_literal(path)
+            ),
+        };
+        input_list.push_str(&rendered);
     }
 
     let mut action_code = String::new();
@@ -1251,17 +1283,14 @@ pub struct Output {{
 {struct_fields}}}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ResourceUrl {{
-    pub url: &'static str,
-    pub description: &'static str,
+pub enum Input {{
+    Text {{ text: String }},
+    Url {{ url: String }},
+    Image {{ path: String }},
 }}
 
-pub fn prompt() -> String {{
-    String::from({prompt_literal})
-}}
-
-pub fn resource_urls() -> Vec<ResourceUrl> {{
-    vec![{url_list}]
+pub fn inputs() -> Vec<Input> {{
+    vec![{input_list}]
 }}
 
 /// JSON Schema that defines the expected LLM output structure.
@@ -1314,8 +1343,7 @@ pub fn actions() -> Vec<Action> {{
 }}
 "##,
         struct_fields = struct_fields,
-        prompt_literal = prompt_literal,
-        url_list = url_list,
+        input_list = input_list,
         action_code = action_code
     )
 }

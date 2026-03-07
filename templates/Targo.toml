@@ -5,6 +5,7 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
+base64 = { version = "0.22.1", default-features = false, features = ["std"] }
 clap = "4.5.35"
 futures = "0.3.31"
 jsonlogic = "0.5.1"

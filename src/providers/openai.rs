@@ -1,5 +1,5 @@
 // External Crates
-use super::{ProviderError, ProviderKind};
+use super::{runtime::ContentPart, ProviderError, ProviderKind};
 use reqwest::ClientBuilder;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -9,13 +9,31 @@ const CHATGPT_CODEX_ENDPOINT_MARKER: &str = "chatgpt.com/backend-api/codex";
 #[derive(Serialize, Debug)]
 pub struct ChatCompletionsRequest {
     pub model: String,
-    pub messages: Vec<Message>,
+    pub messages: Vec<ChatRequestMessage>,
     pub temperature: f64,
     pub response_format: serde_json::Value,
 }
 
+#[derive(Serialize, Debug)]
+pub struct ChatRequestMessage {
+    pub role: String,
+    pub content: Vec<ChatRequestContentPart>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatRequestContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Serialize, Debug)]
+pub struct ImageUrl {
+    pub url: String,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Message {
+pub struct ChatResponseMessage {
     pub role: String,
     pub content: String,
 }
@@ -34,7 +52,7 @@ pub struct ChatCompletionsResponse {
 #[derive(Deserialize, Debug)]
 #[allow(dead_code)]
 pub struct Choice {
-    pub message: Message,
+    pub message: ChatResponseMessage,
     pub finish_reason: Option<String>,
     pub index: usize,
 }
@@ -128,7 +146,7 @@ fn parse_stream_failure_message(payload: &serde_json::Value) -> Option<String> {
 async fn send_chat_completions_request(
     url: &String,
     model: &String,
-    prompt: &String,
+    content_parts: &[ContentPart],
     timeout_in_sec: u64,
     token: &String,
     response_format: serde_json::Value,
@@ -144,9 +162,9 @@ async fn send_chat_completions_request(
         super::DEFAULT_TEMPERATURE
     };
 
-    let message = Message {
+    let message = ChatRequestMessage {
         role: "user".to_string(),
-        content: prompt.clone(),
+        content: chat_request_content_parts(content_parts),
     };
 
     let request = ChatCompletionsRequest {
@@ -203,7 +221,7 @@ async fn send_chat_completions_request(
 async fn send_chatgpt_codex_responses_request(
     url: &String,
     model: &String,
-    prompt: &String,
+    content_parts: &[ContentPart],
     timeout_in_sec: u64,
     token: &String,
     response_format: serde_json::Value,
@@ -219,12 +237,7 @@ async fn send_chatgpt_codex_responses_request(
         "input": [
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": prompt
-                    }
-                ]
+                "content": responses_request_content_parts(content_parts)
             }
         ],
         "text": {
@@ -333,7 +346,7 @@ async fn send_chatgpt_codex_responses_request(
 pub async fn send_request(
     url: &String,
     model: &String,
-    prompt: &String,
+    content_parts: &[ContentPart],
     timeout_in_sec: u64,
     token: &String,
     response_format: serde_json::Value,
@@ -342,21 +355,59 @@ pub async fn send_request(
         send_chatgpt_codex_responses_request(
             url,
             model,
-            prompt,
+            content_parts,
             timeout_in_sec,
             token,
             response_format,
         )
         .await
     } else {
-        send_chat_completions_request(url, model, prompt, timeout_in_sec, token, response_format)
-            .await
+        send_chat_completions_request(
+            url,
+            model,
+            content_parts,
+            timeout_in_sec,
+            token,
+            response_format,
+        )
+        .await
     }
+}
+
+fn chat_request_content_parts(content_parts: &[ContentPart]) -> Vec<ChatRequestContentPart> {
+    content_parts
+        .iter()
+        .map(|part| match part {
+            ContentPart::Text(text) => ChatRequestContentPart::Text { text: text.clone() },
+            ContentPart::Image { data_url } => ChatRequestContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: data_url.clone(),
+                },
+            },
+        })
+        .collect()
+}
+
+fn responses_request_content_parts(content_parts: &[ContentPart]) -> Vec<serde_json::Value> {
+    content_parts
+        .iter()
+        .map(|part| match part {
+            ContentPart::Text(text) => serde_json::json!({
+                "type": "input_text",
+                "text": text
+            }),
+            ContentPart::Image { data_url } => serde_json::json!({
+                "type": "input_image",
+                "image_url": data_url
+            }),
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::send_request;
+    use crate::providers::runtime::ContentPart;
 
     #[tokio::test]
     async fn parses_chatgpt_codex_stream_done_payload() {
@@ -380,7 +431,7 @@ mod tests {
 
         let url = format!("{}/chatgpt.com/backend-api/codex", server.url());
         let model = "gpt-5".to_string();
-        let prompt = "return json".to_string();
+        let content_parts = vec![ContentPart::Text("return json".to_string())];
         let token = "test-token".to_string();
         let response_format = serde_json::json!({
             "type": "json_schema",
@@ -398,7 +449,7 @@ mod tests {
             }
         });
 
-        let response = send_request(&url, &model, &prompt, 10, &token, response_format)
+        let response = send_request(&url, &model, &content_parts, 10, &token, response_format)
             .await
             .expect("stream response should parse");
         assert_eq!(response, "{\"answer\":\"hi\"}");

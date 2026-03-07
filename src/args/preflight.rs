@@ -1,5 +1,5 @@
 //! CLI parser definition for `cargo ai preflight`.
-use clap::{Arg, Command};
+use clap::{Arg, ArgAction, Command};
 
 /// Builds the `preflight` command schema.
 pub fn command() -> Command {
@@ -49,11 +49,27 @@ pub fn command() -> Command {
                 .default_value("60"),
         )
         .arg(
-            Arg::new("prompt")
-                .long("prompt")
-                .short('p')
-                .help("Prompt to provide to the agent at runtime")
+            Arg::new("input_text")
+                .long("input-text")
+                .help("Text input to provide to the agent at runtime")
                 .value_name("TEXT")
+                .action(ArgAction::Append)
+                .num_args(1),
+        )
+        .arg(
+            Arg::new("input_url")
+                .long("input-url")
+                .help("URL input to fetch as text at runtime")
+                .value_name("URL")
+                .action(ArgAction::Append)
+                .num_args(1),
+        )
+        .arg(
+            Arg::new("input_image")
+                .long("input-image")
+                .help("Local image path to provide to the agent at runtime")
+                .value_name("PATH")
+                .action(ArgAction::Append)
                 .num_args(1),
         )
 }

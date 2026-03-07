@@ -12,14 +12,15 @@ fn config_with(properties: &str, actions: &str) -> String {
     format!(
         r#"{{
     "version": "2026-03-03.r1",
-    "prompt": "Test prompt",
+    "inputs": [
+        {{ "type": "text", "text": "Test prompt" }}
+    ],
     "agent_schema": {{
         "type": "object",
         "properties": {{
             {properties}
         }}
     }},
-    "resource_urls": [],
     "actions": {actions}
 }}"#
     )
@@ -518,8 +519,9 @@ fn escapes_action_literals_and_logic_payload_safely() {
 #[test]
 fn generates_canonical_build_provenance_constants() {
     let cfg = r#"{
-      "resource_urls": [],
-      "prompt": "Return a numeric answer.",
+      "inputs": [
+        { "type": "text", "text": "Return a numeric answer." }
+      ],
       "actions": [],
       "version": "2026-03-03.r1",
       "agent_schema": {
@@ -540,7 +542,7 @@ fn generates_canonical_build_provenance_constants() {
     )
     .expect("build provenance source should be generated");
 
-    let expected_definition = r#"{"actions":[],"agent_schema":{"properties":{"answer":{"type":"integer"}},"type":"object"},"prompt":"Return a numeric answer.","resource_urls":[],"version":"2026-03-03.r1"}"#;
+    let expected_definition = r#"{"actions":[],"agent_schema":{"properties":{"answer":{"type":"integer"}},"type":"object"},"inputs":[{"text":"Return a numeric answer.","type":"text"}],"version":"2026-03-03.r1"}"#;
     let mut hasher = Sha256::new();
     hasher.update(expected_definition.as_bytes());
     let expected_hash = format!("{:x}", hasher.finalize());

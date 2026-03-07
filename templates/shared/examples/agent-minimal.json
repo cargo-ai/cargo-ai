@@ -1,6 +1,11 @@
 {
   "version": "2026-03-03.r1",
-  "prompt": "What is 2 + 2? Return the answer as a number.",
+  "inputs": [
+    {
+      "type": "text",
+      "text": "What is 2 + 2? Return the answer as a number."
+    }
+  ],
   "agent_schema": {
     "type": "object",
     "properties": {
@@ -10,7 +15,6 @@
       }
     }
   },
-  "resource_urls": [],
   "actions": [
     {
       "name": "is_4",

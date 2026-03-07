@@ -543,6 +543,7 @@ dependencies = [
 name = "cargo-ai"
 version = "0.0.10"
 dependencies = [
+ "base64",
  "clap",
  "dirs",
  "futures",
