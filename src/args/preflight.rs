@@ -42,11 +42,12 @@ pub fn command() -> Command {
                 .help("API token"),
         )
         .arg(
-            Arg::new("timeout_in_sec")
-                .long("timeout_in_sec")
+            Arg::new("inference_timeout_in_sec")
+                .long("inference-timeout-in-sec")
+                .alias("timeout_in_sec")
                 .value_name("SECONDS")
-                .help("Client timeout request")
-                .default_value("60"),
+                .help("Maximum model request time in seconds for this agent (default: 60)")
+                .value_parser(clap::value_parser!(u64)),
         )
         .arg(
             Arg::new("max_agent_depth")
@@ -54,6 +55,15 @@ pub fn command() -> Command {
                 .value_name("DEPTH")
                 .help("Maximum nested child-agent depth for this invocation tree")
                 .value_parser(clap::value_parser!(u32)),
+        )
+        .arg(
+            Arg::new("max_runtime_in_sec")
+                .long("max-runtime-in-sec")
+                .value_name("SECONDS")
+                .help(
+                    "Maximum runtime in seconds for this agent and any child agents (default: 600)",
+                )
+                .value_parser(clap::value_parser!(u64).range(1..)),
         )
         .arg(
             Arg::new("input_text")

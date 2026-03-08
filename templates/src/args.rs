@@ -65,10 +65,12 @@ pub fn build_cli() -> ArgMatches {
                 .global(true)
         )
         .arg(
-            Arg::new("timeout_in_sec")
-                .long("timeout_in_sec")
-                .help("Client timeout request")
-                .default_value("60")
+            Arg::new("inference_timeout_in_sec")
+                .long("inference-timeout-in-sec")
+                .alias("timeout_in_sec")
+                .help("Maximum model request time in seconds for this agent (default: 60)")
+                .value_name("SECONDS")
+                .value_parser(clap::value_parser!(u64))
                 .global(true)
         )
         .arg(
@@ -77,6 +79,14 @@ pub fn build_cli() -> ArgMatches {
                 .help("Maximum nested child-agent depth for this invocation tree")
                 .value_name("DEPTH")
                 .value_parser(clap::value_parser!(u32))
+                .global(true)
+        )
+        .arg(
+            Arg::new("max_runtime_in_sec")
+                .long("max-runtime-in-sec")
+                .help("Maximum runtime in seconds for this agent and any child agents (default: 600)")
+                .value_name("SECONDS")
+                .value_parser(clap::value_parser!(u64).range(1..))
                 .global(true)
         )
         .arg(

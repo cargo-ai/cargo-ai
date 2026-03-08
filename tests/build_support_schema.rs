@@ -304,6 +304,80 @@ fn rejects_agent_bare_executable_name() {
 }
 
 #[test]
+fn rejects_agent_parent_traversal_path() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_agent",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./../child_agent"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].agent"));
+    assert!(err.contains("parent traversal"));
+}
+
+#[test]
+fn rejects_image_input_parent_traversal_path() {
+    let cfg = r#"{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        { "type": "image", "path": "./../4.png" }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "value": { "type": "integer" }
+        }
+    },
+    "actions": []
+}"#;
+
+    let err = build_support::generate_agent_model_from_str(cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.inputs[0].path"));
+    assert!(err.contains("parent traversal"));
+}
+
+#[test]
+fn rejects_image_input_absolute_path() {
+    let cfg = r#"{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        { "type": "image", "path": "/tmp/4.png" }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "value": { "type": "integer" }
+        }
+    },
+    "actions": []
+}"#;
+
+    let err = build_support::generate_agent_model_from_str(cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.inputs[0].path"));
+    assert!(err.contains("current level or below"));
+}
+
+#[test]
 fn rejects_agent_program_field() {
     let cfg = config_with(
         r#""value": { "type": "integer" }"#,

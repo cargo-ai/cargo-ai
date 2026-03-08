@@ -1,5 +1,6 @@
 //! Runtime behavior for `cargo ai preflight`.
 use clap::ArgMatches;
+use std::time::Duration;
 
 use crate::config::loader::{find_profile, load_config};
 use crate::config::schema::ProfileAuthMode;
@@ -83,12 +84,16 @@ fn cli_override_descriptions(sub_m: &ArgMatches, include_token_override: bool) -
         overrides.push(format!("url={url}"));
     }
 
-    if let Some(timeout) = sub_m.get_one::<String>("timeout_in_sec") {
-        overrides.push(format!("timeout_in_sec={timeout}"));
+    if let Some(timeout) = sub_m.get_one::<u64>("inference_timeout_in_sec") {
+        overrides.push(format!("inference_timeout_in_sec={timeout}"));
     }
 
     if let Some(max_depth) = sub_m.get_one::<u32>("max_agent_depth") {
         overrides.push(format!("max_agent_depth={max_depth}"));
+    }
+
+    if let Some(max_runtime) = sub_m.get_one::<u64>("max_runtime_in_sec") {
+        overrides.push(format!("max_runtime_in_sec={max_runtime}"));
     }
 
     if include_token_override {
@@ -204,6 +209,44 @@ fn configured_agent_action_max_depth(cli_override: Option<u32>) -> u32 {
         .unwrap_or(DEFAULT_AGENT_ACTION_MAX_DEPTH)
 }
 
+fn remaining_runtime_duration(
+    runtime_budget: super::preflight_actions::InvocationRuntimeBudget,
+    exhausted_context: &str,
+) -> Result<Duration, String> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+
+    if now_ms >= runtime_budget.deadline_ms {
+        return Err(exhausted_context.to_string());
+    }
+
+    Ok(Duration::from_millis(
+        runtime_budget.deadline_ms.saturating_sub(now_ms),
+    ))
+}
+
+fn current_agent_runtime_timeout_message(
+    runtime_budget: super::preflight_actions::InvocationRuntimeBudget,
+    context: &str,
+) -> String {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    let elapsed_secs = now_ms
+        .saturating_sub(runtime_budget.started_at_ms)
+        .div_ceil(1000);
+
+    format!(
+        "Current agent exceeded max-runtime-in-sec {} after {} seconds {}.",
+        runtime_budget.max_runtime_secs, elapsed_secs, context
+    )
+}
+
 /// Executes the preflight flow: resolve runtime settings, call provider, and
 /// run any configured post-response actions.
 pub async fn run(sub_m: &ArgMatches) -> bool {
@@ -212,7 +255,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     let mut model = String::new();
     let mut url = String::new();
     let mut token = String::new();
-    let mut timeout_in_sec: u64 = 60; // Default
+    let mut inference_timeout_in_sec: u64 = 60; // Default
     let mut selected_profile: Option<SelectedProfile> = None;
     let mut loaded_profile_message: Option<(LoadedProfileKind, String)> = None;
     let mut use_openai_account_transport = false;
@@ -223,7 +266,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             if let Some(profile) = find_profile(&cfg, profile_name) {
                 server = profile.server.clone().to_lowercase();
                 model = profile.model.clone();
-                timeout_in_sec = profile.timeout_in_sec;
+                inference_timeout_in_sec = profile.timeout_in_sec;
                 // Updated URL assignment logic:
                 url = profile.url.clone().unwrap_or_default();
                 selected_profile = Some(SelectedProfile {
@@ -253,7 +296,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                 if let Some(profile) = find_profile(&cfg, default_profile_name) {
                     server = profile.server.clone().to_lowercase();
                     model = profile.model.clone();
-                    timeout_in_sec = profile.timeout_in_sec;
+                    inference_timeout_in_sec = profile.timeout_in_sec;
                     url = profile.url.clone().unwrap_or_default();
                     selected_profile = Some(SelectedProfile {
                         name: profile.name.clone(),
@@ -284,12 +327,15 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         .get_one::<String>("token")
         .map(|token| token.to_string());
 
-    if let Some(timeout_arg) = sub_m.get_one::<String>("timeout_in_sec") {
-        timeout_in_sec = timeout_arg.parse::<u64>().unwrap_or(60);
+    if let Some(timeout_arg) = sub_m.get_one::<u64>("inference_timeout_in_sec").copied() {
+        inference_timeout_in_sec = timeout_arg;
     }
 
     let max_agent_depth =
         configured_agent_action_max_depth(sub_m.get_one::<u32>("max_agent_depth").copied());
+    let runtime_budget = super::preflight_actions::configured_agent_action_runtime_budget(
+        sub_m.get_one::<u64>("max_runtime_in_sec").copied(),
+    );
 
     let provider = match ProviderKind::from_server_value(&server) {
         Some(provider) => provider,
@@ -381,22 +427,45 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     let mut response = String::new(); // Holds the LLM response
 
     if provider == ProviderKind::Ollama {
-        match crate::providers::send_ollama_request(
-            &url,
-            &model,
-            &content_parts,
-            timeout_in_sec,
-            crate::json_schema_value(),
+        let remaining =
+            match remaining_runtime_duration(runtime_budget, "before starting inference") {
+                Ok(remaining) => remaining,
+                Err(error) => {
+                    eprintln!(
+                        "❌ {}",
+                        current_agent_runtime_timeout_message(runtime_budget, error.as_str())
+                    );
+                    return false;
+                }
+            };
+
+        match tokio::time::timeout(
+            remaining,
+            crate::providers::send_ollama_request(
+                &url,
+                &model,
+                &content_parts,
+                inference_timeout_in_sec,
+                crate::json_schema_value(),
+            ),
         )
         .await
         {
-            Ok(r) => {
-                response.push_str(&r);
-            }
-            Err(error) => {
+            Ok(Ok(r)) => response.push_str(&r),
+            Ok(Err(error)) => {
                 for line in provider_error_messages(&error) {
                     eprintln!("{}", line);
                 }
+                return false;
+            }
+            Err(_) => {
+                eprintln!(
+                    "❌ {}",
+                    current_agent_runtime_timeout_message(
+                        runtime_budget,
+                        "while waiting for the model response"
+                    )
+                );
                 return false;
             }
         }
@@ -419,21 +488,46 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         });
 
         // Send request to OpenAI and `await` the LLM response
-        match crate::providers::send_openai_request(
-            &url,
-            &model,
-            &content_parts,
-            timeout_in_sec,
-            &token,
-            fmt,
+        let remaining =
+            match remaining_runtime_duration(runtime_budget, "before starting inference") {
+                Ok(remaining) => remaining,
+                Err(error) => {
+                    eprintln!(
+                        "❌ {}",
+                        current_agent_runtime_timeout_message(runtime_budget, error.as_str())
+                    );
+                    return false;
+                }
+            };
+
+        match tokio::time::timeout(
+            remaining,
+            crate::providers::send_openai_request(
+                &url,
+                &model,
+                &content_parts,
+                inference_timeout_in_sec,
+                &token,
+                fmt,
+            ),
         )
         .await
         {
-            Ok(r) => response.push_str(&r),
-            Err(error) => {
+            Ok(Ok(r)) => response.push_str(&r),
+            Ok(Err(error)) => {
                 for line in provider_error_messages(&error) {
                     eprintln!("{}", line);
                 }
+                return false;
+            }
+            Err(_) => {
+                eprintln!(
+                    "❌ {}",
+                    current_agent_runtime_timeout_message(
+                        runtime_budget,
+                        "while waiting for the model response"
+                    )
+                );
                 return false;
             }
         };
@@ -459,7 +553,14 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     let actions = crate::actions();
     // println!("Actions {:?}", actions);
 
-    match super::preflight_actions::apply_actions(&output, &actions, max_agent_depth).await {
+    match super::preflight_actions::apply_actions(
+        &output,
+        &actions,
+        max_agent_depth,
+        runtime_budget,
+    )
+    .await
+    {
         Ok(()) => true,
         Err(error) => {
             eprintln!("❌ {error}");
@@ -526,10 +627,12 @@ mod tests {
             "Ollama",
             "--model",
             "mistral",
-            "--timeout_in_sec",
+            "--inference-timeout-in-sec",
             "90",
             "--max-agent-depth",
             "3",
+            "--max-runtime-in-sec",
+            "180",
             "--input-text",
             "Return 4",
         ]);
@@ -544,8 +647,9 @@ mod tests {
             vec![
                 "server=ollama".to_string(),
                 "model=mistral".to_string(),
-                "timeout_in_sec=90".to_string(),
+                "inference_timeout_in_sec=90".to_string(),
                 "max_agent_depth=3".to_string(),
+                "max_runtime_in_sec=180".to_string(),
             ]
         );
     }
@@ -567,6 +671,48 @@ mod tests {
         assert_eq!(
             preflight.get_one::<u32>("max_agent_depth").copied(),
             Some(4)
+        );
+    }
+
+    #[test]
+    fn preflight_accepts_max_runtime_override() {
+        let cmd = matches(&[
+            "cargo-ai",
+            "preflight",
+            "--max-runtime-in-sec",
+            "240",
+            "--input-text",
+            "Return 4",
+        ]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        assert_eq!(
+            preflight.get_one::<u64>("max_runtime_in_sec").copied(),
+            Some(240)
+        );
+    }
+
+    #[test]
+    fn preflight_accepts_legacy_timeout_alias() {
+        let cmd = matches(&[
+            "cargo-ai",
+            "preflight",
+            "--timeout_in_sec",
+            "45",
+            "--input-text",
+            "Return 4",
+        ]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        assert_eq!(
+            preflight
+                .get_one::<u64>("inference_timeout_in_sec")
+                .copied(),
+            Some(45)
         );
     }
 

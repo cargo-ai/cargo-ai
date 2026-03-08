@@ -9,7 +9,7 @@ use std::{
     fmt,
     fs::{self, File},
     io::Write,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use serde_json::{Map, Value};
@@ -480,7 +480,17 @@ fn parse_input_specs(inputs: &[Value], base_path: &str) -> Result<Vec<InputSpec>
                 url: get_required_string(entry_obj, "url", &path)?.to_string(),
             },
             "image" => InputSpec::Image {
-                path: get_required_string(entry_obj, "path", &path)?.to_string(),
+                path: {
+                    let image_path = get_required_string(entry_obj, "path", &path)?
+                        .trim()
+                        .to_string();
+                    validate_definition_owned_local_path(
+                        &image_path,
+                        &format!("{path}.path"),
+                        "image input",
+                    )?;
+                    image_path
+                },
             },
             _ => {
                 return Err(BuildError::config(
@@ -656,6 +666,12 @@ fn parse_actions(
                             "must be an explicit relative path such as `./child_agent`",
                         ));
                     }
+                    if path_uses_parent_traversal(Path::new(&agent)) {
+                        return Err(BuildError::config(
+                            format!("{run_path}.agent"),
+                            "must stay at the current level or below; parent traversal (`..`) is not allowed",
+                        ));
+                    }
                     if !contains_explicit_path_separator(&agent) {
                         return Err(BuildError::config(
                             format!("{run_path}.agent"),
@@ -771,6 +787,43 @@ fn parse_string_parts_field(
 
 fn contains_explicit_path_separator(path: &str) -> bool {
     path.contains('/') || path.contains('\\')
+}
+
+fn validate_definition_owned_local_path(
+    raw_path: &str,
+    path: &str,
+    label: &str,
+) -> Result<(), BuildError> {
+    if raw_path.trim().is_empty() {
+        return Err(BuildError::config(
+            path,
+            format!("{label} path must be a non-empty relative path"),
+        ));
+    }
+
+    let candidate = Path::new(raw_path);
+    if candidate.is_absolute() {
+        return Err(BuildError::config(
+            path,
+            format!("{label} path must be relative and stay at the current level or below"),
+        ));
+    }
+
+    if path_uses_parent_traversal(candidate) {
+        return Err(BuildError::config(
+            path,
+            format!(
+                "{label} path must stay at the current level or below; parent traversal (`..`) is not allowed"
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn path_uses_parent_traversal(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
 }
 
 fn parse_run_arg(

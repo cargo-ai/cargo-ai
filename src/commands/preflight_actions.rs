@@ -4,13 +4,23 @@ use crate::config::loader::{config_path, load_config};
 use crate::credentials::store;
 use crate::infra_api;
 use jsonlogic::apply;
-use std::path::Path;
-use std::time::Duration;
+use std::path::{Component, Path};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
 const AGENT_ACTION_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_DEPTH";
 const AGENT_ACTION_MAX_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_MAX_DEPTH";
-const DEFAULT_AGENT_ACTION_TIMEOUT_SECS: u64 = 90;
+const AGENT_ACTION_MAX_RUNTIME_SECS_ENV: &str = "CARGO_AI_AGENT_MAX_RUNTIME_SECS";
+const AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_STARTED_AT_MS";
+const AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_DEADLINE_MS";
+const DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS: u64 = 600;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InvocationRuntimeBudget {
+    pub(crate) max_runtime_secs: u64,
+    pub(crate) started_at_ms: u64,
+    pub(crate) deadline_ms: u64,
+}
 
 #[derive(Debug, Clone)]
 struct AccountAuth {
@@ -30,6 +40,7 @@ pub(crate) async fn apply_actions(
     output: &crate::Output,
     actions: &[crate::Action],
     max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
 ) -> Result<(), String> {
     // println!("DEBUG: Applying actions -> {:?}", actions);
 
@@ -61,11 +72,12 @@ pub(crate) async fn apply_actions(
 
                     for step in matching_steps {
                         if step.kind.eq_ignore_ascii_case("exec") {
-                            run_exec_step(step, &data, &action.name)?;
+                            run_exec_step(step, &data, &action.name, runtime_budget).await?;
                         } else if step.kind.eq_ignore_ascii_case("email_me") {
-                            run_email_me_step(step, &data, &action.name).await?;
+                            run_email_me_step(step, &data, &action.name, runtime_budget).await?;
                         } else if step.kind.eq_ignore_ascii_case("agent") {
-                            run_agent_step(step, &action.name, max_agent_depth).await?;
+                            run_agent_step(step, &action.name, max_agent_depth, runtime_budget)
+                                .await?;
                         } else {
                             eprintln!(
                                 "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
@@ -87,10 +99,11 @@ pub(crate) async fn apply_actions(
     Ok(())
 }
 
-fn run_exec_step(
+async fn run_exec_step(
     step: &crate::RunStep,
     data: &serde_json::Value,
     action_name: &str,
+    runtime_budget: InvocationRuntimeBudget,
 ) -> Result<(), String> {
     let program = step.program.as_deref().ok_or_else(|| {
         format!(
@@ -102,19 +115,36 @@ fn run_exec_step(
     let resolved_args = resolve_run_args(&step.args, data, action_name)?;
     print_action_start(action_name);
 
-    let status = std::process::Command::new(program)
-        .args(&resolved_args)
-        .status();
+    let remaining = remaining_runtime_duration(
+        runtime_budget,
+        &format!("before starting command '{}'", program),
+    )
+    .map_err(|context| {
+        action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
+    })?;
 
-    match status {
-        Ok(status) if status.success() => {
+    let mut child = tokio::process::Command::new(program)
+        .args(&resolved_args)
+        .spawn()
+        .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
+
+    match tokio::time::timeout(remaining, child.wait()).await {
+        Ok(Ok(status)) if status.success() => {
             print_action_success(action_name, "completed");
         }
-        Ok(status) => {
+        Ok(Ok(status)) => {
             println!("{action_name}: command exited with status {status}.");
         }
-        Err(err) => {
-            println!("{action_name}: failed to execute command: {err}.");
+        Ok(Err(error)) => {
+            println!("{action_name}: failed while waiting for command: {error}.");
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            return Err(action_runtime_timeout_message(
+                action_name,
+                runtime_budget,
+                &format!("while waiting for command '{}'", program),
+            ));
         }
     }
 
@@ -125,6 +155,7 @@ async fn run_email_me_step(
     step: &crate::RunStep,
     data: &serde_json::Value,
     action_name: &str,
+    runtime_budget: InvocationRuntimeBudget,
 ) -> Result<(), String> {
     let subject_parts = step.subject.as_deref().ok_or_else(|| {
         format!(
@@ -143,93 +174,118 @@ async fn run_email_me_step(
     let text = resolve_string_parts(text_parts, data, action_name, "text")?;
     print_action_start(action_name);
 
-    let auth = load_account_auth()?;
-    let access_token_owned = auth.access_token;
-    let refresh_token = auth.refresh_token;
+    let remaining =
+        remaining_runtime_duration(runtime_budget, "before sending email").map_err(|context| {
+            action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
+        })?;
 
-    let mut response = infra_api::account::send_mail::send_test_mail(
-        INFRA_BASE_URL,
-        access_token_owned.as_str(),
-        subject.as_str(),
-        text.as_str(),
-    )
-    .await
-    .map_err(|error| format!("Request failed: {error:?}"))?;
+    let response = tokio::time::timeout(remaining, async {
+        let auth = load_account_auth()?;
+        let access_token_owned = auth.access_token;
+        let refresh_token = auth.refresh_token;
 
-    let is_expired_error = response
-        .get("type")
-        .and_then(|v| v.as_str())
-        .map(|t| t == "access_token_expired")
-        .unwrap_or(false);
-
-    if is_expired_error {
-        response = match refresh_access_token_for_retry(
+        let mut response = infra_api::account::send_mail::send_test_mail(
+            INFRA_BASE_URL,
             access_token_owned.as_str(),
-            refresh_token.as_deref(),
+            subject.as_str(),
+            text.as_str(),
         )
         .await
-        {
-            Err(RefreshAccessError::MissingRefreshToken) => {
-                return Err(
-                    "Access token expired, and no refresh token exists in credential store. Run `cargo ai account status` or re-confirm account."
-                        .to_string(),
-                );
-            }
-            Err(RefreshAccessError::RequestFailed(error)) => {
-                return Err(format!("Request failed while refreshing session: {error}"));
-            }
-            Err(RefreshAccessError::MissingRefreshedToken(refresh_response)) => {
-                return Err(format_backend_error_message(&refresh_response).unwrap_or_else(|| {
-                    "Session refresh did not return a new access token. Cannot retry email_me action."
-                        .to_string()
-                }));
-            }
-            Ok((retry_access_token, refreshed_expires_in)) => {
-                if let Some(rt) = refresh_token.as_deref() {
-                    persist_refreshed_access_token(
-                        retry_access_token.as_str(),
-                        rt,
-                        refreshed_expires_in,
+        .map_err(|error| format!("Request failed: {error:?}"))?;
+
+        let is_expired_error = response
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|t| t == "access_token_expired")
+            .unwrap_or(false);
+
+        if is_expired_error {
+            response = match refresh_access_token_for_retry(
+                access_token_owned.as_str(),
+                refresh_token.as_deref(),
+            )
+            .await
+            {
+                Err(RefreshAccessError::MissingRefreshToken) => {
+                    return Err(
+                        "Access token expired, and no refresh token exists in credential store. Run `cargo ai account status` or re-confirm account."
+                            .to_string(),
                     );
                 }
+                Err(RefreshAccessError::RequestFailed(error)) => {
+                    return Err(format!("Request failed while refreshing session: {error}"));
+                }
+                Err(RefreshAccessError::MissingRefreshedToken(refresh_response)) => {
+                    return Err(
+                        format_backend_error_message(&refresh_response).unwrap_or_else(|| {
+                            "Session refresh did not return a new access token. Cannot retry email_me action."
+                                .to_string()
+                        }),
+                    );
+                }
+                Ok((retry_access_token, refreshed_expires_in)) => {
+                    if let Some(rt) = refresh_token.as_deref() {
+                        persist_refreshed_access_token(
+                            retry_access_token.as_str(),
+                            rt,
+                            refreshed_expires_in,
+                        );
+                    }
 
-                infra_api::account::send_mail::send_test_mail(
-                    INFRA_BASE_URL,
-                    retry_access_token.as_str(),
-                    subject.as_str(),
-                    text.as_str(),
+                    infra_api::account::send_mail::send_test_mail(
+                        INFRA_BASE_URL,
+                        retry_access_token.as_str(),
+                        subject.as_str(),
+                        text.as_str(),
+                    )
+                    .await
+                    .map_err(|error| format!("Request failed after session refresh: {error:?}"))?
+                }
+            };
+        }
+
+        let succeeded = response
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(|status| status.eq_ignore_ascii_case("success"))
+            .unwrap_or(false);
+
+        if succeeded {
+            Ok(response)
+        } else {
+            Err(format_backend_error_message(&response).unwrap_or_else(|| {
+                format!(
+                    "Action '{}' email_me request failed.\n{}",
+                    action_name,
+                    pretty_backend_json(&response)
                 )
-                .await
-                .map_err(|error| format!("Request failed after session refresh: {error:?}"))?
-            }
-        };
-    }
+            }))
+        }
+    })
+    .await;
 
-    let succeeded = response
-        .get("status")
-        .and_then(|v| v.as_str())
-        .map(|status| status.eq_ignore_ascii_case("success"))
-        .unwrap_or(false);
-
-    if succeeded {
-        print_action_success(action_name, "email sent");
-        render_backend_ui_or_json(&response);
-        Ok(())
-    } else {
-        Err(format_backend_error_message(&response).unwrap_or_else(|| {
-            format!(
-                "Action '{}' email_me request failed.\n{}",
+    let response = match response {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => return Err(error),
+        Err(_) => {
+            return Err(action_runtime_timeout_message(
                 action_name,
-                pretty_backend_json(&response)
-            )
-        }))
-    }
+                runtime_budget,
+                "while sending email",
+            ));
+        }
+    };
+
+    print_action_success(action_name, "email sent");
+    render_backend_ui_or_json(&response);
+    Ok(())
 }
 
 async fn run_agent_step(
     step: &crate::RunStep,
     action_name: &str,
     max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
 ) -> Result<(), String> {
     let agent = step.agent.as_deref().ok_or_else(|| {
         format!(
@@ -256,8 +312,28 @@ async fn run_agent_step(
     }
     command.env(AGENT_ACTION_DEPTH_ENV, (current_depth + 1).to_string());
     command.env(AGENT_ACTION_MAX_DEPTH_ENV, max_agent_depth.to_string());
+    command.env(
+        AGENT_ACTION_MAX_RUNTIME_SECS_ENV,
+        runtime_budget.max_runtime_secs.to_string(),
+    );
+    command.env(
+        AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV,
+        runtime_budget.started_at_ms.to_string(),
+    );
+    command.env(
+        AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV,
+        runtime_budget.deadline_ms.to_string(),
+    );
 
     print_action_start(action_name);
+
+    let remaining = remaining_runtime_duration(
+        runtime_budget,
+        &format!("before starting child agent '{}'", agent),
+    )
+    .map_err(|context| {
+        action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
+    })?;
 
     let mut child = command.spawn().map_err(|error| {
         format!(
@@ -266,29 +342,35 @@ async fn run_agent_step(
         )
     })?;
 
-    match tokio::time::timeout(
-        Duration::from_secs(DEFAULT_AGENT_ACTION_TIMEOUT_SECS),
-        child.wait(),
-    )
-    .await
-    {
+    match tokio::time::timeout(remaining, child.wait()).await {
         Ok(Ok(status)) if status.success() => {
             print_action_success(action_name, "completed");
             Ok(())
         }
         Ok(Ok(status)) => Err(format!(
-            "Action '{}' child agent '{}' exited with status {}.",
-            action_name, agent, status
+            "Action '{}' child agent '{}' exited with status {} at depth {}.",
+            action_name,
+            agent,
+            status,
+            current_depth + 1
         )),
         Ok(Err(error)) => Err(format!(
-            "Action '{}' failed while waiting for child agent '{}': {}",
-            action_name, agent, error
+            "Action '{}' failed while waiting for child agent '{}' at depth {}: {}",
+            action_name,
+            agent,
+            current_depth + 1,
+            error
         )),
         Err(_) => {
             let _ = child.kill().await;
-            Err(format!(
-                "Action '{}' child agent '{}' timed out after {} seconds.",
-                action_name, agent, DEFAULT_AGENT_ACTION_TIMEOUT_SECS
+            Err(action_runtime_timeout_message(
+                action_name,
+                runtime_budget,
+                &format!(
+                    "while waiting for child agent '{}' at depth {}",
+                    agent,
+                    current_depth + 1
+                ),
             ))
         }
     }
@@ -576,11 +658,99 @@ fn persist_refreshed_access_token(
     }
 }
 
+fn current_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn new_runtime_budget(max_runtime_secs: u64) -> InvocationRuntimeBudget {
+    let started_at_ms = current_time_millis();
+    InvocationRuntimeBudget {
+        max_runtime_secs,
+        started_at_ms,
+        deadline_ms: started_at_ms.saturating_add(max_runtime_secs.saturating_mul(1000)),
+    }
+}
+
+fn inherited_agent_action_runtime_budget() -> Option<InvocationRuntimeBudget> {
+    let max_runtime_secs = std::env::var(AGENT_ACTION_MAX_RUNTIME_SECS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())?;
+    let started_at_ms = std::env::var(AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())?;
+    let deadline_ms = std::env::var(AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())?;
+
+    Some(InvocationRuntimeBudget {
+        max_runtime_secs,
+        started_at_ms,
+        deadline_ms,
+    })
+}
+
+pub(crate) fn configured_agent_action_runtime_budget(
+    cli_override: Option<u64>,
+) -> InvocationRuntimeBudget {
+    cli_override
+        .map(new_runtime_budget)
+        .or_else(inherited_agent_action_runtime_budget)
+        .unwrap_or_else(|| new_runtime_budget(DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS))
+}
+
+fn remaining_runtime_duration(
+    runtime_budget: InvocationRuntimeBudget,
+    exhausted_context: &str,
+) -> Result<Duration, String> {
+    let now = current_time_millis();
+    if now >= runtime_budget.deadline_ms {
+        return Err(exhausted_context.to_string());
+    }
+
+    Ok(Duration::from_millis(
+        runtime_budget.deadline_ms.saturating_sub(now),
+    ))
+}
+
+fn elapsed_runtime_secs(runtime_budget: InvocationRuntimeBudget) -> u64 {
+    current_time_millis()
+        .saturating_sub(runtime_budget.started_at_ms)
+        .div_ceil(1000)
+}
+
+fn action_runtime_timeout_message(
+    action_name: &str,
+    runtime_budget: InvocationRuntimeBudget,
+    context: &str,
+) -> String {
+    format!(
+        "Action '{}' exceeded max-runtime-in-sec {} after {} seconds {}.",
+        action_name,
+        runtime_budget.max_runtime_secs,
+        elapsed_runtime_secs(runtime_budget),
+        context
+    )
+}
+
 fn validate_agent_step_target(agent: &str, action_name: &str) -> Result<(), String> {
     let agent_path = Path::new(agent);
     if agent_path.is_absolute() {
         return Err(format!(
             "Action '{}' agent step target '{}' must be an explicit relative path such as './child_agent'.",
+            action_name, agent
+        ));
+    }
+
+    if agent_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "Action '{}' agent step target '{}' must stay at the current level or below; parent traversal (`..`) is not allowed.",
             action_name, agent
         ));
     }
@@ -750,9 +920,9 @@ fn resolve_run_arg(
 #[cfg(test)]
 mod tests {
     use super::{
-        child_input_args, format_backend_error_message, format_backend_ui_message,
-        matching_run_steps, resolve_run_args, resolve_string_parts, run_agent_step,
-        step_matches_platform, validate_agent_action_depth,
+        child_input_args, configured_agent_action_runtime_budget, format_backend_error_message,
+        format_backend_ui_message, matching_run_steps, resolve_run_args, resolve_string_parts,
+        run_agent_step, step_matches_platform, validate_agent_action_depth,
     };
     use serde_json::json;
 
@@ -953,7 +1123,8 @@ mod tests {
             platforms: None,
         };
 
-        let result = run_agent_step(&step, "invoke_child", 5).await;
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_agent_step(&step, "invoke_child", 5, runtime_budget).await;
 
         let _ = fs::remove_file(&script_path);
 
@@ -980,7 +1151,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn agent_step_inherits_max_depth_for_child_processes() {
+    async fn agent_step_inherits_max_depth_and_runtime_budget_for_child_processes() {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
@@ -991,7 +1162,7 @@ mod tests {
             std::env::temp_dir().join(format!("cai2032-agent-depth-{}.txt", std::process::id()));
 
         let script_body = format!(
-            "#!/bin/sh\nprintf '%s' \"$CARGO_AI_AGENT_ACTION_MAX_DEPTH\" > \"{}\"\n",
+            "#!/bin/sh\nprintf '%s\\n%s' \"$CARGO_AI_AGENT_ACTION_MAX_DEPTH\" \"$CARGO_AI_AGENT_MAX_RUNTIME_SECS\" > \"{}\"\n",
             output_path.display()
         );
 
@@ -1013,7 +1184,8 @@ mod tests {
             platforms: None,
         };
 
-        let result = run_agent_step(&step, "invoke_child", 7).await;
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_agent_step(&step, "invoke_child", 7, runtime_budget).await;
 
         let _ = fs::remove_file(&script_path);
 
@@ -1022,11 +1194,14 @@ mod tests {
             "child agent invocation should succeed: {result:?}"
         );
 
-        let inherited_depth =
+        let inherited_values =
             fs::read_to_string(&output_path).expect("child output should be captured");
         let _ = fs::remove_file(&output_path);
 
-        assert_eq!(inherited_depth, "7");
+        assert_eq!(
+            inherited_values.lines().collect::<Vec<_>>(),
+            vec!["7", "600"]
+        );
     }
 
     #[tokio::test]
@@ -1042,12 +1217,75 @@ mod tests {
             platforms: None,
         };
 
-        let error = run_agent_step(&step, "invoke_child", 5)
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = run_agent_step(&step, "invoke_child", 5, runtime_budget)
             .await
             .expect_err("bare child agent names should be rejected");
 
         assert!(error.contains("explicit relative path"));
         assert!(error.contains("PATH"));
+    }
+
+    #[tokio::test]
+    async fn agent_step_rejects_parent_traversal_path() {
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            args: Vec::new(),
+            subject: None,
+            text: None,
+            agent: Some("./../child_agent".to_string()),
+            inputs: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = run_agent_step(&step, "invoke_child", 5, runtime_budget)
+            .await
+            .expect_err("parent traversal should be rejected");
+
+        assert!(error.contains("parent traversal"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_step_times_out_against_invocation_budget() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2032-agent-timeout-child-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+
+        let script_body = "#!/bin/sh\nsleep 2\n";
+
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            args: Vec::new(),
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", script_name)),
+            inputs: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(1));
+        let error = run_agent_step(&step, "invoke_child", 5, runtime_budget)
+            .await
+            .expect_err("runtime budget should time out the child");
+
+        let _ = fs::remove_file(&script_path);
+
+        assert!(error.contains("max-runtime-in-sec 1"));
+        assert!(error.contains("while waiting for child agent"));
     }
 
     #[test]
