@@ -1087,7 +1087,7 @@ async fn main() {
     }
 }
 
-pub async fn apply_actions(
+async fn apply_actions(
     output: &Output,
     actions: &[Action],
     config: Option<&config::schema::Config>,
