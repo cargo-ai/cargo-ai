@@ -71,6 +71,13 @@ struct InvocationRuntimeBudget {
     deadline_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepExecutionOutcome {
+    Completed,
+    SoftFailureLogged,
+    SuccessAlreadyPrinted,
+}
+
 #[derive(Debug, Clone)]
 struct AccountAuth {
     access_token: String,
@@ -1106,24 +1113,47 @@ async fn apply_actions(
                         "⚠️ No run steps matched the current platform for action '{}' (current platform: {}).",
                         action.name,
                         current_platform.unwrap_or("unsupported")
-                    );
+                        );
                     continue;
                 }
 
+                print_action_start(&action.name);
+                let single_step_action = matching_steps.len() == 1;
+                let mut outcomes = Vec::with_capacity(matching_steps.len());
+
                 for step in matching_steps {
                     if step.kind.eq_ignore_ascii_case("exec") {
-                        run_exec_step(step, &data, &action.name, runtime_budget).await?;
+                        outcomes.push(
+                            run_exec_step(step, &data, &action.name, runtime_budget).await?,
+                        );
                     } else if step.kind.eq_ignore_ascii_case("email_me") {
-                        run_email_me_step(step, &data, &action.name, config, runtime_budget)
-                            .await?;
+                        outcomes.push(
+                            run_email_me_step(
+                                step,
+                                &data,
+                                &action.name,
+                                config,
+                                runtime_budget,
+                                single_step_action,
+                            )
+                            .await?,
+                        );
                     } else if step.kind.eq_ignore_ascii_case("agent") {
-                        run_agent_step(step, &action.name, max_agent_depth, runtime_budget).await?;
+                        outcomes.push(
+                            run_agent_step(step, &action.name, max_agent_depth, runtime_budget)
+                                .await?,
+                        );
                     } else {
                         println!(
                             "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
                             action.name, step.kind
                         );
+                        outcomes.push(StepExecutionOutcome::SoftFailureLogged);
                     }
+                }
+
+                if let Some(summary) = action_completion_summary(&outcomes) {
+                    print_action_success(&action.name, summary);
                 }
             }
         } else {
@@ -1139,7 +1169,7 @@ async fn run_exec_step(
     data: &serde_json::Value,
     action_name: &str,
     runtime_budget: InvocationRuntimeBudget,
-) -> Result<(), String> {
+) -> Result<StepExecutionOutcome, String> {
     let program = step.program.as_deref().ok_or_else(|| {
         format!(
             "Action '{}' exec step is missing required `program`.",
@@ -1148,7 +1178,6 @@ async fn run_exec_step(
     })?;
 
     let resolved_args = resolve_run_args(&step.args, data, action_name)?;
-    print_action_start(action_name);
 
     let remaining = remaining_runtime_duration(
         runtime_budget,
@@ -1164,26 +1193,24 @@ async fn run_exec_step(
         .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
 
     match tokio::time::timeout(remaining, child.wait()).await {
-        Ok(Ok(status)) if status.success() => {
-            print_action_success(action_name, "completed");
-        }
+        Ok(Ok(status)) if status.success() => Ok(StepExecutionOutcome::Completed),
         Ok(Ok(status)) => {
             println!("{action_name}: command exited with status {status}.");
+            Ok(StepExecutionOutcome::SoftFailureLogged)
         }
         Ok(Err(error)) => {
             println!("{action_name}: failed while waiting for command: {error}.");
+            Ok(StepExecutionOutcome::SoftFailureLogged)
         }
         Err(_) => {
             let _ = child.kill().await;
-            return Err(action_runtime_timeout_message(
+            Err(action_runtime_timeout_message(
                 action_name,
                 runtime_budget,
                 &format!("while waiting for command '{}'", program),
-            ));
+            ))
         }
     }
-
-    Ok(())
 }
 
 async fn run_email_me_step(
@@ -1192,7 +1219,8 @@ async fn run_email_me_step(
     action_name: &str,
     config: Option<&config::schema::Config>,
     runtime_budget: InvocationRuntimeBudget,
-) -> Result<(), String> {
+    single_step_action: bool,
+) -> Result<StepExecutionOutcome, String> {
     let subject_parts = step.subject.as_deref().ok_or_else(|| {
         format!(
             "Action '{}' email_me step is missing required `subject`.",
@@ -1208,7 +1236,6 @@ async fn run_email_me_step(
 
     let subject = resolve_string_parts(subject_parts, data, action_name, "subject")?;
     let text = resolve_string_parts(text_parts, data, action_name, "text")?;
-    print_action_start(action_name);
 
     let remaining =
         remaining_runtime_duration(runtime_budget, "before sending email").map_err(|context| {
@@ -1232,8 +1259,14 @@ async fn run_email_me_step(
         }
     }
 
-    print_action_success(action_name, "email sent");
-    Ok(())
+    if single_step_action {
+        print_action_success(action_name, "email sent");
+    }
+    Ok(if single_step_action {
+        StepExecutionOutcome::SuccessAlreadyPrinted
+    } else {
+        StepExecutionOutcome::Completed
+    })
 }
 
 async fn run_agent_step(
@@ -1241,7 +1274,7 @@ async fn run_agent_step(
     action_name: &str,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
-) -> Result<(), String> {
+) -> Result<StepExecutionOutcome, String> {
     let agent = step.agent.as_deref().ok_or_else(|| {
         format!(
             "Action '{}' agent step is missing required `agent`.",
@@ -1280,8 +1313,6 @@ async fn run_agent_step(
         runtime_budget.deadline_ms.to_string(),
     );
 
-    print_action_start(action_name);
-
     let remaining = remaining_runtime_duration(
         runtime_budget,
         &format!("before starting child agent '{}'", agent),
@@ -1302,10 +1333,7 @@ async fn run_agent_step(
     })?;
 
     match tokio::time::timeout(remaining, child.wait()).await {
-        Ok(Ok(status)) if status.success() => {
-            print_action_success(action_name, "completed");
-            Ok(())
-        }
+        Ok(Ok(status)) if status.success() => Ok(StepExecutionOutcome::Completed),
         Ok(Ok(status)) => Err(format!(
             "Action '{}' child agent '{}' exited with status {} at depth {}.",
             action_name,
@@ -1328,6 +1356,21 @@ async fn run_agent_step(
                 &format!("while waiting for child agent '{}' at depth {}", agent, current_depth + 1),
             ))
         }
+    }
+}
+
+fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'static str> {
+    if outcomes.is_empty()
+        || outcomes.iter().any(|outcome| {
+            matches!(
+                outcome,
+                StepExecutionOutcome::SoftFailureLogged | StepExecutionOutcome::SuccessAlreadyPrinted
+            )
+        })
+    {
+        None
+    } else {
+        Some("completed")
     }
 }
 
