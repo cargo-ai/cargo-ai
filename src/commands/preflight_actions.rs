@@ -1,8 +1,54 @@
 //! Action execution helpers for preflight/test flows.
+use crate::config::adder::set_account_tokens;
+use crate::config::loader::{config_path, load_config};
+use crate::credentials::store;
+use crate::infra_api;
 use jsonlogic::apply;
+use std::path::{Component, Path};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
+const AGENT_ACTION_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_DEPTH";
+const AGENT_ACTION_MAX_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_MAX_DEPTH";
+const AGENT_ACTION_MAX_RUNTIME_SECS_ENV: &str = "CARGO_AI_AGENT_MAX_RUNTIME_SECS";
+const AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_STARTED_AT_MS";
+const AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_DEADLINE_MS";
+const DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS: u64 = 600;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InvocationRuntimeBudget {
+    pub(crate) max_runtime_secs: u64,
+    pub(crate) started_at_ms: u64,
+    pub(crate) deadline_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepExecutionOutcome {
+    Completed,
+    SoftFailureLogged,
+    SuccessAlreadyPrinted,
+}
+
+#[derive(Debug, Clone)]
+struct AccountAuth {
+    access_token: String,
+    refresh_token: Option<String>,
+}
+
+#[derive(Debug)]
+enum RefreshAccessError {
+    MissingRefreshToken,
+    RequestFailed(String),
+    MissingRefreshedToken(serde_json::Value),
+}
 
 /// Applies configured action rules to model output and executes matching steps.
-pub(crate) fn apply_actions(output: &crate::Output, actions: &[crate::Action]) -> Result<(), String> {
+pub(crate) async fn apply_actions(
+    output: &crate::Output,
+    actions: &[crate::Action],
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+) -> Result<(), String> {
     // println!("DEBUG: Applying actions -> {:?}", actions);
 
     let data = match serde_json::to_value(output) {
@@ -31,37 +77,42 @@ pub(crate) fn apply_actions(output: &crate::Output, actions: &[crate::Action]) -
                         continue;
                     }
 
+                    print_action_start(&action.name);
+                    let single_step_action = matching_steps.len() == 1;
+                    let mut outcomes = Vec::with_capacity(matching_steps.len());
+
                     for step in matching_steps {
-                        if !step.kind.eq_ignore_ascii_case("exec") {
+                        if step.kind.eq_ignore_ascii_case("exec") {
+                            outcomes.push(
+                                run_exec_step(step, &data, &action.name, runtime_budget).await?,
+                            );
+                        } else if step.kind.eq_ignore_ascii_case("email_me") {
+                            outcomes.push(
+                                run_email_me_step(
+                                    step,
+                                    &data,
+                                    &action.name,
+                                    runtime_budget,
+                                    single_step_action,
+                                )
+                                .await?,
+                            );
+                        } else if step.kind.eq_ignore_ascii_case("agent") {
+                            outcomes.push(
+                                run_agent_step(step, &action.name, max_agent_depth, runtime_budget)
+                                    .await?,
+                            );
+                        } else {
                             eprintln!(
                                 "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
                                 action.name, step.kind
                             );
-                            continue;
+                            outcomes.push(StepExecutionOutcome::SoftFailureLogged);
                         }
+                    }
 
-                        let resolved_args = resolve_run_args(&step.args, &data, &action.name)?;
-                        println!(
-                            "Running '{}': {} {:?}",
-                            action.name, step.program, resolved_args
-                        );
-
-                        // Execute the command
-                        let status = std::process::Command::new(&step.program)
-                            .args(&resolved_args)
-                            .status();
-
-                        match status {
-                            Ok(status) if status.success() => {
-                                println!("Command completed successfully.");
-                            }
-                            Ok(status) => {
-                                println!("Command exited with status: {}", status);
-                            }
-                            Err(err) => {
-                                println!("Failed to execute command: {}", err);
-                            }
-                        }
+                    if let Some(summary) = action_completion_summary(&outcomes) {
+                        print_action_success(&action.name, summary);
                     }
                 }
             }
@@ -72,6 +123,705 @@ pub(crate) fn apply_actions(output: &crate::Output, actions: &[crate::Action]) -
                 );
             }
         }
+    }
+
+    Ok(())
+}
+
+async fn run_exec_step(
+    step: &crate::RunStep,
+    data: &serde_json::Value,
+    action_name: &str,
+    runtime_budget: InvocationRuntimeBudget,
+) -> Result<StepExecutionOutcome, String> {
+    let program = step.program.as_deref().ok_or_else(|| {
+        format!(
+            "Action '{}' exec step is missing required `program`.",
+            action_name
+        )
+    })?;
+
+    let resolved_args = resolve_run_args(&step.args, data, action_name)?;
+
+    let remaining = remaining_runtime_duration(
+        runtime_budget,
+        &format!("before starting command '{}'", program),
+    )
+    .map_err(|context| {
+        action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
+    })?;
+
+    let mut child = tokio::process::Command::new(program)
+        .args(&resolved_args)
+        .spawn()
+        .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
+
+    match tokio::time::timeout(remaining, child.wait()).await {
+        Ok(Ok(status)) if status.success() => Ok(StepExecutionOutcome::Completed),
+        Ok(Ok(status)) => {
+            println!("{action_name}: command exited with status {status}.");
+            Ok(StepExecutionOutcome::SoftFailureLogged)
+        }
+        Ok(Err(error)) => {
+            println!("{action_name}: failed while waiting for command: {error}.");
+            Ok(StepExecutionOutcome::SoftFailureLogged)
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            Err(action_runtime_timeout_message(
+                action_name,
+                runtime_budget,
+                &format!("while waiting for command '{}'", program),
+            ))
+        }
+    }
+}
+
+async fn run_email_me_step(
+    step: &crate::RunStep,
+    data: &serde_json::Value,
+    action_name: &str,
+    runtime_budget: InvocationRuntimeBudget,
+    single_step_action: bool,
+) -> Result<StepExecutionOutcome, String> {
+    let subject_parts = step.subject.as_deref().ok_or_else(|| {
+        format!(
+            "Action '{}' email_me step is missing required `subject`.",
+            action_name
+        )
+    })?;
+    let text_parts = step.text.as_deref().ok_or_else(|| {
+        format!(
+            "Action '{}' email_me step is missing required `text`.",
+            action_name
+        )
+    })?;
+
+    let subject = resolve_string_parts(subject_parts, data, action_name, "subject")?;
+    let text = resolve_string_parts(text_parts, data, action_name, "text")?;
+
+    let remaining =
+        remaining_runtime_duration(runtime_budget, "before sending email").map_err(|context| {
+            action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
+        })?;
+
+    let response = tokio::time::timeout(remaining, async {
+        let auth = load_account_auth()?;
+        let access_token_owned = auth.access_token;
+        let refresh_token = auth.refresh_token;
+
+        let mut response = infra_api::account::send_mail::send_test_mail(
+            INFRA_BASE_URL,
+            access_token_owned.as_str(),
+            subject.as_str(),
+            text.as_str(),
+        )
+        .await
+        .map_err(|error| format!("Request failed: {error:?}"))?;
+
+        let is_expired_error = response
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|t| t == "access_token_expired")
+            .unwrap_or(false);
+
+        if is_expired_error {
+            response = match refresh_access_token_for_retry(
+                access_token_owned.as_str(),
+                refresh_token.as_deref(),
+            )
+            .await
+            {
+                Err(RefreshAccessError::MissingRefreshToken) => {
+                    return Err(
+                        "Access token expired, and no refresh token exists in credential store. Run `cargo ai account status` or re-confirm account."
+                            .to_string(),
+                    );
+                }
+                Err(RefreshAccessError::RequestFailed(error)) => {
+                    return Err(format!("Request failed while refreshing session: {error}"));
+                }
+                Err(RefreshAccessError::MissingRefreshedToken(refresh_response)) => {
+                    return Err(
+                        format_backend_error_message(&refresh_response).unwrap_or_else(|| {
+                            "Session refresh did not return a new access token. Cannot retry email_me action."
+                                .to_string()
+                        }),
+                    );
+                }
+                Ok((retry_access_token, refreshed_expires_in)) => {
+                    if let Some(rt) = refresh_token.as_deref() {
+                        persist_refreshed_access_token(
+                            retry_access_token.as_str(),
+                            rt,
+                            refreshed_expires_in,
+                        );
+                    }
+
+                    infra_api::account::send_mail::send_test_mail(
+                        INFRA_BASE_URL,
+                        retry_access_token.as_str(),
+                        subject.as_str(),
+                        text.as_str(),
+                    )
+                    .await
+                    .map_err(|error| format!("Request failed after session refresh: {error:?}"))?
+                }
+            };
+        }
+
+        let succeeded = response
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(|status| status.eq_ignore_ascii_case("success"))
+            .unwrap_or(false);
+
+        if succeeded {
+            Ok(response)
+        } else {
+            Err(format_backend_error_message(&response).unwrap_or_else(|| {
+                format!(
+                    "Action '{}' email_me request failed.\n{}",
+                    action_name,
+                    pretty_backend_json(&response)
+                )
+            }))
+        }
+    })
+    .await;
+
+    let response = match response {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => return Err(error),
+        Err(_) => {
+            return Err(action_runtime_timeout_message(
+                action_name,
+                runtime_budget,
+                "while sending email",
+            ));
+        }
+    };
+
+    if single_step_action {
+        print_action_success(action_name, "email sent");
+    }
+    render_backend_ui_or_json(&response);
+    Ok(if single_step_action {
+        StepExecutionOutcome::SuccessAlreadyPrinted
+    } else {
+        StepExecutionOutcome::Completed
+    })
+}
+
+async fn run_agent_step(
+    step: &crate::RunStep,
+    action_name: &str,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+) -> Result<StepExecutionOutcome, String> {
+    let agent = step.agent.as_deref().ok_or_else(|| {
+        format!(
+            "Action '{}' agent step is missing required `agent`.",
+            action_name
+        )
+    })?;
+
+    let current_depth = current_agent_action_depth();
+    validate_agent_action_depth(current_depth, max_agent_depth, action_name)?;
+
+    validate_agent_step_target(agent, action_name)?;
+    let agent_path = Path::new(agent);
+    if !agent_path.exists() {
+        return Err(format!(
+            "Action '{}' agent step target '{}' was not found relative to the current working directory.",
+            action_name, agent
+        ));
+    }
+
+    let mut command = tokio::process::Command::new(agent_path);
+    for argument in child_input_args(step.inputs.as_deref()) {
+        command.arg(argument);
+    }
+    command.env(AGENT_ACTION_DEPTH_ENV, (current_depth + 1).to_string());
+    command.env(AGENT_ACTION_MAX_DEPTH_ENV, max_agent_depth.to_string());
+    command.env(
+        AGENT_ACTION_MAX_RUNTIME_SECS_ENV,
+        runtime_budget.max_runtime_secs.to_string(),
+    );
+    command.env(
+        AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV,
+        runtime_budget.started_at_ms.to_string(),
+    );
+    command.env(
+        AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV,
+        runtime_budget.deadline_ms.to_string(),
+    );
+
+    let remaining = remaining_runtime_duration(
+        runtime_budget,
+        &format!("before starting child agent '{}'", agent),
+    )
+    .map_err(|context| {
+        action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
+    })?;
+
+    let mut child = command.spawn().map_err(|error| {
+        format!(
+            "Action '{}' failed to start child agent '{}': {}",
+            action_name, agent, error
+        )
+    })?;
+
+    match tokio::time::timeout(remaining, child.wait()).await {
+        Ok(Ok(status)) if status.success() => Ok(StepExecutionOutcome::Completed),
+        Ok(Ok(status)) => Err(format!(
+            "Action '{}' child agent '{}' exited with status {} at depth {}.",
+            action_name,
+            agent,
+            status,
+            current_depth + 1
+        )),
+        Ok(Err(error)) => Err(format!(
+            "Action '{}' failed while waiting for child agent '{}' at depth {}: {}",
+            action_name,
+            agent,
+            current_depth + 1,
+            error
+        )),
+        Err(_) => {
+            let _ = child.kill().await;
+            Err(action_runtime_timeout_message(
+                action_name,
+                runtime_budget,
+                &format!(
+                    "while waiting for child agent '{}' at depth {}",
+                    agent,
+                    current_depth + 1
+                ),
+            ))
+        }
+    }
+}
+
+fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'static str> {
+    if outcomes.is_empty()
+        || outcomes.iter().any(|outcome| {
+            matches!(
+                outcome,
+                StepExecutionOutcome::SoftFailureLogged
+                    | StepExecutionOutcome::SuccessAlreadyPrinted
+            )
+        })
+    {
+        None
+    } else {
+        Some("completed")
+    }
+}
+
+fn print_action_start(action_name: &str) {
+    println!("Running action: {}", action_name);
+}
+
+fn print_action_success(action_name: &str, summary: &str) {
+    println!("{action_name}: {summary}.");
+}
+
+fn render_backend_ui_or_json(response: &serde_json::Value) {
+    if let Some(message) = format_backend_ui_message(response, true) {
+        println!("{message}");
+    } else {
+        println!("{}", pretty_backend_json(response));
+    }
+}
+
+fn format_backend_error_message(response: &serde_json::Value) -> Option<String> {
+    format_backend_ui_message(response, false)
+}
+
+fn format_backend_ui_message(
+    response: &serde_json::Value,
+    include_kind_prefix: bool,
+) -> Option<String> {
+    let ui = response.get("ui")?;
+    if ui.get("schema").and_then(|value| value.as_str()) != Some("1.0") {
+        return None;
+    }
+
+    let kind = ui
+        .get("kind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("info");
+    let title = ui
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Status");
+    let summary = ui
+        .get("summary")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Status response received.");
+
+    let mut lines = Vec::new();
+    if include_kind_prefix {
+        let kind_prefix = match kind {
+            "success" => "✅",
+            "error" => "⚠️",
+            "failure" => "❌",
+            _ => "ℹ️",
+        };
+        lines.push(format!("{kind_prefix} {title}"));
+    } else {
+        lines.push(title.to_string());
+    }
+    lines.push(summary.to_string());
+
+    if let Some(variant) = ui.get("variant").and_then(|value| value.as_str()) {
+        if !variant.trim().is_empty() {
+            lines.push(format!("Variant: {variant}"));
+        }
+    }
+
+    if let Some(sections) = ui.get("sections").and_then(|value| value.as_array()) {
+        for section in sections {
+            append_backend_section_lines(section, &mut lines);
+        }
+    }
+
+    if let Some(actions) = ui.get("actions").and_then(|value| value.as_array()) {
+        let action_lines = actions
+            .iter()
+            .filter_map(|action| {
+                let label = action
+                    .get("label")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let command = action
+                    .get("command")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+
+                if label.is_empty() && command.is_empty() {
+                    None
+                } else if !label.is_empty() && !command.is_empty() {
+                    Some(format!("- {}: {}", label, command))
+                } else if !label.is_empty() {
+                    Some(format!("- {}", label))
+                } else {
+                    Some(format!("- {}", command))
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if !action_lines.is_empty() {
+            lines.push(String::new());
+            lines.push("Actions:".to_string());
+            lines.extend(action_lines);
+        }
+    }
+
+    if let Some(next_steps) = ui.get("next_steps").and_then(|value| value.as_array()) {
+        let step_lines = next_steps
+            .iter()
+            .filter_map(|step| step.as_str())
+            .map(str::trim)
+            .filter(|step| !step.is_empty())
+            .map(|step| format!("- {}", step))
+            .collect::<Vec<_>>();
+
+        if !step_lines.is_empty() {
+            lines.push(String::new());
+            lines.push("Next steps:".to_string());
+            lines.extend(step_lines);
+        }
+    }
+
+    Some(lines.join("\n"))
+}
+
+fn append_backend_section_lines(section: &serde_json::Value, lines: &mut Vec<String>) {
+    let section_type = section
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let title = section
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+
+    if !title.is_empty() {
+        lines.push(String::new());
+        lines.push(format!("{title}:"));
+    }
+
+    match section_type {
+        "kv" => {
+            if let Some(items) = section.get("items").and_then(|value| value.as_array()) {
+                for item in items {
+                    let label = item
+                        .get("label")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    let value = item
+                        .get("value")
+                        .map(backend_ui_value_to_string)
+                        .unwrap_or_default();
+
+                    if label.is_empty() && value.is_empty() {
+                        continue;
+                    }
+
+                    if label.is_empty() {
+                        lines.push(format!("- {}", value));
+                    } else {
+                        lines.push(format!("- {}: {}", label, value));
+                    }
+                }
+            }
+        }
+        "list" => {
+            if let Some(items) = section.get("items").and_then(|value| value.as_array()) {
+                for item in items {
+                    let value = backend_ui_value_to_string(item);
+                    if !value.is_empty() {
+                        lines.push(format!("- {}", value));
+                    }
+                }
+            }
+        }
+        "notice" => {
+            if let Some(message) = section.get("message").and_then(|value| value.as_str()) {
+                if !message.trim().is_empty() {
+                    lines.push(message.to_string());
+                }
+            }
+        }
+        "json" => {
+            if let Some(data) = section.get("data") {
+                match serde_json::to_string_pretty(data) {
+                    Ok(pretty) => lines.extend(pretty.lines().map(str::to_string)),
+                    Err(_) => lines.push(backend_ui_value_to_string(data)),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn backend_ui_value_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(boolean) => boolean.to_string(),
+        serde_json::Value::Number(number) => number.to_string(),
+        serde_json::Value::String(text) => text.to_string(),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            serde_json::to_string(value).unwrap_or_default()
+        }
+    }
+}
+
+fn pretty_backend_json(response: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(response).unwrap_or_else(|_| format!("{response:?}"))
+}
+
+fn load_account_auth() -> Result<AccountAuth, String> {
+    let cfg = load_config().ok_or_else(|| {
+        format!(
+            "❌ No local config file found at '{}'. Run `cargo ai account register <email>` on this machine, or copy your config from another machine.",
+            config_path().display()
+        )
+    })?;
+
+    let acct = cfg.account.as_ref().ok_or_else(|| {
+        "❌ No account found in config. You must confirm your account first.".to_string()
+    })?;
+
+    if let Some(account_tokens) = store::load_account_tokens()
+        .map_err(|error| format!("❌ Failed to load account credentials: {error}"))?
+    {
+        return Ok(AccountAuth {
+            access_token: account_tokens.access_token,
+            refresh_token: account_tokens.refresh_token,
+        });
+    }
+
+    let access_token = acct.access_token.as_ref().cloned().ok_or_else(|| {
+        "❌ No access token found in credentials store or legacy config. Run `cargo ai account confirm <code>` first."
+            .to_string()
+    })?;
+
+    Ok(AccountAuth {
+        access_token,
+        refresh_token: acct.refresh_token.clone(),
+    })
+}
+
+async fn refresh_access_token_for_retry(
+    access_token: &str,
+    refresh_token: Option<&str>,
+) -> Result<(String, Option<i32>), RefreshAccessError> {
+    let rt = refresh_token.ok_or(RefreshAccessError::MissingRefreshToken)?;
+
+    let refresh_response =
+        infra_api::account::status::fetch_status(INFRA_BASE_URL, access_token, Some(rt))
+            .await
+            .map_err(|error| RefreshAccessError::RequestFailed(format!("{error:?}")))?;
+
+    let refreshed_access_token = refresh_response
+        .get("session")
+        .and_then(|session| session.get("access_token"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+
+    let refreshed_expires_in = refresh_response
+        .get("session")
+        .and_then(|session| session.get("expires_in_seconds"))
+        .and_then(|value| value.as_i64())
+        .and_then(|value| i32::try_from(value).ok());
+
+    match refreshed_access_token {
+        Some(token) => Ok((token, refreshed_expires_in)),
+        None => Err(RefreshAccessError::MissingRefreshedToken(refresh_response)),
+    }
+}
+
+fn persist_refreshed_access_token(
+    refreshed_access_token: &str,
+    refresh_token: &str,
+    refreshed_expires_in: Option<i32>,
+) {
+    if let Some(expires_in) = refreshed_expires_in {
+        if let Err(error) = set_account_tokens(
+            refreshed_access_token.to_string(),
+            refresh_token.to_string(),
+            expires_in,
+        ) {
+            eprintln!("⚠️ Failed to update account tokens in credential store: {error}");
+        }
+    }
+}
+
+fn current_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn new_runtime_budget(max_runtime_secs: u64) -> InvocationRuntimeBudget {
+    let started_at_ms = current_time_millis();
+    InvocationRuntimeBudget {
+        max_runtime_secs,
+        started_at_ms,
+        deadline_ms: started_at_ms.saturating_add(max_runtime_secs.saturating_mul(1000)),
+    }
+}
+
+fn inherited_agent_action_runtime_budget() -> Option<InvocationRuntimeBudget> {
+    let max_runtime_secs = std::env::var(AGENT_ACTION_MAX_RUNTIME_SECS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())?;
+    let started_at_ms = std::env::var(AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())?;
+    let deadline_ms = std::env::var(AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())?;
+
+    Some(InvocationRuntimeBudget {
+        max_runtime_secs,
+        started_at_ms,
+        deadline_ms,
+    })
+}
+
+pub(crate) fn configured_agent_action_runtime_budget(
+    cli_override: Option<u64>,
+) -> InvocationRuntimeBudget {
+    cli_override
+        .map(new_runtime_budget)
+        .or_else(inherited_agent_action_runtime_budget)
+        .unwrap_or_else(|| new_runtime_budget(DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS))
+}
+
+fn remaining_runtime_duration(
+    runtime_budget: InvocationRuntimeBudget,
+    exhausted_context: &str,
+) -> Result<Duration, String> {
+    let now = current_time_millis();
+    if now >= runtime_budget.deadline_ms {
+        return Err(exhausted_context.to_string());
+    }
+
+    Ok(Duration::from_millis(
+        runtime_budget.deadline_ms.saturating_sub(now),
+    ))
+}
+
+fn elapsed_runtime_secs(runtime_budget: InvocationRuntimeBudget) -> u64 {
+    current_time_millis()
+        .saturating_sub(runtime_budget.started_at_ms)
+        .div_ceil(1000)
+}
+
+fn action_runtime_timeout_message(
+    action_name: &str,
+    runtime_budget: InvocationRuntimeBudget,
+    context: &str,
+) -> String {
+    format!(
+        "Action '{}' exceeded max-runtime-in-sec {} after {} seconds {}.",
+        action_name,
+        runtime_budget.max_runtime_secs,
+        elapsed_runtime_secs(runtime_budget),
+        context
+    )
+}
+
+fn validate_agent_step_target(agent: &str, action_name: &str) -> Result<(), String> {
+    let agent_path = Path::new(agent);
+    if agent_path.is_absolute() {
+        return Err(format!(
+            "Action '{}' agent step target '{}' must be an explicit relative path such as './child_agent'.",
+            action_name, agent
+        ));
+    }
+
+    if agent_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "Action '{}' agent step target '{}' must stay at the current level or below; parent traversal (`..`) is not allowed.",
+            action_name, agent
+        ));
+    }
+
+    if !contains_explicit_path_separator(agent) {
+        return Err(format!(
+            "Action '{}' agent step target '{}' must be an explicit relative path such as './child_agent'; bare executable names are not allowed because they may resolve through PATH.",
+            action_name, agent
+        ));
+    }
+
+    Ok(())
+}
+
+fn contains_explicit_path_separator(path: &str) -> bool {
+    path.contains('/') || path.contains('\\')
+}
+
+fn validate_agent_action_depth(
+    current_depth: u32,
+    max_agent_depth: u32,
+    action_name: &str,
+) -> Result<(), String> {
+    if current_depth >= max_agent_depth {
+        return Err(format!(
+            "Action '{}' cannot invoke another agent because current depth {} has reached max-agent-depth {}.",
+            action_name, current_depth, max_agent_depth
+        ));
     }
 
     Ok(())
@@ -99,12 +849,43 @@ fn matching_run_steps<'a>(
         .collect()
 }
 
+fn child_input_args(inputs: Option<&[crate::Input]>) -> Vec<String> {
+    let mut args = Vec::new();
+
+    if let Some(inputs) = inputs {
+        for input in inputs {
+            match input {
+                crate::Input::Text { text } => {
+                    args.push("--input-text".to_string());
+                    args.push(text.clone());
+                }
+                crate::Input::Url { url } => {
+                    args.push("--input-url".to_string());
+                    args.push(url.clone());
+                }
+                crate::Input::Image { path } => {
+                    args.push("--input-image".to_string());
+                    args.push(path.clone());
+                }
+            }
+        }
+    }
+
+    args
+}
+
+fn current_agent_action_depth() -> u32 {
+    std::env::var(AGENT_ACTION_DEPTH_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
 fn step_matches_platform(platforms: Option<&[String]>, current_platform: Option<&str>) -> bool {
     match platforms {
         None => true,
-        Some(platforms) => current_platform.is_some_and(|platform| {
-            platforms.iter().any(|candidate| candidate == platform)
-        }),
+        Some(platforms) => current_platform
+            .is_some_and(|platform| platforms.iter().any(|candidate| candidate == platform)),
     }
 }
 
@@ -117,6 +898,29 @@ fn resolve_run_args(
         .enumerate()
         .map(|(index, arg)| resolve_run_arg(arg, data, action_name, index))
         .collect()
+}
+
+fn resolve_string_parts(
+    parts: &[crate::RunArg],
+    data: &serde_json::Value,
+    action_name: &str,
+    field_name: &str,
+) -> Result<String, String> {
+    let mut resolved = String::new();
+
+    for (index, part) in parts.iter().enumerate() {
+        let value = resolve_run_arg(part, data, action_name, index)?;
+        resolved.push_str(&value);
+    }
+
+    if resolved.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' {} resolved to an empty string.",
+            action_name, field_name
+        ));
+    }
+
+    Ok(resolved)
 }
 
 fn resolve_run_arg(
@@ -158,7 +962,12 @@ fn resolve_run_arg(
 
 #[cfg(test)]
 mod tests {
-    use super::{matching_run_steps, resolve_run_args, step_matches_platform};
+    use super::{
+        action_completion_summary, child_input_args, configured_agent_action_runtime_budget,
+        format_backend_error_message, format_backend_ui_message, matching_run_steps,
+        resolve_run_args, resolve_string_parts, run_agent_step, step_matches_platform,
+        validate_agent_action_depth, StepExecutionOutcome,
+    };
     use serde_json::json;
 
     fn run_step(
@@ -168,10 +977,17 @@ mod tests {
     ) -> crate::RunStep {
         crate::RunStep {
             kind: "exec".to_string(),
-            program: program.to_string(),
+            program: Some(program.to_string()),
             args,
+            subject: None,
+            text: None,
+            agent: None,
+            inputs: None,
             platforms: platforms.map(|platforms| {
-                platforms.iter().map(|platform| platform.to_string()).collect()
+                platforms
+                    .iter()
+                    .map(|platform| platform.to_string())
+                    .collect()
             }),
         }
     }
@@ -204,7 +1020,11 @@ mod tests {
         let matching = matching_run_steps(&run_steps, Some("macos"));
         let programs = matching
             .iter()
-            .map(|step| step.program.as_str())
+            .map(|step| {
+                step.program
+                    .as_deref()
+                    .expect("exec test steps have a program")
+            })
             .collect::<Vec<_>>();
 
         assert_eq!(programs, vec!["second", "third", "fourth"]);
@@ -253,5 +1073,348 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("array-valued field 'numbers'"));
+    }
+
+    #[test]
+    fn resolves_string_parts_without_implicit_spaces() {
+        let resolved = resolve_string_parts(
+            &[
+                crate::RunArg::Literal("raining=".to_string()),
+                crate::RunArg::Variable("raining".to_string()),
+            ],
+            &json!({
+                "raining": true
+            }),
+            "demo",
+            "text",
+        )
+        .expect("string parts should resolve");
+
+        assert_eq!(resolved, "raining=true");
+    }
+
+    #[test]
+    fn child_input_args_map_to_runtime_flags() {
+        let args = child_input_args(Some(&[
+            crate::Input::Text {
+                text: "hello".to_string(),
+            },
+            crate::Input::Url {
+                url: "https://example.com".to_string(),
+            },
+            crate::Input::Image {
+                path: "./diagram.png".to_string(),
+            },
+        ]));
+
+        assert_eq!(
+            args,
+            vec![
+                "--input-text",
+                "hello",
+                "--input-url",
+                "https://example.com",
+                "--input-image",
+                "./diagram.png",
+            ]
+        );
+    }
+
+    #[test]
+    fn action_completion_summary_uses_completed_for_clean_runs() {
+        let summary = action_completion_summary(&[StepExecutionOutcome::Completed]);
+        assert_eq!(summary, Some("completed"));
+    }
+
+    #[test]
+    fn action_completion_summary_suppresses_duplicate_single_step_email_success() {
+        let summary = action_completion_summary(&[StepExecutionOutcome::SuccessAlreadyPrinted]);
+        assert_eq!(summary, None);
+    }
+
+    #[test]
+    fn action_completion_summary_suppresses_final_success_after_soft_failure() {
+        let summary = action_completion_summary(&[
+            StepExecutionOutcome::Completed,
+            StepExecutionOutcome::SoftFailureLogged,
+        ]);
+        assert_eq!(summary, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_step_invokes_child_with_forwarded_inputs() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2032-agent-child-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+        let output_path = std::env::temp_dir().join(format!(
+            "cai2032-agent-child-args-{}.txt",
+            std::process::id()
+        ));
+
+        let script_body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+            output_path.display()
+        );
+
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            args: Vec::new(),
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", script_name)),
+            inputs: Some(vec![
+                crate::Input::Text {
+                    text: "hello".to_string(),
+                },
+                crate::Input::Url {
+                    url: "https://example.com".to_string(),
+                },
+                crate::Input::Image {
+                    path: "./diagram.png".to_string(),
+                },
+            ]),
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_agent_step(&step, "invoke_child", 5, runtime_budget).await;
+
+        let _ = fs::remove_file(&script_path);
+
+        assert!(
+            result.is_ok(),
+            "child agent invocation should succeed: {result:?}"
+        );
+
+        let args = fs::read_to_string(&output_path).expect("child output should be captured");
+        let _ = fs::remove_file(&output_path);
+
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec![
+                "--input-text",
+                "hello",
+                "--input-url",
+                "https://example.com",
+                "--input-image",
+                "./diagram.png",
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_step_inherits_max_depth_and_runtime_budget_for_child_processes() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2032-agent-depth-child-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+        let output_path =
+            std::env::temp_dir().join(format!("cai2032-agent-depth-{}.txt", std::process::id()));
+
+        let script_body = format!(
+            "#!/bin/sh\nprintf '%s\\n%s' \"$CARGO_AI_AGENT_ACTION_MAX_DEPTH\" \"$CARGO_AI_AGENT_MAX_RUNTIME_SECS\" > \"{}\"\n",
+            output_path.display()
+        );
+
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            args: Vec::new(),
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", script_name)),
+            inputs: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_agent_step(&step, "invoke_child", 7, runtime_budget).await;
+
+        let _ = fs::remove_file(&script_path);
+
+        assert!(
+            result.is_ok(),
+            "child agent invocation should succeed: {result:?}"
+        );
+
+        let inherited_values =
+            fs::read_to_string(&output_path).expect("child output should be captured");
+        let _ = fs::remove_file(&output_path);
+
+        assert_eq!(
+            inherited_values.lines().collect::<Vec<_>>(),
+            vec!["7", "600"]
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_step_rejects_bare_child_name() {
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            args: Vec::new(),
+            subject: None,
+            text: None,
+            agent: Some("child_agent".to_string()),
+            inputs: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = run_agent_step(&step, "invoke_child", 5, runtime_budget)
+            .await
+            .expect_err("bare child agent names should be rejected");
+
+        assert!(error.contains("explicit relative path"));
+        assert!(error.contains("PATH"));
+    }
+
+    #[tokio::test]
+    async fn agent_step_rejects_parent_traversal_path() {
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            args: Vec::new(),
+            subject: None,
+            text: None,
+            agent: Some("./../child_agent".to_string()),
+            inputs: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = run_agent_step(&step, "invoke_child", 5, runtime_budget)
+            .await
+            .expect_err("parent traversal should be rejected");
+
+        assert!(error.contains("parent traversal"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_step_times_out_against_invocation_budget() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2032-agent-timeout-child-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+
+        let script_body = "#!/bin/sh\nsleep 2\n";
+
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            args: Vec::new(),
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", script_name)),
+            inputs: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(1));
+        let error = run_agent_step(&step, "invoke_child", 5, runtime_budget)
+            .await
+            .expect_err("runtime budget should time out the child");
+
+        let _ = fs::remove_file(&script_path);
+
+        assert!(error.contains("max-runtime-in-sec 1"));
+        assert!(error.contains("while waiting for child agent"));
+    }
+
+    #[test]
+    fn validate_agent_action_depth_allows_nested_calls_below_limit() {
+        let result = validate_agent_action_depth(2, 5, "invoke_child");
+
+        assert!(result.is_ok(), "depth below limit should be allowed");
+    }
+
+    #[test]
+    fn validate_agent_action_depth_rejects_when_limit_is_reached() {
+        let error = validate_agent_action_depth(5, 5, "invoke_child")
+            .expect_err("depth at limit should be rejected");
+
+        assert!(error.contains("current depth 5"));
+        assert!(error.contains("max-agent-depth 5"));
+    }
+
+    #[test]
+    fn validate_agent_action_depth_rejects_zero_depth_limit() {
+        let error = validate_agent_action_depth(0, 0, "invoke_child")
+            .expect_err("zero max depth should disable child invocation");
+
+        assert!(error.contains("current depth 0"));
+        assert!(error.contains("max-agent-depth 0"));
+    }
+
+    #[test]
+    fn formats_backend_ui_success_with_kind_prefix() {
+        let response = json!({
+            "ui": {
+                "schema": "1.0",
+                "kind": "success",
+                "title": "Email sent",
+                "summary": "Test email sent to sales@analyzer1.com.",
+                "next_steps": ["Check your inbox and spam folder for the message."]
+            }
+        });
+
+        let rendered =
+            format_backend_ui_message(&response, true).expect("success ui should format");
+
+        assert!(rendered.contains("✅ Email sent"));
+        assert!(rendered.contains("Test email sent to sales@analyzer1.com."));
+        assert!(rendered.contains("Next steps:"));
+    }
+
+    #[test]
+    fn formats_backend_ui_failure_without_kind_prefix() {
+        let response = json!({
+            "ui": {
+                "schema": "1.0",
+                "kind": "failure",
+                "title": "Request failed",
+                "summary": "Email sending is disabled for this account.",
+                "next_steps": ["Enable mail and retry."]
+            }
+        });
+
+        let rendered = format_backend_error_message(&response).expect("failure ui should format");
+
+        assert!(rendered.starts_with("Request failed"));
+        assert!(!rendered.contains("❌ Request failed"));
+        assert!(rendered.contains("Email sending is disabled for this account."));
+        assert!(rendered.contains("Next steps:"));
     }
 }

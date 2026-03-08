@@ -9,7 +9,7 @@ use std::{
     fmt,
     fs::{self, File},
     io::Write,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use serde_json::{Map, Value};
@@ -94,8 +94,12 @@ enum InputSpec {
 #[derive(Debug, Clone)]
 struct RunStep {
     kind: String,
-    program: String,
+    program: Option<String>,
     args: Vec<RunArg>,
+    subject: Option<Vec<RunArg>>,
+    text: Option<Vec<RunArg>>,
+    agent: Option<String>,
+    inputs: Option<Vec<InputSpec>>,
     platforms: Option<Vec<String>>,
 }
 
@@ -449,9 +453,20 @@ fn parse_inputs(root_obj: &Map<String, Value>) -> Result<Vec<InputSpec>, BuildEr
         ));
     }
 
+    parse_input_specs(inputs, "$.inputs")
+}
+
+fn parse_input_specs(inputs: &[Value], base_path: &str) -> Result<Vec<InputSpec>, BuildError> {
+    if inputs.is_empty() {
+        return Err(BuildError::config(
+            base_path,
+            "must contain at least one entry",
+        ));
+    }
+
     let mut parsed = Vec::with_capacity(inputs.len());
     for (index, entry) in inputs.iter().enumerate() {
-        let path = format!("$.inputs[{index}]");
+        let path = format!("{base_path}[{index}]");
         let entry_obj = expect_object(entry, &path)?;
         let input_type = get_required_string(entry_obj, "type", &path)?
             .trim()
@@ -465,12 +480,24 @@ fn parse_inputs(root_obj: &Map<String, Value>) -> Result<Vec<InputSpec>, BuildEr
                 url: get_required_string(entry_obj, "url", &path)?.to_string(),
             },
             "image" => InputSpec::Image {
-                path: get_required_string(entry_obj, "path", &path)?.to_string(),
+                path: {
+                    let image_path = get_required_string(entry_obj, "path", &path)?
+                        .trim()
+                        .to_string();
+                    validate_definition_owned_local_path(
+                        &image_path,
+                        &format!("{path}.path"),
+                        "image input",
+                    )?;
+                    image_path
+                },
             },
             _ => {
                 return Err(BuildError::config(
                     format!("{path}.type"),
-                    format!("unsupported input type `{input_type}` (supported: `text`, `url`, `image`)"),
+                    format!(
+                        "unsupported input type `{input_type}` (supported: `text`, `url`, `image`)"
+                    ),
                 ))
             }
         };
@@ -502,32 +529,192 @@ fn parse_actions(
             let run_path = format!("{action_path}.run[{run_idx}]");
             let run_obj = expect_object(run_value, &run_path)?;
 
-            let kind = get_required_string(run_obj, "kind", &run_path)?.to_string();
-            if kind != "exec" {
-                return Err(BuildError::config(
-                    format!("{run_path}.kind"),
-                    format!("unsupported kind `{kind}` (supported: `exec`)"),
-                ));
-            }
-
-            let program = get_required_string(run_obj, "program", &run_path)?.to_string();
-            if program.trim().is_empty() {
-                return Err(BuildError::config(
-                    format!("{run_path}.program"),
-                    "must be a non-empty string",
-                ));
-            }
-
-            let args = parse_run_args(run_obj, &run_path, schema_field_types)?;
-
             let platforms = parse_optional_platforms(run_obj, &run_path)?;
+            let kind = get_required_string(run_obj, "kind", &run_path)?.to_string();
 
-            run_steps.push(RunStep {
-                kind,
-                program,
-                args,
-                platforms,
-            });
+            let run_step = match kind.as_str() {
+                "exec" => {
+                    if run_obj.contains_key("subject") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.subject"),
+                            "`subject` is only supported for `email_me` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("text") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.text"),
+                            "`text` is only supported for `email_me` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("agent") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.agent"),
+                            "`agent` is only supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("inputs") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.inputs"),
+                            "`inputs` is only supported for `agent` actions",
+                        ));
+                    }
+
+                    let program = get_required_string(run_obj, "program", &run_path)?.to_string();
+                    if program.trim().is_empty() {
+                        return Err(BuildError::config(
+                            format!("{run_path}.program"),
+                            "must be a non-empty string",
+                        ));
+                    }
+
+                    let args = parse_run_args(run_obj, &run_path, schema_field_types)?;
+                    RunStep {
+                        kind,
+                        program: Some(program),
+                        args,
+                        subject: None,
+                        text: None,
+                        agent: None,
+                        inputs: None,
+                        platforms,
+                    }
+                }
+                "email_me" => {
+                    if run_obj.contains_key("program") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.program"),
+                            "`program` is not supported for `email_me` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("args") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.args"),
+                            "`args` is not supported for `email_me` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("agent") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.agent"),
+                            "`agent` is not supported for `email_me` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("inputs") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.inputs"),
+                            "`inputs` is not supported for `email_me` actions",
+                        ));
+                    }
+
+                    let subject = parse_string_parts_field(
+                        run_obj,
+                        "subject",
+                        &run_path,
+                        schema_field_types,
+                    )?;
+                    let text =
+                        parse_string_parts_field(run_obj, "text", &run_path, schema_field_types)?;
+
+                    RunStep {
+                        kind,
+                        program: None,
+                        args: Vec::new(),
+                        subject: Some(subject),
+                        text: Some(text),
+                        agent: None,
+                        inputs: None,
+                        platforms,
+                    }
+                }
+                "agent" => {
+                    if run_obj.contains_key("program") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.program"),
+                            "`program` is not supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("args") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.args"),
+                            "`args` is not supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("subject") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.subject"),
+                            "`subject` is not supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("text") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.text"),
+                            "`text` is not supported for `agent` actions",
+                        ));
+                    }
+
+                    let agent = get_required_string(run_obj, "agent", &run_path)?
+                        .trim()
+                        .to_string();
+                    if agent.is_empty() {
+                        return Err(BuildError::config(
+                            format!("{run_path}.agent"),
+                            "must be a non-empty explicit relative path such as `./child_agent`",
+                        ));
+                    }
+                    if Path::new(&agent).is_absolute() {
+                        return Err(BuildError::config(
+                            format!("{run_path}.agent"),
+                            "must be an explicit relative path such as `./child_agent`",
+                        ));
+                    }
+                    if path_uses_parent_traversal(Path::new(&agent)) {
+                        return Err(BuildError::config(
+                            format!("{run_path}.agent"),
+                            "must stay at the current level or below; parent traversal (`..`) is not allowed",
+                        ));
+                    }
+                    if !contains_explicit_path_separator(&agent) {
+                        return Err(BuildError::config(
+                            format!("{run_path}.agent"),
+                            "must be an explicit relative path such as `./child_agent`; bare executable names are not allowed",
+                        ));
+                    }
+
+                    let inputs = match run_obj.get("inputs") {
+                        Some(input_value) => {
+                            let input_path = format!("{run_path}.inputs");
+                            let input_array = input_value.as_array().ok_or_else(|| {
+                                BuildError::config(
+                                    &input_path,
+                                    "expected `inputs` to be an array of ordered input parts",
+                                )
+                            })?;
+                            Some(parse_input_specs(input_array, &input_path)?)
+                        }
+                        None => None,
+                    };
+
+                    RunStep {
+                        kind,
+                        program: None,
+                        args: Vec::new(),
+                        subject: None,
+                        text: None,
+                        agent: Some(agent),
+                        inputs,
+                        platforms,
+                    }
+                }
+                _ => {
+                    return Err(BuildError::config(
+                        format!("{run_path}.kind"),
+                        format!(
+                            "unsupported kind `{kind}` (supported: `exec`, `email_me`, `agent`)"
+                        ),
+                    ));
+                }
+            };
+
+            run_steps.push(run_step);
         }
 
         parsed.push(Action {
@@ -548,8 +735,95 @@ fn parse_run_args(
     get_required_array(run_obj, "args", run_path)?
         .iter()
         .enumerate()
-        .map(|(arg_idx, arg)| parse_run_arg(arg, &format!("{run_path}.args[{arg_idx}]"), schema_field_types))
+        .map(|(arg_idx, arg)| {
+            parse_run_arg(
+                arg,
+                &format!("{run_path}.args[{arg_idx}]"),
+                schema_field_types,
+            )
+        })
         .collect()
+}
+
+fn parse_string_parts_field(
+    run_obj: &Map<String, Value>,
+    field_name: &str,
+    run_path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<Vec<RunArg>, BuildError> {
+    let field_path = format!("{run_path}.{field_name}");
+    match get_required_field(run_obj, field_name, run_path)? {
+        Value::String(literal) => {
+            if literal.trim().is_empty() {
+                return Err(BuildError::config(
+                    &field_path,
+                    "must be a non-empty string",
+                ));
+            }
+            Ok(vec![RunArg::Literal(literal.to_string())])
+        }
+        Value::Array(parts) => {
+            if parts.is_empty() {
+                return Err(BuildError::config(
+                    &field_path,
+                    "expected at least one string or variable part",
+                ));
+            }
+
+            parts
+                .iter()
+                .enumerate()
+                .map(|(index, part)| {
+                    parse_run_arg(part, &format!("{field_path}[{index}]"), schema_field_types)
+                })
+                .collect()
+        }
+        _ => Err(BuildError::config(
+            &field_path,
+            "expected a string or an array of string/variable parts",
+        )),
+    }
+}
+
+fn contains_explicit_path_separator(path: &str) -> bool {
+    path.contains('/') || path.contains('\\')
+}
+
+fn validate_definition_owned_local_path(
+    raw_path: &str,
+    path: &str,
+    label: &str,
+) -> Result<(), BuildError> {
+    if raw_path.trim().is_empty() {
+        return Err(BuildError::config(
+            path,
+            format!("{label} path must be a non-empty relative path"),
+        ));
+    }
+
+    let candidate = Path::new(raw_path);
+    if candidate.is_absolute() {
+        return Err(BuildError::config(
+            path,
+            format!("{label} path must be relative and stay at the current level or below"),
+        ));
+    }
+
+    if path_uses_parent_traversal(candidate) {
+        return Err(BuildError::config(
+            path,
+            format!(
+                "{label} path must stay at the current level or below; parent traversal (`..`) is not allowed"
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn path_uses_parent_traversal(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
 }
 
 fn parse_run_arg(
@@ -627,7 +901,10 @@ fn parse_optional_platforms(
 
     let platform_path = format!("{run_path}.platform");
     match platform_value {
-        Value::String(platform) => Ok(Some(vec![normalize_platform_value(platform, &platform_path)?])),
+        Value::String(platform) => Ok(Some(vec![normalize_platform_value(
+            platform,
+            &platform_path,
+        )?])),
         Value::Array(platforms) => {
             if platforms.is_empty() {
                 return Err(BuildError::config(
@@ -671,7 +948,10 @@ fn parse_optional_platforms(
 fn normalize_platform_value(value: &str, path: &str) -> Result<String, BuildError> {
     let normalized = value.trim().to_ascii_lowercase();
     if normalized.is_empty() {
-        return Err(BuildError::config(path, "expected a non-empty platform value"));
+        return Err(BuildError::config(
+            path,
+            "expected a non-empty platform value",
+        ));
     }
 
     if SUPPORTED_ACTION_PLATFORMS.contains(&normalized.as_str()) {
@@ -1232,13 +1512,87 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
+                let subject = run_step
+                    .subject
+                    .as_ref()
+                    .map(|parts| {
+                        let rendered = parts
+                            .iter()
+                            .map(|part| match part {
+                                RunArg::Literal(literal) => format!(
+                                    "RunArg::Literal({}.to_string())",
+                                    rust_string_literal(literal)
+                                ),
+                                RunArg::Variable(variable) => format!(
+                                    "RunArg::Variable({}.to_string())",
+                                    rust_string_literal(variable)
+                                ),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("Some(vec![{}])", rendered)
+                    })
+                    .unwrap_or_else(|| "None".to_string());
+                let text = run_step
+                    .text
+                    .as_ref()
+                    .map(|parts| {
+                        let rendered = parts
+                            .iter()
+                            .map(|part| match part {
+                                RunArg::Literal(literal) => format!(
+                                    "RunArg::Literal({}.to_string())",
+                                    rust_string_literal(literal)
+                                ),
+                                RunArg::Variable(variable) => format!(
+                                    "RunArg::Variable({}.to_string())",
+                                    rust_string_literal(variable)
+                                ),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("Some(vec![{}])", rendered)
+                    })
+                    .unwrap_or_else(|| "None".to_string());
+                let agent = run_step
+                    .agent
+                    .as_ref()
+                    .map(|agent| format!("Some({}.to_string())", rust_string_literal(agent)))
+                    .unwrap_or_else(|| "None".to_string());
+                let inputs = run_step
+                    .inputs
+                    .as_ref()
+                    .map(|inputs| {
+                        let rendered = inputs
+                            .iter()
+                            .map(|input| match input {
+                                InputSpec::Text { text } => format!(
+                                    "Input::Text {{ text: {}.to_string() }}",
+                                    rust_string_literal(text)
+                                ),
+                                InputSpec::Url { url } => format!(
+                                    "Input::Url {{ url: {}.to_string() }}",
+                                    rust_string_literal(url)
+                                ),
+                                InputSpec::Image { path } => format!(
+                                    "Input::Image {{ path: {}.to_string() }}",
+                                    rust_string_literal(path)
+                                ),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("Some(vec![{}])", rendered)
+                    })
+                    .unwrap_or_else(|| "None".to_string());
                 let platforms = run_step
                     .platforms
                     .as_ref()
                     .map(|platforms| {
                         let rendered = platforms
                             .iter()
-                            .map(|platform| format!("{}.to_string()", rust_string_literal(platform)))
+                            .map(|platform| {
+                                format!("{}.to_string()", rust_string_literal(platform))
+                            })
                             .collect::<Vec<_>>()
                             .join(", ");
                         format!("Some(vec![{}])", rendered)
@@ -1248,13 +1602,27 @@ fn render_agent_model(config: &AgentConfig) -> String {
                 format!(
                     "RunStep {{
                         kind: {}.to_string(),
-                        program: {}.to_string(),
+                        program: {},
                         args: vec![{}],
+                        subject: {},
+                        text: {},
+                        agent: {},
+                        inputs: {},
                         platforms: {},
                     }}",
                     rust_string_literal(&run_step.kind),
-                    rust_string_literal(&run_step.program),
+                    run_step
+                        .program
+                        .as_ref()
+                        .map(|program| {
+                            format!("Some({}.to_string())", rust_string_literal(program))
+                        })
+                        .unwrap_or_else(|| "None".to_string()),
                     args,
+                    subject,
+                    text,
+                    agent,
+                    inputs,
                     platforms
                 )
             })
@@ -1319,8 +1687,12 @@ pub fn json_schema_value() -> serde_json::Value {{
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RunStep {{
     kind: String,
-    program: String,
+    program: Option<String>,
     args: Vec<RunArg>,
+    subject: Option<Vec<RunArg>>,
+    text: Option<Vec<RunArg>>,
+    agent: Option<String>,
+    inputs: Option<Vec<Input>>,
     platforms: Option<Vec<String>>,
 }}
 

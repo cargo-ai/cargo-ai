@@ -5,7 +5,10 @@ use crate::agent_builder::build_target::BuildTarget;
 use crate::infra_api;
 use crate::ui;
 
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use super::helpers::{
     apply_agents_list_display_limit, load_account_auth, persist_refreshed_access_token,
@@ -89,10 +92,8 @@ fn parse_hatch_command(hatch_m: &ArgMatches) -> Result<AccountHatchCommand, Stri
         .map(String::as_str)
         .ok_or_else(|| "Missing account hatch name. Provide positional NAME.".to_string())?;
 
-    let (source_name, local_name) = resolve_account_hatch_names(
-        name,
-        hatch_m.get_one::<String>("agent").map(String::as_str),
-    )?;
+    let (source_name, local_name) =
+        resolve_account_hatch_names(name, hatch_m.get_one::<String>("agent").map(String::as_str))?;
 
     let build_target =
         BuildTarget::from_cli(hatch_m.get_one::<String>("target").map(String::as_str))?;

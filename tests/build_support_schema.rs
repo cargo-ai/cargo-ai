@@ -111,7 +111,7 @@ fn rejects_unsupported_action_kind_with_actionable_path() {
         .to_string();
 
     assert!(err.contains("$.actions[0].run[0].kind"));
-    assert!(err.contains("supported: `exec`"));
+    assert!(err.contains("supported: `exec`, `email_me`, `agent`"));
 }
 
 #[test]
@@ -137,6 +137,271 @@ fn accepts_mixed_literal_and_variable_action_args() {
 
     assert!(generated.contains("RunArg::Literal(\"value=\".to_string())"));
     assert!(generated.contains("RunArg::Variable(\"value\".to_string())"));
+}
+
+#[test]
+fn accepts_email_me_string_and_variable_parts() {
+    let cfg = config_with(
+        r#""city": { "type": "string" }, "raining": { "type": "boolean" }"#,
+        r#"[
+          {
+            "name": "email_me",
+            "logic": { "==": [ { "var": "raining" }, true ] },
+            "run": [
+              {
+                "kind": "email_me",
+                "subject": ["Weather alert for ", { "var": "city" }],
+                "text": ["Bring an umbrella because raining=", { "var": "raining" }]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains("kind: \"email_me\".to_string()"));
+    assert!(generated.contains("subject: Some(vec![RunArg::Literal(\"Weather alert for \".to_string()), RunArg::Variable(\"city\".to_string())])"));
+    assert!(generated.contains("text: Some(vec![RunArg::Literal(\"Bring an umbrella because raining=\".to_string()), RunArg::Variable(\"raining\".to_string())])"));
+}
+
+#[test]
+fn rejects_email_me_program_field() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_email_me",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "email_me",
+                "program": "echo",
+                "subject": "Alert",
+                "text": "Body"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].program"));
+    assert!(err.contains("not supported for `email_me`"));
+}
+
+#[test]
+fn rejects_empty_email_me_subject_string() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_email_subject",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "email_me",
+                "subject": "   ",
+                "text": "Body"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].subject"));
+    assert!(err.contains("must be a non-empty string"));
+}
+
+#[test]
+fn accepts_agent_step_with_relative_path_and_inputs() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./agents/summary_agent",
+                "inputs": [
+                  { "type": "text", "text": "Summarize this." },
+                  { "type": "url", "url": "https://example.com" }
+                ]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains("kind: \"agent\".to_string()"));
+    assert!(generated.contains("agent: Some(\"./agents/summary_agent\".to_string())"));
+    assert!(generated.contains(
+        "inputs: Some(vec![Input::Text { text: \"Summarize this.\".to_string() }, Input::Url { url: \"https://example.com\".to_string() }])"
+    ));
+}
+
+#[test]
+fn rejects_agent_absolute_path() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_agent",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "/tmp/summary_agent"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].agent"));
+    assert!(err.contains("explicit relative path"));
+}
+
+#[test]
+fn rejects_agent_bare_executable_name() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_agent",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "child_agent"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].agent"));
+    assert!(err.contains("bare executable names are not allowed"));
+}
+
+#[test]
+fn rejects_agent_parent_traversal_path() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_agent",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./../child_agent"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].agent"));
+    assert!(err.contains("parent traversal"));
+}
+
+#[test]
+fn rejects_image_input_parent_traversal_path() {
+    let cfg = r#"{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        { "type": "image", "path": "./../4.png" }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "value": { "type": "integer" }
+        }
+    },
+    "actions": []
+}"#;
+
+    let err = build_support::generate_agent_model_from_str(cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.inputs[0].path"));
+    assert!(err.contains("parent traversal"));
+}
+
+#[test]
+fn rejects_image_input_absolute_path() {
+    let cfg = r#"{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        { "type": "image", "path": "/tmp/4.png" }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "value": { "type": "integer" }
+        }
+    },
+    "actions": []
+}"#;
+
+    let err = build_support::generate_agent_model_from_str(cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.inputs[0].path"));
+    assert!(err.contains("current level or below"));
+}
+
+#[test]
+fn rejects_agent_program_field() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "bad_agent",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./agents/summary_agent",
+                "program": "echo"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].program"));
+    assert!(err.contains("not supported for `agent`"));
 }
 
 #[test]
@@ -547,15 +812,12 @@ fn generates_canonical_build_provenance_constants() {
     hasher.update(expected_definition.as_bytes());
     let expected_hash = format!("{:x}", hasher.finalize());
 
-    assert!(generated.contains(
-        r#"const AGENT_BUILD_ID: &str = "11111111-2222-4333-8444-555555555555";"#
-    ));
-    assert!(generated.contains(
-        r#"const AGENT_TARGET_TRIPLE: &str = "aarch64-apple-darwin";"#
-    ));
-    assert!(generated.contains(
-        r#"const AGENT_BUILD_TIMESTAMP_UTC: &str = "2026-03-05T23:14:29Z";"#
-    ));
+    assert!(generated
+        .contains(r#"const AGENT_BUILD_ID: &str = "11111111-2222-4333-8444-555555555555";"#));
+    assert!(generated.contains(r#"const AGENT_TARGET_TRIPLE: &str = "aarch64-apple-darwin";"#));
+    assert!(
+        generated.contains(r#"const AGENT_BUILD_TIMESTAMP_UTC: &str = "2026-03-05T23:14:29Z";"#)
+    );
     assert!(generated.contains(&format!(
         r#"const AGENT_DEFINITION_SHA256: &str = "{}";"#,
         expected_hash

@@ -1,7 +1,7 @@
 //! Shared provider error taxonomy and user-facing diagnostics policy.
 
-use reqwest::StatusCode;
 use super::runtime::ContentPart;
+use reqwest::StatusCode;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -164,10 +164,10 @@ fn provider_hint(kind: ProviderErrorKind, provider: ProviderKind) -> Option<&'st
         },
         ProviderErrorKind::Timeout => match provider {
             ProviderKind::Ollama => {
-                Some("Request timed out; ensure Ollama/model is responsive or increase `--timeout_in_sec`.")
+                Some("Request timed out; ensure Ollama/model is responsive or increase `--inference-timeout-in-sec`.")
             }
             ProviderKind::OpenAi => {
-                Some("Request timed out; retry later or increase `--timeout_in_sec`.")
+                Some("Request timed out; retry later or increase `--inference-timeout-in-sec`.")
             }
         },
         ProviderErrorKind::InvalidRequest => {
