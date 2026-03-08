@@ -9,6 +9,7 @@ use std::time::Duration;
 
 const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
 const AGENT_ACTION_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_DEPTH";
+const AGENT_ACTION_MAX_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_MAX_DEPTH";
 const DEFAULT_AGENT_ACTION_TIMEOUT_SECS: u64 = 90;
 
 #[derive(Debug, Clone)]
@@ -28,6 +29,7 @@ enum RefreshAccessError {
 pub(crate) async fn apply_actions(
     output: &crate::Output,
     actions: &[crate::Action],
+    max_agent_depth: u32,
 ) -> Result<(), String> {
     // println!("DEBUG: Applying actions -> {:?}", actions);
 
@@ -63,7 +65,7 @@ pub(crate) async fn apply_actions(
                         } else if step.kind.eq_ignore_ascii_case("email_me") {
                             run_email_me_step(step, &data, &action.name).await?;
                         } else if step.kind.eq_ignore_ascii_case("agent") {
-                            run_agent_step(step, &action.name).await?;
+                            run_agent_step(step, &action.name, max_agent_depth).await?;
                         } else {
                             eprintln!(
                                 "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
@@ -224,7 +226,11 @@ async fn run_email_me_step(
     }
 }
 
-async fn run_agent_step(step: &crate::RunStep, action_name: &str) -> Result<(), String> {
+async fn run_agent_step(
+    step: &crate::RunStep,
+    action_name: &str,
+    max_agent_depth: u32,
+) -> Result<(), String> {
     let agent = step.agent.as_deref().ok_or_else(|| {
         format!(
             "Action '{}' agent step is missing required `agent`.",
@@ -232,12 +238,8 @@ async fn run_agent_step(step: &crate::RunStep, action_name: &str) -> Result<(), 
         )
     })?;
 
-    if current_agent_action_depth() > 0 {
-        return Err(format!(
-            "Action '{}' attempted nested agent invocation, which is not supported in this story.",
-            action_name
-        ));
-    }
+    let current_depth = current_agent_action_depth();
+    validate_agent_action_depth(current_depth, max_agent_depth, action_name)?;
 
     validate_agent_step_target(agent, action_name)?;
     let agent_path = Path::new(agent);
@@ -252,10 +254,8 @@ async fn run_agent_step(step: &crate::RunStep, action_name: &str) -> Result<(), 
     for argument in child_input_args(step.inputs.as_deref()) {
         command.arg(argument);
     }
-    command.env(
-        AGENT_ACTION_DEPTH_ENV,
-        (current_agent_action_depth() + 1).to_string(),
-    );
+    command.env(AGENT_ACTION_DEPTH_ENV, (current_depth + 1).to_string());
+    command.env(AGENT_ACTION_MAX_DEPTH_ENV, max_agent_depth.to_string());
 
     print_action_start(action_name);
 
@@ -599,6 +599,21 @@ fn contains_explicit_path_separator(path: &str) -> bool {
     path.contains('/') || path.contains('\\')
 }
 
+fn validate_agent_action_depth(
+    current_depth: u32,
+    max_agent_depth: u32,
+    action_name: &str,
+) -> Result<(), String> {
+    if current_depth >= max_agent_depth {
+        return Err(format!(
+            "Action '{}' cannot invoke another agent because current depth {} has reached max-agent-depth {}.",
+            action_name, current_depth, max_agent_depth
+        ));
+    }
+
+    Ok(())
+}
+
 fn current_action_platform() -> Option<&'static str> {
     if cfg!(target_os = "macos") {
         Some("macos")
@@ -737,7 +752,7 @@ mod tests {
     use super::{
         child_input_args, format_backend_error_message, format_backend_ui_message,
         matching_run_steps, resolve_run_args, resolve_string_parts, run_agent_step,
-        step_matches_platform,
+        step_matches_platform, validate_agent_action_depth,
     };
     use serde_json::json;
 
@@ -938,7 +953,7 @@ mod tests {
             platforms: None,
         };
 
-        let result = run_agent_step(&step, "invoke_child").await;
+        let result = run_agent_step(&step, "invoke_child", 5).await;
 
         let _ = fs::remove_file(&script_path);
 
@@ -963,6 +978,57 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_step_inherits_max_depth_for_child_processes() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2032-agent-depth-child-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+        let output_path =
+            std::env::temp_dir().join(format!("cai2032-agent-depth-{}.txt", std::process::id()));
+
+        let script_body = format!(
+            "#!/bin/sh\nprintf '%s' \"$CARGO_AI_AGENT_ACTION_MAX_DEPTH\" > \"{}\"\n",
+            output_path.display()
+        );
+
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            args: Vec::new(),
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", script_name)),
+            inputs: None,
+            platforms: None,
+        };
+
+        let result = run_agent_step(&step, "invoke_child", 7).await;
+
+        let _ = fs::remove_file(&script_path);
+
+        assert!(
+            result.is_ok(),
+            "child agent invocation should succeed: {result:?}"
+        );
+
+        let inherited_depth =
+            fs::read_to_string(&output_path).expect("child output should be captured");
+        let _ = fs::remove_file(&output_path);
+
+        assert_eq!(inherited_depth, "7");
+    }
+
     #[tokio::test]
     async fn agent_step_rejects_bare_child_name() {
         let step = crate::RunStep {
@@ -976,12 +1042,37 @@ mod tests {
             platforms: None,
         };
 
-        let error = run_agent_step(&step, "invoke_child")
+        let error = run_agent_step(&step, "invoke_child", 5)
             .await
             .expect_err("bare child agent names should be rejected");
 
         assert!(error.contains("explicit relative path"));
         assert!(error.contains("PATH"));
+    }
+
+    #[test]
+    fn validate_agent_action_depth_allows_nested_calls_below_limit() {
+        let result = validate_agent_action_depth(2, 5, "invoke_child");
+
+        assert!(result.is_ok(), "depth below limit should be allowed");
+    }
+
+    #[test]
+    fn validate_agent_action_depth_rejects_when_limit_is_reached() {
+        let error = validate_agent_action_depth(5, 5, "invoke_child")
+            .expect_err("depth at limit should be rejected");
+
+        assert!(error.contains("current depth 5"));
+        assert!(error.contains("max-agent-depth 5"));
+    }
+
+    #[test]
+    fn validate_agent_action_depth_rejects_zero_depth_limit() {
+        let error = validate_agent_action_depth(0, 0, "invoke_child")
+            .expect_err("zero max depth should disable child invocation");
+
+        assert!(error.contains("current depth 0"));
+        assert!(error.contains("max-agent-depth 0"));
     }
 
     #[test]

@@ -49,6 +49,13 @@ pub fn command() -> Command {
                 .default_value("60"),
         )
         .arg(
+            Arg::new("max_agent_depth")
+                .long("max-agent-depth")
+                .value_name("DEPTH")
+                .help("Maximum nested child-agent depth for this invocation tree")
+                .value_parser(clap::value_parser!(u32)),
+        )
+        .arg(
             Arg::new("input_text")
                 .long("input-text")
                 .help("Text input to provide to the agent at runtime")

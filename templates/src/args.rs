@@ -72,6 +72,14 @@ pub fn build_cli() -> ArgMatches {
                 .global(true)
         )
         .arg(
+            Arg::new("max_agent_depth")
+                .long("max-agent-depth")
+                .help("Maximum nested child-agent depth for this invocation tree")
+                .value_name("DEPTH")
+                .value_parser(clap::value_parser!(u32))
+                .global(true)
+        )
+        .arg(
             Arg::new("input_text")
                 .long("input-text")
                 .help("Text input to provide to the agent at runtime")

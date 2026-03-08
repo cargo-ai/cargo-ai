@@ -27,7 +27,9 @@ const KEYCHAIN_SERVICE: &str = "cargo-ai";
 const ACCOUNT_ACCESS_TOKEN_STORAGE_KEY: &str = "account/access_token";
 const ACCOUNT_REFRESH_TOKEN_STORAGE_KEY: &str = "account/refresh_token";
 const AGENT_ACTION_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_DEPTH";
+const AGENT_ACTION_MAX_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_MAX_DEPTH";
 const DEFAULT_AGENT_ACTION_TIMEOUT_SECS: u64 = 90;
+const DEFAULT_AGENT_ACTION_MAX_DEPTH: u32 = 5;
 
 fn unknown_server_messages(server: &str) -> Vec<String> {
     let display_server = if server.trim().is_empty() {
@@ -131,6 +133,10 @@ fn cli_override_descriptions(
 
     if let Some(timeout) = matches.get_one::<String>("timeout_in_sec") {
         overrides.push(format!("timeout_in_sec={timeout}"));
+    }
+
+    if let Some(max_depth) = matches.get_one::<u32>("max_agent_depth") {
+        overrides.push(format!("max_agent_depth={max_depth}"));
     }
 
     if include_token_override {
@@ -853,6 +859,9 @@ async fn main() {
         timeout_in_sec = timeout_arg.parse::<u64>().unwrap_or(60);
     }
 
+    let max_agent_depth =
+        configured_agent_action_max_depth(cmd_args.get_one::<u32>("max_agent_depth").copied());
+
     let provider = match ProviderKind::from_server_value(&server) {
         Some(provider) => provider,
         None => {
@@ -1008,7 +1017,7 @@ async fn main() {
     };
 
     let actions = actions();
-    if let Err(error) = apply_actions(&output, &actions, config.as_ref()).await {
+    if let Err(error) = apply_actions(&output, &actions, config.as_ref(), max_agent_depth).await {
         eprintln!("❌ {error}");
         std::process::exit(1);
     }
@@ -1018,6 +1027,7 @@ pub async fn apply_actions(
     output: &Output,
     actions: &[Action],
     config: Option<&config::schema::Config>,
+    max_agent_depth: u32,
 ) -> Result<(), String> {
     let data = serde_json::to_value(output).unwrap();
     let current_platform = current_action_platform();
@@ -1041,7 +1051,7 @@ pub async fn apply_actions(
                     } else if step.kind.eq_ignore_ascii_case("email_me") {
                         run_email_me_step(step, &data, &action.name, config).await?;
                     } else if step.kind.eq_ignore_ascii_case("agent") {
-                        run_agent_step(step, &action.name).await?;
+                        run_agent_step(step, &action.name, max_agent_depth).await?;
                     } else {
                         println!(
                             "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
@@ -1122,7 +1132,11 @@ async fn run_email_me_step(
     Ok(())
 }
 
-async fn run_agent_step(step: &RunStep, action_name: &str) -> Result<(), String> {
+async fn run_agent_step(
+    step: &RunStep,
+    action_name: &str,
+    max_agent_depth: u32,
+) -> Result<(), String> {
     let agent = step.agent.as_deref().ok_or_else(|| {
         format!(
             "Action '{}' agent step is missing required `agent`.",
@@ -1130,12 +1144,8 @@ async fn run_agent_step(step: &RunStep, action_name: &str) -> Result<(), String>
         )
     })?;
 
-    if current_agent_action_depth() > 0 {
-        return Err(format!(
-            "Action '{}' attempted nested agent invocation, which is not supported in this story.",
-            action_name
-        ));
-    }
+    let current_depth = current_agent_action_depth();
+    validate_agent_action_depth(current_depth, max_agent_depth, action_name)?;
 
     validate_agent_step_target(agent, action_name)?;
     let agent_path = Path::new(agent);
@@ -1150,10 +1160,8 @@ async fn run_agent_step(step: &RunStep, action_name: &str) -> Result<(), String>
     for argument in child_input_args(step.inputs.as_deref()) {
         command.arg(argument);
     }
-    command.env(
-        AGENT_ACTION_DEPTH_ENV,
-        (current_agent_action_depth() + 1).to_string(),
-    );
+    command.env(AGENT_ACTION_DEPTH_ENV, (current_depth + 1).to_string());
+    command.env(AGENT_ACTION_MAX_DEPTH_ENV, max_agent_depth.to_string());
 
     print_action_start(action_name);
 
@@ -1436,6 +1444,33 @@ fn current_agent_action_depth() -> u32 {
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(0)
+}
+
+fn inherited_agent_action_max_depth() -> Option<u32> {
+    std::env::var(AGENT_ACTION_MAX_DEPTH_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+}
+
+fn configured_agent_action_max_depth(cli_override: Option<u32>) -> u32 {
+    cli_override
+        .or_else(inherited_agent_action_max_depth)
+        .unwrap_or(DEFAULT_AGENT_ACTION_MAX_DEPTH)
+}
+
+fn validate_agent_action_depth(
+    current_depth: u32,
+    max_agent_depth: u32,
+    action_name: &str,
+) -> Result<(), String> {
+    if current_depth >= max_agent_depth {
+        return Err(format!(
+            "Action '{}' cannot invoke another agent because current depth {} has reached max-agent-depth {}.",
+            action_name, current_depth, max_agent_depth
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_agent_step_target(agent: &str, action_name: &str) -> Result<(), String> {

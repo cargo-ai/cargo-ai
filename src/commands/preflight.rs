@@ -9,6 +9,9 @@ use crate::providers::{
     ProviderKind,
 };
 
+const AGENT_ACTION_MAX_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_MAX_DEPTH";
+const DEFAULT_AGENT_ACTION_MAX_DEPTH: u32 = 5;
+
 fn unknown_server_messages(server: &str) -> Vec<String> {
     let display_server = if server.trim().is_empty() {
         "(not set)"
@@ -82,6 +85,10 @@ fn cli_override_descriptions(sub_m: &ArgMatches, include_token_override: bool) -
 
     if let Some(timeout) = sub_m.get_one::<String>("timeout_in_sec") {
         overrides.push(format!("timeout_in_sec={timeout}"));
+    }
+
+    if let Some(max_depth) = sub_m.get_one::<u32>("max_agent_depth") {
+        overrides.push(format!("max_agent_depth={max_depth}"));
     }
 
     if include_token_override {
@@ -185,6 +192,18 @@ fn resolved_inputs_for_run(sub_m: &ArgMatches) -> Vec<crate::Input> {
     }
 }
 
+fn inherited_agent_action_max_depth() -> Option<u32> {
+    std::env::var(AGENT_ACTION_MAX_DEPTH_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+}
+
+fn configured_agent_action_max_depth(cli_override: Option<u32>) -> u32 {
+    cli_override
+        .or_else(inherited_agent_action_max_depth)
+        .unwrap_or(DEFAULT_AGENT_ACTION_MAX_DEPTH)
+}
+
 /// Executes the preflight flow: resolve runtime settings, call provider, and
 /// run any configured post-response actions.
 pub async fn run(sub_m: &ArgMatches) -> bool {
@@ -268,6 +287,9 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     if let Some(timeout_arg) = sub_m.get_one::<String>("timeout_in_sec") {
         timeout_in_sec = timeout_arg.parse::<u64>().unwrap_or(60);
     }
+
+    let max_agent_depth =
+        configured_agent_action_max_depth(sub_m.get_one::<u32>("max_agent_depth").copied());
 
     let provider = match ProviderKind::from_server_value(&server) {
         Some(provider) => provider,
@@ -437,7 +459,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     let actions = crate::actions();
     // println!("Actions {:?}", actions);
 
-    match super::preflight_actions::apply_actions(&output, &actions).await {
+    match super::preflight_actions::apply_actions(&output, &actions, max_agent_depth).await {
         Ok(()) => true,
         Err(error) => {
             eprintln!("❌ {error}");
@@ -506,6 +528,8 @@ mod tests {
             "mistral",
             "--timeout_in_sec",
             "90",
+            "--max-agent-depth",
+            "3",
             "--input-text",
             "Return 4",
         ]);
@@ -521,7 +545,28 @@ mod tests {
                 "server=ollama".to_string(),
                 "model=mistral".to_string(),
                 "timeout_in_sec=90".to_string(),
+                "max_agent_depth=3".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn preflight_accepts_max_agent_depth_override() {
+        let cmd = matches(&[
+            "cargo-ai",
+            "preflight",
+            "--max-agent-depth",
+            "4",
+            "--input-text",
+            "Return 4",
+        ]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        assert_eq!(
+            preflight.get_one::<u32>("max_agent_depth").copied(),
+            Some(4)
         );
     }
 
