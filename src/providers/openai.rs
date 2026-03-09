@@ -440,13 +440,13 @@ mod tests {
     fn chat_request_content_parts_encode_pdf_files() {
         let parts = chat_request_content_parts(&[ContentPart::File {
             filename: "report.pdf".to_string(),
-            file_data: "JVBERi0xLjQK".to_string(),
+            file_data: "data:application/pdf;base64,JVBERi0xLjQK".to_string(),
         }]);
 
         match &parts[0] {
             ChatRequestContentPart::File { file } => {
                 assert_eq!(file.filename, "report.pdf");
-                assert_eq!(file.file_data, "JVBERi0xLjQK");
+                assert_eq!(file.file_data, "data:application/pdf;base64,JVBERi0xLjQK");
             }
             other => panic!("expected file content part, got {other:?}"),
         }
@@ -456,7 +456,7 @@ mod tests {
     fn responses_request_content_parts_encode_pdf_files() {
         let parts = responses_request_content_parts(&[ContentPart::File {
             filename: "report.pdf".to_string(),
-            file_data: "JVBERi0xLjQK".to_string(),
+            file_data: "data:application/pdf;base64,JVBERi0xLjQK".to_string(),
         }]);
 
         assert_eq!(
@@ -464,7 +464,7 @@ mod tests {
             vec![serde_json::json!({
                 "type": "input_file",
                 "filename": "report.pdf",
-                "file_data": "JVBERi0xLjQK"
+                "file_data": "data:application/pdf;base64,JVBERi0xLjQK"
             })]
         );
     }

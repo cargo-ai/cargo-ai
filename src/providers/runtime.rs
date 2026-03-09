@@ -161,8 +161,13 @@ fn load_pdf_file_content(path: &str) -> Result<ContentPart, String> {
 
     Ok(ContentPart::File {
         filename,
-        file_data: BASE64_STANDARD.encode(file_bytes),
+        file_data: pdf_data_url(&file_bytes),
     })
+}
+
+fn pdf_data_url(file_bytes: &[u8]) -> String {
+    let encoded = BASE64_STANDARD.encode(file_bytes);
+    format!("data:application/pdf;base64,{encoded}")
 }
 
 fn validate_pdf_extension(path: &Path) -> Result<(), String> {
@@ -293,7 +298,10 @@ mod tests {
                     .and_then(|value| value.to_str())
                     .expect("filename")
                     .to_string(),
-                file_data: super::BASE64_STANDARD.encode(b"%PDF-1.4\n%mock\n"),
+                file_data: format!(
+                    "data:application/pdf;base64,{}",
+                    super::BASE64_STANDARD.encode(b"%PDF-1.4\n%mock\n")
+                ),
             }
         );
     }
