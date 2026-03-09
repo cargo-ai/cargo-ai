@@ -503,7 +503,7 @@ fn parse_input_specs(inputs: &[Value], base_path: &str) -> Result<Vec<InputSpec>
                         &format!("{path}.path"),
                         "file input",
                     )?;
-                    validate_phase_one_pdf_extension(
+                    validate_supported_file_extension(
                         &file_path,
                         &format!("{path}.path"),
                         "file input",
@@ -840,7 +840,7 @@ fn validate_definition_owned_local_path(
     Ok(())
 }
 
-fn validate_phase_one_pdf_extension(
+fn validate_supported_file_extension(
     raw_path: &str,
     path: &str,
     label: &str,
@@ -850,13 +850,12 @@ fn validate_phase_one_pdf_extension(
         .and_then(|value| value.to_str())
         .map(|value| value.to_ascii_lowercase());
 
-    if extension.as_deref() == Some("pdf") {
-        Ok(())
-    } else {
-        Err(BuildError::config(
+    match extension.as_deref() {
+        Some("pdf" | "docx" | "csv") => Ok(()),
+        _ => Err(BuildError::config(
             path,
-            format!("{label} path must use a `.pdf` extension in Phase 1"),
-        ))
+            format!("{label} path must use a supported extension: `.pdf`, `.docx`, `.csv`"),
+        )),
     }
 }
 

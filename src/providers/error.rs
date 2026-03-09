@@ -176,9 +176,13 @@ fn provider_hint(
         },
         ProviderErrorKind::InvalidRequest => {
             let normalized_message = message.to_ascii_lowercase();
-            if normalized_message.contains("file") || normalized_message.contains("pdf") {
+            if normalized_message.contains("file")
+                || normalized_message.contains("pdf")
+                || normalized_message.contains("docx")
+                || normalized_message.contains("csv")
+            {
                 Some(
-                    "The selected provider/model rejected the supplied PDF file input. Verify that the model and endpoint support file inputs, or retry without `file` / `--input-file`.",
+                    "The selected provider/model rejected the supplied file input. Verify that the model and endpoint support the current file type, or retry without `file` / `--input-file`.",
                 )
             } else {
                 Some("Check `--model`, `--url`, and request parameters for invalid values.")
@@ -275,7 +279,7 @@ pub(crate) fn validate_provider_content_parts(
         }
         if includes_files {
             issues.push(
-                "❌ PDF file inputs require a transport that accepts OpenAI-style file content parts. Ollama `/api/generate` and `/api/chat` are not compatible with `file` / `--input-file`."
+                "❌ File inputs require a transport that accepts OpenAI-style file content parts. Ollama `/api/generate` and `/api/chat` are not compatible with `file` / `--input-file`."
                     .to_string(),
             );
         }
@@ -379,24 +383,24 @@ mod tests {
         let messages = provider_error_messages(&error);
         assert!(messages
             .iter()
-            .any(|line| line.contains("rejected the supplied PDF file input")));
+            .any(|line| line.contains("rejected the supplied file input")));
     }
 
     #[test]
-    fn rejects_pdf_files_on_non_openai_ollama_transport() {
+    fn rejects_file_inputs_on_non_openai_ollama_transport() {
         let issues = validate_provider_content_parts(
             ProviderKind::Ollama,
             "http://localhost:11434/api/chat",
             &[ContentPart::File {
                 filename: "report.pdf".to_string(),
-                file_data: "JVBERi0xLjQK".to_string(),
+                file_data: "data:application/pdf;base64,JVBERi0xLjQK".to_string(),
             }],
         )
         .expect_err("expected transport validation failure");
 
         assert!(issues
             .iter()
-            .any(|line| line.contains("`file` / `--input-file`")));
+            .any(|line| line.contains("File inputs require a transport")));
     }
 
     #[tokio::test]

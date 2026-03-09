@@ -101,7 +101,7 @@ pub(crate) async fn resolve_inputs(inputs: &[crate::Input]) -> Result<Vec<Conten
             crate::Input::Image { path } => resolved.push(ContentPart::Image {
                 data_url: load_image_data_url(path)?,
             }),
-            crate::Input::File { path } => resolved.push(load_pdf_file_content(path)?),
+            crate::Input::File { path } => resolved.push(load_supported_file_content(path)?),
         }
     }
 
@@ -117,9 +117,9 @@ fn load_image_data_url(path: &str) -> Result<String, String> {
     Ok(format!("data:{media_type};base64,{encoded}"))
 }
 
-fn load_pdf_file_content(path: &str) -> Result<ContentPart, String> {
+fn load_supported_file_content(path: &str) -> Result<ContentPart, String> {
     let file_path = Path::new(path);
-    validate_pdf_extension(file_path)?;
+    let media_type = supported_file_media_type(file_path)?;
 
     let metadata = fs::metadata(file_path).map_err(|error| {
         format!(
@@ -157,28 +157,36 @@ fn load_pdf_file_content(path: &str) -> Result<ContentPart, String> {
 
     Ok(ContentPart::File {
         filename,
-        file_data: pdf_data_url(&file_bytes),
+        file_data: file_data_url(media_type, &file_bytes),
     })
 }
 
-fn pdf_data_url(file_bytes: &[u8]) -> String {
+fn file_data_url(media_type: &str, file_bytes: &[u8]) -> String {
     let encoded = BASE64_STANDARD.encode(file_bytes);
-    format!("data:application/pdf;base64,{encoded}")
+    format!("data:{media_type};base64,{encoded}")
 }
 
-fn validate_pdf_extension(path: &Path) -> Result<(), String> {
+fn supported_file_media_type(path: &Path) -> Result<&'static str, String> {
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
-        .map(|value| value.to_ascii_lowercase());
+        .map(|value| value.to_ascii_lowercase())
+        .ok_or_else(|| {
+            format!(
+                "File input '{}' must include a supported extension. Supported: pdf, docx, csv.",
+                path.display()
+            )
+        })?;
 
-    if extension.as_deref() == Some("pdf") {
-        Ok(())
-    } else {
-        Err(format!(
-            "File input '{}' must use a `.pdf` extension in Phase 1.",
-            path.display()
-        ))
+    match extension.as_str() {
+        "pdf" => Ok("application/pdf"),
+        "docx" => Ok("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        "csv" => Ok("text/csv"),
+        other => Err(format!(
+            "File input '{}' uses unsupported extension '{}'. Supported: pdf, docx, csv.",
+            path.display(),
+            other
+        )),
     }
 }
 

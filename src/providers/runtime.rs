@@ -101,7 +101,7 @@ pub(crate) async fn resolve_inputs(inputs: &[crate::Input]) -> Result<Vec<Conten
             crate::Input::Image { path } => resolved.push(ContentPart::Image {
                 data_url: load_image_data_url(path)?,
             }),
-            crate::Input::File { path } => resolved.push(load_pdf_file_content(path)?),
+            crate::Input::File { path } => resolved.push(load_supported_file_content(path)?),
         }
     }
 
@@ -121,9 +121,9 @@ fn load_image_data_url(path: &str) -> Result<String, String> {
     Ok(format!("data:{media_type};base64,{encoded}"))
 }
 
-fn load_pdf_file_content(path: &str) -> Result<ContentPart, String> {
+fn load_supported_file_content(path: &str) -> Result<ContentPart, String> {
     let file_path = Path::new(path);
-    validate_pdf_extension(file_path)?;
+    let media_type = supported_file_media_type(file_path)?;
 
     let metadata = fs::metadata(file_path).map_err(|error| {
         format!(
@@ -161,28 +161,36 @@ fn load_pdf_file_content(path: &str) -> Result<ContentPart, String> {
 
     Ok(ContentPart::File {
         filename,
-        file_data: pdf_data_url(&file_bytes),
+        file_data: file_data_url(media_type, &file_bytes),
     })
 }
 
-fn pdf_data_url(file_bytes: &[u8]) -> String {
+fn file_data_url(media_type: &str, file_bytes: &[u8]) -> String {
     let encoded = BASE64_STANDARD.encode(file_bytes);
-    format!("data:application/pdf;base64,{encoded}")
+    format!("data:{media_type};base64,{encoded}")
 }
 
-fn validate_pdf_extension(path: &Path) -> Result<(), String> {
+fn supported_file_media_type(path: &Path) -> Result<&'static str, String> {
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
-        .map(|value| value.to_ascii_lowercase());
+        .map(|value| value.to_ascii_lowercase())
+        .ok_or_else(|| {
+            format!(
+                "File input '{}' must include a supported extension. Supported: pdf, docx, csv.",
+                path.display()
+            )
+        })?;
 
-    if extension.as_deref() == Some("pdf") {
-        Ok(())
-    } else {
-        Err(format!(
-            "File input '{}' must use a `.pdf` extension in Phase 1.",
-            path.display()
-        ))
+    match extension.as_str() {
+        "pdf" => Ok("application/pdf"),
+        "docx" => Ok("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        "csv" => Ok("text/csv"),
+        other => Err(format!(
+            "File input '{}' uses unsupported extension '{}'. Supported: pdf, docx, csv.",
+            path.display(),
+            other
+        )),
     }
 }
 
@@ -280,12 +288,12 @@ mod tests {
     }
 
     #[test]
-    fn load_pdf_file_content_reads_pdf_bytes() {
+    fn load_supported_file_content_reads_pdf_bytes() {
         let temp_path =
             std::env::temp_dir().join(format!("cai2036-runtime-{}.pdf", std::process::id()));
         std::fs::write(&temp_path, b"%PDF-1.4\n%mock\n").expect("pdf fixture should write");
 
-        let content = super::load_pdf_file_content(temp_path.to_str().expect("utf8 path"))
+        let content = super::load_supported_file_content(temp_path.to_str().expect("utf8 path"))
             .expect("pdf content should load");
 
         let _ = std::fs::remove_file(&temp_path);
@@ -307,8 +315,62 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_pdf_extension_for_file_inputs() {
-        let err = super::load_pdf_file_content("./report.txt").expect_err("txt should fail");
-        assert!(err.contains("`.pdf` extension"));
+    fn load_supported_file_content_reads_docx_bytes() {
+        let temp_path =
+            std::env::temp_dir().join(format!("cai2036-runtime-{}.docx", std::process::id()));
+        std::fs::write(&temp_path, b"PK\x03\x04mock-docx").expect("docx fixture should write");
+
+        let content = super::load_supported_file_content(temp_path.to_str().expect("utf8 path"))
+            .expect("docx content should load");
+
+        let _ = std::fs::remove_file(&temp_path);
+
+        assert_eq!(
+            content,
+            ContentPart::File {
+                filename: temp_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .expect("filename")
+                    .to_string(),
+                file_data: format!(
+                    "data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{}",
+                    super::BASE64_STANDARD.encode(b"PK\x03\x04mock-docx")
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn load_supported_file_content_reads_csv_bytes() {
+        let temp_path =
+            std::env::temp_dir().join(format!("cai2036-runtime-{}.csv", std::process::id()));
+        std::fs::write(&temp_path, b"value\n2\n").expect("csv fixture should write");
+
+        let content = super::load_supported_file_content(temp_path.to_str().expect("utf8 path"))
+            .expect("csv content should load");
+
+        let _ = std::fs::remove_file(&temp_path);
+
+        assert_eq!(
+            content,
+            ContentPart::File {
+                filename: temp_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .expect("filename")
+                    .to_string(),
+                file_data: format!(
+                    "data:text/csv;base64,{}",
+                    super::BASE64_STANDARD.encode(b"value\n2\n")
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_extension_for_file_inputs() {
+        let err = super::load_supported_file_content("./report.txt").expect_err("txt should fail");
+        assert!(err.contains("Supported: pdf, docx, csv"));
     }
 }

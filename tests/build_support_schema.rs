@@ -273,11 +273,53 @@ fn accepts_pdf_file_inputs() {
 }
 
 #[test]
-fn rejects_non_pdf_file_inputs() {
+fn accepts_docx_file_inputs() {
     let cfg = r#"{
     "version": "2026-03-03.r1",
     "inputs": [
         { "type": "file", "path": "./reports/q1.docx" }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "summary": { "type": "string" }
+        }
+    },
+    "actions": []
+}"#;
+
+    let generated = build_support::generate_agent_model_from_str(cfg).unwrap();
+
+    assert!(generated.contains("Input::File { path: \"./reports/q1.docx\".to_string() }"));
+}
+
+#[test]
+fn accepts_csv_file_inputs() {
+    let cfg = r#"{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        { "type": "file", "path": "./reports/q1.csv" }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "summary": { "type": "string" }
+        }
+    },
+    "actions": []
+}"#;
+
+    let generated = build_support::generate_agent_model_from_str(cfg).unwrap();
+
+    assert!(generated.contains("Input::File { path: \"./reports/q1.csv\".to_string() }"));
+}
+
+#[test]
+fn rejects_unsupported_file_inputs() {
+    let cfg = r#"{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        { "type": "file", "path": "./reports/q1.txt" }
     ],
     "agent_schema": {
         "type": "object",
@@ -293,7 +335,9 @@ fn rejects_non_pdf_file_inputs() {
         .to_string();
 
     assert!(err.contains("$.inputs[0].path"));
-    assert!(err.contains("`.pdf` extension"));
+    assert!(err.contains("supported extension"));
+    assert!(err.contains("`.docx`"));
+    assert!(err.contains("`.csv`"));
 }
 
 #[test]

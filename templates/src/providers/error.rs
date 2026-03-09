@@ -176,9 +176,13 @@ fn provider_hint(
         },
         ProviderErrorKind::InvalidRequest => {
             let normalized_message = message.to_ascii_lowercase();
-            if normalized_message.contains("file") || normalized_message.contains("pdf") {
+            if normalized_message.contains("file")
+                || normalized_message.contains("pdf")
+                || normalized_message.contains("docx")
+                || normalized_message.contains("csv")
+            {
                 Some(
-                    "The selected provider/model rejected the supplied PDF file input. Verify that the model and endpoint support file inputs, or retry without `file` / `--input-file`.",
+                    "The selected provider/model rejected the supplied file input. Verify that the model and endpoint support the current file type, or retry without `file` / `--input-file`.",
                 )
             } else {
                 Some("Check `--model`, `--url`, and request parameters for invalid values.")
@@ -275,7 +279,7 @@ pub(crate) fn validate_provider_content_parts(
         }
         if includes_files {
             issues.push(
-                "❌ PDF file inputs require a transport that accepts OpenAI-style file content parts. Ollama `/api/generate` and `/api/chat` are not compatible with `file` / `--input-file`."
+                "❌ File inputs require a transport that accepts OpenAI-style file content parts. Ollama `/api/generate` and `/api/chat` are not compatible with `file` / `--input-file`."
                     .to_string(),
             );
         }
