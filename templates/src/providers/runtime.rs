@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize}; // Data format (e.g.,JSON, TOML) (de)serial
 use serde_json;
 use std::{collections::BTreeMap, fs, path::Path};
 
+const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str =
+    "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ContentPart {
     Text(String),
@@ -173,17 +176,28 @@ fn supported_file_media_type(path: &Path) -> Result<&'static str, String> {
         .map(|value| value.to_ascii_lowercase())
         .ok_or_else(|| {
             format!(
-                "File input '{}' must include a supported extension. Supported: pdf, docx, csv.",
+                "File input '{}' must include a supported extension. Supported: {SUPPORTED_FILE_EXTENSIONS_MESSAGE}.",
                 path.display()
             )
         })?;
 
     match extension.as_str() {
         "pdf" => Ok("application/pdf"),
+        "doc" | "dot" => Ok("application/msword"),
         "docx" => Ok("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        "odt" => Ok("application/vnd.oasis.opendocument.text"),
+        "rtf" => Ok("application/rtf"),
         "csv" => Ok("text/csv"),
+        "tsv" => Ok("text/tsv"),
+        "iif" => Ok("text/x-iif"),
+        "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlt" | "xlw" => {
+            Ok("application/vnd.ms-excel")
+        }
+        "xlsx" => Ok("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "pot" | "ppa" | "pps" | "ppt" | "pwz" | "wiz" => Ok("application/vnd.ms-powerpoint"),
+        "pptx" => Ok("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
         other => Err(format!(
-            "File input '{}' uses unsupported extension '{}'. Supported: pdf, docx, csv.",
+            "File input '{}' uses unsupported extension '{}'. Supported: {SUPPORTED_FILE_EXTENSIONS_MESSAGE}.",
             path.display(),
             other
         )),

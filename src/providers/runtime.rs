@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize}; // Data format (e.g.,JSON, TOML) (de)serial
 use serde_json;
 use std::{collections::BTreeMap, fs, path::Path};
 
+const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str =
+    "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ContentPart {
     Text(String),
@@ -177,17 +180,28 @@ fn supported_file_media_type(path: &Path) -> Result<&'static str, String> {
         .map(|value| value.to_ascii_lowercase())
         .ok_or_else(|| {
             format!(
-                "File input '{}' must include a supported extension. Supported: pdf, docx, csv.",
+                "File input '{}' must include a supported extension. Supported: {SUPPORTED_FILE_EXTENSIONS_MESSAGE}.",
                 path.display()
             )
         })?;
 
     match extension.as_str() {
         "pdf" => Ok("application/pdf"),
+        "doc" | "dot" => Ok("application/msword"),
         "docx" => Ok("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        "odt" => Ok("application/vnd.oasis.opendocument.text"),
+        "rtf" => Ok("application/rtf"),
         "csv" => Ok("text/csv"),
+        "tsv" => Ok("text/tsv"),
+        "iif" => Ok("text/x-iif"),
+        "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlt" | "xlw" => {
+            Ok("application/vnd.ms-excel")
+        }
+        "xlsx" => Ok("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "pot" | "ppa" | "pps" | "ppt" | "pwz" | "wiz" => Ok("application/vnd.ms-powerpoint"),
+        "pptx" => Ok("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
         other => Err(format!(
-            "File input '{}' uses unsupported extension '{}'. Supported: pdf, docx, csv.",
+            "File input '{}' uses unsupported extension '{}'. Supported: {SUPPORTED_FILE_EXTENSIONS_MESSAGE}.",
             path.display(),
             other
         )),
@@ -224,6 +238,7 @@ mod tests {
     use super::{Cargo, ContentPart};
     use base64::Engine as _;
     use serde::{Deserialize, Serialize};
+    use std::path::Path;
 
     #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
     struct SampleOutput {
@@ -369,8 +384,54 @@ mod tests {
     }
 
     #[test]
+    fn supported_file_media_type_maps_phase_three_extensions() {
+        let cases = [
+            ("report.pdf", "application/pdf"),
+            ("report.doc", "application/msword"),
+            ("report.dot", "application/msword"),
+            (
+                "report.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+            ("report.odt", "application/vnd.oasis.opendocument.text"),
+            ("report.rtf", "application/rtf"),
+            ("report.csv", "text/csv"),
+            ("report.tsv", "text/tsv"),
+            ("report.iif", "text/x-iif"),
+            ("report.xla", "application/vnd.ms-excel"),
+            ("report.xlb", "application/vnd.ms-excel"),
+            ("report.xlc", "application/vnd.ms-excel"),
+            ("report.xlm", "application/vnd.ms-excel"),
+            ("report.xls", "application/vnd.ms-excel"),
+            (
+                "report.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+            ("report.xlt", "application/vnd.ms-excel"),
+            ("report.xlw", "application/vnd.ms-excel"),
+            ("report.pot", "application/vnd.ms-powerpoint"),
+            ("report.ppa", "application/vnd.ms-powerpoint"),
+            ("report.pps", "application/vnd.ms-powerpoint"),
+            ("report.ppt", "application/vnd.ms-powerpoint"),
+            (
+                "report.pptx",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ),
+            ("report.pwz", "application/vnd.ms-powerpoint"),
+            ("report.wiz", "application/vnd.ms-powerpoint"),
+        ];
+
+        for (path, expected) in cases {
+            let media_type = super::supported_file_media_type(Path::new(path))
+                .unwrap_or_else(|err| panic!("expected media type for {path}: {err}"));
+            assert_eq!(media_type, expected, "wrong media type for {path}");
+        }
+    }
+
+    #[test]
     fn rejects_unsupported_extension_for_file_inputs() {
         let err = super::load_supported_file_content("./report.txt").expect_err("txt should fail");
         assert!(err.contains("Supported: pdf, docx, csv"));
+        assert!(err.contains("pptx"));
     }
 }

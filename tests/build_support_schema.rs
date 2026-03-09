@@ -315,6 +315,42 @@ fn accepts_csv_file_inputs() {
 }
 
 #[test]
+fn accepts_phase_three_file_inputs() {
+    let extensions = [
+        "xla", "xlb", "xlc", "xlm", "xls", "xlsx", "xlt", "xlw", "tsv", "iif", "doc", "dot", "odt",
+        "rtf", "pot", "ppa", "pps", "ppt", "pptx", "pwz", "wiz",
+    ];
+
+    for extension in extensions {
+        let cfg = format!(
+            r#"{{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        {{ "type": "file", "path": "./reports/q1.{extension}" }}
+    ],
+    "agent_schema": {{
+        "type": "object",
+        "properties": {{
+            "summary": {{ "type": "string" }}
+        }}
+    }},
+    "actions": []
+}}"#
+        );
+
+        let generated = build_support::generate_agent_model_from_str(&cfg)
+            .unwrap_or_else(|err| panic!("expected {extension} to be accepted: {err}"));
+
+        assert!(
+            generated.contains(&format!(
+                "Input::File {{ path: \"./reports/q1.{extension}\".to_string() }}"
+            )),
+            "generated code should preserve the {extension} path"
+        );
+    }
+}
+
+#[test]
 fn rejects_unsupported_file_inputs() {
     let cfg = r#"{
     "version": "2026-03-03.r1",
@@ -338,6 +374,7 @@ fn rejects_unsupported_file_inputs() {
     assert!(err.contains("supported extension"));
     assert!(err.contains("`.docx`"));
     assert!(err.contains("`.csv`"));
+    assert!(err.contains("`.pptx`"));
 }
 
 #[test]

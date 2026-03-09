@@ -20,6 +20,12 @@ use uuid::Uuid;
 const SCHEMA_VERSION_FORMAT: &str = "YYYY-MM-DD.rN";
 const SCHEMA_VERSION_EXAMPLE: &str = "2026-03-03.r1";
 const SUPPORTED_ACTION_PLATFORMS: [&str; 3] = ["macos", "linux", "windows"];
+const SUPPORTED_FILE_EXTENSIONS: [&str; 24] = [
+    "pdf", "docx", "csv", "xla", "xlb", "xlc", "xlm", "xls", "xlsx", "xlt", "xlw", "tsv", "iif",
+    "doc", "dot", "odt", "rtf", "pot", "ppa", "pps", "ppt", "pptx", "pwz", "wiz",
+];
+const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str =
+    "`.pdf`, `.docx`, `.csv`, `.xla`, `.xlb`, `.xlc`, `.xlm`, `.xls`, `.xlsx`, `.xlt`, `.xlw`, `.tsv`, `.iif`, `.doc`, `.dot`, `.odt`, `.rtf`, `.pot`, `.ppa`, `.pps`, `.ppt`, `.pptx`, `.pwz`, `.wiz`";
 
 #[derive(Debug)]
 pub enum BuildError {
@@ -851,10 +857,12 @@ fn validate_supported_file_extension(
         .map(|value| value.to_ascii_lowercase());
 
     match extension.as_deref() {
-        Some("pdf" | "docx" | "csv") => Ok(()),
+        Some(extension) if SUPPORTED_FILE_EXTENSIONS.contains(&extension) => Ok(()),
         _ => Err(BuildError::config(
             path,
-            format!("{label} path must use a supported extension: `.pdf`, `.docx`, `.csv`"),
+            format!(
+                "{label} path must use a supported extension: {SUPPORTED_FILE_EXTENSIONS_MESSAGE}"
+            ),
         )),
     }
 }
