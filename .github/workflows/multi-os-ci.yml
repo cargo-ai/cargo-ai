@@ -62,12 +62,12 @@ jobs:
           }
         shell: bash
 
-      - name: Validate agent_adder output with overridden prompt
+      - name: Validate agent_adder output with overridden text input
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            OUTPUT=$(./adder_test.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --prompt "2+3")
+            OUTPUT=$(./adder_test.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --input-text "What is 2 + 3? Return the answer as a number.")
           else
-            OUTPUT=$(./adder_test -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --prompt "2+3")
+            OUTPUT=$(./adder_test -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --input-text "What is 2 + 3? Return the answer as a number.")
           fi
 
           echo "$OUTPUT"
