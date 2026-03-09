@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use config::loader::{find_profile, load_config};
@@ -1125,17 +1126,27 @@ async fn apply_actions(
                 print_action_start(&action.name);
                 let single_step_action = matching_steps.len() == 1;
                 let mut outcomes = Vec::with_capacity(matching_steps.len());
+                let mut action_data = data.clone();
 
                 for step in matching_steps {
                     if step.kind.eq_ignore_ascii_case("exec") {
-                        outcomes.push(
-                            run_exec_step(step, &data, &action.name, runtime_budget).await?,
-                        );
+                        let (outcome, captured_output) =
+                            run_exec_step(step, &action_data, &action.name, runtime_budget)
+                                .await?;
+                        if let Some((name, value)) = captured_output {
+                            insert_action_output_variable(
+                                &mut action_data,
+                                name.as_str(),
+                                value,
+                                action.name.as_str(),
+                            )?;
+                        }
+                        outcomes.push(outcome);
                     } else if step.kind.eq_ignore_ascii_case("email_me") {
                         outcomes.push(
                             run_email_me_step(
                                 step,
-                                &data,
+                                &action_data,
                                 &action.name,
                                 config,
                                 runtime_budget,
@@ -1147,7 +1158,7 @@ async fn apply_actions(
                             outcomes.push(
                                 run_agent_step(
                                     step,
-                                    &data,
+                                    &action_data,
                                     &action.name,
                                     max_agent_depth,
                                     runtime_budget,
@@ -1180,7 +1191,7 @@ async fn run_exec_step(
     data: &serde_json::Value,
     action_name: &str,
     runtime_budget: InvocationRuntimeBudget,
-) -> Result<StepExecutionOutcome, String> {
+) -> Result<(StepExecutionOutcome, Option<(String, String)>), String> {
     let program = step.program.as_deref().ok_or_else(|| {
         format!(
             "Action '{}' exec step is missing required `program`.",
@@ -1198,30 +1209,85 @@ async fn run_exec_step(
         action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
     })?;
 
-    let mut child = tokio::process::Command::new(program)
-        .args(&resolved_args)
-        .spawn()
-        .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
+    if let Some(output_variable) = step.output_variable.as_deref() {
+        let child = tokio::process::Command::new(program)
+            .args(&resolved_args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
 
-    match tokio::time::timeout(remaining, child.wait()).await {
-        Ok(Ok(status)) if status.success() => Ok(StepExecutionOutcome::Completed),
-        Ok(Ok(status)) => {
-            println!("{action_name}: command exited with status {status}.");
-            Ok(StepExecutionOutcome::SoftFailureLogged)
-        }
-        Ok(Err(error)) => {
-            println!("{action_name}: failed while waiting for command: {error}.");
-            Ok(StepExecutionOutcome::SoftFailureLogged)
-        }
-        Err(_) => {
-            let _ = child.kill().await;
-            Err(action_runtime_timeout_message(
+        match tokio::time::timeout(remaining, child.wait_with_output()).await {
+            Ok(Ok(output)) if output.status.success() => {
+                let captured_output = String::from_utf8_lossy(&output.stdout)
+                    .trim_end_matches(['\r', '\n'])
+                    .to_string();
+                println!(
+                    "ℹ️ Action '{}' stored exec output in variable '{}'.",
+                    action_name, output_variable
+                );
+                Ok((
+                    StepExecutionOutcome::Completed,
+                    Some((output_variable.to_string(), captured_output)),
+                ))
+            }
+            Ok(Ok(output)) => {
+                println!("{action_name}: command exited with status {}.", output.status);
+                Ok((StepExecutionOutcome::SoftFailureLogged, None))
+            }
+            Ok(Err(error)) => {
+                println!("{action_name}: failed while waiting for command: {error}.");
+                Ok((StepExecutionOutcome::SoftFailureLogged, None))
+            }
+            Err(_) => Err(action_runtime_timeout_message(
                 action_name,
                 runtime_budget,
                 &format!("while waiting for command '{}'", program),
-            ))
+            )),
+        }
+    } else {
+        let mut child = tokio::process::Command::new(program)
+            .args(&resolved_args)
+            .spawn()
+            .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
+
+        match tokio::time::timeout(remaining, child.wait()).await {
+            Ok(Ok(status)) if status.success() => Ok((StepExecutionOutcome::Completed, None)),
+            Ok(Ok(status)) => {
+                println!("{action_name}: command exited with status {status}.");
+                Ok((StepExecutionOutcome::SoftFailureLogged, None))
+            }
+            Ok(Err(error)) => {
+                println!("{action_name}: failed while waiting for command: {error}.");
+                Ok((StepExecutionOutcome::SoftFailureLogged, None))
+            }
+            Err(_) => {
+                let _ = child.kill().await;
+                Err(action_runtime_timeout_message(
+                    action_name,
+                    runtime_budget,
+                    &format!("while waiting for command '{}'", program),
+                ))
+            }
         }
     }
+}
+
+fn insert_action_output_variable(
+    data: &mut serde_json::Value,
+    name: &str,
+    value: String,
+    action_name: &str,
+) -> Result<(), String> {
+    let Some(object) = data.as_object_mut() else {
+        return Err(format!(
+            "Action '{}' could not store captured output '{}' because the action data context is not an object.",
+            action_name, name
+        ));
+    };
+
+    object.insert(name.to_string(), serde_json::Value::String(value));
+    Ok(())
 }
 
 async fn run_email_me_step(

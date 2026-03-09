@@ -110,6 +110,7 @@ enum ActionInputSpec {
 struct RunStep {
     kind: String,
     program: Option<String>,
+    output_variable: Option<String>,
     args: Vec<RunArg>,
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
@@ -558,6 +559,8 @@ fn parse_actions(
 
         let runs = get_required_array(action_obj, "run", &action_path)?;
         let mut run_steps = Vec::with_capacity(runs.len());
+        let mut available_field_types = schema_field_types.clone();
+        let mut captured_output_names = BTreeMap::new();
         for (run_idx, run_value) in runs.iter().enumerate() {
             let run_path = format!("{action_path}.run[{run_idx}]");
             let run_obj = expect_object(run_value, &run_path)?;
@@ -600,10 +603,17 @@ fn parse_actions(
                         ));
                     }
 
-                    let args = parse_run_args(run_obj, &run_path, schema_field_types)?;
+                    let output_variable = parse_optional_output_variable(
+                        run_obj,
+                        &run_path,
+                        schema_field_types,
+                        &captured_output_names,
+                    )?;
+                    let args = parse_run_args(run_obj, &run_path, &available_field_types)?;
                     RunStep {
                         kind,
                         program: Some(program),
+                        output_variable,
                         args,
                         subject: None,
                         text: None,
@@ -637,19 +647,30 @@ fn parse_actions(
                             "`inputs` is not supported for `email_me` actions",
                         ));
                     }
+                    if run_obj.contains_key("output_variable") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.output_variable"),
+                            "`output_variable` is only supported for `exec` actions",
+                        ));
+                    }
 
                     let subject = parse_string_parts_field(
                         run_obj,
                         "subject",
                         &run_path,
-                        schema_field_types,
+                        &available_field_types,
                     )?;
-                    let text =
-                        parse_string_parts_field(run_obj, "text", &run_path, schema_field_types)?;
+                    let text = parse_string_parts_field(
+                        run_obj,
+                        "text",
+                        &run_path,
+                        &available_field_types,
+                    )?;
 
                     RunStep {
                         kind,
                         program: None,
+                        output_variable: None,
                         args: Vec::new(),
                         subject: Some(subject),
                         text: Some(text),
@@ -681,6 +702,12 @@ fn parse_actions(
                         return Err(BuildError::config(
                             format!("{run_path}.text"),
                             "`text` is not supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("output_variable") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.output_variable"),
+                            "`output_variable` is only supported for `exec` actions",
                         ));
                     }
 
@@ -724,7 +751,7 @@ fn parse_actions(
                             Some(parse_action_input_specs(
                                 input_array,
                                 &input_path,
-                                schema_field_types,
+                                &available_field_types,
                             )?)
                         }
                         None => None,
@@ -733,6 +760,7 @@ fn parse_actions(
                     RunStep {
                         kind,
                         program: None,
+                        output_variable: None,
                         args: Vec::new(),
                         subject: None,
                         text: None,
@@ -751,6 +779,10 @@ fn parse_actions(
                 }
             };
 
+            if let Some(output_variable) = run_step.output_variable.as_ref() {
+                captured_output_names.insert(output_variable.clone(), run_path.clone());
+                available_field_types.insert(output_variable.clone(), FieldType::String);
+            }
             run_steps.push(run_step);
         }
 
@@ -762,6 +794,47 @@ fn parse_actions(
     }
 
     Ok(parsed)
+}
+
+fn parse_optional_output_variable(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+    captured_output_names: &BTreeMap<String, String>,
+) -> Result<Option<String>, BuildError> {
+    let Some(value) = run_obj.get("output_variable") else {
+        return Ok(None);
+    };
+
+    let output_variable_path = format!("{run_path}.output_variable");
+    let output_variable = value.as_str().ok_or_else(|| {
+        BuildError::config(
+            &output_variable_path,
+            "expected `output_variable` to be a non-empty string name",
+        )
+    })?;
+    let normalized = output_variable.trim();
+    validate_action_output_variable_name(normalized, &output_variable_path)?;
+
+    if schema_field_types.contains_key(normalized) {
+        return Err(BuildError::config(
+            &output_variable_path,
+            format!(
+                "captured output name `{normalized}` collides with an agent output field; choose a different name"
+            ),
+        ));
+    }
+
+    if captured_output_names.contains_key(normalized) {
+        return Err(BuildError::config(
+            &output_variable_path,
+            format!(
+                "duplicate captured output name `{normalized}` within this action; choose a unique name"
+            ),
+        ));
+    }
+
+    Ok(Some(normalized.to_string()))
 }
 
 fn parse_run_args(
@@ -780,6 +853,24 @@ fn parse_run_args(
             )
         })
         .collect()
+}
+
+fn validate_action_output_variable_name(name: &str, path: &str) -> Result<(), BuildError> {
+    if name.is_empty() {
+        return Err(BuildError::config(
+            path,
+            "output variable name cannot be empty",
+        ));
+    }
+
+    if name.contains('.') {
+        return Err(BuildError::config(
+            path,
+            "output variable name must be flat; nested names with `.` are not supported",
+        ));
+    }
+
+    Ok(())
 }
 
 fn parse_action_input_specs(
@@ -1699,6 +1790,11 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     .as_ref()
                     .map(|parts| format!("Some(vec![{}])", render_run_arg_parts(parts)))
                     .unwrap_or_else(|| "None".to_string());
+                let output_variable = run_step
+                    .output_variable
+                    .as_ref()
+                    .map(|name| format!("Some({}.to_string())", rust_string_literal(name)))
+                    .unwrap_or_else(|| "None".to_string());
                 let agent = run_step
                     .agent
                     .as_ref()
@@ -1752,6 +1848,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     "RunStep {{
                         kind: {}.to_string(),
                         program: {},
+                        output_variable: {},
                         args: vec![{}],
                         subject: {},
                         text: {},
@@ -1767,6 +1864,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                             format!("Some({}.to_string())", rust_string_literal(program))
                         })
                         .unwrap_or_else(|| "None".to_string()),
+                    output_variable,
                     args,
                     subject,
                     text,
@@ -1846,6 +1944,7 @@ pub enum ActionInput {{
 pub struct RunStep {{
     kind: String,
     program: Option<String>,
+    output_variable: Option<String>,
     args: Vec<RunArg>,
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
