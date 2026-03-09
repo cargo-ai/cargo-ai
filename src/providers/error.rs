@@ -128,7 +128,11 @@ fn classify_http_status(status: StatusCode, body: &str) -> ProviderErrorKind {
     }
 }
 
-fn provider_hint(kind: ProviderErrorKind, provider: ProviderKind) -> Option<&'static str> {
+fn provider_hint(
+    kind: ProviderErrorKind,
+    provider: ProviderKind,
+    message: &str,
+) -> Option<&'static str> {
     match kind {
         ProviderErrorKind::ModelNotFound => match provider {
             ProviderKind::Ollama => Some(
@@ -171,7 +175,14 @@ fn provider_hint(kind: ProviderErrorKind, provider: ProviderKind) -> Option<&'st
             }
         },
         ProviderErrorKind::InvalidRequest => {
-            Some("Check `--model`, `--url`, and request parameters for invalid values.")
+            let normalized_message = message.to_ascii_lowercase();
+            if normalized_message.contains("file") || normalized_message.contains("pdf") {
+                Some(
+                    "The selected provider/model rejected the supplied PDF file input. Verify that the model and endpoint support file inputs, or retry without `file` / `--input-file`.",
+                )
+            } else {
+                Some("Check `--model`, `--url`, and request parameters for invalid values.")
+            }
         }
         ProviderErrorKind::InvalidResponse => {
             Some("The provider returned an unexpected response shape; verify model and endpoint compatibility.")
@@ -189,7 +200,7 @@ pub(crate) fn provider_error_messages(error: &ProviderError) -> Vec<String> {
         format!("Reason: {}", error.message()),
     ];
 
-    if let Some(hint) = provider_hint(error.kind(), error.provider()) {
+    if let Some(hint) = provider_hint(error.kind(), error.provider(), error.message()) {
         messages.push(format!("Hint: {hint}"));
     }
 
@@ -242,8 +253,11 @@ pub(crate) fn validate_provider_content_parts(
     let includes_images = content_parts
         .iter()
         .any(|part| matches!(part, ContentPart::Image { .. }));
+    let includes_files = content_parts
+        .iter()
+        .any(|part| matches!(part, ContentPart::File { .. }));
 
-    if !includes_images {
+    if !includes_images && !includes_files {
         return Ok(());
     }
 
@@ -253,10 +267,18 @@ pub(crate) fn validate_provider_content_parts(
     if provider == ProviderKind::Ollama
         && (normalized_url.contains("/api/generate") || normalized_url.contains("/api/chat"))
     {
-        issues.push(
-            "❌ Image inputs require Ollama's OpenAI-compatible `/v1/chat/completions` transport. Update `--url` or your profile URL before retrying."
-                .to_string(),
-        );
+        if includes_images {
+            issues.push(
+                "❌ Image inputs require Ollama's OpenAI-compatible `/v1/chat/completions` transport. Update `--url` or your profile URL before retrying."
+                    .to_string(),
+            );
+        }
+        if includes_files {
+            issues.push(
+                "❌ PDF file inputs require a transport that accepts OpenAI-style file content parts. Ollama `/api/generate` and `/api/chat` are not compatible with `file` / `--input-file`."
+                    .to_string(),
+            );
+        }
     }
 
     if issues.is_empty() {
@@ -268,7 +290,11 @@ pub(crate) fn validate_provider_content_parts(
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_error_messages, validate_provider_request, ProviderError, ProviderKind};
+    use super::{
+        provider_error_messages, validate_provider_content_parts, validate_provider_request,
+        ProviderError, ProviderKind,
+    };
+    use crate::providers::runtime::ContentPart;
     use reqwest::StatusCode;
     use tokio::net::TcpListener;
 
@@ -341,6 +367,36 @@ mod tests {
         assert!(messages
             .iter()
             .any(|line| line.contains("unexpected response shape")));
+    }
+
+    #[test]
+    fn invalid_request_with_file_input_uses_file_specific_hint() {
+        let error = ProviderError::from_http_status(
+            ProviderKind::OpenAi,
+            StatusCode::BAD_REQUEST,
+            "{\"error\":\"file inputs are not supported for this model\"}",
+        );
+        let messages = provider_error_messages(&error);
+        assert!(messages
+            .iter()
+            .any(|line| line.contains("rejected the supplied PDF file input")));
+    }
+
+    #[test]
+    fn rejects_pdf_files_on_non_openai_ollama_transport() {
+        let issues = validate_provider_content_parts(
+            ProviderKind::Ollama,
+            "http://localhost:11434/api/chat",
+            &[ContentPart::File {
+                filename: "report.pdf".to_string(),
+                file_data: "JVBERi0xLjQK".to_string(),
+            }],
+        )
+        .expect_err("expected transport validation failure");
+
+        assert!(issues
+            .iter()
+            .any(|line| line.contains("`file` / `--input-file`")));
     }
 
     #[tokio::test]

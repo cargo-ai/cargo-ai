@@ -252,6 +252,51 @@ fn accepts_agent_step_with_relative_path_and_inputs() {
 }
 
 #[test]
+fn accepts_pdf_file_inputs() {
+    let cfg = r#"{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        { "type": "file", "path": "./reports/q1.pdf" }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "summary": { "type": "string" }
+        }
+    },
+    "actions": []
+}"#;
+
+    let generated = build_support::generate_agent_model_from_str(cfg).unwrap();
+
+    assert!(generated.contains("Input::File { path: \"./reports/q1.pdf\".to_string() }"));
+}
+
+#[test]
+fn rejects_non_pdf_file_inputs() {
+    let cfg = r#"{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        { "type": "file", "path": "./reports/q1.docx" }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "summary": { "type": "string" }
+        }
+    },
+    "actions": []
+}"#;
+
+    let err = build_support::generate_agent_model_from_str(cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.inputs[0].path"));
+    assert!(err.contains("`.pdf` extension"));
+}
+
+#[test]
 fn rejects_agent_absolute_path() {
     let cfg = config_with(
         r#""value": { "type": "integer" }"#,

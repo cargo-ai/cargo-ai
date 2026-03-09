@@ -867,6 +867,10 @@ fn child_input_args(inputs: Option<&[crate::Input]>) -> Vec<String> {
                     args.push("--input-image".to_string());
                     args.push(path.clone());
                 }
+                crate::Input::File { path } => {
+                    args.push("--input-file".to_string());
+                    args.push(path.clone());
+                }
             }
         }
     }
@@ -1105,6 +1109,9 @@ mod tests {
             crate::Input::Image {
                 path: "./diagram.png".to_string(),
             },
+            crate::Input::File {
+                path: "./report.pdf".to_string(),
+            },
         ]));
 
         assert_eq!(
@@ -1116,6 +1123,8 @@ mod tests {
                 "https://example.com",
                 "--input-image",
                 "./diagram.png",
+                "--input-file",
+                "./report.pdf",
             ]
         );
     }
@@ -1184,6 +1193,9 @@ mod tests {
                 crate::Input::Image {
                     path: "./diagram.png".to_string(),
                 },
+                crate::Input::File {
+                    path: "./report.pdf".to_string(),
+                },
             ]),
             platforms: None,
         };
@@ -1210,6 +1222,8 @@ mod tests {
                 "https://example.com",
                 "--input-image",
                 "./diagram.png",
+                "--input-file",
+                "./report.pdf",
             ]
         );
     }

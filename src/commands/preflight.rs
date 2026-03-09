@@ -173,6 +173,9 @@ fn runtime_input_overrides(sub_m: &ArgMatches) -> Vec<crate::Input> {
     collect_flagged_inputs(sub_m, "input_image")
         .into_iter()
         .for_each(|(index, value)| ordered.push((index, crate::Input::Image { path: value })));
+    collect_flagged_inputs(sub_m, "input_file")
+        .into_iter()
+        .for_each(|(index, value)| ordered.push((index, crate::Input::File { path: value })));
 
     ordered.sort_by_key(|(index, _)| *index);
     ordered.into_iter().map(|(_, input)| input).collect()
@@ -714,6 +717,38 @@ mod tests {
                 .copied(),
             Some(45)
         );
+    }
+
+    #[test]
+    fn runtime_input_overrides_preserve_file_order() {
+        let cmd = matches(&[
+            "cargo-ai",
+            "preflight",
+            "--input-text",
+            "hello",
+            "--input-file",
+            "./report.pdf",
+            "--input-url",
+            "https://example.com",
+        ]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        let overrides = super::runtime_input_overrides(preflight);
+        assert_eq!(overrides.len(), 3);
+        assert!(matches!(
+            &overrides[0],
+            crate::Input::Text { text } if text == "hello"
+        ));
+        assert!(matches!(
+            &overrides[1],
+            crate::Input::File { path } if path == "./report.pdf"
+        ));
+        assert!(matches!(
+            &overrides[2],
+            crate::Input::Url { url } if url == "https://example.com"
+        ));
     }
 
     #[tokio::test]

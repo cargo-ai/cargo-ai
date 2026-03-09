@@ -23,11 +23,18 @@ struct RequestMessage {
 enum RequestContentPart {
     Text { text: String },
     ImageUrl { image_url: ImageUrl },
+    File { file: FileInput },
 }
 
 #[derive(Serialize, Debug)]
 struct ImageUrl {
     url: String,
+}
+
+#[derive(Serialize, Debug)]
+struct FileInput {
+    filename: String,
+    file_data: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -138,6 +145,15 @@ fn request_content_parts(content_parts: &[ContentPart]) -> Vec<RequestContentPar
             ContentPart::Image { data_url } => RequestContentPart::ImageUrl {
                 image_url: ImageUrl {
                     url: data_url.clone(),
+                },
+            },
+            ContentPart::File {
+                filename,
+                file_data,
+            } => RequestContentPart::File {
+                file: FileInput {
+                    filename: filename.clone(),
+                    file_data: file_data.clone(),
                 },
             },
         })

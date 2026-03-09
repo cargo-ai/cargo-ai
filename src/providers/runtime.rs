@@ -7,6 +7,7 @@ use std::{collections::BTreeMap, fs, path::Path};
 pub(crate) enum ContentPart {
     Text(String),
     Image { data_url: String },
+    File { filename: String, file_data: String },
 }
 
 #[derive(Debug)]
@@ -100,6 +101,7 @@ pub(crate) async fn resolve_inputs(inputs: &[crate::Input]) -> Result<Vec<Conten
             crate::Input::Image { path } => resolved.push(ContentPart::Image {
                 data_url: load_image_data_url(path)?,
             }),
+            crate::Input::File { path } => resolved.push(load_pdf_file_content(path)?),
         }
     }
 
@@ -117,6 +119,66 @@ fn load_image_data_url(path: &str) -> Result<String, String> {
     let media_type = image_media_type(image_path)?;
     let encoded = BASE64_STANDARD.encode(image_bytes);
     Ok(format!("data:{media_type};base64,{encoded}"))
+}
+
+fn load_pdf_file_content(path: &str) -> Result<ContentPart, String> {
+    let file_path = Path::new(path);
+    validate_pdf_extension(file_path)?;
+
+    let metadata = fs::metadata(file_path).map_err(|error| {
+        format!(
+            "Failed to inspect file input '{}': {error}",
+            file_path.display()
+        )
+    })?;
+
+    if !metadata.is_file() {
+        return Err(format!(
+            "File input '{}' must point to a regular file.",
+            file_path.display()
+        ));
+    }
+
+    let file_bytes = fs::read(file_path).map_err(|error| {
+        format!(
+            "Failed to read file input '{}': {error}",
+            file_path.display()
+        )
+    })?;
+
+    let filename = file_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!(
+                "File input '{}' must include a filename.",
+                file_path.display()
+            )
+        })?;
+
+    Ok(ContentPart::File {
+        filename,
+        file_data: BASE64_STANDARD.encode(file_bytes),
+    })
+}
+
+fn validate_pdf_extension(path: &Path) -> Result<(), String> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    if extension.as_deref() == Some("pdf") {
+        Ok(())
+    } else {
+        Err(format!(
+            "File input '{}' must use a `.pdf` extension in Phase 1.",
+            path.display()
+        ))
+    }
 }
 
 fn image_media_type(path: &Path) -> Result<&'static str, String> {
@@ -147,6 +209,7 @@ fn image_media_type(path: &Path) -> Result<&'static str, String> {
 #[cfg(test)]
 mod tests {
     use super::{Cargo, ContentPart};
+    use base64::Engine as _;
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -209,5 +272,35 @@ mod tests {
         assert!(with_image
             .iter()
             .any(|part| matches!(part, ContentPart::Image { .. })));
+    }
+
+    #[test]
+    fn load_pdf_file_content_reads_pdf_bytes() {
+        let temp_path =
+            std::env::temp_dir().join(format!("cai2036-runtime-{}.pdf", std::process::id()));
+        std::fs::write(&temp_path, b"%PDF-1.4\n%mock\n").expect("pdf fixture should write");
+
+        let content = super::load_pdf_file_content(temp_path.to_str().expect("utf8 path"))
+            .expect("pdf content should load");
+
+        let _ = std::fs::remove_file(&temp_path);
+
+        assert_eq!(
+            content,
+            ContentPart::File {
+                filename: temp_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .expect("filename")
+                    .to_string(),
+                file_data: super::BASE64_STANDARD.encode(b"%PDF-1.4\n%mock\n"),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_non_pdf_extension_for_file_inputs() {
+        let err = super::load_pdf_file_content("./report.txt").expect_err("txt should fail");
+        assert!(err.contains("`.pdf` extension"));
     }
 }

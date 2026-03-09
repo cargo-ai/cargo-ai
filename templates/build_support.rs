@@ -89,6 +89,7 @@ enum InputSpec {
     Text { text: String },
     Url { url: String },
     Image { path: String },
+    File { path: String },
 }
 
 #[derive(Debug, Clone)]
@@ -492,11 +493,29 @@ fn parse_input_specs(inputs: &[Value], base_path: &str) -> Result<Vec<InputSpec>
                     image_path
                 },
             },
+            "file" => InputSpec::File {
+                path: {
+                    let file_path = get_required_string(entry_obj, "path", &path)?
+                        .trim()
+                        .to_string();
+                    validate_definition_owned_local_path(
+                        &file_path,
+                        &format!("{path}.path"),
+                        "file input",
+                    )?;
+                    validate_phase_one_pdf_extension(
+                        &file_path,
+                        &format!("{path}.path"),
+                        "file input",
+                    )?;
+                    file_path
+                },
+            },
             _ => {
                 return Err(BuildError::config(
                     format!("{path}.type"),
                     format!(
-                        "unsupported input type `{input_type}` (supported: `text`, `url`, `image`)"
+                        "unsupported input type `{input_type}` (supported: `text`, `url`, `image`, `file`)"
                     ),
                 ))
             }
@@ -819,6 +838,26 @@ fn validate_definition_owned_local_path(
     }
 
     Ok(())
+}
+
+fn validate_phase_one_pdf_extension(
+    raw_path: &str,
+    path: &str,
+    label: &str,
+) -> Result<(), BuildError> {
+    let extension = Path::new(raw_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    if extension.as_deref() == Some("pdf") {
+        Ok(())
+    } else {
+        Err(BuildError::config(
+            path,
+            format!("{label} path must use a `.pdf` extension in Phase 1"),
+        ))
+    }
 }
 
 fn path_uses_parent_traversal(path: &Path) -> bool {
@@ -1486,6 +1525,10 @@ fn render_agent_model(config: &AgentConfig) -> String {
                 "        Input::Image {{ path: {}.to_string() }},\n",
                 rust_string_literal(path)
             ),
+            InputSpec::File { path } => format!(
+                "        Input::File {{ path: {}.to_string() }},\n",
+                rust_string_literal(path)
+            ),
         };
         input_list.push_str(&rendered);
     }
@@ -1578,6 +1621,10 @@ fn render_agent_model(config: &AgentConfig) -> String {
                                     "Input::Image {{ path: {}.to_string() }}",
                                     rust_string_literal(path)
                                 ),
+                                InputSpec::File { path } => format!(
+                                    "Input::File {{ path: {}.to_string() }}",
+                                    rust_string_literal(path)
+                                ),
                             })
                             .collect::<Vec<_>>()
                             .join(", ");
@@ -1655,6 +1702,7 @@ pub enum Input {{
     Text {{ text: String }},
     Url {{ url: String }},
     Image {{ path: String }},
+    File {{ path: String }},
 }}
 
 pub fn inputs() -> Vec<Input> {{

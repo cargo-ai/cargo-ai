@@ -789,6 +789,9 @@ fn runtime_input_overrides(cmd_args: &clap::ArgMatches) -> Vec<Input> {
     collect_flagged_inputs(cmd_args, "input_image")
         .into_iter()
         .for_each(|(index, value)| ordered.push((index, Input::Image { path: value })));
+    collect_flagged_inputs(cmd_args, "input_file")
+        .into_iter()
+        .for_each(|(index, value)| ordered.push((index, Input::File { path: value })));
 
     ordered.sort_by_key(|(index, _)| *index);
     ordered.into_iter().map(|(_, input)| input).collect()
@@ -1607,6 +1610,10 @@ fn child_input_args(inputs: Option<&[Input]>) -> Vec<String> {
                 }
                 Input::Image { path } => {
                     args.push("--input-image".to_string());
+                    args.push(path.clone());
+                }
+                Input::File { path } => {
+                    args.push("--input-file".to_string());
                     args.push(path.clone());
                 }
             }

@@ -25,11 +25,18 @@ pub struct ChatRequestMessage {
 pub enum ChatRequestContentPart {
     Text { text: String },
     ImageUrl { image_url: ImageUrl },
+    File { file: FileInput },
 }
 
 #[derive(Serialize, Debug)]
 pub struct ImageUrl {
     pub url: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct FileInput {
+    pub filename: String,
+    pub file_data: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -384,6 +391,15 @@ fn chat_request_content_parts(content_parts: &[ContentPart]) -> Vec<ChatRequestC
                     url: data_url.clone(),
                 },
             },
+            ContentPart::File {
+                filename,
+                file_data,
+            } => ChatRequestContentPart::File {
+                file: FileInput {
+                    filename: filename.clone(),
+                    file_data: file_data.clone(),
+                },
+            },
         })
         .collect()
 }
@@ -400,14 +416,58 @@ fn responses_request_content_parts(content_parts: &[ContentPart]) -> Vec<serde_j
                 "type": "input_image",
                 "image_url": data_url
             }),
+            ContentPart::File {
+                filename,
+                file_data,
+            } => serde_json::json!({
+                "type": "input_file",
+                "filename": filename,
+                "file_data": file_data
+            }),
         })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::send_request;
+    use super::{
+        chat_request_content_parts, responses_request_content_parts, send_request,
+        ChatRequestContentPart,
+    };
     use crate::providers::runtime::ContentPart;
+
+    #[test]
+    fn chat_request_content_parts_encode_pdf_files() {
+        let parts = chat_request_content_parts(&[ContentPart::File {
+            filename: "report.pdf".to_string(),
+            file_data: "JVBERi0xLjQK".to_string(),
+        }]);
+
+        match &parts[0] {
+            ChatRequestContentPart::File { file } => {
+                assert_eq!(file.filename, "report.pdf");
+                assert_eq!(file.file_data, "JVBERi0xLjQK");
+            }
+            other => panic!("expected file content part, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn responses_request_content_parts_encode_pdf_files() {
+        let parts = responses_request_content_parts(&[ContentPart::File {
+            filename: "report.pdf".to_string(),
+            file_data: "JVBERi0xLjQK".to_string(),
+        }]);
+
+        assert_eq!(
+            parts,
+            vec![serde_json::json!({
+                "type": "input_file",
+                "filename": "report.pdf",
+                "file_data": "JVBERi0xLjQK"
+            })]
+        );
+    }
 
     #[tokio::test]
     async fn parses_chatgpt_codex_stream_done_payload() {

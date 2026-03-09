@@ -25,11 +25,18 @@ pub struct ChatRequestMessage {
 pub enum ChatRequestContentPart {
     Text { text: String },
     ImageUrl { image_url: ImageUrl },
+    File { file: FileInput },
 }
 
 #[derive(Serialize, Debug)]
 pub struct ImageUrl {
     pub url: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct FileInput {
+    pub filename: String,
+    pub file_data: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -384,6 +391,15 @@ fn chat_request_content_parts(content_parts: &[ContentPart]) -> Vec<ChatRequestC
                     url: data_url.clone(),
                 },
             },
+            ContentPart::File {
+                filename,
+                file_data,
+            } => ChatRequestContentPart::File {
+                file: FileInput {
+                    filename: filename.clone(),
+                    file_data: file_data.clone(),
+                },
+            },
         })
         .collect()
 }
@@ -399,6 +415,14 @@ fn responses_request_content_parts(content_parts: &[ContentPart]) -> Vec<serde_j
             ContentPart::Image { data_url } => serde_json::json!({
                 "type": "input_image",
                 "image_url": data_url
+            }),
+            ContentPart::File {
+                filename,
+                file_data,
+            } => serde_json::json!({
+                "type": "input_file",
+                "filename": filename,
+                "file_data": file_data
             }),
         })
         .collect()
