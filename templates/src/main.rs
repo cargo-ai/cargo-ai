@@ -33,6 +33,8 @@ const AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_STA
 const AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_DEADLINE_MS";
 const DEFAULT_AGENT_ACTION_MAX_DEPTH: u32 = 5;
 const DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS: u64 = 600;
+const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str =
+    "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
 
 fn unknown_server_messages(server: &str) -> Vec<String> {
     let display_server = if server.trim().is_empty() {
@@ -1141,12 +1143,18 @@ async fn apply_actions(
                             )
                             .await?,
                         );
-                    } else if step.kind.eq_ignore_ascii_case("agent") {
-                        outcomes.push(
-                            run_agent_step(step, &action.name, max_agent_depth, runtime_budget)
+                        } else if step.kind.eq_ignore_ascii_case("agent") {
+                            outcomes.push(
+                                run_agent_step(
+                                    step,
+                                    &data,
+                                    &action.name,
+                                    max_agent_depth,
+                                    runtime_budget,
+                                )
                                 .await?,
-                        );
-                    } else {
+                            );
+                        } else {
                         println!(
                             "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
                             action.name, step.kind
@@ -1274,6 +1282,7 @@ async fn run_email_me_step(
 
 async fn run_agent_step(
     step: &RunStep,
+    data: &serde_json::Value,
     action_name: &str,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
@@ -1298,7 +1307,11 @@ async fn run_agent_step(
     }
 
     let mut command = tokio::process::Command::new(agent_path);
-    for argument in child_input_args(step.inputs.as_deref()) {
+    let (child_args, resolution_notes) = child_input_args(step.inputs.as_deref(), data, action_name)?;
+    for note in resolution_notes {
+        println!("ℹ️ {note}");
+    }
+    for argument in child_args {
         command.arg(argument);
     }
     command.env(AGENT_ACTION_DEPTH_ENV, (current_depth + 1).to_string());
@@ -1594,33 +1607,169 @@ fn matching_run_steps<'a>(
         .collect()
 }
 
-fn child_input_args(inputs: Option<&[Input]>) -> Vec<String> {
+fn child_input_args(
+    inputs: Option<&[ActionInput]>,
+    data: &serde_json::Value,
+    action_name: &str,
+) -> Result<(Vec<String>, Vec<String>), String> {
     let mut args = Vec::new();
+    let mut notes = Vec::new();
 
     if let Some(inputs) = inputs {
-        for input in inputs {
+        for (index, input) in inputs.iter().enumerate() {
             match input {
-                Input::Text { text } => {
+                ActionInput::Text { text } => {
+                    let resolved = resolve_string_parts(
+                        text,
+                        data,
+                        action_name,
+                        &format!("child-agent text input {}", index + 1),
+                    )?;
                     args.push("--input-text".to_string());
-                    args.push(text.clone());
+                    args.push(resolved);
+                    if child_input_uses_dynamic_parts(text) {
+                        notes.push(format!(
+                            "Action '{}' resolved dynamic child-agent text input {}.",
+                            action_name,
+                            index + 1
+                        ));
+                    }
                 }
-                Input::Url { url } => {
+                ActionInput::Url { url } => {
+                    let resolved = resolve_string_parts(
+                        url,
+                        data,
+                        action_name,
+                        &format!("child-agent url input {}", index + 1),
+                    )?;
+                    validate_child_input_url(&resolved, action_name, index + 1)?;
                     args.push("--input-url".to_string());
-                    args.push(url.clone());
+                    args.push(resolved.clone());
+                    if child_input_uses_dynamic_parts(url) {
+                        notes.push(format!(
+                            "Action '{}' resolved dynamic child-agent url input {} -> {}.",
+                            action_name,
+                            index + 1,
+                            resolved
+                        ));
+                    }
                 }
-                Input::Image { path } => {
+                ActionInput::Image { path } => {
+                    let resolved = resolve_string_parts(
+                        path,
+                        data,
+                        action_name,
+                        &format!("child-agent image path input {}", index + 1),
+                    )?;
+                    validate_child_input_path(&resolved, action_name, index + 1, "image")?;
                     args.push("--input-image".to_string());
-                    args.push(path.clone());
+                    args.push(resolved.clone());
+                    if child_input_uses_dynamic_parts(path) {
+                        notes.push(format!(
+                            "Action '{}' resolved dynamic child-agent image path input {} -> {}.",
+                            action_name,
+                            index + 1,
+                            resolved
+                        ));
+                    }
                 }
-                Input::File { path } => {
+                ActionInput::File { path } => {
+                    let resolved = resolve_string_parts(
+                        path,
+                        data,
+                        action_name,
+                        &format!("child-agent file path input {}", index + 1),
+                    )?;
+                    validate_child_input_path(&resolved, action_name, index + 1, "file")?;
+                    validate_child_file_extension(&resolved, action_name, index + 1)?;
                     args.push("--input-file".to_string());
-                    args.push(path.clone());
+                    args.push(resolved.clone());
+                    if child_input_uses_dynamic_parts(path) {
+                        notes.push(format!(
+                            "Action '{}' resolved dynamic child-agent file path input {} -> {}.",
+                            action_name,
+                            index + 1,
+                            resolved
+                        ));
+                    }
                 }
             }
         }
     }
 
-    args
+    Ok((args, notes))
+}
+
+fn child_input_uses_dynamic_parts(parts: &[RunArg]) -> bool {
+    parts.iter().any(|part| matches!(part, RunArg::Variable(_)))
+}
+
+fn validate_child_input_url(url: &str, action_name: &str, input_index: usize) -> Result<(), String> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(())
+    } else {
+        Err(format!(
+            "Action '{}' child-agent url input {} must resolve to an http(s) URL.",
+            action_name, input_index
+        ))
+    }
+}
+
+fn validate_child_input_path(
+    path: &str,
+    action_name: &str,
+    input_index: usize,
+    input_kind: &str,
+) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' child-agent {} input {} must resolve to a non-empty relative path.",
+            action_name, input_kind, input_index
+        ));
+    }
+
+    let candidate = Path::new(path);
+    if candidate.is_absolute() {
+        return Err(format!(
+            "Action '{}' child-agent {} input {} must stay at the current level or below; absolute paths are not allowed.",
+            action_name, input_kind, input_index
+        ));
+    }
+
+    if candidate
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "Action '{}' child-agent {} input {} must stay at the current level or below; parent traversal (`..`) is not allowed.",
+            action_name, input_kind, input_index
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_child_file_extension(
+    path: &str,
+    action_name: &str,
+    input_index: usize,
+) -> Result<(), String> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    match extension.as_deref() {
+        Some(
+            "pdf" | "docx" | "csv" | "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlsx" | "xlt"
+            | "xlw" | "tsv" | "iif" | "doc" | "dot" | "odt" | "rtf" | "pot" | "ppa" | "pps"
+            | "ppt" | "pptx" | "pwz" | "wiz",
+        ) => Ok(()),
+        _ => Err(format!(
+            "Action '{}' child-agent file input {} must use a supported extension: {}.",
+            action_name, input_index, SUPPORTED_FILE_EXTENSIONS_MESSAGE
+        )),
+    }
 }
 
 fn current_agent_action_depth() -> u32 {

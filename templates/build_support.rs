@@ -99,6 +99,14 @@ enum InputSpec {
 }
 
 #[derive(Debug, Clone)]
+enum ActionInputSpec {
+    Text { text: Vec<RunArg> },
+    Url { url: Vec<RunArg> },
+    Image { path: Vec<RunArg> },
+    File { path: Vec<RunArg> },
+}
+
+#[derive(Debug, Clone)]
 struct RunStep {
     kind: String,
     program: Option<String>,
@@ -106,7 +114,7 @@ struct RunStep {
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
     agent: Option<String>,
-    inputs: Option<Vec<InputSpec>>,
+    inputs: Option<Vec<ActionInputSpec>>,
     platforms: Option<Vec<String>>,
 }
 
@@ -713,7 +721,11 @@ fn parse_actions(
                                     "expected `inputs` to be an array of ordered input parts",
                                 )
                             })?;
-                            Some(parse_input_specs(input_array, &input_path)?)
+                            Some(parse_action_input_specs(
+                                input_array,
+                                &input_path,
+                                schema_field_types,
+                            )?)
                         }
                         None => None,
                     };
@@ -770,6 +782,92 @@ fn parse_run_args(
         .collect()
 }
 
+fn parse_action_input_specs(
+    inputs: &[Value],
+    base_path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<Vec<ActionInputSpec>, BuildError> {
+    if inputs.is_empty() {
+        return Err(BuildError::config(
+            base_path,
+            "must contain at least one entry",
+        ));
+    }
+
+    let mut parsed = Vec::with_capacity(inputs.len());
+    for (index, entry) in inputs.iter().enumerate() {
+        let path = format!("{base_path}[{index}]");
+        let entry_obj = expect_object(entry, &path)?;
+        let input_type = get_required_string(entry_obj, "type", &path)?
+            .trim()
+            .to_ascii_lowercase();
+
+        let input = match input_type.as_str() {
+            "text" => ActionInputSpec::Text {
+                text: parse_string_parts_value(
+                    get_required_field(entry_obj, "text", &path)?,
+                    &format!("{path}.text"),
+                    schema_field_types,
+                )?,
+            },
+            "url" => ActionInputSpec::Url {
+                url: parse_string_parts_value(
+                    get_required_field(entry_obj, "url", &path)?,
+                    &format!("{path}.url"),
+                    schema_field_types,
+                )?,
+            },
+            "image" => {
+                let path_parts = parse_string_parts_value(
+                    get_required_field(entry_obj, "path", &path)?,
+                    &format!("{path}.path"),
+                    schema_field_types,
+                )?;
+                if let Some(resolved_path) = resolve_literal_run_args(&path_parts) {
+                    validate_definition_owned_local_path(
+                        &resolved_path,
+                        &format!("{path}.path"),
+                        "image input",
+                    )?;
+                }
+                ActionInputSpec::Image { path: path_parts }
+            }
+            "file" => {
+                let path_parts = parse_string_parts_value(
+                    get_required_field(entry_obj, "path", &path)?,
+                    &format!("{path}.path"),
+                    schema_field_types,
+                )?;
+                if let Some(resolved_path) = resolve_literal_run_args(&path_parts) {
+                    validate_definition_owned_local_path(
+                        &resolved_path,
+                        &format!("{path}.path"),
+                        "file input",
+                    )?;
+                    validate_supported_file_extension(
+                        &resolved_path,
+                        &format!("{path}.path"),
+                        "file input",
+                    )?;
+                }
+                ActionInputSpec::File { path: path_parts }
+            }
+            _ => {
+                return Err(BuildError::config(
+                    format!("{path}.type"),
+                    format!(
+                        "unsupported input type `{input_type}` (supported: `text`, `url`, `image`, `file`)"
+                    ),
+                ))
+            }
+        };
+
+        parsed.push(input);
+    }
+
+    Ok(parsed)
+}
+
 fn parse_string_parts_field(
     run_obj: &Map<String, Value>,
     field_name: &str,
@@ -777,20 +875,29 @@ fn parse_string_parts_field(
     schema_field_types: &BTreeMap<String, FieldType>,
 ) -> Result<Vec<RunArg>, BuildError> {
     let field_path = format!("{run_path}.{field_name}");
-    match get_required_field(run_obj, field_name, run_path)? {
+    parse_string_parts_value(
+        get_required_field(run_obj, field_name, run_path)?,
+        &field_path,
+        schema_field_types,
+    )
+}
+
+fn parse_string_parts_value(
+    value: &Value,
+    field_path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<Vec<RunArg>, BuildError> {
+    match value {
         Value::String(literal) => {
             if literal.trim().is_empty() {
-                return Err(BuildError::config(
-                    &field_path,
-                    "must be a non-empty string",
-                ));
+                return Err(BuildError::config(field_path, "must be a non-empty string"));
             }
             Ok(vec![RunArg::Literal(literal.to_string())])
         }
         Value::Array(parts) => {
             if parts.is_empty() {
                 return Err(BuildError::config(
-                    &field_path,
+                    field_path,
                     "expected at least one string or variable part",
                 ));
             }
@@ -804,10 +911,23 @@ fn parse_string_parts_field(
                 .collect()
         }
         _ => Err(BuildError::config(
-            &field_path,
+            field_path,
             "expected a string or an array of string/variable parts",
         )),
     }
+}
+
+fn resolve_literal_run_args(parts: &[RunArg]) -> Option<String> {
+    let mut resolved = String::new();
+
+    for part in parts {
+        let RunArg::Literal(literal) = part else {
+            return None;
+        };
+        resolved.push_str(literal);
+    }
+
+    Some(resolved)
 }
 
 fn contains_explicit_path_separator(path: &str) -> bool {
@@ -1511,6 +1631,27 @@ fn is_rust_keyword(name: &str) -> bool {
     )
 }
 
+fn render_run_arg(arg: &RunArg) -> String {
+    match arg {
+        RunArg::Literal(literal) => format!(
+            "RunArg::Literal({}.to_string())",
+            rust_string_literal(literal)
+        ),
+        RunArg::Variable(variable) => format!(
+            "RunArg::Variable({}.to_string())",
+            rust_string_literal(variable)
+        ),
+    }
+}
+
+fn render_run_arg_parts(parts: &[RunArg]) -> String {
+    parts
+        .iter()
+        .map(render_run_arg)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn render_agent_model(config: &AgentConfig) -> String {
     let mut struct_fields = String::new();
     for (name, rust_type) in &config.fields {
@@ -1547,62 +1688,16 @@ fn render_agent_model(config: &AgentConfig) -> String {
             .run
             .iter()
             .map(|run_step| {
-                let args = run_step
-                    .args
-                    .iter()
-                    .map(|arg| match arg {
-                        RunArg::Literal(literal) => format!(
-                            "RunArg::Literal({}.to_string())",
-                            rust_string_literal(literal)
-                        ),
-                        RunArg::Variable(variable) => format!(
-                            "RunArg::Variable({}.to_string())",
-                            rust_string_literal(variable)
-                        ),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let args = render_run_arg_parts(&run_step.args);
                 let subject = run_step
                     .subject
                     .as_ref()
-                    .map(|parts| {
-                        let rendered = parts
-                            .iter()
-                            .map(|part| match part {
-                                RunArg::Literal(literal) => format!(
-                                    "RunArg::Literal({}.to_string())",
-                                    rust_string_literal(literal)
-                                ),
-                                RunArg::Variable(variable) => format!(
-                                    "RunArg::Variable({}.to_string())",
-                                    rust_string_literal(variable)
-                                ),
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        format!("Some(vec![{}])", rendered)
-                    })
+                    .map(|parts| format!("Some(vec![{}])", render_run_arg_parts(parts)))
                     .unwrap_or_else(|| "None".to_string());
                 let text = run_step
                     .text
                     .as_ref()
-                    .map(|parts| {
-                        let rendered = parts
-                            .iter()
-                            .map(|part| match part {
-                                RunArg::Literal(literal) => format!(
-                                    "RunArg::Literal({}.to_string())",
-                                    rust_string_literal(literal)
-                                ),
-                                RunArg::Variable(variable) => format!(
-                                    "RunArg::Variable({}.to_string())",
-                                    rust_string_literal(variable)
-                                ),
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        format!("Some(vec![{}])", rendered)
-                    })
+                    .map(|parts| format!("Some(vec![{}])", render_run_arg_parts(parts)))
                     .unwrap_or_else(|| "None".to_string());
                 let agent = run_step
                     .agent
@@ -1616,21 +1711,21 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         let rendered = inputs
                             .iter()
                             .map(|input| match input {
-                                InputSpec::Text { text } => format!(
-                                    "Input::Text {{ text: {}.to_string() }}",
-                                    rust_string_literal(text)
+                                ActionInputSpec::Text { text } => format!(
+                                    "ActionInput::Text {{ text: vec![{}] }}",
+                                    render_run_arg_parts(text)
                                 ),
-                                InputSpec::Url { url } => format!(
-                                    "Input::Url {{ url: {}.to_string() }}",
-                                    rust_string_literal(url)
+                                ActionInputSpec::Url { url } => format!(
+                                    "ActionInput::Url {{ url: vec![{}] }}",
+                                    render_run_arg_parts(url)
                                 ),
-                                InputSpec::Image { path } => format!(
-                                    "Input::Image {{ path: {}.to_string() }}",
-                                    rust_string_literal(path)
+                                ActionInputSpec::Image { path } => format!(
+                                    "ActionInput::Image {{ path: vec![{}] }}",
+                                    render_run_arg_parts(path)
                                 ),
-                                InputSpec::File { path } => format!(
-                                    "Input::File {{ path: {}.to_string() }}",
-                                    rust_string_literal(path)
+                                ActionInputSpec::File { path } => format!(
+                                    "ActionInput::File {{ path: vec![{}] }}",
+                                    render_run_arg_parts(path)
                                 ),
                             })
                             .collect::<Vec<_>>()
@@ -1740,6 +1835,14 @@ pub fn json_schema_value() -> serde_json::Value {{
 }}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum ActionInput {{
+    Text {{ text: Vec<RunArg> }},
+    Url {{ url: Vec<RunArg> }},
+    Image {{ path: Vec<RunArg> }},
+    File {{ path: Vec<RunArg> }},
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RunStep {{
     kind: String,
     program: Option<String>,
@@ -1747,7 +1850,7 @@ pub struct RunStep {{
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
     agent: Option<String>,
-    inputs: Option<Vec<Input>>,
+    inputs: Option<Vec<ActionInput>>,
     platforms: Option<Vec<String>>,
 }}
 

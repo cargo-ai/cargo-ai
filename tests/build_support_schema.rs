@@ -247,7 +247,45 @@ fn accepts_agent_step_with_relative_path_and_inputs() {
     assert!(generated.contains("kind: \"agent\".to_string()"));
     assert!(generated.contains("agent: Some(\"./agents/summary_agent\".to_string())"));
     assert!(generated.contains(
-        "inputs: Some(vec![Input::Text { text: \"Summarize this.\".to_string() }, Input::Url { url: \"https://example.com\".to_string() }])"
+        "inputs: Some(vec![ActionInput::Text { text: vec![RunArg::Literal(\"Summarize this.\".to_string())] }, ActionInput::Url { url: vec![RunArg::Literal(\"https://example.com\".to_string())] }])"
+    ));
+}
+
+#[test]
+fn accepts_dynamic_child_agent_input_parts() {
+    let cfg = config_with(
+        r#""report_filename": { "type": "string" }, "customer": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [ { "var": "customer" }, "acme" ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./agents/summary_agent",
+                "inputs": [
+                  {
+                    "type": "text",
+                    "text": ["Summarize for ", { "var": "customer" }]
+                  },
+                  {
+                    "type": "file",
+                    "path": ["./reports/", { "var": "report_filename" }]
+                  }
+                ]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains(
+        "ActionInput::Text { text: vec![RunArg::Literal(\"Summarize for \".to_string()), RunArg::Variable(\"customer\".to_string())] }"
+    ));
+    assert!(generated.contains(
+        "ActionInput::File { path: vec![RunArg::Literal(\"./reports/\".to_string()), RunArg::Variable(\"report_filename\".to_string())] }"
     ));
 }
 

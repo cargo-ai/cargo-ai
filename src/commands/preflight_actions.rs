@@ -14,6 +14,8 @@ const AGENT_ACTION_MAX_RUNTIME_SECS_ENV: &str = "CARGO_AI_AGENT_MAX_RUNTIME_SECS
 const AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_STARTED_AT_MS";
 const AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_DEADLINE_MS";
 const DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS: u64 = 600;
+const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str =
+    "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct InvocationRuntimeBudget {
@@ -99,8 +101,14 @@ pub(crate) async fn apply_actions(
                             );
                         } else if step.kind.eq_ignore_ascii_case("agent") {
                             outcomes.push(
-                                run_agent_step(step, &action.name, max_agent_depth, runtime_budget)
-                                    .await?,
+                                run_agent_step(
+                                    step,
+                                    &data,
+                                    &action.name,
+                                    max_agent_depth,
+                                    runtime_budget,
+                                )
+                                .await?,
                             );
                         } else {
                             eprintln!(
@@ -315,6 +323,7 @@ async fn run_email_me_step(
 
 async fn run_agent_step(
     step: &crate::RunStep,
+    data: &serde_json::Value,
     action_name: &str,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
@@ -339,7 +348,12 @@ async fn run_agent_step(
     }
 
     let mut command = tokio::process::Command::new(agent_path);
-    for argument in child_input_args(step.inputs.as_deref()) {
+    let (child_args, resolution_notes) =
+        child_input_args(step.inputs.as_deref(), data, action_name)?;
+    for note in resolution_notes {
+        println!("ℹ️ {note}");
+    }
+    for argument in child_args {
         command.arg(argument);
     }
     command.env(AGENT_ACTION_DEPTH_ENV, (current_depth + 1).to_string());
@@ -849,33 +863,175 @@ fn matching_run_steps<'a>(
         .collect()
 }
 
-fn child_input_args(inputs: Option<&[crate::Input]>) -> Vec<String> {
+fn child_input_args(
+    inputs: Option<&[crate::ActionInput]>,
+    data: &serde_json::Value,
+    action_name: &str,
+) -> Result<(Vec<String>, Vec<String>), String> {
     let mut args = Vec::new();
+    let mut notes = Vec::new();
 
     if let Some(inputs) = inputs {
-        for input in inputs {
+        for (index, input) in inputs.iter().enumerate() {
             match input {
-                crate::Input::Text { text } => {
+                crate::ActionInput::Text { text } => {
+                    let resolved = resolve_string_parts(
+                        text,
+                        data,
+                        action_name,
+                        &format!("child-agent text input {}", index + 1),
+                    )?;
                     args.push("--input-text".to_string());
-                    args.push(text.clone());
+                    args.push(resolved);
+                    if child_input_uses_dynamic_parts(text) {
+                        notes.push(format!(
+                            "Action '{}' resolved dynamic child-agent text input {}.",
+                            action_name,
+                            index + 1
+                        ));
+                    }
                 }
-                crate::Input::Url { url } => {
+                crate::ActionInput::Url { url } => {
+                    let resolved = resolve_string_parts(
+                        url,
+                        data,
+                        action_name,
+                        &format!("child-agent url input {}", index + 1),
+                    )?;
+                    validate_child_input_url(&resolved, action_name, index + 1)?;
                     args.push("--input-url".to_string());
-                    args.push(url.clone());
+                    args.push(resolved.clone());
+                    if child_input_uses_dynamic_parts(url) {
+                        notes.push(format!(
+                            "Action '{}' resolved dynamic child-agent url input {} -> {}.",
+                            action_name,
+                            index + 1,
+                            resolved
+                        ));
+                    }
                 }
-                crate::Input::Image { path } => {
+                crate::ActionInput::Image { path } => {
+                    let resolved = resolve_string_parts(
+                        path,
+                        data,
+                        action_name,
+                        &format!("child-agent image path input {}", index + 1),
+                    )?;
+                    validate_child_input_path(&resolved, action_name, index + 1, "image")?;
                     args.push("--input-image".to_string());
-                    args.push(path.clone());
+                    args.push(resolved.clone());
+                    if child_input_uses_dynamic_parts(path) {
+                        notes.push(format!(
+                            "Action '{}' resolved dynamic child-agent image path input {} -> {}.",
+                            action_name,
+                            index + 1,
+                            resolved
+                        ));
+                    }
                 }
-                crate::Input::File { path } => {
+                crate::ActionInput::File { path } => {
+                    let resolved = resolve_string_parts(
+                        path,
+                        data,
+                        action_name,
+                        &format!("child-agent file path input {}", index + 1),
+                    )?;
+                    validate_child_input_path(&resolved, action_name, index + 1, "file")?;
+                    validate_child_file_extension(&resolved, action_name, index + 1)?;
                     args.push("--input-file".to_string());
-                    args.push(path.clone());
+                    args.push(resolved.clone());
+                    if child_input_uses_dynamic_parts(path) {
+                        notes.push(format!(
+                            "Action '{}' resolved dynamic child-agent file path input {} -> {}.",
+                            action_name,
+                            index + 1,
+                            resolved
+                        ));
+                    }
                 }
             }
         }
     }
 
-    args
+    Ok((args, notes))
+}
+
+fn child_input_uses_dynamic_parts(parts: &[crate::RunArg]) -> bool {
+    parts
+        .iter()
+        .any(|part| matches!(part, crate::RunArg::Variable(_)))
+}
+
+fn validate_child_input_url(
+    url: &str,
+    action_name: &str,
+    input_index: usize,
+) -> Result<(), String> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(())
+    } else {
+        Err(format!(
+            "Action '{}' child-agent url input {} must resolve to an http(s) URL.",
+            action_name, input_index
+        ))
+    }
+}
+
+fn validate_child_input_path(
+    path: &str,
+    action_name: &str,
+    input_index: usize,
+    input_kind: &str,
+) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' child-agent {} input {} must resolve to a non-empty relative path.",
+            action_name, input_kind, input_index
+        ));
+    }
+
+    let candidate = Path::new(path);
+    if candidate.is_absolute() {
+        return Err(format!(
+            "Action '{}' child-agent {} input {} must stay at the current level or below; absolute paths are not allowed.",
+            action_name, input_kind, input_index
+        ));
+    }
+
+    if candidate
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "Action '{}' child-agent {} input {} must stay at the current level or below; parent traversal (`..`) is not allowed.",
+            action_name, input_kind, input_index
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_child_file_extension(
+    path: &str,
+    action_name: &str,
+    input_index: usize,
+) -> Result<(), String> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    match extension.as_deref() {
+        Some(
+            "pdf" | "docx" | "csv" | "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlsx" | "xlt" | "xlw"
+            | "tsv" | "iif" | "doc" | "dot" | "odt" | "rtf" | "pot" | "ppa" | "pps" | "ppt"
+            | "pptx" | "pwz" | "wiz",
+        ) => Ok(()),
+        _ => Err(format!(
+            "Action '{}' child-agent file input {} must use a supported extension: {}.",
+            action_name, input_index, SUPPORTED_FILE_EXTENSIONS_MESSAGE
+        )),
+    }
 }
 
 fn current_agent_action_depth() -> u32 {
@@ -1099,20 +1255,25 @@ mod tests {
 
     #[test]
     fn child_input_args_map_to_runtime_flags() {
-        let args = child_input_args(Some(&[
-            crate::Input::Text {
-                text: "hello".to_string(),
-            },
-            crate::Input::Url {
-                url: "https://example.com".to_string(),
-            },
-            crate::Input::Image {
-                path: "./diagram.png".to_string(),
-            },
-            crate::Input::File {
-                path: "./report.pdf".to_string(),
-            },
-        ]));
+        let (args, notes) = child_input_args(
+            Some(&[
+                crate::ActionInput::Text {
+                    text: vec![crate::RunArg::Literal("hello".to_string())],
+                },
+                crate::ActionInput::Url {
+                    url: vec![crate::RunArg::Literal("https://example.com".to_string())],
+                },
+                crate::ActionInput::Image {
+                    path: vec![crate::RunArg::Literal("./diagram.png".to_string())],
+                },
+                crate::ActionInput::File {
+                    path: vec![crate::RunArg::Literal("./report.pdf".to_string())],
+                },
+            ]),
+            &json!({}),
+            "demo",
+        )
+        .expect("child input args should resolve");
 
         assert_eq!(
             args,
@@ -1127,6 +1288,97 @@ mod tests {
                 "./report.pdf",
             ]
         );
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn child_input_args_resolve_dynamic_text_and_file_path() {
+        let (args, notes) = child_input_args(
+            Some(&[
+                crate::ActionInput::Text {
+                    text: vec![
+                        crate::RunArg::Literal("hello ".to_string()),
+                        crate::RunArg::Variable("customer".to_string()),
+                    ],
+                },
+                crate::ActionInput::File {
+                    path: vec![
+                        crate::RunArg::Literal("./reports/".to_string()),
+                        crate::RunArg::Variable("report_filename".to_string()),
+                    ],
+                },
+            ]),
+            &json!({
+                "customer": "Acme",
+                "report_filename": "q1.pdf"
+            }),
+            "demo",
+        )
+        .expect("dynamic child input args should resolve");
+
+        assert_eq!(
+            args,
+            vec![
+                "--input-text",
+                "hello Acme",
+                "--input-file",
+                "./reports/q1.pdf"
+            ]
+        );
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("dynamic child-agent text input 1"));
+        assert!(notes[1].contains("./reports/q1.pdf"));
+    }
+
+    #[test]
+    fn child_input_args_reject_invalid_dynamic_url() {
+        let error = child_input_args(
+            Some(&[crate::ActionInput::Url {
+                url: vec![crate::RunArg::Variable("source_url".to_string())],
+            }]),
+            &json!({
+                "source_url": "ftp://example.com/report"
+            }),
+            "demo",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("must resolve to an http(s) URL"));
+    }
+
+    #[test]
+    fn child_input_args_reject_invalid_dynamic_file_extension() {
+        let error = child_input_args(
+            Some(&[crate::ActionInput::File {
+                path: vec![
+                    crate::RunArg::Literal("./reports/".to_string()),
+                    crate::RunArg::Variable("report_filename".to_string()),
+                ],
+            }]),
+            &json!({
+                "report_filename": "q1.exe"
+            }),
+            "demo",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("supported extension"));
+    }
+
+    #[test]
+    fn child_input_args_reject_parent_traversal_in_dynamic_path() {
+        let error = child_input_args(
+            Some(&[crate::ActionInput::Image {
+                path: vec![crate::RunArg::Variable("image_path".to_string())],
+            }]),
+            &json!({
+                "image_path": "../diagram.png"
+            }),
+            "demo",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("parent traversal"));
     }
 
     #[test]
@@ -1184,24 +1436,40 @@ mod tests {
             text: None,
             agent: Some(format!("./{}", script_name)),
             inputs: Some(vec![
-                crate::Input::Text {
-                    text: "hello".to_string(),
+                crate::ActionInput::Text {
+                    text: vec![
+                        crate::RunArg::Literal("hello ".to_string()),
+                        crate::RunArg::Variable("customer".to_string()),
+                    ],
                 },
-                crate::Input::Url {
-                    url: "https://example.com".to_string(),
+                crate::ActionInput::Url {
+                    url: vec![crate::RunArg::Literal("https://example.com".to_string())],
                 },
-                crate::Input::Image {
-                    path: "./diagram.png".to_string(),
+                crate::ActionInput::Image {
+                    path: vec![crate::RunArg::Literal("./diagram.png".to_string())],
                 },
-                crate::Input::File {
-                    path: "./report.pdf".to_string(),
+                crate::ActionInput::File {
+                    path: vec![
+                        crate::RunArg::Literal("./reports/".to_string()),
+                        crate::RunArg::Variable("report_filename".to_string()),
+                    ],
                 },
             ]),
             platforms: None,
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let result = run_agent_step(&step, "invoke_child", 5, runtime_budget).await;
+        let result = run_agent_step(
+            &step,
+            &json!({
+                "customer": "world",
+                "report_filename": "report.pdf"
+            }),
+            "invoke_child",
+            5,
+            runtime_budget,
+        )
+        .await;
 
         let _ = fs::remove_file(&script_path);
 
@@ -1217,13 +1485,13 @@ mod tests {
             args.lines().collect::<Vec<_>>(),
             vec![
                 "--input-text",
-                "hello",
+                "hello world",
                 "--input-url",
                 "https://example.com",
                 "--input-image",
                 "./diagram.png",
                 "--input-file",
-                "./report.pdf",
+                "./reports/report.pdf",
             ]
         );
     }
@@ -1264,7 +1532,7 @@ mod tests {
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let result = run_agent_step(&step, "invoke_child", 7, runtime_budget).await;
+        let result = run_agent_step(&step, &json!({}), "invoke_child", 7, runtime_budget).await;
 
         let _ = fs::remove_file(&script_path);
 
@@ -1297,7 +1565,7 @@ mod tests {
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let error = run_agent_step(&step, "invoke_child", 5, runtime_budget)
+        let error = run_agent_step(&step, &json!({}), "invoke_child", 5, runtime_budget)
             .await
             .expect_err("bare child agent names should be rejected");
 
@@ -1319,7 +1587,7 @@ mod tests {
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let error = run_agent_step(&step, "invoke_child", 5, runtime_budget)
+        let error = run_agent_step(&step, &json!({}), "invoke_child", 5, runtime_budget)
             .await
             .expect_err("parent traversal should be rejected");
 
@@ -1357,7 +1625,7 @@ mod tests {
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(1));
-        let error = run_agent_step(&step, "invoke_child", 5, runtime_budget)
+        let error = run_agent_step(&step, &json!({}), "invoke_child", 5, runtime_budget)
             .await
             .expect_err("runtime budget should time out the child");
 
