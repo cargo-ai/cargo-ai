@@ -1,5 +1,6 @@
 //! Runtime behavior for `cargo ai hatch`.
 use clap::ArgMatches;
+use std::env;
 use std::path::{Path, PathBuf};
 
 enum HatchConfigSource {
@@ -78,9 +79,25 @@ fn derive_project_name_from_json_path(path: &str) -> Result<String, String> {
     Ok(stem.to_string())
 }
 
-fn resolve_hatch_input(
+fn resolve_same_directory_json_fallback(name: &str, current_dir: &Path) -> Option<HatchResolution> {
+    let candidate = current_dir.join(format!("{name}.json"));
+    if !candidate.is_file() {
+        return None;
+    }
+
+    Some(HatchResolution {
+        project_name: name.to_string(),
+        config_source: HatchConfigSource::LocalPath {
+            path: candidate.to_string_lossy().to_string(),
+            from_positional_shorthand: true,
+        },
+    })
+}
+
+fn resolve_hatch_input_in_dir(
     name_or_path: &str,
     config_path: Option<&str>,
+    current_dir: &Path,
 ) -> Result<HatchResolution, String> {
     if let Some(config_path) = config_path {
         if !is_supported_project_name(name_or_path) {
@@ -132,10 +149,25 @@ fn resolve_hatch_input(
         ));
     }
 
+    if let Some(local_resolution) = resolve_same_directory_json_fallback(name_or_path, current_dir)
+    {
+        return Ok(local_resolution);
+    }
+
     Ok(HatchResolution {
         project_name: name_or_path.to_string(),
         config_source: HatchConfigSource::RegistryName(name_or_path.to_string()),
     })
+}
+
+fn resolve_hatch_input(
+    name_or_path: &str,
+    config_path: Option<&str>,
+) -> Result<HatchResolution, String> {
+    let current_dir = env::current_dir().map_err(|error| {
+        format!("Unable to resolve the current directory for local hatch lookup: {error}")
+    })?;
+    resolve_hatch_input_in_dir(name_or_path, config_path, &current_dir)
 }
 
 /// Executes the `hatch` command flow from parsed CLI arguments.
@@ -242,12 +274,13 @@ pub fn run(sub_m: &ArgMatches) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        mode_from_check_flag, resolve_hatch_input, resolve_local_output_dir, HatchConfigSource,
+        mode_from_check_flag, resolve_hatch_input, resolve_hatch_input_in_dir,
+        resolve_local_output_dir, HatchConfigSource,
     };
     use crate::commands::hatch_pipeline::HatchMode;
     use clap::{Arg, ArgMatches, Command};
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn output_dir_matches(value: Option<&str>) -> ArgMatches {
@@ -280,6 +313,18 @@ mod tests {
             .join(file_name)
             .to_string_lossy()
             .to_string()
+    }
+
+    fn temp_dir_path(stem: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("cargo-ai-hatch-test-{stem}-{nanos}"))
+    }
+
+    fn remove_temp_dir_if_present(path: &Path) {
+        let _ = fs::remove_dir_all(path);
     }
 
     #[test]
@@ -349,6 +394,47 @@ mod tests {
             HatchConfigSource::RegistryName(name) => assert_eq!(name, "adder_registry"),
             HatchConfigSource::LocalPath { .. } => panic!("expected registry resolution"),
         }
+    }
+
+    #[test]
+    fn bare_name_prefers_same_directory_json_file() {
+        let temp_dir = temp_dir_path("same-dir-fallback");
+        fs::create_dir_all(&temp_dir).expect("temp dir should be writable");
+        let local_config = temp_dir.join("adder_test.json");
+        fs::write(&local_config, r#"{"version":"2026-03-03.r1"}"#)
+            .expect("local config should be writable");
+
+        let resolution = resolve_hatch_input_in_dir("adder_test", None, &temp_dir)
+            .expect("resolution should succeed");
+        assert_eq!(resolution.project_name, "adder_test");
+        match resolution.config_source {
+            HatchConfigSource::LocalPath {
+                path,
+                from_positional_shorthand,
+            } => {
+                assert_eq!(path, local_config.to_string_lossy().to_string());
+                assert!(from_positional_shorthand);
+            }
+            HatchConfigSource::RegistryName(_) => panic!("expected local path resolution"),
+        }
+
+        remove_temp_dir_if_present(&temp_dir);
+    }
+
+    #[test]
+    fn bare_name_uses_registry_when_same_directory_json_is_absent() {
+        let temp_dir = temp_dir_path("registry-fallback");
+        fs::create_dir_all(&temp_dir).expect("temp dir should be writable");
+
+        let resolution = resolve_hatch_input_in_dir("adder_test", None, &temp_dir)
+            .expect("resolution should succeed");
+        assert_eq!(resolution.project_name, "adder_test");
+        match resolution.config_source {
+            HatchConfigSource::RegistryName(name) => assert_eq!(name, "adder_test"),
+            HatchConfigSource::LocalPath { .. } => panic!("expected registry resolution"),
+        }
+
+        remove_temp_dir_if_present(&temp_dir);
     }
 
     #[test]
