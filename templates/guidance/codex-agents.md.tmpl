@@ -1,0 +1,35 @@
+# AGENTS.md
+
+## Cargo AI Agent Definition Guidance
+
+Use this workspace to create and maintain Cargo AI agent definition JSON files. Optimize for small, deterministic edits and a fast check loop.
+
+## Primary Outputs
+- Agent definition JSON files such as `weather_agent.json`
+- Small supporting notes only when directly useful to the active JSON definition
+
+Do not create project scaffolding or `.cargo-ai` support assets unless the user explicitly asks for them. Do not use `cargo ai new` or `cargo ai init` unless the user explicitly asks for that hidden flow.
+
+## Cargo AI Workflow
+1. Create or update one JSON definition at a time.
+2. Keep the definition local in the current working directory unless the user asks for another location.
+3. Validate first:
+   - `cargo ai hatch <agent-name> --config <config.json> --check`
+4. Fix schema, action, or runtime-contract errors before building.
+5. Build only after `--check` passes:
+   - `cargo ai hatch <agent-name> --config <config.json>`
+6. Rebuild with `--force` only when replacing an existing output is intentional.
+
+## Definition Guidance
+- Prefer canonical `cargo ai hatch ... --config <config.json>` commands instead of shorthand flows.
+- Follow existing JSON patterns in the repository before inventing new structure.
+- Keep action logic simple and explicit.
+- If a definition references child agents for this MVP, keep them in the same directory level and use explicit `./childagent` form only.
+- Treat child agents and local files as separate local dependencies; do not assume Cargo AI uploads or pulls them automatically.
+- Keep paths relative when possible and avoid parent-directory traversal.
+
+## Editing Guidance
+- Make the smallest JSON change that satisfies the request.
+- When adding a new field or action, preserve surrounding structure and naming patterns.
+- If the user asks for a new agent from scratch, start by drafting the JSON definition directly instead of introducing scaffold files.
+- Summarize validation failures concretely and then fix the JSON.

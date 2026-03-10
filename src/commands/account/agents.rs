@@ -133,6 +133,15 @@ async fn request_hatch_pull(
     .map_err(|error| format!("{error:?}"))
 }
 
+fn render_account_agents_response(response: &serde_json::Value) {
+    if !ui::account_status::render_backend_ui(response) {
+        match serde_json::to_string_pretty(response) {
+            Ok(pretty) => println!("{pretty}"),
+            Err(_) => println!("{response:?}"),
+        }
+    }
+}
+
 fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &serde_json::Value) -> bool {
     let is_pull_success = response
         .get("type")
@@ -141,12 +150,7 @@ fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &serde_js
         .unwrap_or(false);
 
     if !is_pull_success {
-        if !ui::account_status::render_backend_ui(response) {
-            match serde_json::to_string_pretty(response) {
-                Ok(pretty) => println!("{pretty}"),
-                Err(_) => println!("{response:?}"),
-            }
-        }
+        render_account_agents_response(response);
         return false;
     }
 
@@ -159,6 +163,8 @@ fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &serde_js
             return false;
         }
     };
+
+    render_account_agents_response(response);
 
     let definition_json_str = match serde_json::to_string_pretty(definition_json) {
         Ok(pretty) => pretty,
@@ -803,12 +809,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
     };
 
     // 6. Render backend-provided UI when available, fallback to raw JSON.
-    if !ui::account_status::render_backend_ui(&response) {
-        match serde_json::to_string_pretty(&response) {
-            Ok(pretty) => println!("{pretty}"),
-            Err(_) => println!("{response:?}"),
-        }
-    }
+    render_account_agents_response(&response);
 
     if let Some((shown, total)) = list_display_truncation {
         println!(

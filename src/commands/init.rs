@@ -27,6 +27,11 @@ fn print_success(report: &super::scaffold::ScaffoldReport) {
 
 /// Executes the `init` command flow from parsed CLI arguments.
 pub fn run(sub_m: &ArgMatches) -> bool {
+    if !super::scaffold::scaffold_gate_enabled(sub_m.get_flag("experimental")) {
+        eprintln!("⚠️ {}", super::scaffold::scaffold_gate_message("init"));
+        return false;
+    }
+
     if let Err(error) = run_impl(sub_m) {
         eprintln!("❌ {}", error);
         return false;

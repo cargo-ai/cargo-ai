@@ -231,7 +231,7 @@ fn accepts_agent_step_with_relative_path_and_inputs() {
             "run": [
               {
                 "kind": "agent",
-                "agent": "./agents/summary_agent",
+                "agent": "./summary_agent",
                 "inputs": [
                   { "type": "text", "text": "Summarize this." },
                   { "type": "url", "url": "https://example.com" }
@@ -245,7 +245,7 @@ fn accepts_agent_step_with_relative_path_and_inputs() {
     let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
 
     assert!(generated.contains("kind: \"agent\".to_string()"));
-    assert!(generated.contains("agent: Some(\"./agents/summary_agent\".to_string())"));
+    assert!(generated.contains("agent: Some(\"./summary_agent\".to_string())"));
     assert!(generated.contains(
         "inputs: Some(vec![ActionInput::Text { text: vec![RunArg::Literal(\"Summarize this.\".to_string())] }, ActionInput::Url { url: vec![RunArg::Literal(\"https://example.com\".to_string())] }])"
     ));
@@ -262,7 +262,7 @@ fn accepts_dynamic_child_agent_input_parts() {
             "run": [
               {
                 "kind": "agent",
-                "agent": "./agents/summary_agent",
+                "agent": "./summary_agent",
                 "inputs": [
                   {
                     "type": "text",
@@ -306,7 +306,7 @@ fn accepts_exec_output_variable_for_later_action_inputs() {
               },
               {
                 "kind": "agent",
-                "agent": "./agents/summary_agent",
+                "agent": "./summary_agent",
                 "inputs": [
                   {
                     "type": "text",
@@ -424,7 +424,9 @@ fn allows_reusing_output_variable_names_in_different_actions() {
     let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
 
     assert_eq!(
-        generated.matches("output_variable: Some(\"report_listing\".to_string())").count(),
+        generated
+            .matches("output_variable: Some(\"report_listing\".to_string())")
+            .count(),
         2
     );
 }
@@ -452,7 +454,7 @@ fn rejects_cross_action_reference_to_captured_output_variable() {
             "run": [
               {
                 "kind": "agent",
-                "agent": "./agents/summary_agent",
+                "agent": "./summary_agent",
                 "inputs": [
                   {
                     "type": "text",
@@ -622,7 +624,7 @@ fn rejects_agent_absolute_path() {
         .to_string();
 
     assert!(err.contains("$.actions[0].run[0].agent"));
-    assert!(err.contains("explicit relative path"));
+    assert!(err.contains("absolute paths are not allowed"));
 }
 
 #[test]
@@ -648,7 +650,7 @@ fn rejects_agent_bare_executable_name() {
         .to_string();
 
     assert!(err.contains("$.actions[0].run[0].agent"));
-    assert!(err.contains("bare executable names are not allowed"));
+    assert!(err.contains("bare child-agent names are not allowed"));
 }
 
 #[test]
@@ -1160,8 +1162,10 @@ fn generates_canonical_build_provenance_constants() {
     hasher.update(expected_definition.as_bytes());
     let expected_hash = format!("{:x}", hasher.finalize());
 
-    assert!(generated
-        .contains(r#"const AGENT_BUILD_ID: &str = "11111111-2222-4333-8444-555555555555";"#));
+    assert!(
+        generated
+            .contains(r#"const AGENT_BUILD_ID: &str = "11111111-2222-4333-8444-555555555555";"#)
+    );
     assert!(generated.contains(r#"const AGENT_TARGET_TRIPLE: &str = "aarch64-apple-darwin";"#));
     assert!(
         generated.contains(r#"const AGENT_BUILD_TIMESTAMP_UTC: &str = "2026-03-05T23:14:29Z";"#)

@@ -14,7 +14,7 @@ use std::{
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 const SCHEMA_VERSION_FORMAT: &str = "YYYY-MM-DD.rN";
@@ -24,8 +24,7 @@ const SUPPORTED_FILE_EXTENSIONS: [&str; 24] = [
     "pdf", "docx", "csv", "xla", "xlb", "xlc", "xlm", "xls", "xlsx", "xlt", "xlw", "tsv", "iif",
     "doc", "dot", "odt", "rtf", "pot", "ppa", "pps", "ppt", "pptx", "pwz", "wiz",
 ];
-const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str =
-    "`.pdf`, `.docx`, `.csv`, `.xla`, `.xlb`, `.xlc`, `.xlm`, `.xls`, `.xlsx`, `.xlt`, `.xlw`, `.tsv`, `.iif`, `.doc`, `.dot`, `.odt`, `.rtf`, `.pot`, `.ppa`, `.pps`, `.ppt`, `.pptx`, `.pwz`, `.wiz`";
+const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str = "`.pdf`, `.docx`, `.csv`, `.xla`, `.xlb`, `.xlc`, `.xlm`, `.xls`, `.xlsx`, `.xlt`, `.xlw`, `.tsv`, `.iif`, `.doc`, `.dot`, `.odt`, `.rtf`, `.pot`, `.ppa`, `.pps`, `.ppt`, `.pptx`, `.pwz`, `.wiz`";
 
 #[derive(Debug)]
 pub enum BuildError {
@@ -532,7 +531,7 @@ fn parse_input_specs(inputs: &[Value], base_path: &str) -> Result<Vec<InputSpec>
                     format!(
                         "unsupported input type `{input_type}` (supported: `text`, `url`, `image`, `file`)"
                     ),
-                ))
+                ));
             }
         };
 
@@ -714,30 +713,8 @@ fn parse_actions(
                     let agent = get_required_string(run_obj, "agent", &run_path)?
                         .trim()
                         .to_string();
-                    if agent.is_empty() {
-                        return Err(BuildError::config(
-                            format!("{run_path}.agent"),
-                            "must be a non-empty explicit relative path such as `./child_agent`",
-                        ));
-                    }
-                    if Path::new(&agent).is_absolute() {
-                        return Err(BuildError::config(
-                            format!("{run_path}.agent"),
-                            "must be an explicit relative path such as `./child_agent`",
-                        ));
-                    }
-                    if path_uses_parent_traversal(Path::new(&agent)) {
-                        return Err(BuildError::config(
-                            format!("{run_path}.agent"),
-                            "must stay at the current level or below; parent traversal (`..`) is not allowed",
-                        ));
-                    }
-                    if !contains_explicit_path_separator(&agent) {
-                        return Err(BuildError::config(
-                            format!("{run_path}.agent"),
-                            "must be an explicit relative path such as `./child_agent`; bare executable names are not allowed",
-                        ));
-                    }
+                    let agent_path = format!("{run_path}.agent");
+                    validate_child_agent_target(&agent, &agent_path)?;
 
                     let inputs = match run_obj.get("inputs") {
                         Some(input_value) => {
@@ -949,7 +926,7 @@ fn parse_action_input_specs(
                     format!(
                         "unsupported input type `{input_type}` (supported: `text`, `url`, `image`, `file`)"
                     ),
-                ))
+                ));
             }
         };
 
@@ -1021,10 +998,6 @@ fn resolve_literal_run_args(parts: &[RunArg]) -> Option<String> {
     Some(resolved)
 }
 
-fn contains_explicit_path_separator(path: &str) -> bool {
-    path.contains('/') || path.contains('\\')
-}
-
 fn validate_definition_owned_local_path(
     raw_path: &str,
     path: &str,
@@ -1057,6 +1030,50 @@ fn validate_definition_owned_local_path(
     Ok(())
 }
 
+fn validate_child_agent_target(raw_agent: &str, path: &str) -> Result<(), BuildError> {
+    let agent = raw_agent.trim();
+    if agent.is_empty() {
+        return Err(BuildError::config(
+            path,
+            "must use explicit same-level `./childagent` form",
+        ));
+    }
+
+    let candidate = Path::new(agent);
+    if candidate.is_absolute() {
+        return Err(BuildError::config(
+            path,
+            "must use explicit same-level `./childagent` form; absolute paths are not allowed",
+        ));
+    }
+
+    if path_uses_parent_traversal(candidate) {
+        return Err(BuildError::config(
+            path,
+            "must use explicit same-level `./childagent` form; parent traversal (`..`) is not allowed",
+        ));
+    }
+
+    if !agent.starts_with("./") {
+        let message = if contains_path_separator(agent) {
+            "must use explicit same-level `./childagent` form; nested child-agent paths are not allowed"
+        } else {
+            "must use explicit same-level `./childagent` form; bare child-agent names are not allowed"
+        };
+        return Err(BuildError::config(path, message));
+    }
+
+    let sibling = &agent[2..];
+    if sibling.is_empty() || !is_single_normal_path_component(sibling) {
+        return Err(BuildError::config(
+            path,
+            "must stay at the same level; nested child-agent paths such as `./agents/childagent` are not allowed",
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_supported_file_extension(
     raw_path: &str,
     path: &str,
@@ -1081,6 +1098,15 @@ fn validate_supported_file_extension(
 fn path_uses_parent_traversal(path: &Path) -> bool {
     path.components()
         .any(|component| matches!(component, Component::ParentDir))
+}
+
+fn contains_path_separator(path: &str) -> bool {
+    path.contains('/') || path.contains('\\')
+}
+
+fn is_single_normal_path_component(path: &str) -> bool {
+    let mut components = Path::new(path).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
 fn parse_run_arg(
@@ -1438,7 +1464,7 @@ fn resolve_var_field_type(
             return Err(BuildError::config(
                 path,
                 "expected `var` arguments as a string or array",
-            ))
+            ));
         }
     };
 
@@ -1979,4 +2005,75 @@ pub fn actions() -> Vec<Action> {{
 
 fn rust_string_literal(value: &str) -> String {
     format!("{value:?}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generate_agent_model_from_str;
+
+    fn config_with_child_agent_target(target: &str) -> String {
+        let encoded_target =
+            serde_json::to_string(target).expect("child agent target should encode as JSON");
+        format!(
+            r#"{{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        {{ "type": "text", "text": "Test prompt" }}
+    ],
+    "agent_schema": {{
+        "type": "object",
+        "properties": {{
+            "ok": {{ "type": "boolean" }}
+        }}
+    }},
+    "actions": [
+        {{
+            "name": "invoke_child",
+            "logic": {{ "==": [ {{ "var": "ok" }}, true ] }},
+            "run": [
+                {{ "kind": "agent", "agent": {encoded_target} }}
+            ]
+        }}
+    ]
+}}"#
+        )
+    }
+
+    #[test]
+    fn accepts_explicit_same_level_child_agent_target() {
+        let generated =
+            generate_agent_model_from_str(&config_with_child_agent_target("./childagent"))
+                .expect("explicit same-level child agent target should compile");
+
+        assert!(generated.contains("agent: Some(\"./childagent\".to_string())"));
+    }
+
+    #[test]
+    fn rejects_bare_child_agent_target() {
+        let error = generate_agent_model_from_str(&config_with_child_agent_target("childagent"))
+            .expect_err("bare child agent names should be rejected")
+            .to_string();
+
+        assert!(error.contains("bare child-agent names are not allowed"));
+    }
+
+    #[test]
+    fn rejects_nested_child_agent_target() {
+        let error =
+            generate_agent_model_from_str(&config_with_child_agent_target("./agents/childagent"))
+                .expect_err("nested child agent paths should be rejected")
+                .to_string();
+
+        assert!(error.contains("nested child-agent paths"));
+    }
+
+    #[test]
+    fn rejects_parent_traversal_child_agent_target() {
+        let error =
+            generate_agent_model_from_str(&config_with_child_agent_target("./../childagent"))
+                .expect_err("parent traversal should be rejected")
+                .to_string();
+
+        assert!(error.contains("parent traversal"));
+    }
 }
