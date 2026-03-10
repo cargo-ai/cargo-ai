@@ -33,6 +33,24 @@ const DOC_HATCH_CHECK_LOOP: &str = include_str!(concat!(
     "/templates/shared/docs/hatch-check-loop.md"
 ));
 
+pub(crate) const SCAFFOLD_ENABLE_ENV_VAR: &str = "CARGO_AI_ENABLE_SCAFFOLD";
+
+pub(crate) fn scaffold_gate_enabled(experimental_flag: bool) -> bool {
+    experimental_flag
+        || std::env::var(SCAFFOLD_ENABLE_ENV_VAR)
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+}
+
+pub(crate) fn scaffold_gate_message(command_name: &str) -> String {
+    format!(
+        "Project scaffolding is currently hidden from the supported MVP path.\nTo use `cargo ai {command_name}`, re-run with `--experimental` or set `{SCAFFOLD_ENABLE_ENV_VAR}=1`."
+    )
+}
+
 #[derive(Clone, Copy)]
 struct TemplateArtifact {
     relative_path: &'static str,
@@ -372,10 +390,16 @@ vcs = \"{}\"\n",
 
 #[cfg(test)]
 mod tests {
-    use super::{scaffold_init, scaffold_new, ProjectTemplate, VcsMode};
+    use super::{
+        scaffold_gate_enabled, scaffold_init, scaffold_new, ProjectTemplate, VcsMode,
+        SCAFFOLD_ENABLE_ENV_VAR,
+    };
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{LazyLock, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn temp_dir_path(stem: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -383,6 +407,32 @@ mod tests {
             .expect("system time should be after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("cargo-ai-scaffold-test-{}-{}", stem, nanos))
+    }
+
+    #[test]
+    fn scaffold_gate_is_disabled_by_default() {
+        let _guard = ENV_LOCK.lock().expect("env lock should be available");
+        std::env::remove_var(SCAFFOLD_ENABLE_ENV_VAR);
+
+        assert!(!scaffold_gate_enabled(false));
+    }
+
+    #[test]
+    fn scaffold_gate_accepts_experimental_flag() {
+        let _guard = ENV_LOCK.lock().expect("env lock should be available");
+        std::env::remove_var(SCAFFOLD_ENABLE_ENV_VAR);
+
+        assert!(scaffold_gate_enabled(true));
+    }
+
+    #[test]
+    fn scaffold_gate_accepts_enable_env_var() {
+        let _guard = ENV_LOCK.lock().expect("env lock should be available");
+        std::env::set_var(SCAFFOLD_ENABLE_ENV_VAR, "1");
+
+        assert!(scaffold_gate_enabled(false));
+
+        std::env::remove_var(SCAFFOLD_ENABLE_ENV_VAR);
     }
 
     #[test]
