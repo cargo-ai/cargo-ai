@@ -7,6 +7,50 @@ const CODEX_GUIDANCE_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/codex-agents.md.tmpl"
 ));
+const ACTION_RULES_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/action-rules.md"
+));
+const EXAMPLE_STOP_BY_DEFAULT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/stop-by-default.json"
+));
+const EXAMPLE_CONTINUE_ON_FAILURE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/continue-on-failure.json"
+));
+
+#[derive(Clone, Copy)]
+struct GuidanceArtifact {
+    relative_path: &'static str,
+    contents: &'static str,
+}
+
+const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 4] = [
+    GuidanceArtifact {
+        relative_path: "AGENTS.md",
+        contents: CODEX_GUIDANCE_TEMPLATE,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/action-rules.md",
+        contents: ACTION_RULES_TEMPLATE,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/stop-by-default.json",
+        contents: EXAMPLE_STOP_BY_DEFAULT,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/continue-on-failure.json",
+        contents: EXAMPLE_CONTINUE_ON_FAILURE,
+    },
+];
+
+#[derive(Debug)]
+struct GuidanceBundleReport {
+    root_output_path: PathBuf,
+    guidance_root: PathBuf,
+    artifact_paths: Vec<PathBuf>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GuidanceStyle {
@@ -33,31 +77,69 @@ impl GuidanceStyle {
         }
     }
 
-    fn output_file_contents(self) -> &'static str {
+    fn artifacts(self) -> &'static [GuidanceArtifact] {
         match self {
-            Self::Codex => CODEX_GUIDANCE_TEMPLATE,
+            Self::Codex => &CODEX_GUIDANCE_ARTIFACTS,
         }
     }
 }
 
-fn write_guidance_file(target_dir: &Path, style: GuidanceStyle) -> Result<PathBuf, String> {
-    let output_path = target_dir.join(style.output_file_name());
-    if output_path.exists() {
-        return Err(format!(
-            "Guidance file '{}' already exists. Remove it first or choose another directory before retrying.",
-            output_path.display()
-        ));
+fn ensure_no_conflicts(paths: &[PathBuf]) -> Result<(), String> {
+    let mut conflicts = Vec::new();
+
+    for path in paths {
+        if path.exists() {
+            conflicts.push(path.display().to_string());
+        }
     }
 
-    fs::write(&output_path, style.output_file_contents()).map_err(|error| {
-        format!(
-            "Failed to write guidance file '{}': {}",
-            output_path.display(),
-            error
-        )
-    })?;
+    if conflicts.is_empty() {
+        return Ok(());
+    }
 
-    Ok(output_path)
+    Err(format!(
+        "Guidance conflicts detected. The following managed file(s) already exist: {}. Remove conflicting files or choose another directory before retrying.",
+        conflicts.join(", ")
+    ))
+}
+
+fn write_guidance_bundle(
+    target_dir: &Path,
+    style: GuidanceStyle,
+) -> Result<GuidanceBundleReport, String> {
+    let artifact_paths = style
+        .artifacts()
+        .iter()
+        .map(|artifact| target_dir.join(artifact.relative_path))
+        .collect::<Vec<_>>();
+
+    ensure_no_conflicts(&artifact_paths)?;
+
+    for (artifact, output_path) in style.artifacts().iter().zip(artifact_paths.iter()) {
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "Failed to create guidance directory '{}': {}",
+                    parent.display(),
+                    error
+                )
+            })?;
+        }
+
+        fs::write(output_path, artifact.contents).map_err(|error| {
+            format!(
+                "Failed to write guidance file '{}': {}",
+                output_path.display(),
+                error
+            )
+        })?;
+    }
+
+    Ok(GuidanceBundleReport {
+        root_output_path: target_dir.join(style.output_file_name()),
+        guidance_root: target_dir.join(".cargo-ai").join("guidance"),
+        artifact_paths,
+    })
 }
 
 /// Executes the `guidance` subcommand flow from parsed CLI arguments.
@@ -74,17 +156,26 @@ fn run_impl(sub_m: &ArgMatches) -> Result<(), String> {
     let style = GuidanceStyle::from_cli(sub_m.get_one::<String>("style").map(String::as_str))?;
     let current_dir = std::env::current_dir()
         .map_err(|error| format!("Failed to resolve current directory: {error}"))?;
-    let output_path = write_guidance_file(&current_dir, style)?;
+    let report = write_guidance_bundle(&current_dir, style)?;
 
-    println!("✅ Wrote guidance file: {}", output_path.display());
-    println!("ℹ️ Added AGENTS.md only. No scaffold metadata or .cargo-ai assets were created.");
+    println!(
+        "✅ Wrote guidance file: {}",
+        report.root_output_path.display()
+    );
+    println!(
+        "ℹ️ Added offline guidance bundle: {}",
+        report.guidance_root.display()
+    );
+    for artifact_path in report.artifact_paths.iter().skip(1) {
+        println!("   - {}", artifact_path.display());
+    }
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{write_guidance_file, GuidanceStyle};
+    use super::{write_guidance_bundle, GuidanceStyle};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -98,37 +189,76 @@ mod tests {
     }
 
     #[test]
-    fn write_guidance_file_writes_agents_md_for_codex() {
+    fn write_guidance_bundle_writes_agents_md_and_offline_assets_for_codex() {
         let dir = temp_dir_path("codex");
         fs::create_dir_all(&dir).expect("test dir should be created");
 
-        let output_path =
-            write_guidance_file(&dir, GuidanceStyle::Codex).expect("guidance write should work");
+        let report =
+            write_guidance_bundle(&dir, GuidanceStyle::Codex).expect("guidance write should work");
         assert_eq!(
-            output_path.file_name().and_then(|name| name.to_str()),
+            report
+                .root_output_path
+                .file_name()
+                .and_then(|name| name.to_str()),
             Some("AGENTS.md")
         );
+        assert_eq!(report.artifact_paths.len(), 4);
+        assert!(dir.join(".cargo-ai/guidance/action-rules.md").exists());
+        assert!(dir
+            .join(".cargo-ai/guidance/examples/stop-by-default.json")
+            .exists());
+        assert!(dir
+            .join(".cargo-ai/guidance/examples/continue-on-failure.json")
+            .exists());
 
-        let guidance =
-            fs::read_to_string(&output_path).expect("guidance output should be readable");
+        let guidance = fs::read_to_string(&report.root_output_path)
+            .expect("guidance output should be readable");
         assert!(guidance.contains("Cargo AI Agent Definition Guidance"));
+        assert!(guidance.contains(".cargo-ai/guidance/action-rules.md"));
+        assert!(guidance.contains(".cargo-ai/guidance/examples/stop-by-default.json"));
         assert!(guidance.contains("cargo ai hatch <agent-name> --config <config.json> --check"));
-        assert!(guidance.contains("Do not use `cargo ai new` or `cargo ai init`"));
+
+        let rules = fs::read_to_string(dir.join(".cargo-ai/guidance/action-rules.md"))
+            .expect("action rules should be readable");
+        assert!(rules.contains("failure_mode"));
+        assert!(rules.contains("status_variable"));
+        assert!(rules.contains("when"));
 
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn write_guidance_file_fails_when_agents_md_exists() {
+    fn write_guidance_bundle_fails_when_agents_md_exists() {
         let dir = temp_dir_path("conflict");
         fs::create_dir_all(&dir).expect("test dir should be created");
         fs::write(dir.join("AGENTS.md"), "existing guidance\n")
             .expect("existing guidance file should be written");
 
-        let error =
-            write_guidance_file(&dir, GuidanceStyle::Codex).expect_err("existing file should fail");
+        let error = write_guidance_bundle(&dir, GuidanceStyle::Codex)
+            .expect_err("existing file should fail");
         assert!(error.contains("AGENTS.md"));
-        assert!(error.contains("already exists"));
+        assert!(error.contains("already exist"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_guidance_bundle_fails_when_companion_asset_exists() {
+        let dir = temp_dir_path("companion-conflict");
+        let conflict_path = dir.join(".cargo-ai/guidance/action-rules.md");
+        fs::create_dir_all(
+            conflict_path
+                .parent()
+                .expect("conflict parent should be available"),
+        )
+        .expect("conflict parent should be created");
+        fs::write(&conflict_path, "existing guidance rules\n")
+            .expect("existing companion file should be written");
+
+        let error = write_guidance_bundle(&dir, GuidanceStyle::Codex)
+            .expect_err("existing companion file should fail");
+        assert!(error.contains(".cargo-ai/guidance/action-rules.md"));
+        assert!(error.contains("already exist"));
 
         let _ = fs::remove_dir_all(dir);
     }

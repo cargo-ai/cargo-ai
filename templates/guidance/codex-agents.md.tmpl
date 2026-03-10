@@ -6,9 +6,14 @@ Use this workspace to create and maintain Cargo AI agent definition JSON files. 
 
 ## Primary Outputs
 - Agent definition JSON files such as `weather_agent.json`
-- Small supporting notes only when directly useful to the active JSON definition
+- Local offline guidance files under `.cargo-ai/guidance/`
 
-Do not create project scaffolding or `.cargo-ai` support assets unless the user explicitly asks for them. Do not use `cargo ai new` or `cargo ai init` unless the user explicitly asks for that hidden flow.
+Prefer the generated local bundle before looking elsewhere:
+- `.cargo-ai/guidance/action-rules.md`
+- `.cargo-ai/guidance/examples/stop-by-default.json`
+- `.cargo-ai/guidance/examples/continue-on-failure.json`
+
+Do not use `cargo ai new` or `cargo ai init` unless the user explicitly asks for those hidden flows.
 
 ## Cargo AI Workflow
 1. Create or update one JSON definition at a time.
@@ -20,13 +25,24 @@ Do not create project scaffolding or `.cargo-ai` support assets unless the user 
    - `cargo ai hatch <agent-name> --config <config.json>`
 6. Rebuild with `--force` only when replacing an existing output is intentional.
 
-## Definition Guidance
+## Action Rules Summary
 - Prefer canonical `cargo ai hatch ... --config <config.json>` commands instead of shorthand flows.
-- Follow existing JSON patterns in the repository before inventing new structure.
-- Keep action logic simple and explicit.
-- If a definition references child agents for this MVP, keep them in the same directory level and use explicit `./childagent` form only.
-- Treat child agents and local files as separate local dependencies; do not assume Cargo AI uploads or pulls them automatically.
-- Keep paths relative when possible and avoid parent-directory traversal.
+- Required fields stay minimal:
+  - `exec`: `kind`, `program`, `args`
+  - `agent`: `kind`, `agent`
+  - `email_me`: `kind`, `subject`, `text`
+- Optional control fields on every step:
+  - `when`
+  - `failure_mode`
+  - `status_variable`
+  - `error_variable`
+- Default step failure behavior is `stop`.
+- Use `failure_mode: "continue"` only when a later step should react to a failure.
+- `output_variable` remains `exec`-only.
+- Captured variable names are flat, action-local, and cannot collide with top-level agent output fields or other captured names in the same action.
+- `when` can read top-level model outputs plus prior captured values from earlier steps in the same action.
+- Child agents must use explicit same-level `./childagent` paths.
+- Keep local file paths relative and avoid parent-directory traversal.
 
 ## Editing Guidance
 - Make the smallest JSON change that satisfies the request.
