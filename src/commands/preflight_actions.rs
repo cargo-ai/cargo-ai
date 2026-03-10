@@ -15,8 +15,7 @@ const AGENT_ACTION_MAX_RUNTIME_SECS_ENV: &str = "CARGO_AI_AGENT_MAX_RUNTIME_SECS
 const AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_STARTED_AT_MS";
 const AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_DEADLINE_MS";
 const DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS: u64 = 600;
-const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str =
-    "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
+const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str = "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct InvocationRuntimeBudget {
@@ -864,9 +863,16 @@ fn action_runtime_timeout_message(
 
 fn validate_agent_step_target(agent: &str, action_name: &str) -> Result<(), String> {
     let agent_path = Path::new(agent);
+    if agent.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' agent step target '{}' must use explicit same-level './childagent' form.",
+            action_name, agent
+        ));
+    }
+
     if agent_path.is_absolute() {
         return Err(format!(
-            "Action '{}' agent step target '{}' must be an explicit relative path such as './child_agent'.",
+            "Action '{}' agent step target '{}' must use explicit same-level './childagent' form; absolute paths are not allowed.",
             action_name, agent
         ));
     }
@@ -876,14 +882,27 @@ fn validate_agent_step_target(agent: &str, action_name: &str) -> Result<(), Stri
         .any(|component| matches!(component, Component::ParentDir))
     {
         return Err(format!(
-            "Action '{}' agent step target '{}' must stay at the current level or below; parent traversal (`..`) is not allowed.",
+            "Action '{}' agent step target '{}' must use explicit same-level './childagent' form; parent traversal (`..`) is not allowed.",
             action_name, agent
         ));
     }
 
-    if !contains_explicit_path_separator(agent) {
+    if !agent.starts_with("./") {
+        let message = if contains_explicit_path_separator(agent) {
+            "must use explicit same-level './childagent' form; nested child-agent paths are not allowed."
+        } else {
+            "must use explicit same-level './childagent' form; bare child-agent names are not allowed."
+        };
         return Err(format!(
-            "Action '{}' agent step target '{}' must be an explicit relative path such as './child_agent'; bare executable names are not allowed because they may resolve through PATH.",
+            "Action '{}' agent step target '{}' {}",
+            action_name, agent, message
+        ));
+    }
+
+    let sibling = &agent[2..];
+    if sibling.is_empty() || !is_single_normal_path_component(sibling) {
+        return Err(format!(
+            "Action '{}' agent step target '{}' must stay at the same level; nested child-agent paths such as './agents/childagent' are not allowed.",
             action_name, agent
         ));
     }
@@ -893,6 +912,11 @@ fn validate_agent_step_target(agent: &str, action_name: &str) -> Result<(), Stri
 
 fn contains_explicit_path_separator(path: &str) -> bool {
     path.contains('/') || path.contains('\\')
+}
+
+fn is_single_normal_path_component(path: &str) -> bool {
+    let mut components = Path::new(path).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
 fn validate_agent_action_depth(
@@ -1192,10 +1216,11 @@ fn resolve_run_arg(
 #[cfg(test)]
 mod tests {
     use super::{
-        action_completion_summary, child_input_args, configured_agent_action_runtime_budget,
-        format_backend_error_message, format_backend_ui_message, insert_action_output_variable,
-        matching_run_steps, resolve_run_args, resolve_string_parts, run_agent_step, run_exec_step,
-        step_matches_platform, validate_agent_action_depth, StepExecutionOutcome,
+        StepExecutionOutcome, action_completion_summary, child_input_args,
+        configured_agent_action_runtime_budget, format_backend_error_message,
+        format_backend_ui_message, insert_action_output_variable, matching_run_steps,
+        resolve_run_args, resolve_string_parts, run_agent_step, run_exec_step,
+        step_matches_platform, validate_agent_action_depth,
     };
     use serde_json::json;
 
@@ -1769,8 +1794,7 @@ mod tests {
             .await
             .expect_err("bare child agent names should be rejected");
 
-        assert!(error.contains("explicit relative path"));
-        assert!(error.contains("PATH"));
+        assert!(error.contains("bare child-agent names are not allowed"));
     }
 
     #[tokio::test]
@@ -1793,6 +1817,28 @@ mod tests {
             .expect_err("parent traversal should be rejected");
 
         assert!(error.contains("parent traversal"));
+    }
+
+    #[tokio::test]
+    async fn agent_step_rejects_nested_child_path() {
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            output_variable: None,
+            args: Vec::new(),
+            subject: None,
+            text: None,
+            agent: Some("./agents/child_agent".to_string()),
+            inputs: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = run_agent_step(&step, &json!({}), "invoke_child", 5, runtime_budget)
+            .await
+            .expect_err("nested child agent paths should be rejected");
+
+        assert!(error.contains("nested child-agent paths"));
     }
 
     #[cfg(unix)]

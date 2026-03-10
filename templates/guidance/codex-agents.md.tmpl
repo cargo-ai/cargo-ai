@@ -24,7 +24,7 @@ Do not create project scaffolding or `.cargo-ai` support assets unless the user 
 - Prefer canonical `cargo ai hatch ... --config <config.json>` commands instead of shorthand flows.
 - Follow existing JSON patterns in the repository before inventing new structure.
 - Keep action logic simple and explicit.
-- If a definition references child agents for this MVP, keep them in the same directory level and use only `childagent` or `./childagent`.
+- If a definition references child agents for this MVP, keep them in the same directory level and use explicit `./childagent` form only.
 - Treat child agents and local files as separate local dependencies; do not assume Cargo AI uploads or pulls them automatically.
 - Keep paths relative when possible and avoid parent-directory traversal.
 
