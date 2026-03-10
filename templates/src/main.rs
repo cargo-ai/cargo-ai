@@ -1220,6 +1220,10 @@ async fn apply_actions(
         }
     }
 
+    if let Some(message) = root_run_completion_message() {
+        println!("{message}");
+    }
+
     Ok(())
 }
 
@@ -1547,6 +1551,18 @@ fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'stat
     } else {
         Some("completed")
     }
+}
+
+fn run_completion_message_for_depth(depth: u32) -> Option<&'static str> {
+    if depth == 0 {
+        Some("✅ Run complete.")
+    } else {
+        None
+    }
+}
+
+fn root_run_completion_message() -> Option<&'static str> {
+    run_completion_message_for_depth(current_agent_action_depth())
 }
 
 fn print_action_start(action_name: &str) {

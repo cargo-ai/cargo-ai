@@ -180,6 +180,10 @@ pub(crate) async fn apply_actions(
         }
     }
 
+    if let Some(message) = root_run_completion_message() {
+        println!("{message}");
+    }
+
     Ok(())
 }
 
@@ -591,6 +595,18 @@ fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'stat
     } else {
         Some("completed")
     }
+}
+
+fn run_completion_message_for_depth(depth: u32) -> Option<&'static str> {
+    if depth == 0 {
+        Some("✅ Run complete.")
+    } else {
+        None
+    }
+}
+
+fn root_run_completion_message() -> Option<&'static str> {
+    run_completion_message_for_depth(current_agent_action_depth())
 }
 
 fn print_action_start(action_name: &str) {
@@ -1311,7 +1327,8 @@ mod tests {
         action_completion_summary, apply_actions, child_input_args,
         configured_agent_action_runtime_budget, format_backend_error_message,
         format_backend_ui_message, insert_action_output_variable, matching_run_steps,
-        resolve_run_args, resolve_string_parts, run_agent_step, run_exec_step,
+        resolve_run_args, resolve_string_parts, run_agent_step, run_completion_message_for_depth,
+        run_exec_step,
         step_matches_platform, validate_agent_action_depth, StepExecutionOutcome,
     };
     use serde_json::json;
@@ -1599,6 +1616,12 @@ mod tests {
             StepExecutionOutcome::SoftFailureLogged,
         ]);
         assert_eq!(summary, None);
+    }
+
+    #[test]
+    fn run_completion_message_for_depth_prints_for_root_runs_only() {
+        assert_eq!(run_completion_message_for_depth(0), Some("✅ Run complete."));
+        assert_eq!(run_completion_message_for_depth(1), None);
     }
 
     #[cfg(unix)]
