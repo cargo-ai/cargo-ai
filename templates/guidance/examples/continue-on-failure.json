@@ -1,0 +1,50 @@
+{
+  "version": "2026-03-03.r1",
+  "inputs": [
+    {
+      "type": "text",
+      "text": "Run the child workflow and report failures."
+    }
+  ],
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "answer": {
+        "type": "integer"
+      }
+    }
+  },
+  "actions": [
+    {
+      "name": "handle_answer_4",
+      "logic": {
+        "==": [{ "var": "answer" }, 4]
+      },
+      "run": [
+        {
+          "kind": "agent",
+          "agent": "./child_reporter",
+          "failure_mode": "continue",
+          "status_variable": "child_status",
+          "error_variable": "child_error"
+        },
+        {
+          "kind": "email_me",
+          "when": {
+            "==": [{ "var": "child_status" }, "failed"]
+          },
+          "subject": "Child agent failed",
+          "text": ["Failure detail: ", { "var": "child_error" }]
+        },
+        {
+          "kind": "exec",
+          "when": {
+            "==": [{ "var": "child_status" }, "succeeded"]
+          },
+          "program": "echo",
+          "args": ["child agent succeeded"]
+        }
+      ]
+    }
+  ]
+}

@@ -85,47 +85,84 @@ pub(crate) async fn apply_actions(
                     let mut action_data = data.clone();
 
                     for step in matching_steps {
-                        if step.kind.eq_ignore_ascii_case("exec") {
-                            let (outcome, captured_output) =
-                                run_exec_step(step, &action_data, &action.name, runtime_budget)
-                                    .await?;
-                            if let Some((name, value)) = captured_output {
-                                insert_action_output_variable(
-                                    &mut action_data,
-                                    name.as_str(),
-                                    value,
-                                    action.name.as_str(),
-                                )?;
-                            }
-                            outcomes.push(outcome);
+                        if !should_run_step(step, &action_data, &action.name)? {
+                            continue;
+                        }
+
+                        let step_result = if step.kind.eq_ignore_ascii_case("exec") {
+                            run_exec_step(step, &action_data, &action.name, runtime_budget)
+                                .await
+                                .map(|captured_output| {
+                                    (StepExecutionOutcome::Completed, captured_output)
+                                })
                         } else if step.kind.eq_ignore_ascii_case("email_me") {
-                            outcomes.push(
-                                run_email_me_step(
-                                    step,
-                                    &action_data,
-                                    &action.name,
-                                    runtime_budget,
-                                    single_step_action,
-                                )
-                                .await?,
-                            );
+                            run_email_me_step(
+                                step,
+                                &action_data,
+                                &action.name,
+                                runtime_budget,
+                                single_step_action,
+                            )
+                            .await
+                            .map(|outcome| (outcome, None))
                         } else if step.kind.eq_ignore_ascii_case("agent") {
-                            outcomes.push(
-                                run_agent_step(
-                                    step,
-                                    &action_data,
-                                    &action.name,
-                                    max_agent_depth,
-                                    runtime_budget,
-                                )
-                                .await?,
-                            );
+                            run_agent_step(
+                                step,
+                                &action_data,
+                                &action.name,
+                                max_agent_depth,
+                                runtime_budget,
+                            )
+                            .await
+                            .map(|outcome| (outcome, None))
                         } else {
                             eprintln!(
                                 "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
                                 action.name, step.kind
                             );
                             outcomes.push(StepExecutionOutcome::SoftFailureLogged);
+                            continue;
+                        };
+
+                        match step_result {
+                            Ok((outcome, captured_output)) => {
+                                if let Some((name, value)) = captured_output {
+                                    insert_action_output_variable(
+                                        &mut action_data,
+                                        name.as_str(),
+                                        value,
+                                        action.name.as_str(),
+                                    )?;
+                                }
+                                insert_step_status_variable(
+                                    &mut action_data,
+                                    step,
+                                    "succeeded",
+                                    action.name.as_str(),
+                                )?;
+                                outcomes.push(outcome);
+                            }
+                            Err(error) => {
+                                insert_step_status_variable(
+                                    &mut action_data,
+                                    step,
+                                    "failed",
+                                    action.name.as_str(),
+                                )?;
+                                insert_step_error_variable(
+                                    &mut action_data,
+                                    step,
+                                    error.as_str(),
+                                    action.name.as_str(),
+                                )?;
+
+                                if matches!(step_failure_mode(step), crate::FailureMode::Continue) {
+                                    println!("{error}");
+                                    outcomes.push(StepExecutionOutcome::SoftFailureLogged);
+                                } else {
+                                    return Err(error);
+                                }
+                            }
                         }
                     }
 
@@ -143,6 +180,10 @@ pub(crate) async fn apply_actions(
         }
     }
 
+    if let Some(message) = root_run_completion_message() {
+        println!("{message}");
+    }
+
     Ok(())
 }
 
@@ -151,7 +192,7 @@ async fn run_exec_step(
     data: &serde_json::Value,
     action_name: &str,
     runtime_budget: InvocationRuntimeBudget,
-) -> Result<(StepExecutionOutcome, Option<(String, String)>), String> {
+) -> Result<Option<(String, String)>, String> {
     let program = step.program.as_deref().ok_or_else(|| {
         format!(
             "Action '{}' exec step is missing required `program`.",
@@ -159,7 +200,8 @@ async fn run_exec_step(
         )
     })?;
 
-    let resolved_args = resolve_run_args(&step.args, data, action_name)?;
+    let resolved_args = resolve_run_args(&step.args, data, action_name)
+        .map_err(|error| format!("Action '{}': {error}", action_name))?;
 
     let remaining = remaining_runtime_duration(
         runtime_budget,
@@ -186,22 +228,16 @@ async fn run_exec_step(
                     "ℹ️ Action '{}' stored exec output in variable '{}'.",
                     action_name, output_variable
                 );
-                Ok((
-                    StepExecutionOutcome::Completed,
-                    Some((output_variable.to_string(), captured_output)),
-                ))
+                Ok(Some((output_variable.to_string(), captured_output)))
             }
-            Ok(Ok(output)) => {
-                println!(
-                    "{action_name}: command exited with status {}.",
-                    output.status
-                );
-                Ok((StepExecutionOutcome::SoftFailureLogged, None))
-            }
-            Ok(Err(error)) => {
-                println!("{action_name}: failed while waiting for command: {error}.");
-                Ok((StepExecutionOutcome::SoftFailureLogged, None))
-            }
+            Ok(Ok(output)) => Err(format!(
+                "Action '{}' exec step command '{}' exited with status {}.",
+                action_name, program, output.status
+            )),
+            Ok(Err(error)) => Err(format!(
+                "Action '{}' exec step failed while waiting for command '{}': {}",
+                action_name, program, error
+            )),
             Err(_) => Err(action_runtime_timeout_message(
                 action_name,
                 runtime_budget,
@@ -215,15 +251,15 @@ async fn run_exec_step(
             .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
 
         match tokio::time::timeout(remaining, child.wait()).await {
-            Ok(Ok(status)) if status.success() => Ok((StepExecutionOutcome::Completed, None)),
-            Ok(Ok(status)) => {
-                println!("{action_name}: command exited with status {status}.");
-                Ok((StepExecutionOutcome::SoftFailureLogged, None))
-            }
-            Ok(Err(error)) => {
-                println!("{action_name}: failed while waiting for command: {error}.");
-                Ok((StepExecutionOutcome::SoftFailureLogged, None))
-            }
+            Ok(Ok(status)) if status.success() => Ok(None),
+            Ok(Ok(status)) => Err(format!(
+                "Action '{}' exec step command '{}' exited with status {}.",
+                action_name, program, status
+            )),
+            Ok(Err(error)) => Err(format!(
+                "Action '{}' exec step failed while waiting for command '{}': {}",
+                action_name, program, error
+            )),
             Err(_) => {
                 let _ = child.kill().await;
                 Err(action_runtime_timeout_message(
@@ -242,15 +278,75 @@ fn insert_action_output_variable(
     value: String,
     action_name: &str,
 ) -> Result<(), String> {
+    insert_action_string_variable(data, name, value, action_name)
+}
+
+fn insert_action_string_variable(
+    data: &mut serde_json::Value,
+    name: &str,
+    value: String,
+    action_name: &str,
+) -> Result<(), String> {
     let Some(object) = data.as_object_mut() else {
         return Err(format!(
-            "Action '{}' could not store captured output '{}' because the action data context is not an object.",
+            "Action '{}' could not store captured variable '{}' because the action data context is not an object.",
             action_name, name
         ));
     };
 
     object.insert(name.to_string(), serde_json::Value::String(value));
     Ok(())
+}
+
+fn insert_step_status_variable(
+    data: &mut serde_json::Value,
+    step: &crate::RunStep,
+    status: &str,
+    action_name: &str,
+) -> Result<(), String> {
+    let Some(name) = step.status_variable.as_deref() else {
+        return Ok(());
+    };
+
+    insert_action_string_variable(data, name, status.to_string(), action_name)
+}
+
+fn insert_step_error_variable(
+    data: &mut serde_json::Value,
+    step: &crate::RunStep,
+    error: &str,
+    action_name: &str,
+) -> Result<(), String> {
+    let Some(name) = step.error_variable.as_deref() else {
+        return Ok(());
+    };
+
+    insert_action_string_variable(data, name, error.to_string(), action_name)
+}
+
+fn step_failure_mode(step: &crate::RunStep) -> crate::FailureMode {
+    step.failure_mode
+        .clone()
+        .unwrap_or(crate::FailureMode::Stop)
+}
+
+fn should_run_step(
+    step: &crate::RunStep,
+    data: &serde_json::Value,
+    action_name: &str,
+) -> Result<bool, String> {
+    let Some(condition) = step.when.as_ref() else {
+        return Ok(true);
+    };
+
+    apply(condition, data)
+        .map(|result| result.as_bool() == Some(true))
+        .map_err(|error| {
+            format!(
+                "Action '{}' failed to evaluate step `when` for kind '{}': {}",
+                action_name, step.kind, error
+            )
+        })
 }
 
 async fn run_email_me_step(
@@ -499,6 +595,18 @@ fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'stat
     } else {
         Some("completed")
     }
+}
+
+fn run_completion_message_for_depth(depth: u32) -> Option<&'static str> {
+    if depth == 0 {
+        Some("✅ Run complete.")
+    } else {
+        None
+    }
+}
+
+fn root_run_completion_message() -> Option<&'static str> {
+    run_completion_message_for_depth(current_agent_action_depth())
 }
 
 fn print_action_start(action_name: &str) {
@@ -1216,11 +1324,12 @@ fn resolve_run_arg(
 #[cfg(test)]
 mod tests {
     use super::{
-        StepExecutionOutcome, action_completion_summary, child_input_args,
+        action_completion_summary, apply_actions, child_input_args,
         configured_agent_action_runtime_budget, format_backend_error_message,
         format_backend_ui_message, insert_action_output_variable, matching_run_steps,
-        resolve_run_args, resolve_string_parts, run_agent_step, run_exec_step,
-        step_matches_platform, validate_agent_action_depth,
+        resolve_run_args, resolve_string_parts, run_agent_step, run_completion_message_for_depth,
+        run_exec_step,
+        step_matches_platform, validate_agent_action_depth, StepExecutionOutcome,
     };
     use serde_json::json;
 
@@ -1233,6 +1342,10 @@ mod tests {
             kind: "exec".to_string(),
             program: Some(program.to_string()),
             output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
             args,
             subject: None,
             text: None,
@@ -1244,6 +1357,14 @@ mod tests {
                     .map(|platform| platform.to_string())
                     .collect()
             }),
+        }
+    }
+
+    fn action(run: Vec<crate::RunStep>) -> crate::Action {
+        crate::Action {
+            name: "demo".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run,
         }
     }
 
@@ -1497,6 +1618,12 @@ mod tests {
         assert_eq!(summary, None);
     }
 
+    #[test]
+    fn run_completion_message_for_depth_prints_for_root_runs_only() {
+        assert_eq!(run_completion_message_for_depth(0), Some("✅ Run complete."));
+        assert_eq!(run_completion_message_for_depth(1), None);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn exec_step_captures_output_variable_on_success() {
@@ -1504,6 +1631,10 @@ mod tests {
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             output_variable: Some("report_listing".to_string()),
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
             args: vec![
                 crate::RunArg::Literal("-lc".to_string()),
                 crate::RunArg::Literal("printf 'alpha\\nbeta\\n'".to_string()),
@@ -1516,12 +1647,10 @@ mod tests {
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let (outcome, captured_output) =
-            run_exec_step(&step, &json!({}), "capture_exec", runtime_budget)
-                .await
-                .expect("exec capture should succeed");
+        let captured_output = run_exec_step(&step, &json!({}), "capture_exec", runtime_budget)
+            .await
+            .expect("exec capture should succeed");
 
-        assert_eq!(outcome, StepExecutionOutcome::Completed);
         assert_eq!(
             captured_output,
             Some(("report_listing".to_string(), "alpha\nbeta".to_string()))
@@ -1558,6 +1687,10 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
             args: Vec::new(),
             subject: None,
             text: None,
@@ -1653,6 +1786,10 @@ mod tests {
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             output_variable: Some("report_listing".to_string()),
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
             args: vec![
                 crate::RunArg::Literal("-lc".to_string()),
                 crate::RunArg::Literal("printf 'q1.pdf | q2.pdf\\n'".to_string()),
@@ -1667,6 +1804,10 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
             args: Vec::new(),
             subject: None,
             text: None,
@@ -1682,7 +1823,7 @@ mod tests {
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
         let mut action_data = json!({});
-        let (_, captured_output) = run_exec_step(
+        let captured_output = run_exec_step(
             &exec_step,
             &action_data,
             "capture_then_agent",
@@ -1747,6 +1888,10 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
             args: Vec::new(),
             subject: None,
             text: None,
@@ -1781,6 +1926,10 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
             args: Vec::new(),
             subject: None,
             text: None,
@@ -1803,6 +1952,10 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
             args: Vec::new(),
             subject: None,
             text: None,
@@ -1825,6 +1978,10 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
             args: Vec::new(),
             subject: None,
             text: None,
@@ -1864,6 +2021,10 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
             args: Vec::new(),
             subject: None,
             text: None,
@@ -1881,6 +2042,159 @@ mod tests {
 
         assert!(error.contains("max-runtime-in-sec 1"));
         assert!(error.contains("while waiting for child agent"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_actions_stops_on_failed_exec_by_default() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2040-stop-child-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+        let output_path =
+            std::env::temp_dir().join(format!("cai2040-stop-output-{}.txt", std::process::id()));
+
+        let script_body = format!("#!/bin/sh\nprintf 'ran' > \"{}\"\n", output_path.display());
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let failing_step = crate::RunStep {
+            kind: "exec".to_string(),
+            program: Some("/bin/sh".to_string()),
+            output_variable: None,
+            status_variable: Some("step_status".to_string()),
+            error_variable: Some("step_error".to_string()),
+            failure_mode: None,
+            when: None,
+            args: vec![
+                crate::RunArg::Literal("-lc".to_string()),
+                crate::RunArg::Literal("exit 7".to_string()),
+            ],
+            subject: None,
+            text: None,
+            agent: None,
+            inputs: None,
+            platforms: None,
+        };
+        let second_step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", script_name)),
+            inputs: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = apply_actions(
+            &crate::Output { answer: 4 },
+            &[action(vec![failing_step, second_step])],
+            5,
+            runtime_budget,
+        )
+        .await;
+
+        let _ = fs::remove_file(&script_path);
+        let _ = fs::remove_file(&output_path);
+
+        let error = result.expect_err("failed exec should stop by default");
+        assert!(error.contains("exited with status"));
+        assert!(
+            !output_path.exists(),
+            "later step should not run after default stop"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_actions_continue_mode_exposes_failed_status_to_later_when() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2040-continue-child-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+        let output_path = std::env::temp_dir().join(format!(
+            "cai2040-continue-output-{}.txt",
+            std::process::id()
+        ));
+
+        let script_body = format!("#!/bin/sh\nprintf 'ran' > \"{}\"\n", output_path.display());
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let failing_step = crate::RunStep {
+            kind: "exec".to_string(),
+            program: Some("/bin/sh".to_string()),
+            output_variable: None,
+            status_variable: Some("step_status".to_string()),
+            error_variable: Some("step_error".to_string()),
+            failure_mode: Some(crate::FailureMode::Continue),
+            when: None,
+            args: vec![
+                crate::RunArg::Literal("-lc".to_string()),
+                crate::RunArg::Literal("exit 9".to_string()),
+            ],
+            subject: None,
+            text: None,
+            agent: None,
+            inputs: None,
+            platforms: None,
+        };
+        let second_step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: Some(json!({ "==": [{ "var": "step_status" }, "failed"] })),
+            args: Vec::new(),
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", script_name)),
+            inputs: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = apply_actions(
+            &crate::Output { answer: 4 },
+            &[action(vec![failing_step, second_step])],
+            5,
+            runtime_budget,
+        )
+        .await;
+
+        let _ = fs::remove_file(&script_path);
+
+        assert!(
+            result.is_ok(),
+            "continue-mode failure should not stop the action"
+        );
+
+        let file_contents =
+            fs::read_to_string(&output_path).expect("later step should have executed");
+        let _ = fs::remove_file(&output_path);
+
+        assert_eq!(file_contents, "ran");
     }
 
     #[test]

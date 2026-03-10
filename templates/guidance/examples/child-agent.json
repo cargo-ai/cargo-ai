@@ -1,0 +1,39 @@
+{
+  "version": "2026-03-03.r1",
+  "inputs": [
+    {
+      "type": "text",
+      "text": "Summarize this note in one sentence."
+    }
+  ],
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "child_summary": {
+        "type": "string",
+        "description": "One-sentence summary for the parent."
+      }
+    }
+  },
+  "actions": [
+    {
+      "name": "echo_summary",
+      "logic": {
+        "!=": [
+          { "var": "child_summary" },
+          ""
+        ]
+      },
+      "run": [
+        {
+          "kind": "exec",
+          "program": "echo",
+          "args": [
+            "child summary:",
+            { "var": "child_summary" }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "version": "2026-03-03.r1",
+  "inputs": [
+    {
+      "type": "text",
+      "text": "Should I build the report?"
+    }
+  ],
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "build_report": {
+        "type": "boolean"
+      }
+    }
+  },
+  "actions": [
+    {
+      "name": "build_report_flow",
+      "logic": {
+        "==": [{ "var": "build_report" }, true]
+      },
+      "run": [
+        {
+          "kind": "exec",
+          "program": "./generate_report.sh",
+          "args": [],
+          "output_variable": "report_path",
+          "status_variable": "report_status",
+          "error_variable": "report_error"
+        },
+        {
+          "kind": "email_me",
+          "subject": "Report ready",
+          "text": ["Generated file: ", { "var": "report_path" }]
+        }
+      ]
+    }
+  ]
+}
