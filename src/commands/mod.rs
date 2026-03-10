@@ -2,6 +2,7 @@
 //!
 //! Each submodule owns one command area and keeps `main.rs` dispatch-only.
 pub mod account;
+pub mod add;
 pub mod auth;
 pub mod credentials;
 pub mod hatch;

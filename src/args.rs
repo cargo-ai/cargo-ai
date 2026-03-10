@@ -5,6 +5,7 @@
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
 mod account;
+mod add;
 mod auth;
 mod credentials;
 mod hatch;
@@ -26,9 +27,8 @@ fn cli_command(bin_name: &'static str) -> Command {
                 .global(true)
                 .action(ArgAction::SetTrue),
         )
-        .subcommand(new::command())
-        .subcommand(init::command())
         .subcommand(hatch::command())
+        .subcommand(add::command())
         .subcommand(profile::command())
         .subcommand(auth::command())
         .subcommand(credentials::command())
@@ -36,6 +36,8 @@ fn cli_command(bin_name: &'static str) -> Command {
         .subcommand(version::command())
         .subcommand(preflight::command())
         .subcommand(shipyard::command())
+        .subcommand(new::command())
+        .subcommand(init::command())
 }
 
 /// Parses CLI arguments into clap matches.
@@ -110,6 +112,8 @@ mod tests {
         };
 
         assert!(index_of("hatch") < index_of("profile"));
+        assert!(index_of("hatch") < index_of("add"));
+        assert!(index_of("add") < index_of("profile"));
         assert!(index_of("profile") < index_of("auth"));
         assert!(index_of("auth") < index_of("credentials"));
         assert!(index_of("credentials") < index_of("account"));
@@ -117,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn top_level_help_hides_scaffold_commands() {
+    fn top_level_help_shows_add_and_hides_scaffold_commands() {
         let mut command = cli_command("cargo-ai");
         let mut help = Vec::new();
         command
@@ -125,9 +129,38 @@ mod tests {
             .expect("top-level help should render");
         let help = String::from_utf8(help).expect("help should be utf8");
 
+        assert!(help.contains("\n  add"));
         assert!(!help.contains("\n  new"));
         assert!(!help.contains("\n  init"));
         assert!(help.contains("\n  hatch"));
+    }
+
+    #[test]
+    fn add_guidance_style_parses() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "add", "guidance", "--style", "codex"])
+            .expect("add guidance --style codex should parse");
+
+        let guidance_matches = matches
+            .subcommand_matches("add")
+            .and_then(|m| m.subcommand_matches("guidance"))
+            .expect("guidance subcommand should be available");
+
+        assert_eq!(
+            guidance_matches
+                .get_one::<String>("style")
+                .map(String::as_str),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn add_guidance_requires_style() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "add", "guidance"])
+            .expect_err("missing --style should fail parsing");
+
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]

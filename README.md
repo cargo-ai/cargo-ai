@@ -129,6 +129,16 @@ Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change 
 
 ### Create a Sample Agent
 
+### Add Codex Guidance
+
+To add a local `AGENTS.md` file for Codex in the current directory:
+
+```bash
+cargo ai add guidance --style codex
+```
+
+This writes `AGENTS.md` only. It does not create `.cargo-ai/project.toml`, example JSON files, or other scaffold assets.
+
 1. **Hatch a Sample Agent**  
 
    By default, if you don’t provide a config file, `cargo-ai` will hatch a sample “Hello World” style agent (`adder_test`) that simply adds 2 + 2.
