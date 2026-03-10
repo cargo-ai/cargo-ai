@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 const CODEX_GUIDANCE_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/templates/codex/agent-guidance.md.tmpl"
+    "/templates/guidance/codex-agents.md.tmpl"
 ));
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -111,7 +111,9 @@ mod tests {
 
         let guidance =
             fs::read_to_string(&output_path).expect("guidance output should be readable");
-        assert!(guidance.contains("Cargo-AI Agent Authoring (Codex)"));
+        assert!(guidance.contains("Cargo AI Agent Definition Guidance"));
+        assert!(guidance.contains("cargo ai hatch <agent-name> --config <config.json> --check"));
+        assert!(guidance.contains("Do not use `cargo ai new` or `cargo ai init`"));
 
         let _ = fs::remove_dir_all(dir);
     }

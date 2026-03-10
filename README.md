@@ -138,6 +138,7 @@ cargo ai add guidance --style codex
 ```
 
 This writes `AGENTS.md` only. It does not create `.cargo-ai/project.toml`, example JSON files, or other scaffold assets.
+The generated guidance is tuned for authoring Cargo AI JSON definitions directly and validating them with the hatch/check loop.
 
 1. **Hatch a Sample Agent**  
 
