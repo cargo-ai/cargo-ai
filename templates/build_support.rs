@@ -14,7 +14,7 @@ use std::{
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
 
 const SCHEMA_VERSION_FORMAT: &str = "YYYY-MM-DD.rN";
@@ -110,12 +110,22 @@ struct RunStep {
     kind: String,
     program: Option<String>,
     output_variable: Option<String>,
+    status_variable: Option<String>,
+    error_variable: Option<String>,
+    failure_mode: Option<FailureMode>,
+    when: Option<Value>,
     args: Vec<RunArg>,
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
     agent: Option<String>,
     inputs: Option<Vec<ActionInputSpec>>,
     platforms: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureMode {
+    Stop,
+    Continue,
 }
 
 #[derive(Debug, Clone)]
@@ -559,12 +569,28 @@ fn parse_actions(
         let runs = get_required_array(action_obj, "run", &action_path)?;
         let mut run_steps = Vec::with_capacity(runs.len());
         let mut available_field_types = schema_field_types.clone();
-        let mut captured_output_names = BTreeMap::new();
+        let mut captured_variable_names = BTreeMap::new();
         for (run_idx, run_value) in runs.iter().enumerate() {
             let run_path = format!("{action_path}.run[{run_idx}]");
             let run_obj = expect_object(run_value, &run_path)?;
 
             let platforms = parse_optional_platforms(run_obj, &run_path)?;
+            let when = parse_optional_when(run_obj, &run_path, &available_field_types)?;
+            let failure_mode = parse_optional_failure_mode(run_obj, &run_path)?;
+            let status_variable = parse_optional_capture_variable(
+                run_obj,
+                "status_variable",
+                &run_path,
+                schema_field_types,
+                &captured_variable_names,
+            )?;
+            let error_variable = parse_optional_capture_variable(
+                run_obj,
+                "error_variable",
+                &run_path,
+                schema_field_types,
+                &captured_variable_names,
+            )?;
             let kind = get_required_string(run_obj, "kind", &run_path)?.to_string();
 
             let run_step = match kind.as_str() {
@@ -602,17 +628,22 @@ fn parse_actions(
                         ));
                     }
 
-                    let output_variable = parse_optional_output_variable(
+                    let output_variable = parse_optional_capture_variable(
                         run_obj,
+                        "output_variable",
                         &run_path,
                         schema_field_types,
-                        &captured_output_names,
+                        &captured_variable_names,
                     )?;
                     let args = parse_run_args(run_obj, &run_path, &available_field_types)?;
                     RunStep {
                         kind,
                         program: Some(program),
                         output_variable,
+                        status_variable,
+                        error_variable,
+                        failure_mode,
+                        when,
                         args,
                         subject: None,
                         text: None,
@@ -670,6 +701,10 @@ fn parse_actions(
                         kind,
                         program: None,
                         output_variable: None,
+                        status_variable,
+                        error_variable,
+                        failure_mode,
+                        when,
                         args: Vec::new(),
                         subject: Some(subject),
                         text: Some(text),
@@ -738,6 +773,10 @@ fn parse_actions(
                         kind,
                         program: None,
                         output_variable: None,
+                        status_variable,
+                        error_variable,
+                        failure_mode,
+                        when,
                         args: Vec::new(),
                         subject: None,
                         text: None,
@@ -756,9 +795,16 @@ fn parse_actions(
                 }
             };
 
-            if let Some(output_variable) = run_step.output_variable.as_ref() {
-                captured_output_names.insert(output_variable.clone(), run_path.clone());
-                available_field_types.insert(output_variable.clone(), FieldType::String);
+            for captured_name in [
+                run_step.output_variable.as_ref(),
+                run_step.status_variable.as_ref(),
+                run_step.error_variable.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                captured_variable_names.insert(captured_name.clone(), run_path.clone());
+                available_field_types.insert(captured_name.clone(), FieldType::String);
             }
             run_steps.push(run_step);
         }
@@ -773,45 +819,93 @@ fn parse_actions(
     Ok(parsed)
 }
 
-fn parse_optional_output_variable(
+fn parse_optional_capture_variable(
     run_obj: &Map<String, Value>,
+    field_name: &str,
     run_path: &str,
     schema_field_types: &BTreeMap<String, FieldType>,
-    captured_output_names: &BTreeMap<String, String>,
+    captured_variable_names: &BTreeMap<String, String>,
 ) -> Result<Option<String>, BuildError> {
-    let Some(value) = run_obj.get("output_variable") else {
+    let Some(value) = run_obj.get(field_name) else {
         return Ok(None);
     };
 
-    let output_variable_path = format!("{run_path}.output_variable");
-    let output_variable = value.as_str().ok_or_else(|| {
+    let variable_path = format!("{run_path}.{field_name}");
+    let variable_name = value.as_str().ok_or_else(|| {
         BuildError::config(
-            &output_variable_path,
-            "expected `output_variable` to be a non-empty string name",
+            &variable_path,
+            format!("expected `{field_name}` to be a non-empty string name"),
         )
     })?;
-    let normalized = output_variable.trim();
-    validate_action_output_variable_name(normalized, &output_variable_path)?;
+    let normalized = variable_name.trim();
+    validate_action_capture_variable_name(normalized, &variable_path)?;
 
     if schema_field_types.contains_key(normalized) {
         return Err(BuildError::config(
-            &output_variable_path,
+            &variable_path,
             format!(
-                "captured output name `{normalized}` collides with an agent output field; choose a different name"
+                "captured variable name `{normalized}` collides with an agent output field; choose a different name"
             ),
         ));
     }
 
-    if captured_output_names.contains_key(normalized) {
+    if captured_variable_names.contains_key(normalized) {
         return Err(BuildError::config(
-            &output_variable_path,
+            &variable_path,
             format!(
-                "duplicate captured output name `{normalized}` within this action; choose a unique name"
+                "duplicate captured variable name `{normalized}` within this action; choose a unique name"
             ),
         ));
     }
 
     Ok(Some(normalized.to_string()))
+}
+
+fn parse_optional_failure_mode(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+) -> Result<Option<FailureMode>, BuildError> {
+    let Some(value) = run_obj.get("failure_mode") else {
+        return Ok(None);
+    };
+
+    let failure_mode_path = format!("{run_path}.failure_mode");
+    let failure_mode = value.as_str().ok_or_else(|| {
+        BuildError::config(
+            &failure_mode_path,
+            "expected `failure_mode` to be a string (`stop` or `continue`)",
+        )
+    })?;
+
+    match failure_mode.trim() {
+        "stop" => Ok(Some(FailureMode::Stop)),
+        "continue" => Ok(Some(FailureMode::Continue)),
+        _ => Err(BuildError::config(
+            &failure_mode_path,
+            "unsupported `failure_mode` (supported: `stop`, `continue`)",
+        )),
+    }
+}
+
+fn parse_optional_when(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<Option<Value>, BuildError> {
+    let Some(value) = run_obj.get("when") else {
+        return Ok(None);
+    };
+
+    let when_path = format!("{run_path}.when");
+    if !value.is_object() {
+        return Err(BuildError::config(
+            &when_path,
+            "expected `when` to be a JSON Logic object",
+        ));
+    }
+
+    validate_logic_expression(value, &when_path, schema_field_types)?;
+    Ok(Some(value.clone()))
 }
 
 fn parse_run_args(
@@ -832,18 +926,18 @@ fn parse_run_args(
         .collect()
 }
 
-fn validate_action_output_variable_name(name: &str, path: &str) -> Result<(), BuildError> {
+fn validate_action_capture_variable_name(name: &str, path: &str) -> Result<(), BuildError> {
     if name.is_empty() {
         return Err(BuildError::config(
             path,
-            "output variable name cannot be empty",
+            "captured variable name cannot be empty",
         ));
     }
 
     if name.contains('.') {
         return Err(BuildError::config(
             path,
-            "output variable name must be flat; nested names with `.` are not supported",
+            "captured variable name must be flat; nested names with `.` are not supported",
         ));
     }
 
@@ -1821,6 +1915,34 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     .as_ref()
                     .map(|name| format!("Some({}.to_string())", rust_string_literal(name)))
                     .unwrap_or_else(|| "None".to_string());
+                let status_variable = run_step
+                    .status_variable
+                    .as_ref()
+                    .map(|name| format!("Some({}.to_string())", rust_string_literal(name)))
+                    .unwrap_or_else(|| "None".to_string());
+                let error_variable = run_step
+                    .error_variable
+                    .as_ref()
+                    .map(|name| format!("Some({}.to_string())", rust_string_literal(name)))
+                    .unwrap_or_else(|| "None".to_string());
+                let failure_mode = run_step
+                    .failure_mode
+                    .as_ref()
+                    .map(|mode| match mode {
+                        FailureMode::Stop => "Some(FailureMode::Stop)".to_string(),
+                        FailureMode::Continue => "Some(FailureMode::Continue)".to_string(),
+                    })
+                    .unwrap_or_else(|| "None".to_string());
+                let when = run_step
+                    .when
+                    .as_ref()
+                    .map(|value| {
+                        format!(
+                            "Some(serde_json::from_str({}).expect(\"generated step `when` must be valid JSON\"))",
+                            rust_string_literal(&value.to_string())
+                        )
+                    })
+                    .unwrap_or_else(|| "None".to_string());
                 let agent = run_step
                     .agent
                     .as_ref()
@@ -1875,6 +1997,10 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         kind: {}.to_string(),
                         program: {},
                         output_variable: {},
+                        status_variable: {},
+                        error_variable: {},
+                        failure_mode: {},
+                        when: {},
                         args: vec![{}],
                         subject: {},
                         text: {},
@@ -1891,6 +2017,10 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         })
                         .unwrap_or_else(|| "None".to_string()),
                     output_variable,
+                    status_variable,
+                    error_variable,
+                    failure_mode,
+                    when,
                     args,
                     subject,
                     text,
@@ -1967,10 +2097,20 @@ pub enum ActionInput {{
 }}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum FailureMode {{
+    Stop,
+    Continue,
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RunStep {{
     kind: String,
     program: Option<String>,
     output_variable: Option<String>,
+    status_variable: Option<String>,
+    error_variable: Option<String>,
+    failure_mode: Option<FailureMode>,
+    when: Option<serde_json::Value>,
     args: Vec<RunArg>,
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,

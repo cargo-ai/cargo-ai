@@ -328,6 +328,43 @@ fn accepts_exec_output_variable_for_later_action_inputs() {
 }
 
 #[test]
+fn accepts_step_control_fields_for_later_steps() {
+    let cfg = config_with(
+        r#""answer": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [ { "var": "answer" }, 4 ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./summary_agent",
+                "failure_mode": "continue",
+                "status_variable": "child_status",
+                "error_variable": "child_error"
+              },
+              {
+                "kind": "email_me",
+                "when": { "==": [ { "var": "child_status" }, "failed" ] },
+                "subject": "Child failed",
+                "text": ["Failure: ", { "var": "child_error" }]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains("status_variable: Some(\"child_status\".to_string())"));
+    assert!(generated.contains("error_variable: Some(\"child_error\".to_string())"));
+    assert!(generated.contains("failure_mode: Some(FailureMode::Continue)"));
+    assert!(generated.contains(
+        "when: Some(serde_json::from_str(\"{\\\"==\\\":[{\\\"var\\\":\\\"child_status\\\"},\\\"failed\\\"]}\")"
+    ));
+}
+
+#[test]
 fn rejects_duplicate_output_variable_names_within_one_action() {
     let cfg = config_with(
         r#""customer": { "type": "string" }"#,
@@ -358,7 +395,7 @@ fn rejects_duplicate_output_variable_names_within_one_action() {
         .to_string();
 
     assert!(err.contains("$.actions[0].run[1].output_variable"));
-    assert!(err.contains("duplicate captured output name `report_listing`"));
+    assert!(err.contains("duplicate captured variable name `report_listing`"));
 }
 
 #[test]
@@ -386,6 +423,67 @@ fn rejects_output_variable_name_collisions_with_agent_output_fields() {
         .to_string();
 
     assert!(err.contains("$.actions[0].run[0].output_variable"));
+    assert!(err.contains("collides with an agent output field"));
+}
+
+#[test]
+fn rejects_duplicate_status_variable_names_within_one_action() {
+    let cfg = config_with(
+        r#""customer": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [ { "var": "customer" }, "Acme" ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["first"],
+                "status_variable": "step_status"
+              },
+              {
+                "kind": "agent",
+                "agent": "./summary_agent",
+                "status_variable": "step_status"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[1].status_variable"));
+    assert!(err.contains("duplicate captured variable name `step_status`"));
+}
+
+#[test]
+fn rejects_status_variable_name_collisions_with_agent_output_fields() {
+    let cfg = config_with(
+        r#""customer": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [ { "var": "customer" }, "Acme" ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["value"],
+                "status_variable": "customer"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].status_variable"));
     assert!(err.contains("collides with an agent output field"));
 }
 
@@ -426,6 +524,47 @@ fn allows_reusing_output_variable_names_in_different_actions() {
     assert_eq!(
         generated
             .matches("output_variable: Some(\"report_listing\".to_string())")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn allows_reusing_status_variable_names_in_different_actions() {
+    let cfg = config_with(
+        r#""customer": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "first_action",
+            "logic": { "==": [ { "var": "customer" }, "Acme" ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["first"],
+                "status_variable": "step_status"
+              }
+            ]
+          },
+          {
+            "name": "second_action",
+            "logic": { "==": [ { "var": "customer" }, "Acme" ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./summary_agent",
+                "status_variable": "step_status"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert_eq!(
+        generated
+            .matches("status_variable: Some(\"step_status\".to_string())")
             .count(),
         2
     );
@@ -473,6 +612,46 @@ fn rejects_cross_action_reference_to_captured_output_variable() {
 
     assert!(err.contains("$.actions[1].run[0].inputs[0].text[1].var"));
     assert!(err.contains("unknown variable `report_listing`"));
+}
+
+#[test]
+fn rejects_cross_action_reference_to_status_variable() {
+    let cfg = config_with(
+        r#""customer": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "first_action",
+            "logic": { "==": [ { "var": "customer" }, "Acme" ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["first"],
+                "status_variable": "step_status"
+              }
+            ]
+          },
+          {
+            "name": "second_action",
+            "logic": { "==": [ { "var": "customer" }, "Acme" ] },
+            "run": [
+              {
+                "kind": "email_me",
+                "when": { "==": [ { "var": "step_status" }, "failed" ] },
+                "subject": "Failed",
+                "text": "Body"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[1].run[0].when.==[0].var"));
+    assert!(err.contains("unknown variable `step_status`"));
 }
 
 #[test]
@@ -1162,10 +1341,8 @@ fn generates_canonical_build_provenance_constants() {
     hasher.update(expected_definition.as_bytes());
     let expected_hash = format!("{:x}", hasher.finalize());
 
-    assert!(
-        generated
-            .contains(r#"const AGENT_BUILD_ID: &str = "11111111-2222-4333-8444-555555555555";"#)
-    );
+    assert!(generated
+        .contains(r#"const AGENT_BUILD_ID: &str = "11111111-2222-4333-8444-555555555555";"#));
     assert!(generated.contains(r#"const AGENT_TARGET_TRIPLE: &str = "aarch64-apple-darwin";"#));
     assert!(
         generated.contains(r#"const AGENT_BUILD_TIMESTAMP_UTC: &str = "2026-03-05T23:14:29Z";"#)

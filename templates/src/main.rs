@@ -1129,48 +1129,85 @@ async fn apply_actions(
                 let mut action_data = data.clone();
 
                 for step in matching_steps {
-                    if step.kind.eq_ignore_ascii_case("exec") {
-                        let (outcome, captured_output) =
-                            run_exec_step(step, &action_data, &action.name, runtime_budget)
-                                .await?;
-                        if let Some((name, value)) = captured_output {
-                            insert_action_output_variable(
-                                &mut action_data,
-                                name.as_str(),
-                                value,
-                                action.name.as_str(),
-                            )?;
-                        }
-                        outcomes.push(outcome);
+                    if !should_run_step(step, &action_data, &action.name)? {
+                        continue;
+                    }
+
+                    let step_result = if step.kind.eq_ignore_ascii_case("exec") {
+                        run_exec_step(step, &action_data, &action.name, runtime_budget)
+                            .await
+                            .map(|captured_output| {
+                                (StepExecutionOutcome::Completed, captured_output)
+                            })
                     } else if step.kind.eq_ignore_ascii_case("email_me") {
-                        outcomes.push(
-                            run_email_me_step(
-                                step,
-                                &action_data,
-                                &action.name,
-                                config,
-                                runtime_budget,
-                                single_step_action,
-                            )
-                            .await?,
-                        );
-                        } else if step.kind.eq_ignore_ascii_case("agent") {
-                            outcomes.push(
-                                run_agent_step(
-                                    step,
-                                    &action_data,
-                                    &action.name,
-                                    max_agent_depth,
-                                    runtime_budget,
-                                )
-                                .await?,
-                            );
-                        } else {
+                        run_email_me_step(
+                            step,
+                            &action_data,
+                            &action.name,
+                            config,
+                            runtime_budget,
+                            single_step_action,
+                        )
+                        .await
+                        .map(|outcome| (outcome, None))
+                    } else if step.kind.eq_ignore_ascii_case("agent") {
+                        run_agent_step(
+                            step,
+                            &action_data,
+                            &action.name,
+                            max_agent_depth,
+                            runtime_budget,
+                        )
+                        .await
+                        .map(|outcome| (outcome, None))
+                    } else {
                         println!(
                             "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
                             action.name, step.kind
                         );
                         outcomes.push(StepExecutionOutcome::SoftFailureLogged);
+                        continue;
+                    };
+
+                    match step_result {
+                        Ok((outcome, captured_output)) => {
+                            if let Some((name, value)) = captured_output {
+                                insert_action_output_variable(
+                                    &mut action_data,
+                                    name.as_str(),
+                                    value,
+                                    action.name.as_str(),
+                                )?;
+                            }
+                            insert_step_status_variable(
+                                &mut action_data,
+                                step,
+                                "succeeded",
+                                action.name.as_str(),
+                            )?;
+                            outcomes.push(outcome);
+                        }
+                        Err(error) => {
+                            insert_step_status_variable(
+                                &mut action_data,
+                                step,
+                                "failed",
+                                action.name.as_str(),
+                            )?;
+                            insert_step_error_variable(
+                                &mut action_data,
+                                step,
+                                error.as_str(),
+                                action.name.as_str(),
+                            )?;
+
+                            if matches!(step_failure_mode(step), FailureMode::Continue) {
+                                println!("{error}");
+                                outcomes.push(StepExecutionOutcome::SoftFailureLogged);
+                            } else {
+                                return Err(error);
+                            }
+                        }
                     }
                 }
 
@@ -1191,7 +1228,7 @@ async fn run_exec_step(
     data: &serde_json::Value,
     action_name: &str,
     runtime_budget: InvocationRuntimeBudget,
-) -> Result<(StepExecutionOutcome, Option<(String, String)>), String> {
+) -> Result<Option<(String, String)>, String> {
     let program = step.program.as_deref().ok_or_else(|| {
         format!(
             "Action '{}' exec step is missing required `program`.",
@@ -1199,7 +1236,8 @@ async fn run_exec_step(
         )
     })?;
 
-    let resolved_args = resolve_run_args(&step.args, data, action_name)?;
+    let resolved_args = resolve_run_args(&step.args, data, action_name)
+        .map_err(|error| format!("Action '{}': {error}", action_name))?;
 
     let remaining = remaining_runtime_duration(
         runtime_budget,
@@ -1226,19 +1264,16 @@ async fn run_exec_step(
                     "ℹ️ Action '{}' stored exec output in variable '{}'.",
                     action_name, output_variable
                 );
-                Ok((
-                    StepExecutionOutcome::Completed,
-                    Some((output_variable.to_string(), captured_output)),
-                ))
+                Ok(Some((output_variable.to_string(), captured_output)))
             }
-            Ok(Ok(output)) => {
-                println!("{action_name}: command exited with status {}.", output.status);
-                Ok((StepExecutionOutcome::SoftFailureLogged, None))
-            }
-            Ok(Err(error)) => {
-                println!("{action_name}: failed while waiting for command: {error}.");
-                Ok((StepExecutionOutcome::SoftFailureLogged, None))
-            }
+            Ok(Ok(output)) => Err(format!(
+                "Action '{}' exec step command '{}' exited with status {}.",
+                action_name, program, output.status
+            )),
+            Ok(Err(error)) => Err(format!(
+                "Action '{}' exec step failed while waiting for command '{}': {}",
+                action_name, program, error
+            )),
             Err(_) => Err(action_runtime_timeout_message(
                 action_name,
                 runtime_budget,
@@ -1252,15 +1287,15 @@ async fn run_exec_step(
             .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
 
         match tokio::time::timeout(remaining, child.wait()).await {
-            Ok(Ok(status)) if status.success() => Ok((StepExecutionOutcome::Completed, None)),
-            Ok(Ok(status)) => {
-                println!("{action_name}: command exited with status {status}.");
-                Ok((StepExecutionOutcome::SoftFailureLogged, None))
-            }
-            Ok(Err(error)) => {
-                println!("{action_name}: failed while waiting for command: {error}.");
-                Ok((StepExecutionOutcome::SoftFailureLogged, None))
-            }
+            Ok(Ok(status)) if status.success() => Ok(None),
+            Ok(Ok(status)) => Err(format!(
+                "Action '{}' exec step command '{}' exited with status {}.",
+                action_name, program, status
+            )),
+            Ok(Err(error)) => Err(format!(
+                "Action '{}' exec step failed while waiting for command '{}': {}",
+                action_name, program, error
+            )),
             Err(_) => {
                 let _ = child.kill().await;
                 Err(action_runtime_timeout_message(
@@ -1279,15 +1314,73 @@ fn insert_action_output_variable(
     value: String,
     action_name: &str,
 ) -> Result<(), String> {
+    insert_action_string_variable(data, name, value, action_name)
+}
+
+fn insert_action_string_variable(
+    data: &mut serde_json::Value,
+    name: &str,
+    value: String,
+    action_name: &str,
+) -> Result<(), String> {
     let Some(object) = data.as_object_mut() else {
         return Err(format!(
-            "Action '{}' could not store captured output '{}' because the action data context is not an object.",
+            "Action '{}' could not store captured variable '{}' because the action data context is not an object.",
             action_name, name
         ));
     };
 
     object.insert(name.to_string(), serde_json::Value::String(value));
     Ok(())
+}
+
+fn insert_step_status_variable(
+    data: &mut serde_json::Value,
+    step: &RunStep,
+    status: &str,
+    action_name: &str,
+) -> Result<(), String> {
+    let Some(name) = step.status_variable.as_deref() else {
+        return Ok(());
+    };
+
+    insert_action_string_variable(data, name, status.to_string(), action_name)
+}
+
+fn insert_step_error_variable(
+    data: &mut serde_json::Value,
+    step: &RunStep,
+    error: &str,
+    action_name: &str,
+) -> Result<(), String> {
+    let Some(name) = step.error_variable.as_deref() else {
+        return Ok(());
+    };
+
+    insert_action_string_variable(data, name, error.to_string(), action_name)
+}
+
+fn step_failure_mode(step: &RunStep) -> FailureMode {
+    step.failure_mode.clone().unwrap_or(FailureMode::Stop)
+}
+
+fn should_run_step(
+    step: &RunStep,
+    data: &serde_json::Value,
+    action_name: &str,
+) -> Result<bool, String> {
+    let Some(condition) = step.when.as_ref() else {
+        return Ok(true);
+    };
+
+    apply(condition, data)
+        .map(|result| result.as_bool() == Some(true))
+        .map_err(|error| {
+            format!(
+                "Action '{}' failed to evaluate step `when` for kind '{}': {}",
+                action_name, step.kind, error
+            )
+        })
 }
 
 async fn run_email_me_step(
