@@ -1,6 +1,11 @@
 # Cargo AI Action Rules
 
-Use this file as the local source of truth for action-step behavior when authoring JSON definitions offline.
+Use this file as the fast local reference for action-step behavior when authoring JSON definitions offline.
+
+For broader shape and validation rules, also read:
+- `agent-definition-contract.md`
+- `start-here.md`
+- `examples/README.md`
 
 ## Top-Level Shape
 - Required top-level keys:

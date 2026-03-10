@@ -11,6 +11,38 @@ const ACTION_RULES_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/action-rules.md"
 ));
+const AGENT_DEFINITION_CONTRACT_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/agent-definition-contract.md"
+));
+const AUTHORING_PATTERNS_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/authoring-patterns.md"
+));
+const EXAMPLES_README_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/README.md"
+));
+const START_HERE_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/start-here.md"
+));
+const PATTERN_SELECTION_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/pattern-selection.md"
+));
+const TROUBLESHOOTING_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/troubleshooting.md"
+));
+const EXAMPLE_BASIC_AGENT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/basic-agent.json"
+));
+const EXAMPLE_CHILD_AGENT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/child-agent.json"
+));
 const EXAMPLE_STOP_BY_DEFAULT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/examples/stop-by-default.json"
@@ -19,6 +51,10 @@ const EXAMPLE_CONTINUE_ON_FAILURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/examples/continue-on-failure.json"
 ));
+const EXAMPLE_CONDITIONAL_WHEN: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/conditional-when.json"
+));
 
 #[derive(Clone, Copy)]
 struct GuidanceArtifact {
@@ -26,14 +62,46 @@ struct GuidanceArtifact {
     contents: &'static str,
 }
 
-const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 4] = [
+const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 13] = [
     GuidanceArtifact {
         relative_path: "AGENTS.md",
         contents: CODEX_GUIDANCE_TEMPLATE,
     },
     GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/agent-definition-contract.md",
+        contents: AGENT_DEFINITION_CONTRACT_TEMPLATE,
+    },
+    GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/action-rules.md",
         contents: ACTION_RULES_TEMPLATE,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/authoring-patterns.md",
+        contents: AUTHORING_PATTERNS_TEMPLATE,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/README.md",
+        contents: EXAMPLES_README_TEMPLATE,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/start-here.md",
+        contents: START_HERE_TEMPLATE,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/pattern-selection.md",
+        contents: PATTERN_SELECTION_TEMPLATE,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/troubleshooting.md",
+        contents: TROUBLESHOOTING_TEMPLATE,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/basic-agent.json",
+        contents: EXAMPLE_BASIC_AGENT,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/child-agent.json",
+        contents: EXAMPLE_CHILD_AGENT,
     },
     GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/examples/stop-by-default.json",
@@ -42,6 +110,10 @@ const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 4] = [
     GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/examples/continue-on-failure.json",
         contents: EXAMPLE_CONTINUE_ON_FAILURE,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/conditional-when.json",
+        contents: EXAMPLE_CONDITIONAL_WHEN,
     },
 ];
 
@@ -202,27 +274,65 @@ mod tests {
                 .and_then(|name| name.to_str()),
             Some("AGENTS.md")
         );
-        assert_eq!(report.artifact_paths.len(), 4);
+        assert_eq!(report.artifact_paths.len(), 13);
+        assert!(dir
+            .join(".cargo-ai/guidance/agent-definition-contract.md")
+            .exists());
         assert!(dir.join(".cargo-ai/guidance/action-rules.md").exists());
+        assert!(dir
+            .join(".cargo-ai/guidance/authoring-patterns.md")
+            .exists());
+        assert!(dir.join(".cargo-ai/guidance/examples/README.md").exists());
+        assert!(dir.join(".cargo-ai/guidance/start-here.md").exists());
+        assert!(dir.join(".cargo-ai/guidance/pattern-selection.md").exists());
+        assert!(dir.join(".cargo-ai/guidance/troubleshooting.md").exists());
+        assert!(dir
+            .join(".cargo-ai/guidance/examples/basic-agent.json")
+            .exists());
+        assert!(dir
+            .join(".cargo-ai/guidance/examples/child-agent.json")
+            .exists());
         assert!(dir
             .join(".cargo-ai/guidance/examples/stop-by-default.json")
             .exists());
         assert!(dir
             .join(".cargo-ai/guidance/examples/continue-on-failure.json")
             .exists());
+        assert!(dir
+            .join(".cargo-ai/guidance/examples/conditional-when.json")
+            .exists());
 
         let guidance = fs::read_to_string(&report.root_output_path)
             .expect("guidance output should be readable");
-        assert!(guidance.contains("Cargo AI Agent Definition Guidance"));
-        assert!(guidance.contains(".cargo-ai/guidance/action-rules.md"));
-        assert!(guidance.contains(".cargo-ai/guidance/examples/stop-by-default.json"));
+        assert!(guidance.contains("Cargo AI Agent Authoring (Codex)"));
+        assert!(guidance.contains(".cargo-ai/guidance/start-here.md"));
+        assert!(guidance.contains(".cargo-ai/guidance/pattern-selection.md"));
+        assert!(guidance.contains(".cargo-ai/guidance/agent-definition-contract.md"));
         assert!(guidance.contains("cargo ai hatch <agent-name> --config <config.json> --check"));
+        assert!(guidance.contains("portable across macOS, Windows, and Linux"));
 
         let rules = fs::read_to_string(dir.join(".cargo-ai/guidance/action-rules.md"))
             .expect("action rules should be readable");
         assert!(rules.contains("failure_mode"));
         assert!(rules.contains("status_variable"));
         assert!(rules.contains("when"));
+        assert!(rules.contains("agent-definition-contract.md"));
+
+        let start_here = fs::read_to_string(dir.join(".cargo-ai/guidance/start-here.md"))
+            .expect("start-here guidance should be readable");
+        assert!(start_here.contains("What do you want this agent to do?"));
+        assert!(start_here.contains("current machine"));
+        assert!(start_here.contains("portable across macOS, Windows, and Linux"));
+
+        let patterns = fs::read_to_string(dir.join(".cargo-ai/guidance/pattern-selection.md"))
+            .expect("pattern selection guidance should be readable");
+        assert!(patterns.contains("basic-agent.json"));
+        assert!(patterns.contains("continue-on-failure.json"));
+
+        let authoring = fs::read_to_string(dir.join(".cargo-ai/guidance/authoring-patterns.md"))
+            .expect("authoring patterns guidance should be readable");
+        assert!(authoring.contains("version"));
+        assert!(authoring.contains("boxed ASCII"));
 
         let _ = fs::remove_dir_all(dir);
     }

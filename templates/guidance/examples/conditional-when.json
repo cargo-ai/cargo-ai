@@ -1,0 +1,58 @@
+{
+  "version": "2026-03-03.r1",
+  "inputs": [
+    {
+      "type": "text",
+      "text": "Should I send a report? Return send_report as true or false and include a report_title."
+    }
+  ],
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "send_report": {
+        "type": "boolean"
+      },
+      "report_title": {
+        "type": "string"
+      }
+    }
+  },
+  "actions": [
+    {
+      "name": "conditional_report_flow",
+      "logic": {
+        "==": [
+          { "var": "send_report" },
+          true
+        ]
+      },
+      "run": [
+        {
+          "kind": "exec",
+          "program": "echo",
+          "args": [
+            "preparing report:",
+            { "var": "report_title" }
+          ],
+          "output_variable": "report_message",
+          "status_variable": "prepare_status",
+          "error_variable": "prepare_error"
+        },
+        {
+          "kind": "email_me",
+          "when": {
+            "==": [
+              { "var": "prepare_status" },
+              "succeeded"
+            ]
+          },
+          "subject": "Report ready",
+          "text": [
+            "Prepared message: ",
+            { "var": "report_message" }
+          ]
+        }
+      ]
+    }
+  ]
+}
