@@ -92,9 +92,25 @@ pub fn command() -> Command {
         .arg(
             Arg::new("input_file")
                 .long("input-file")
-                .help("Local PDF file path to provide to the agent at runtime")
+                .help("Local supported file path to provide to the agent at runtime")
                 .value_name("PATH")
                 .action(ArgAction::Append)
                 .num_args(1),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn help_describes_input_file_as_supported_file_path() {
+        let mut command = super::command();
+        let mut help = Vec::new();
+        command
+            .write_long_help(&mut help)
+            .expect("preflight help should render");
+        let help = String::from_utf8(help).expect("help should be utf8");
+
+        assert!(help.contains("Local supported file path to provide to the agent at runtime"));
+        assert!(!help.contains("Local PDF file path to provide to the agent at runtime"));
+    }
 }

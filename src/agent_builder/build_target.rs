@@ -113,16 +113,16 @@ mod tests {
 
         assert_eq!(target.cache_key_target(), "x86_64-pc-windows-msvc");
         assert_eq!(
-            target.compiled_binary_path(&project_path, "weather_agent"),
+            target.compiled_binary_path(&project_path, "weather_test"),
             project_path
                 .join("target")
                 .join("x86_64-pc-windows-msvc")
                 .join("debug")
-                .join("weather_agent.exe")
+                .join("weather_test.exe")
         );
         assert_eq!(
-            target.exported_binary_path(Path::new("/tmp/out"), "weather_agent"),
-            Path::new("/tmp/out").join("weather_agent.exe")
+            target.exported_binary_path(Path::new("/tmp/out"), "weather_test"),
+            Path::new("/tmp/out").join("weather_test.exe")
         );
     }
 

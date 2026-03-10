@@ -116,7 +116,7 @@ pub fn build_cli() -> ArgMatches {
         .arg(
             Arg::new("input_file")
                 .long("input-file")
-                .help("Local PDF file path to provide to the agent at runtime")
+                .help("Local supported file path to provide to the agent at runtime")
                 .value_name("PATH")
                 .action(ArgAction::Append)
                 .num_args(1),
