@@ -512,7 +512,7 @@ mod tests {
                 "account",
                 "agents",
                 "hatch",
-                "weather_agent",
+                "weather_test",
                 "-f",
             ])
             .expect("account agents hatch -f should parse");
@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn account_hatch_alias_supports_short_force_flag() {
         let matches = cli_command("cargo-ai")
-            .try_get_matches_from(["cargo-ai", "account", "hatch", "weather_agent", "-f"])
+            .try_get_matches_from(["cargo-ai", "account", "hatch", "weather_test", "-f"])
             .expect("account hatch alias -f should parse");
 
         let hatch_matches = matches
@@ -549,7 +549,7 @@ mod tests {
                 "agents",
                 "hatch",
                 "--name",
-                "weather_agent",
+                "weather_test",
             ])
             .expect_err("--name should be rejected for account agents hatch");
 
@@ -564,9 +564,9 @@ mod tests {
                 "account",
                 "agents",
                 "hatch",
-                "weather_agent",
+                "weather_test",
                 "--local-name",
-                "weather_agent_v2",
+                "weather_test_v2",
             ])
             .expect_err("--local-name should be rejected for account agents hatch");
 
@@ -581,7 +581,7 @@ mod tests {
                 "account",
                 "agents",
                 "pull",
-                "weather_agent",
+                "weather_test",
                 "--definition-path",
                 "/team/ops",
                 "--stdout",
@@ -604,7 +604,7 @@ mod tests {
                 "account",
                 "agents",
                 "hatch",
-                "weather_agent",
+                "weather_test",
                 "--definition-path",
                 "/team/ops",
             ])
@@ -628,7 +628,7 @@ mod tests {
                 "agents",
                 "push",
                 "--name",
-                "weather_agent",
+                "weather_test",
                 "--json",
                 "{}",
                 "--definition-path",
@@ -653,7 +653,7 @@ mod tests {
                 "agents",
                 "visibility",
                 "--name",
-                "weather_agent",
+                "weather_test",
                 "--public",
                 "--definition-path",
                 "/team/ops",
@@ -678,7 +678,7 @@ mod tests {
                 "agents",
                 "archive",
                 "--name",
-                "weather_agent",
+                "weather_test",
                 "--archive",
                 "--definition-path",
                 "/team/ops",
@@ -705,7 +705,7 @@ mod tests {
                 "account",
                 "agents",
                 "hatch",
-                "weather_agent",
+                "weather_test",
                 "--path",
                 "/team/ops",
             ])

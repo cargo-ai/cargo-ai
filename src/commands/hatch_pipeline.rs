@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn existing_workspace_requires_force() {
-        let err = prepare_workspace_for_hatch("weather_agent", false, |_| true, |_| Ok(()))
+        let err = prepare_workspace_for_hatch("weather_test", false, |_| true, |_| Ok(()))
             .expect_err("existing workspace without force should fail");
         assert!(err.contains("Agent project already exists"));
         assert!(err.contains("--force"));
@@ -348,7 +348,7 @@ mod tests {
     fn force_replaces_existing_workspace_before_build() {
         let deleted = Cell::new(false);
         prepare_workspace_for_hatch(
-            "weather_agent",
+            "weather_test",
             true,
             |_| true,
             |_| {

@@ -229,40 +229,40 @@ When you are signed in, you can hatch an agent directly from account-hosted defi
 
 ```bash
 # Hatch your own account agent (path defaults to "/")
-cargo ai account agents hatch weather_agent
+cargo ai account agents hatch weather_test
 
 # Shortcut alias for the same account-hosted hatch flow
-cargo ai account hatch weather_agent
+cargo ai account hatch weather_test
 
 # Validate scaffold and compile path only (no binary export)
-cargo ai account hatch weather_agent --check
+cargo ai account hatch weather_test --check
 
 # Use a different remote account agent while keeping a local output name
-cargo ai account hatch weather_agent_local --agent weather_agent_remote
+cargo ai account hatch weather_test_local --agent weather_test_remote
 
 # Export the built binary to a specific directory
-cargo ai account hatch weather_agent --output-dir ./dist
+cargo ai account hatch weather_test --output-dir ./dist
 
 # Overwrite existing local output binary
-cargo ai account agents hatch weather_agent --force
+cargo ai account agents hatch weather_test --force
 
 # Preserve the internal project workspace for inspection
-cargo ai account agents hatch weather_agent --keep-project
+cargo ai account agents hatch weather_test --keep-project
 
 # Build an account-hosted agent for an explicit Rust target triple
-cargo ai account agents hatch weather_agent --target aarch64-apple-darwin
+cargo ai account agents hatch weather_test --target aarch64-apple-darwin
 ```
 
 To hatch a public agent from another owner:
 
 ```bash
-cargo ai account agents hatch weather_agent --owner-handle alice
+cargo ai account agents hatch weather_test --owner-handle alice
 ```
 
 To select a non-root definition path:
 
 ```bash
-cargo ai account agents hatch weather_agent --definition-path /team/ops
+cargo ai account agents hatch weather_test --definition-path /team/ops
 ```
 
   To understand what is happening behind the scenes, we can look at the internal structure of the sample agent JSON file, [`adder_test.json`](./adder_test.json). 
@@ -352,36 +352,36 @@ In short:
 
 ## 🌦️🤖 Create Your Own Weather Agent with JSON
 
-We’ll walk through a [weather_agent.json](./weather_agent.json) example step-by-step—ordered inputs, expected response schema, and actions.
+We’ll walk through a [weather_test.json](./weather_test.json) example step-by-step—ordered inputs, expected response schema, and actions.
 
 To define a custom agent, you’ll use a JSON file that specifies:
 1. The ordered **inputs** to send to the AI/transformer server  
 2. The **expected response schema** (properties returned)  
 3. A set of **actions** to run, depending on the agent’s response  
 
-The steps below show how to create the weather_agent, but once defined, running it is as simple as:
+The steps below show how to create the weather_test agent, but once defined, running it is as simple as:
 
 ```bash
-# 1. Hatch your weather_agent from a JSON config
-cargo ai hatch weather_agent --config weather_agent.json
+# 1. Hatch your weather_test agent from a JSON config
+cargo ai hatch weather_test --config weather_test.json
 
-# 2. Run your weather_agent using either your default profile or explicit flags
-./weather_agent
+# 2. Run your weather_test agent using either your default profile or explicit flags
+./weather_test
 # or override the defaults:
-./weather_agent -s openai -m gpt-4o --token sk-ABCD1234...
+./weather_test -s openai -m gpt-4o --token sk-ABCD1234...
 
 # Expected output if raining tomorrow:
 # bring an umbrella
 ```
 > **Note for Windows users:**  
-> Use `weather_agent` (or `weather_agent.exe`) instead of `./weather_agent`.
+> Use `weather_test` (or `weather_test.exe`) instead of `./weather_test`.
 
 ### 1) Define the Inputs
 
   The `inputs` array is the ordered model-facing input the agent sends at runtime.  
   Start with `type: "text"` entries for plain instructions, and add `type: "url"` or `type: "image"` entries when the agent needs fetched web text or local image files.
 
-  Example from [weather_agent.json](./weather_agent.json):
+  Example from [weather_test.json](./weather_test.json):
 
   ```json
   "inputs": [
@@ -413,7 +413,7 @@ cargo ai hatch weather_agent --config weather_agent.json
   - `number` → floating-point numbers (f64)  
   - `integer` → whole numbers (i64)  
 
-  Example from [weather_agent.json](./weather_agent.json):
+  Example from [weather_test.json](./weather_test.json):
 
   ```json
   "agent_schema": {
@@ -474,7 +474,7 @@ Action object schema:
 Platform values are matched at the OS level, not by full target triple. For example, both Apple Silicon and Intel macOS builds match `macos`.
 Variable args are limited to top-level scalar fields (`string`, `integer`, `number`, `boolean`). Array fields are not supported for arg substitution in this story.
 
-Example from [weather_agent.json](./weather_agent.json):
+Example from [weather_test.json](./weather_test.json):
 
 ```json
 "actions": [

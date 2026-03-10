@@ -915,38 +915,38 @@ mod tests {
 
     #[test]
     fn account_hatch_name_defaults_remote_source_to_local_name() {
-        let (source_name, local_name) = resolve_account_hatch_names("weather_agent", None)
+        let (source_name, local_name) = resolve_account_hatch_names("weather_test", None)
             .expect("default account hatch names should resolve");
-        assert_eq!(source_name, "weather_agent");
-        assert_eq!(local_name, "weather_agent");
+        assert_eq!(source_name, "weather_test");
+        assert_eq!(local_name, "weather_test");
     }
 
     #[test]
     fn account_hatch_name_accepts_remote_source_override() {
         let (source_name, local_name) =
-            resolve_account_hatch_names("weather_agent_local", Some("weather_agent_remote"))
+            resolve_account_hatch_names("weather_test_local", Some("weather_test_remote"))
                 .expect("remote source override should resolve");
-        assert_eq!(source_name, "weather_agent_remote");
-        assert_eq!(local_name, "weather_agent_local");
+        assert_eq!(source_name, "weather_test_remote");
+        assert_eq!(local_name, "weather_test_local");
     }
 
     #[test]
     fn account_hatch_name_rejects_path_like_local_name() {
-        let err = resolve_account_hatch_names("./bin/weather_agent", None)
+        let err = resolve_account_hatch_names("./bin/weather_test", None)
             .expect_err("path-like local name should fail");
         assert!(err.contains("looks like a path"));
     }
 
     #[test]
     fn account_hatch_name_rejects_json_like_local_name() {
-        let err = resolve_account_hatch_names("weather_agent.json", None)
+        let err = resolve_account_hatch_names("weather_test.json", None)
             .expect_err(".json-like local name should fail");
         assert!(err.contains(".json"));
     }
 
     #[test]
     fn account_hatch_name_rejects_invalid_remote_source_override() {
-        let err = resolve_account_hatch_names("weather_agent", Some("weather.agent.v2"))
+        let err = resolve_account_hatch_names("weather_test", Some("weather.test.v2"))
             .expect_err("invalid remote source override should fail");
         assert!(err.contains("invalid"));
     }
