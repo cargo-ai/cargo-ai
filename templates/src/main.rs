@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use config::loader::{find_profile, load_config};
@@ -33,6 +34,8 @@ const AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_STA
 const AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_DEADLINE_MS";
 const DEFAULT_AGENT_ACTION_MAX_DEPTH: u32 = 5;
 const DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS: u64 = 600;
+const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str =
+    "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
 
 fn unknown_server_messages(server: &str) -> Vec<String> {
     let display_server = if server.trim().is_empty() {
@@ -789,6 +792,9 @@ fn runtime_input_overrides(cmd_args: &clap::ArgMatches) -> Vec<Input> {
     collect_flagged_inputs(cmd_args, "input_image")
         .into_iter()
         .for_each(|(index, value)| ordered.push((index, Input::Image { path: value })));
+    collect_flagged_inputs(cmd_args, "input_file")
+        .into_iter()
+        .for_each(|(index, value)| ordered.push((index, Input::File { path: value })));
 
     ordered.sort_by_key(|(index, _)| *index);
     ordered.into_iter().map(|(_, input)| input).collect()
@@ -1120,17 +1126,27 @@ async fn apply_actions(
                 print_action_start(&action.name);
                 let single_step_action = matching_steps.len() == 1;
                 let mut outcomes = Vec::with_capacity(matching_steps.len());
+                let mut action_data = data.clone();
 
                 for step in matching_steps {
                     if step.kind.eq_ignore_ascii_case("exec") {
-                        outcomes.push(
-                            run_exec_step(step, &data, &action.name, runtime_budget).await?,
-                        );
+                        let (outcome, captured_output) =
+                            run_exec_step(step, &action_data, &action.name, runtime_budget)
+                                .await?;
+                        if let Some((name, value)) = captured_output {
+                            insert_action_output_variable(
+                                &mut action_data,
+                                name.as_str(),
+                                value,
+                                action.name.as_str(),
+                            )?;
+                        }
+                        outcomes.push(outcome);
                     } else if step.kind.eq_ignore_ascii_case("email_me") {
                         outcomes.push(
                             run_email_me_step(
                                 step,
-                                &data,
+                                &action_data,
                                 &action.name,
                                 config,
                                 runtime_budget,
@@ -1138,12 +1154,18 @@ async fn apply_actions(
                             )
                             .await?,
                         );
-                    } else if step.kind.eq_ignore_ascii_case("agent") {
-                        outcomes.push(
-                            run_agent_step(step, &action.name, max_agent_depth, runtime_budget)
+                        } else if step.kind.eq_ignore_ascii_case("agent") {
+                            outcomes.push(
+                                run_agent_step(
+                                    step,
+                                    &action_data,
+                                    &action.name,
+                                    max_agent_depth,
+                                    runtime_budget,
+                                )
                                 .await?,
-                        );
-                    } else {
+                            );
+                        } else {
                         println!(
                             "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
                             action.name, step.kind
@@ -1169,7 +1191,7 @@ async fn run_exec_step(
     data: &serde_json::Value,
     action_name: &str,
     runtime_budget: InvocationRuntimeBudget,
-) -> Result<StepExecutionOutcome, String> {
+) -> Result<(StepExecutionOutcome, Option<(String, String)>), String> {
     let program = step.program.as_deref().ok_or_else(|| {
         format!(
             "Action '{}' exec step is missing required `program`.",
@@ -1187,30 +1209,85 @@ async fn run_exec_step(
         action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
     })?;
 
-    let mut child = tokio::process::Command::new(program)
-        .args(&resolved_args)
-        .spawn()
-        .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
+    if let Some(output_variable) = step.output_variable.as_deref() {
+        let child = tokio::process::Command::new(program)
+            .args(&resolved_args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
 
-    match tokio::time::timeout(remaining, child.wait()).await {
-        Ok(Ok(status)) if status.success() => Ok(StepExecutionOutcome::Completed),
-        Ok(Ok(status)) => {
-            println!("{action_name}: command exited with status {status}.");
-            Ok(StepExecutionOutcome::SoftFailureLogged)
-        }
-        Ok(Err(error)) => {
-            println!("{action_name}: failed while waiting for command: {error}.");
-            Ok(StepExecutionOutcome::SoftFailureLogged)
-        }
-        Err(_) => {
-            let _ = child.kill().await;
-            Err(action_runtime_timeout_message(
+        match tokio::time::timeout(remaining, child.wait_with_output()).await {
+            Ok(Ok(output)) if output.status.success() => {
+                let captured_output = String::from_utf8_lossy(&output.stdout)
+                    .trim_end_matches(['\r', '\n'])
+                    .to_string();
+                println!(
+                    "ℹ️ Action '{}' stored exec output in variable '{}'.",
+                    action_name, output_variable
+                );
+                Ok((
+                    StepExecutionOutcome::Completed,
+                    Some((output_variable.to_string(), captured_output)),
+                ))
+            }
+            Ok(Ok(output)) => {
+                println!("{action_name}: command exited with status {}.", output.status);
+                Ok((StepExecutionOutcome::SoftFailureLogged, None))
+            }
+            Ok(Err(error)) => {
+                println!("{action_name}: failed while waiting for command: {error}.");
+                Ok((StepExecutionOutcome::SoftFailureLogged, None))
+            }
+            Err(_) => Err(action_runtime_timeout_message(
                 action_name,
                 runtime_budget,
                 &format!("while waiting for command '{}'", program),
-            ))
+            )),
+        }
+    } else {
+        let mut child = tokio::process::Command::new(program)
+            .args(&resolved_args)
+            .spawn()
+            .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
+
+        match tokio::time::timeout(remaining, child.wait()).await {
+            Ok(Ok(status)) if status.success() => Ok((StepExecutionOutcome::Completed, None)),
+            Ok(Ok(status)) => {
+                println!("{action_name}: command exited with status {status}.");
+                Ok((StepExecutionOutcome::SoftFailureLogged, None))
+            }
+            Ok(Err(error)) => {
+                println!("{action_name}: failed while waiting for command: {error}.");
+                Ok((StepExecutionOutcome::SoftFailureLogged, None))
+            }
+            Err(_) => {
+                let _ = child.kill().await;
+                Err(action_runtime_timeout_message(
+                    action_name,
+                    runtime_budget,
+                    &format!("while waiting for command '{}'", program),
+                ))
+            }
         }
     }
+}
+
+fn insert_action_output_variable(
+    data: &mut serde_json::Value,
+    name: &str,
+    value: String,
+    action_name: &str,
+) -> Result<(), String> {
+    let Some(object) = data.as_object_mut() else {
+        return Err(format!(
+            "Action '{}' could not store captured output '{}' because the action data context is not an object.",
+            action_name, name
+        ));
+    };
+
+    object.insert(name.to_string(), serde_json::Value::String(value));
+    Ok(())
 }
 
 async fn run_email_me_step(
@@ -1271,6 +1348,7 @@ async fn run_email_me_step(
 
 async fn run_agent_step(
     step: &RunStep,
+    data: &serde_json::Value,
     action_name: &str,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
@@ -1295,7 +1373,11 @@ async fn run_agent_step(
     }
 
     let mut command = tokio::process::Command::new(agent_path);
-    for argument in child_input_args(step.inputs.as_deref()) {
+    let (child_args, resolution_notes) = child_input_args(step.inputs.as_deref(), data, action_name)?;
+    for note in resolution_notes {
+        println!("ℹ️ {note}");
+    }
+    for argument in child_args {
         command.arg(argument);
     }
     command.env(AGENT_ACTION_DEPTH_ENV, (current_depth + 1).to_string());
@@ -1591,29 +1673,169 @@ fn matching_run_steps<'a>(
         .collect()
 }
 
-fn child_input_args(inputs: Option<&[Input]>) -> Vec<String> {
+fn child_input_args(
+    inputs: Option<&[ActionInput]>,
+    data: &serde_json::Value,
+    action_name: &str,
+) -> Result<(Vec<String>, Vec<String>), String> {
     let mut args = Vec::new();
+    let mut notes = Vec::new();
 
     if let Some(inputs) = inputs {
-        for input in inputs {
+        for (index, input) in inputs.iter().enumerate() {
             match input {
-                Input::Text { text } => {
+                ActionInput::Text { text } => {
+                    let resolved = resolve_string_parts(
+                        text,
+                        data,
+                        action_name,
+                        &format!("child-agent text input {}", index + 1),
+                    )?;
                     args.push("--input-text".to_string());
-                    args.push(text.clone());
+                    args.push(resolved);
+                    if child_input_uses_dynamic_parts(text) {
+                        notes.push(format!(
+                            "Action '{}' resolved dynamic child-agent text input {}.",
+                            action_name,
+                            index + 1
+                        ));
+                    }
                 }
-                Input::Url { url } => {
+                ActionInput::Url { url } => {
+                    let resolved = resolve_string_parts(
+                        url,
+                        data,
+                        action_name,
+                        &format!("child-agent url input {}", index + 1),
+                    )?;
+                    validate_child_input_url(&resolved, action_name, index + 1)?;
                     args.push("--input-url".to_string());
-                    args.push(url.clone());
+                    args.push(resolved.clone());
+                    if child_input_uses_dynamic_parts(url) {
+                        notes.push(format!(
+                            "Action '{}' resolved dynamic child-agent url input {} -> {}.",
+                            action_name,
+                            index + 1,
+                            resolved
+                        ));
+                    }
                 }
-                Input::Image { path } => {
+                ActionInput::Image { path } => {
+                    let resolved = resolve_string_parts(
+                        path,
+                        data,
+                        action_name,
+                        &format!("child-agent image path input {}", index + 1),
+                    )?;
+                    validate_child_input_path(&resolved, action_name, index + 1, "image")?;
                     args.push("--input-image".to_string());
-                    args.push(path.clone());
+                    args.push(resolved.clone());
+                    if child_input_uses_dynamic_parts(path) {
+                        notes.push(format!(
+                            "Action '{}' resolved dynamic child-agent image path input {} -> {}.",
+                            action_name,
+                            index + 1,
+                            resolved
+                        ));
+                    }
+                }
+                ActionInput::File { path } => {
+                    let resolved = resolve_string_parts(
+                        path,
+                        data,
+                        action_name,
+                        &format!("child-agent file path input {}", index + 1),
+                    )?;
+                    validate_child_input_path(&resolved, action_name, index + 1, "file")?;
+                    validate_child_file_extension(&resolved, action_name, index + 1)?;
+                    args.push("--input-file".to_string());
+                    args.push(resolved.clone());
+                    if child_input_uses_dynamic_parts(path) {
+                        notes.push(format!(
+                            "Action '{}' resolved dynamic child-agent file path input {} -> {}.",
+                            action_name,
+                            index + 1,
+                            resolved
+                        ));
+                    }
                 }
             }
         }
     }
 
-    args
+    Ok((args, notes))
+}
+
+fn child_input_uses_dynamic_parts(parts: &[RunArg]) -> bool {
+    parts.iter().any(|part| matches!(part, RunArg::Variable(_)))
+}
+
+fn validate_child_input_url(url: &str, action_name: &str, input_index: usize) -> Result<(), String> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(())
+    } else {
+        Err(format!(
+            "Action '{}' child-agent url input {} must resolve to an http(s) URL.",
+            action_name, input_index
+        ))
+    }
+}
+
+fn validate_child_input_path(
+    path: &str,
+    action_name: &str,
+    input_index: usize,
+    input_kind: &str,
+) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' child-agent {} input {} must resolve to a non-empty relative path.",
+            action_name, input_kind, input_index
+        ));
+    }
+
+    let candidate = Path::new(path);
+    if candidate.is_absolute() {
+        return Err(format!(
+            "Action '{}' child-agent {} input {} must stay at the current level or below; absolute paths are not allowed.",
+            action_name, input_kind, input_index
+        ));
+    }
+
+    if candidate
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "Action '{}' child-agent {} input {} must stay at the current level or below; parent traversal (`..`) is not allowed.",
+            action_name, input_kind, input_index
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_child_file_extension(
+    path: &str,
+    action_name: &str,
+    input_index: usize,
+) -> Result<(), String> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    match extension.as_deref() {
+        Some(
+            "pdf" | "docx" | "csv" | "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlsx" | "xlt"
+            | "xlw" | "tsv" | "iif" | "doc" | "dot" | "odt" | "rtf" | "pot" | "ppa" | "pps"
+            | "ppt" | "pptx" | "pwz" | "wiz",
+        ) => Ok(()),
+        _ => Err(format!(
+            "Action '{}' child-agent file input {} must use a supported extension: {}.",
+            action_name, input_index, SUPPORTED_FILE_EXTENSIONS_MESSAGE
+        )),
+    }
 }
 
 fn current_agent_action_depth() -> u32 {

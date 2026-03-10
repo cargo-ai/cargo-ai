@@ -247,8 +247,356 @@ fn accepts_agent_step_with_relative_path_and_inputs() {
     assert!(generated.contains("kind: \"agent\".to_string()"));
     assert!(generated.contains("agent: Some(\"./agents/summary_agent\".to_string())"));
     assert!(generated.contains(
-        "inputs: Some(vec![Input::Text { text: \"Summarize this.\".to_string() }, Input::Url { url: \"https://example.com\".to_string() }])"
+        "inputs: Some(vec![ActionInput::Text { text: vec![RunArg::Literal(\"Summarize this.\".to_string())] }, ActionInput::Url { url: vec![RunArg::Literal(\"https://example.com\".to_string())] }])"
     ));
+}
+
+#[test]
+fn accepts_dynamic_child_agent_input_parts() {
+    let cfg = config_with(
+        r#""report_filename": { "type": "string" }, "customer": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [ { "var": "customer" }, "acme" ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./agents/summary_agent",
+                "inputs": [
+                  {
+                    "type": "text",
+                    "text": ["Summarize for ", { "var": "customer" }]
+                  },
+                  {
+                    "type": "file",
+                    "path": ["./reports/", { "var": "report_filename" }]
+                  }
+                ]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains(
+        "ActionInput::Text { text: vec![RunArg::Literal(\"Summarize for \".to_string()), RunArg::Variable(\"customer\".to_string())] }"
+    ));
+    assert!(generated.contains(
+        "ActionInput::File { path: vec![RunArg::Literal(\"./reports/\".to_string()), RunArg::Variable(\"report_filename\".to_string())] }"
+    ));
+}
+
+#[test]
+fn accepts_exec_output_variable_for_later_action_inputs() {
+    let cfg = config_with(
+        r#""customer": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [ { "var": "customer" }, "Acme" ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["./reports/q1.pdf"],
+                "output_variable": "report_path"
+              },
+              {
+                "kind": "agent",
+                "agent": "./agents/summary_agent",
+                "inputs": [
+                  {
+                    "type": "text",
+                    "text": ["Customer=", { "var": "customer" }, "\nPath=", { "var": "report_path" }]
+                  }
+                ]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains("output_variable: Some(\"report_path\".to_string())"));
+    assert!(generated.contains(
+        "ActionInput::Text { text: vec![RunArg::Literal(\"Customer=\".to_string()), RunArg::Variable(\"customer\".to_string()), RunArg::Literal(\"\\nPath=\".to_string()), RunArg::Variable(\"report_path\".to_string())] }"
+    ));
+}
+
+#[test]
+fn rejects_duplicate_output_variable_names_within_one_action() {
+    let cfg = config_with(
+        r#""customer": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [ { "var": "customer" }, "Acme" ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["first"],
+                "output_variable": "report_listing"
+              },
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["second"],
+                "output_variable": "report_listing"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[1].output_variable"));
+    assert!(err.contains("duplicate captured output name `report_listing`"));
+}
+
+#[test]
+fn rejects_output_variable_name_collisions_with_agent_output_fields() {
+    let cfg = config_with(
+        r#""customer": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [ { "var": "customer" }, "Acme" ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["value"],
+                "output_variable": "customer"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].output_variable"));
+    assert!(err.contains("collides with an agent output field"));
+}
+
+#[test]
+fn allows_reusing_output_variable_names_in_different_actions() {
+    let cfg = config_with(
+        r#""customer": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "first_action",
+            "logic": { "==": [ { "var": "customer" }, "Acme" ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["first"],
+                "output_variable": "report_listing"
+              }
+            ]
+          },
+          {
+            "name": "second_action",
+            "logic": { "==": [ { "var": "customer" }, "Acme" ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["second"],
+                "output_variable": "report_listing"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert_eq!(
+        generated.matches("output_variable: Some(\"report_listing\".to_string())").count(),
+        2
+    );
+}
+
+#[test]
+fn rejects_cross_action_reference_to_captured_output_variable() {
+    let cfg = config_with(
+        r#""customer": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "first_action",
+            "logic": { "==": [ { "var": "customer" }, "Acme" ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["first"],
+                "output_variable": "report_listing"
+              }
+            ]
+          },
+          {
+            "name": "second_action",
+            "logic": { "==": [ { "var": "customer" }, "Acme" ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./agents/summary_agent",
+                "inputs": [
+                  {
+                    "type": "text",
+                    "text": ["Listing=", { "var": "report_listing" }]
+                  }
+                ]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[1].run[0].inputs[0].text[1].var"));
+    assert!(err.contains("unknown variable `report_listing`"));
+}
+
+#[test]
+fn accepts_pdf_file_inputs() {
+    let cfg = r#"{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        { "type": "file", "path": "./reports/q1.pdf" }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "summary": { "type": "string" }
+        }
+    },
+    "actions": []
+}"#;
+
+    let generated = build_support::generate_agent_model_from_str(cfg).unwrap();
+
+    assert!(generated.contains("Input::File { path: \"./reports/q1.pdf\".to_string() }"));
+}
+
+#[test]
+fn accepts_docx_file_inputs() {
+    let cfg = r#"{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        { "type": "file", "path": "./reports/q1.docx" }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "summary": { "type": "string" }
+        }
+    },
+    "actions": []
+}"#;
+
+    let generated = build_support::generate_agent_model_from_str(cfg).unwrap();
+
+    assert!(generated.contains("Input::File { path: \"./reports/q1.docx\".to_string() }"));
+}
+
+#[test]
+fn accepts_csv_file_inputs() {
+    let cfg = r#"{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        { "type": "file", "path": "./reports/q1.csv" }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "summary": { "type": "string" }
+        }
+    },
+    "actions": []
+}"#;
+
+    let generated = build_support::generate_agent_model_from_str(cfg).unwrap();
+
+    assert!(generated.contains("Input::File { path: \"./reports/q1.csv\".to_string() }"));
+}
+
+#[test]
+fn accepts_phase_three_file_inputs() {
+    let extensions = [
+        "xla", "xlb", "xlc", "xlm", "xls", "xlsx", "xlt", "xlw", "tsv", "iif", "doc", "dot", "odt",
+        "rtf", "pot", "ppa", "pps", "ppt", "pptx", "pwz", "wiz",
+    ];
+
+    for extension in extensions {
+        let cfg = format!(
+            r#"{{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        {{ "type": "file", "path": "./reports/q1.{extension}" }}
+    ],
+    "agent_schema": {{
+        "type": "object",
+        "properties": {{
+            "summary": {{ "type": "string" }}
+        }}
+    }},
+    "actions": []
+}}"#
+        );
+
+        let generated = build_support::generate_agent_model_from_str(&cfg)
+            .unwrap_or_else(|err| panic!("expected {extension} to be accepted: {err}"));
+
+        assert!(
+            generated.contains(&format!(
+                "Input::File {{ path: \"./reports/q1.{extension}\".to_string() }}"
+            )),
+            "generated code should preserve the {extension} path"
+        );
+    }
+}
+
+#[test]
+fn rejects_unsupported_file_inputs() {
+    let cfg = r#"{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        { "type": "file", "path": "./reports/q1.txt" }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "summary": { "type": "string" }
+        }
+    },
+    "actions": []
+}"#;
+
+    let err = build_support::generate_agent_model_from_str(cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.inputs[0].path"));
+    assert!(err.contains("supported extension"));
+    assert!(err.contains("`.docx`"));
+    assert!(err.contains("`.csv`"));
+    assert!(err.contains("`.pptx`"));
 }
 
 #[test]

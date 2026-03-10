@@ -3,10 +3,14 @@ use serde::{Deserialize, Serialize}; // Data format (e.g.,JSON, TOML) (de)serial
 use serde_json;
 use std::{collections::BTreeMap, fs, path::Path};
 
+const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str =
+    "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ContentPart {
     Text(String),
     Image { data_url: String },
+    File { filename: String, file_data: String },
 }
 
 #[derive(Debug)]
@@ -100,6 +104,7 @@ pub(crate) async fn resolve_inputs(inputs: &[crate::Input]) -> Result<Vec<Conten
             crate::Input::Image { path } => resolved.push(ContentPart::Image {
                 data_url: load_image_data_url(path)?,
             }),
+            crate::Input::File { path } => resolved.push(load_supported_file_content(path)?),
         }
     }
 
@@ -113,6 +118,90 @@ fn load_image_data_url(path: &str) -> Result<String, String> {
     let media_type = image_media_type(image_path)?;
     let encoded = BASE64_STANDARD.encode(image_bytes);
     Ok(format!("data:{media_type};base64,{encoded}"))
+}
+
+fn load_supported_file_content(path: &str) -> Result<ContentPart, String> {
+    let file_path = Path::new(path);
+    let media_type = supported_file_media_type(file_path)?;
+
+    let metadata = fs::metadata(file_path).map_err(|error| {
+        format!(
+            "Failed to inspect file input '{}': {error}",
+            file_path.display()
+        )
+    })?;
+
+    if !metadata.is_file() {
+        return Err(format!(
+            "File input '{}' must point to a regular file.",
+            file_path.display()
+        ));
+    }
+
+    let file_bytes = fs::read(file_path).map_err(|error| {
+        format!(
+            "Failed to read file input '{}': {error}",
+            file_path.display()
+        )
+    })?;
+
+    let filename = file_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!(
+                "File input '{}' must include a filename.",
+                file_path.display()
+            )
+        })?;
+
+    Ok(ContentPart::File {
+        filename,
+        file_data: file_data_url(media_type, &file_bytes),
+    })
+}
+
+fn file_data_url(media_type: &str, file_bytes: &[u8]) -> String {
+    let encoded = BASE64_STANDARD.encode(file_bytes);
+    format!("data:{media_type};base64,{encoded}")
+}
+
+fn supported_file_media_type(path: &Path) -> Result<&'static str, String> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .ok_or_else(|| {
+            format!(
+                "File input '{}' must include a supported extension. Supported: {SUPPORTED_FILE_EXTENSIONS_MESSAGE}.",
+                path.display()
+            )
+        })?;
+
+    match extension.as_str() {
+        "pdf" => Ok("application/pdf"),
+        "doc" | "dot" => Ok("application/msword"),
+        "docx" => Ok("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        "odt" => Ok("application/vnd.oasis.opendocument.text"),
+        "rtf" => Ok("application/rtf"),
+        "csv" => Ok("text/csv"),
+        "tsv" => Ok("text/tsv"),
+        "iif" => Ok("text/x-iif"),
+        "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlt" | "xlw" => {
+            Ok("application/vnd.ms-excel")
+        }
+        "xlsx" => Ok("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "pot" | "ppa" | "pps" | "ppt" | "pwz" | "wiz" => Ok("application/vnd.ms-powerpoint"),
+        "pptx" => Ok("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+        other => Err(format!(
+            "File input '{}' uses unsupported extension '{}'. Supported: {SUPPORTED_FILE_EXTENSIONS_MESSAGE}.",
+            path.display(),
+            other
+        )),
+    }
 }
 
 fn image_media_type(path: &Path) -> Result<&'static str, String> {
