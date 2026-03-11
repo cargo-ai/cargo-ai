@@ -33,6 +33,21 @@ Keep each run step in this order:
 - Use explicit captured-variable names such as `child_status` or `report_error`.
 - Do not overload one variable name for multiple meanings.
 
+## Input Strategy
+
+Choose one of these intentionally:
+
+- baked inputs
+  - keep instructions and fixed local paths in the JSON `inputs` array
+- runtime inputs
+  - let the caller provide values such as `--input-text`, `--input-file`, `--input-url`, or `--input-image`
+
+Important rule:
+- If any runtime input flags are used, they replace the full baked `inputs` array for that run.
+- If the caller supplies `--input-file` but the agent also needs instructions, the caller should also supply `--input-text`.
+
+Use baked file/image paths only when the definition should own a fixed local asset. Use runtime flags when the caller should choose the asset.
+
 ## Sidecar Notes
 
 When a JSON definition becomes complex, recommend a same-name sidecar Markdown file:
@@ -98,6 +113,9 @@ When the user wants portability across macOS, Windows, and Linux:
 
 When the user wants local-machine behavior:
 - you may use local commands and conventions
+- prefer real executables over shell builtins when possible
+- for macOS-only examples, prefer `/bin/echo` over bare `echo`
+- pair intentionally platform-specific steps with `platform`
 - still keep the JSON as small and explicit as possible
 
 ## Validation Rhythm

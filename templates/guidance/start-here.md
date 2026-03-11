@@ -18,6 +18,10 @@ Start by asking:
 
 If the runtime exposes the current OS, treat that as a hint for the local-machine option, but still confirm whether the user wants local-only behavior or cross-platform portability.
 
+When files, URLs, or images are involved, also clarify:
+- should this content be baked into the JSON as a fixed default?
+- or should the caller supply it at runtime with flags such as `--input-file` or `--input-url`?
+
 ## How To Drive The Conversation
 
 - Keep the questions in plain language.
@@ -29,15 +33,17 @@ If the runtime exposes the current OS, treat that as a hint for the local-machin
 
 1. Use `pattern-selection.md` to infer the right Cargo AI shape.
 2. Copy the closest example from `examples/`.
-3. Draft the JSON in canonical field order.
-4. If the flow becomes complex, recommend a same-name sidecar Markdown file.
-5. Validate with:
+3. Decide which inputs are baked into JSON and which will be supplied at runtime.
+4. Draft the JSON in canonical field order.
+5. If the flow becomes complex, recommend a same-name sidecar Markdown file.
+6. Validate with:
    - `cargo ai hatch <agent-name> --config <config.json> --check`
-6. Fix reported errors before building.
+7. Fix reported errors before building.
 
 ## Behavioral Defaults
 
 - Prefer the most minimal portable approach that satisfies the user's goal.
 - Use platform-specific steps only when the user explicitly wants local-machine behavior or the task cannot be met portably.
+- Remember that runtime input flags replace the full baked `inputs` array. If a run still needs text instructions plus a runtime file, URL, or image, supply both kinds of runtime inputs.
 - Prefer boxed ASCII diagrams for explanations by default.
 - If Mermaid rendering is clearly supported, offer it as an option and ask whether the user wants it.

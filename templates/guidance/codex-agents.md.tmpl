@@ -35,6 +35,7 @@ Read these files before inventing structure:
 Useful examples:
 - `.cargo-ai/guidance/examples/basic-agent.json`
 - `.cargo-ai/guidance/examples/schema-features.json`
+- `.cargo-ai/guidance/examples/runtime-file-local-exec.json`
 - `.cargo-ai/guidance/examples/child-agent.json`
 - `.cargo-ai/guidance/examples/stop-by-default.json`
 - `.cargo-ai/guidance/examples/continue-on-failure.json`
@@ -59,8 +60,10 @@ Useful examples:
   - string-only `enum`
   - `minimum`, `maximum`, `exclusiveMinimum`, and `exclusiveMaximum` on `number` and `integer`
 - Treat top-level arrays, nested objects, and union types as unsupported unless the local contract docs say otherwise.
+- Treat the local contract and action helper docs as authoritative for step fields such as `platform`, runtime input override behavior, and child-agent data-flow limits.
 - Prefer the most minimal portable steps that satisfy the user's goal.
 - Use platform-specific commands only when the user explicitly wants local-machine behavior or the task cannot be met portably.
+- Remember that runtime input flags replace the full baked `inputs` array for that run.
 - Recommend a same-name sidecar Markdown file when the JSON becomes structurally complex.
 - Prefer boxed ASCII diagrams for flow explanations.
 - If Mermaid rendering is clearly supported, offer Mermaid as an option and ask whether the user wants it.
