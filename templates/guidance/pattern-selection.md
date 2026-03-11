@@ -4,6 +4,12 @@ Use this file after the user describes the outcome they want. The user should no
 
 ## Pattern Guide
 
+### Start with `schema-features.json` when:
+
+- the user needs more than one scalar output field type in the same agent
+- the user needs `description`, string `enum`, or numeric bounds
+- the main uncertainty is the output schema shape rather than action control flow
+
 ### Start with `basic-agent.json` when:
 
 - the user wants one agent

@@ -39,6 +39,10 @@ const EXAMPLE_BASIC_AGENT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/examples/basic-agent.json"
 ));
+const EXAMPLE_SCHEMA_FEATURES: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/schema-features.json"
+));
 const EXAMPLE_CHILD_AGENT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/examples/child-agent.json"
@@ -62,7 +66,7 @@ struct GuidanceArtifact {
     contents: &'static str,
 }
 
-const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 13] = [
+const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 14] = [
     GuidanceArtifact {
         relative_path: "AGENTS.md",
         contents: CODEX_GUIDANCE_TEMPLATE,
@@ -98,6 +102,10 @@ const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 13] = [
     GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/examples/basic-agent.json",
         contents: EXAMPLE_BASIC_AGENT,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/schema-features.json",
+        contents: EXAMPLE_SCHEMA_FEATURES,
     },
     GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/examples/child-agent.json",
@@ -274,7 +282,7 @@ mod tests {
                 .and_then(|name| name.to_str()),
             Some("AGENTS.md")
         );
-        assert_eq!(report.artifact_paths.len(), 13);
+        assert_eq!(report.artifact_paths.len(), 14);
         assert!(dir
             .join(".cargo-ai/guidance/agent-definition-contract.md")
             .exists());
@@ -288,6 +296,9 @@ mod tests {
         assert!(dir.join(".cargo-ai/guidance/troubleshooting.md").exists());
         assert!(dir
             .join(".cargo-ai/guidance/examples/basic-agent.json")
+            .exists());
+        assert!(dir
+            .join(".cargo-ai/guidance/examples/schema-features.json")
             .exists());
         assert!(dir
             .join(".cargo-ai/guidance/examples/child-agent.json")
@@ -308,6 +319,7 @@ mod tests {
         assert!(guidance.contains(".cargo-ai/guidance/start-here.md"));
         assert!(guidance.contains(".cargo-ai/guidance/pattern-selection.md"));
         assert!(guidance.contains(".cargo-ai/guidance/agent-definition-contract.md"));
+        assert!(guidance.contains(".cargo-ai/guidance/examples/schema-features.json"));
         assert!(guidance.contains("cargo ai hatch <agent-name> --config <config.json> --check"));
         assert!(guidance.contains("portable across macOS, Windows, and Linux"));
 
@@ -327,6 +339,7 @@ mod tests {
         let patterns = fs::read_to_string(dir.join(".cargo-ai/guidance/pattern-selection.md"))
             .expect("pattern selection guidance should be readable");
         assert!(patterns.contains("basic-agent.json"));
+        assert!(patterns.contains("schema-features.json"));
         assert!(patterns.contains("continue-on-failure.json"));
 
         let authoring = fs::read_to_string(dir.join(".cargo-ai/guidance/authoring-patterns.md"))
