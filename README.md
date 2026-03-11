@@ -1,4 +1,4 @@
-# cargo-ai
+# cargo-ai™
 
 [![Audit Status](https://github.com/analyzer1/cargo-ai/actions/workflows/security-audit.yml/badge.svg)](https://github.com/analyzer1/cargo-ai/actions/workflows/security-audit.yml)
 [![Multi-OS CI](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml/badge.svg)](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml)
@@ -6,7 +6,7 @@
 
 Build open-source AI agents that hatch into native executables.
 
-Cargo AI gives you a fast way to build agents that are **auditable**, **portable**, and **actually yours**. Refine them in Codex, run them locally, and share the definition through CargoAI.org in minutes so other people can hatch it on their own machines without turning the runtime into a black-box hosted service.
+cargo-ai™ gives you a fast way to build agents that are **auditable**, **portable**, and **actually yours**. Refine them in Codex, run them locally, and share the definition through `cargo-ai.org` in minutes so other people can hatch it on their own machines without turning the runtime into a black-box hosted service.
 
 ## Why Cargo AI
 
@@ -14,7 +14,7 @@ Cargo AI gives you a fast way to build agents that are **auditable**, **portable
 - **You Own the Output**: hatch a local executable and generated code that you can keep, modify, and run wherever you want.
 - **Portable Across macOS, Linux, and Windows**: keep one readable agent definition and hatch it for the systems you care about.
 - **Built for Codex Iteration**: keep the agent small, readable, diffable, and easy to improve in conversation.
-- **CargoAI.org Extends Local Execution**: register an account to share definitions with anyone in minutes, use repository features, and unlock email-backed workflows while execution still happens on your machine.
+- **`cargo-ai.org` Extends Local Execution**: register an account to share definitions with anyone in minutes, use repository features, and unlock email-backed workflows while execution still happens on your machine.
 - **Faster Than a One-Off CLI**: skip hand-rolling a custom app just to get a reliable agent with typed output and real actions.
 
 What matters is not that the definition is JSON by itself. It is that the definition stays small enough to read, reason about, diff, and improve without losing trust in what the agent is doing.
@@ -71,7 +71,7 @@ On Windows, run `adder_test.exe` or just `adder_test`.
 
 ### 4. Register an account
 
-If you want CargoAI.org features such as shareable definitions, your public handle, and email-backed workflows, create an account early:
+If you want `cargo-ai.org` features such as shareable definitions, your public handle, and email-backed workflows, create an account early:
 
 ```bash
 cargo ai account register you@example.com
