@@ -48,6 +48,16 @@ Useful examples:
   - `inputs`
   - `agent_schema`
   - `actions`
+- The current supported output schema is flat and top-level only:
+  - `string`
+  - `number`
+  - `integer`
+  - `boolean`
+- Current supported top-level schema metadata/constraints:
+  - `description`
+  - string-only `enum`
+  - `minimum`, `maximum`, `exclusiveMinimum`, and `exclusiveMaximum` on `number` and `integer`
+- Treat top-level arrays, nested objects, and union types as unsupported unless the local contract docs say otherwise.
 - Prefer the most minimal portable steps that satisfy the user's goal.
 - Use platform-specific commands only when the user explicitly wants local-machine behavior or the task cannot be met portably.
 - Recommend a same-name sidecar Markdown file when the JSON becomes structurally complex.

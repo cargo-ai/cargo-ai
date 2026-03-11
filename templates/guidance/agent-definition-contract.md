@@ -44,8 +44,29 @@ Path rules for `image` and `file`:
   - `type: "object"`
   - `properties: { ... }`
 - Each property must define a `type`.
-- Array properties must define `items.type`.
 - Top-level property names are reserved for action-variable lookup. Step-captured variable names cannot reuse them.
+
+Supported top-level property `type` values:
+- `string`
+- `number`
+- `integer`
+- `boolean`
+
+Supported optional top-level property metadata and constraints:
+- `description` on any supported field
+- `enum` on `string` fields only
+- `minimum`, `maximum`, `exclusiveMinimum`, and `exclusiveMaximum` on `number` and `integer` fields
+
+Constraint rules:
+- `enum` values must be non-empty strings
+- `enum` values are exact and case-sensitive
+- lower bounds may use `minimum` or `exclusiveMinimum`, but not both
+- upper bounds may use `maximum` or `exclusiveMaximum`, but not both
+
+Unsupported schema shapes for the current MVP:
+- top-level arrays
+- nested objects
+- union types
 
 ## `actions`
 
@@ -131,6 +152,9 @@ For `kind: "agent"`:
 Expect `cargo ai hatch <agent-name> --config <config.json> --check` to reject at least these cases:
 - missing required top-level keys
 - malformed `version`
+- unsupported top-level `agent_schema` property types
+- top-level arrays, nested objects, or union types in `agent_schema`
+- invalid `description`, `enum`, or numeric-bound metadata on a property
 - unsupported run-step kind
 - missing required fields for a step kind
 - invalid child-agent path shape
@@ -141,6 +165,25 @@ Expect `cargo ai hatch <agent-name> --config <config.json> --check` to reject at
 - malformed `failure_mode`
 
 ## Minimal Valid Examples
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "unit": {
+      "type": "string",
+      "description": "Temperature unit.",
+      "enum": ["F", "C"]
+    },
+    "confidence": {
+      "type": "number",
+      "description": "Confidence score greater than 0 and less than or equal to 1.",
+      "exclusiveMinimum": 0,
+      "maximum": 1
+    }
+  }
+}
+```
 
 ```json
 { "kind": "agent", "agent": "./child_reporter" }
