@@ -39,6 +39,11 @@ Path rules for `image` and `file`:
 - Do not use absolute paths.
 - Do not use parent traversal such as `../`.
 
+URL guidance:
+- `{"type":"url","url":"..."}` means Cargo AI fetches the URL with its own HTTP client and passes the returned body as text input.
+- Treat the practical compatibility target as comparable to `curl` for ordinary static or server-rendered content.
+- Do not assume browser-only or JavaScript-rendered pages will work through `type: "url"`.
+
 ## Runtime Inputs
 
 Generated agent binaries may also accept runtime input flags such as:
