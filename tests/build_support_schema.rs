@@ -27,14 +27,18 @@ fn config_with(properties: &str, actions: &str) -> String {
 }
 
 #[test]
-fn maps_array_of_integers_to_vec_i64() {
+fn rejects_top_level_array_fields_with_actionable_path() {
     let cfg = config_with(
         r#""numbers": { "type": "array", "items": { "type": "integer" } }"#,
         "[]",
     );
 
-    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
-    assert!(generated.contains("pub numbers: Vec<i64>,"));
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.agent_schema.properties.numbers.type"));
+    assert!(err.contains("top-level array output fields are not supported in this story"));
 }
 
 #[test]
@@ -51,8 +55,87 @@ fn rejects_nested_arrays_with_actionable_path() {
         .unwrap_err()
         .to_string();
 
-    assert!(err.contains("$.agent_schema.properties.matrix.items.type"));
-    assert!(err.contains("nested arrays are not supported yet"));
+    assert!(err.contains("$.agent_schema.properties.matrix.type"));
+    assert!(err.contains("top-level array output fields are not supported in this story"));
+}
+
+#[test]
+fn preserves_description_in_generated_schema_metadata() {
+    let cfg = config_with(
+        r#""answer": { "type": "integer", "description": "The numeric answer." }"#,
+        "[]",
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains(r#"apply_property_schema_metadata("#));
+    assert!(generated.contains(r#""answer""#));
+    assert!(generated.contains(r#"Some("The numeric answer.")"#));
+}
+
+#[test]
+fn preserves_string_enum_in_generated_schema_and_runtime_validation() {
+    let cfg = config_with(r#""unit": { "type": "string", "enum": ["F", "C"] }"#, "[]");
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains(r#"validate_enum_field(&self.unit, "unit", &["F", "C"])?;"#));
+    assert!(generated.contains(r#""enum".to_string()"#));
+    assert!(generated.contains(r#"Some(vec!["F", "C"])"#));
+}
+
+#[test]
+fn rejects_non_string_enum_fields() {
+    let cfg = config_with(
+        r#""score": { "type": "number", "enum": ["high", "low"] }"#,
+        "[]",
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.agent_schema.properties.score.enum"));
+    assert!(err.contains("`enum` is supported only for `type: \"string\"` fields"));
+}
+
+#[test]
+fn preserves_numeric_bounds_in_generated_schema_and_runtime_validation() {
+    let cfg = config_with(
+        r#""confidence": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMaximum": 1
+        }"#,
+        "[]",
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains(
+        r#"validate_f64_range(self.confidence, "confidence", Some(0), None, None, Some(1))?;"#
+    ));
+    assert!(generated.contains(r#""minimum".to_string()"#));
+    assert!(generated.contains(r#""exclusiveMaximum".to_string()"#));
+}
+
+#[test]
+fn rejects_conflicting_numeric_lower_bounds() {
+    let cfg = config_with(
+        r#""confidence": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMinimum": 0
+        }"#,
+        "[]",
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.agent_schema.properties.confidence.exclusiveMinimum"));
+    assert!(err.contains("cannot be combined with `minimum`"));
 }
 
 #[test]
@@ -1161,7 +1244,7 @@ fn rejects_unknown_action_arg_variable_with_actionable_path() {
 }
 
 #[test]
-fn rejects_array_typed_action_arg_variable_with_actionable_path() {
+fn rejects_top_level_arrays_before_action_variable_validation() {
     let cfg = config_with(
         r#""numbers": { "type": "array", "items": { "type": "integer" } }"#,
         r#"[
@@ -1183,8 +1266,8 @@ fn rejects_array_typed_action_arg_variable_with_actionable_path() {
         .unwrap_err()
         .to_string();
 
-    assert!(err.contains("$.actions[0].run[0].args[0].var"));
-    assert!(err.contains("array-valued field `numbers`"));
+    assert!(err.contains("$.agent_schema.properties.numbers.type"));
+    assert!(err.contains("top-level array output fields are not supported in this story"));
 }
 
 #[test]
