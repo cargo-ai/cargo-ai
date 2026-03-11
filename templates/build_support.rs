@@ -2107,7 +2107,8 @@ fn render_agent_model(config: &AgentConfig) -> String {
     let mut validation_calls = String::new();
     let mut schema_metadata_calls = String::new();
     let mut has_enum_validation = false;
-    let mut has_numeric_validation = false;
+    let mut has_i64_validation = false;
+    let mut has_f64_validation = false;
 
     let mut input_list = String::new();
     for property in &config.properties {
@@ -2131,34 +2132,39 @@ fn render_agent_model(config: &AgentConfig) -> String {
         }
 
         if property.numeric_constraints.has_any() {
-            has_numeric_validation = true;
             let validation_call = match property.field_type {
-                FieldType::Integer => format!(
-                    "        validate_i64_range(self.{name}, {field_name}, {minimum}, {exclusive_minimum}, {maximum}, {exclusive_maximum})?;\n",
-                    name = property.name,
-                    field_name = rust_string_literal(&property.name),
-                    minimum = render_optional_i64_literal(property.numeric_constraints.minimum.as_ref()),
-                    exclusive_minimum = render_optional_i64_literal(
-                        property.numeric_constraints.exclusive_minimum.as_ref()
-                    ),
-                    maximum = render_optional_i64_literal(property.numeric_constraints.maximum.as_ref()),
-                    exclusive_maximum = render_optional_i64_literal(
-                        property.numeric_constraints.exclusive_maximum.as_ref()
-                    ),
-                ),
-                FieldType::Number => format!(
-                    "        validate_f64_range(self.{name}, {field_name}, {minimum}, {exclusive_minimum}, {maximum}, {exclusive_maximum})?;\n",
-                    name = property.name,
-                    field_name = rust_string_literal(&property.name),
-                    minimum = render_optional_f64_literal(property.numeric_constraints.minimum.as_ref()),
-                    exclusive_minimum = render_optional_f64_literal(
-                        property.numeric_constraints.exclusive_minimum.as_ref()
-                    ),
-                    maximum = render_optional_f64_literal(property.numeric_constraints.maximum.as_ref()),
-                    exclusive_maximum = render_optional_f64_literal(
-                        property.numeric_constraints.exclusive_maximum.as_ref()
-                    ),
-                ),
+                FieldType::Integer => {
+                    has_i64_validation = true;
+                    format!(
+                        "        validate_i64_range(self.{name}, {field_name}, {minimum}, {exclusive_minimum}, {maximum}, {exclusive_maximum})?;\n",
+                        name = property.name,
+                        field_name = rust_string_literal(&property.name),
+                        minimum = render_optional_i64_literal(property.numeric_constraints.minimum.as_ref()),
+                        exclusive_minimum = render_optional_i64_literal(
+                            property.numeric_constraints.exclusive_minimum.as_ref()
+                        ),
+                        maximum = render_optional_i64_literal(property.numeric_constraints.maximum.as_ref()),
+                        exclusive_maximum = render_optional_i64_literal(
+                            property.numeric_constraints.exclusive_maximum.as_ref()
+                        ),
+                    )
+                }
+                FieldType::Number => {
+                    has_f64_validation = true;
+                    format!(
+                        "        validate_f64_range(self.{name}, {field_name}, {minimum}, {exclusive_minimum}, {maximum}, {exclusive_maximum})?;\n",
+                        name = property.name,
+                        field_name = rust_string_literal(&property.name),
+                        minimum = render_optional_f64_literal(property.numeric_constraints.minimum.as_ref()),
+                        exclusive_minimum = render_optional_f64_literal(
+                            property.numeric_constraints.exclusive_minimum.as_ref()
+                        ),
+                        maximum = render_optional_f64_literal(property.numeric_constraints.maximum.as_ref()),
+                        exclusive_maximum = render_optional_f64_literal(
+                            property.numeric_constraints.exclusive_maximum.as_ref()
+                        ),
+                    )
+                }
                 _ => String::new(),
             };
             validation_calls.push_str(&validation_call);
@@ -2370,7 +2376,8 @@ fn render_agent_model(config: &AgentConfig) -> String {
         ));
     }
 
-    let validation_helpers = render_validation_helpers(has_enum_validation, has_numeric_validation);
+    let validation_helpers =
+        render_validation_helpers(has_enum_validation, has_i64_validation, has_f64_validation);
     let schema_metadata_helpers = render_schema_metadata_helpers(&schema_metadata_calls);
     let schema_metadata_apply = if schema_metadata_calls.is_empty() {
         String::new()
@@ -2492,7 +2499,11 @@ pub fn actions() -> Vec<Action> {{
     )
 }
 
-fn render_validation_helpers(has_enum_validation: bool, has_numeric_validation: bool) -> String {
+fn render_validation_helpers(
+    has_enum_validation: bool,
+    has_i64_validation: bool,
+    has_f64_validation: bool,
+) -> String {
     let mut helpers = String::new();
 
     if has_enum_validation {
@@ -2514,7 +2525,7 @@ fn validate_enum_field(value: &str, field_name: &str, allowed_values: &[&str]) -
         );
     }
 
-    if has_numeric_validation {
+    if has_i64_validation {
         helpers.push_str(
             r#"
 fn validate_i64_range(
@@ -2547,6 +2558,13 @@ fn validate_i64_range(
     }
     Ok(())
 }
+"#,
+        );
+    }
+
+    if has_f64_validation {
+        helpers.push_str(
+            r#"
 
 fn validate_f64_range(
     value: f64,

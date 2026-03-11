@@ -117,6 +117,28 @@ fn preserves_numeric_bounds_in_generated_schema_and_runtime_validation() {
     ));
     assert!(generated.contains(r#""minimum".to_string()"#));
     assert!(generated.contains(r#""exclusiveMaximum".to_string()"#));
+    assert!(generated.contains("fn validate_f64_range("));
+    assert!(!generated.contains("fn validate_i64_range("));
+}
+
+#[test]
+fn emits_integer_range_helper_only_when_integer_bounds_exist() {
+    let cfg = config_with(
+        r#""attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        }"#,
+        "[]",
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains(
+        r#"validate_i64_range(self.attempts, "attempts", Some(1), None, Some(3), None)?;"#
+    ));
+    assert!(generated.contains("fn validate_i64_range("));
+    assert!(!generated.contains("fn validate_f64_range("));
 }
 
 #[test]
