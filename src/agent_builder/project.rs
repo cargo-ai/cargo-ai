@@ -4,6 +4,7 @@
 //! with the necessary config and build files.
 
 use crate::schema_version;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::Error;
 use std::path::Path;
@@ -22,12 +23,19 @@ const PROVENANCE_HOOK_SNIPPET: &str = r#"    let cmd_args = args::build_cli();
     }"#;
 const GENERATED_AGENT_VERSION_BLOCK_TEMPLATE: &str =
     include_str!("templates/agent_version_block.rs.tmpl");
+const ROOT_EXCLUDED_TEMPLATE_ENTRIES_FOR_CHECK: &[&str] = &["target"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AgentSyncState {
     InSync,
     OutOfSync,
     Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceSeedMode {
+    IncludeBuildArtifacts,
+    SkipBuildArtifacts,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -130,9 +138,10 @@ pub fn create_new_agent_project(
     template_path: &Path,
     agent_name: &str,
     agentcfg: Result<String, Error>,
+    seed_mode: WorkspaceSeedMode,
 ) -> Result<(), Error> {
     create_agent_workspace(agent_name)?;
-    seed_agent_workspace(template_path, agent_name)?;
+    seed_agent_workspace(template_path, agent_name, seed_mode)?;
     rewrite_agent_generated_files(
         &super::agent_workspace_path(agent_name),
         agent_name,
@@ -168,8 +177,23 @@ pub(crate) fn create_template_project(
     )
 }
 
-fn seed_agent_workspace(template_path: &Path, agent_name: &str) -> Result<(), Error> {
-    copy_directory_recursive(template_path, &super::agent_workspace_path(agent_name))
+fn seed_agent_workspace(
+    template_path: &Path,
+    agent_name: &str,
+    seed_mode: WorkspaceSeedMode,
+) -> Result<(), Error> {
+    let workspace_path = super::agent_workspace_path(agent_name);
+
+    match seed_mode {
+        WorkspaceSeedMode::IncludeBuildArtifacts => {
+            copy_directory_recursive(template_path, &workspace_path)
+        }
+        WorkspaceSeedMode::SkipBuildArtifacts => copy_directory_recursive_excluding_root_entries(
+            template_path,
+            &workspace_path,
+            ROOT_EXCLUDED_TEMPLATE_ENTRIES_FOR_CHECK,
+        ),
+    }
 }
 
 /// Rewrites only the agent-generated scaffold files after template seeding.
@@ -269,11 +293,44 @@ fn copy_directory_recursive(source: &Path, destination: &Path) -> Result<(), Err
     Ok(())
 }
 
+fn copy_directory_recursive_excluding_root_entries(
+    source: &Path,
+    destination: &Path,
+    excluded_root_entries: &[&str],
+) -> Result<(), Error> {
+    fs::create_dir_all(destination)?;
+
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        let file_name = entry.file_name();
+
+        if excluded_root_entries
+            .iter()
+            .any(|excluded| file_name == OsStr::new(excluded))
+        {
+            continue;
+        }
+
+        if file_type.is_dir() {
+            fs::create_dir_all(&destination_path)?;
+            copy_directory_recursive(&source_path, &destination_path)?;
+        } else {
+            fs::copy(&source_path, &destination_path)?;
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_directory_recursive, determine_agent_sync_state, render_workspace_file_contents,
-        should_replace_agent_identity, sync_state_label, AgentSyncState,
+        copy_directory_recursive, copy_directory_recursive_excluding_root_entries,
+        determine_agent_sync_state, render_workspace_file_contents, should_replace_agent_identity,
+        sync_state_label, AgentSyncState,
     };
     use crate::schema_version;
     use std::fs;
@@ -456,6 +513,30 @@ fn main() {
                 .as_deref(),
             Some("fn main() {}")
         );
+
+        let _ = fs::remove_dir_all(source);
+        let _ = fs::remove_dir_all(destination);
+    }
+
+    #[test]
+    fn root_exclusion_copy_skips_target_directory_only_at_root() {
+        let source = temp_dir_path("copy-skip-src");
+        let destination = temp_dir_path("copy-skip-dst");
+        fs::create_dir_all(source.join("src")).expect("source tree should be creatable");
+        fs::create_dir_all(source.join("target").join("debug"))
+            .expect("root target tree should be creatable");
+        fs::write(source.join("Cargo.toml"), "name = 'seed'").expect("cargo file should write");
+        fs::write(source.join("src").join("main.rs"), "fn main() {}")
+            .expect("main file should write");
+        fs::write(source.join("target").join("debug").join("seed"), "binary")
+            .expect("binary file should write");
+
+        copy_directory_recursive_excluding_root_entries(&source, &destination, &["target"])
+            .expect("copy with root exclusions should succeed");
+
+        assert!(destination.join("Cargo.toml").exists());
+        assert!(destination.join("src").join("main.rs").exists());
+        assert!(!destination.join("target").exists());
 
         let _ = fs::remove_dir_all(source);
         let _ = fs::remove_dir_all(destination);
