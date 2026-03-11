@@ -58,7 +58,7 @@ codex login
 
 cargo ai profile add openai-account \
   --server openai \
-  --model gpt-4o \
+  --model gpt-5.3 \
   --auth openai_account \
   --default
 
@@ -75,7 +75,7 @@ Use this path if you want an explicit model profile with direct provider credent
 ```bash
 cargo ai profile add openai \
   --server openai \
-  --model gpt-4o \
+  --model gpt-5.3 \
   --auth api_key \
   --default
 
