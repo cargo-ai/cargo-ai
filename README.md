@@ -4,23 +4,20 @@
 [![Multi-OS CI](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml/badge.svg)](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml)
 [![Status: Stable – Ongoing Development](https://img.shields.io/badge/Status-Stable_–_Ongoing_Development-blue)](https://github.com/analyzer1/cargo-ai)
 
-Build AI agents in plain JSON, hatch them into native binaries, and iterate in Codex without hand-writing a Rust CLI.
+Build open-source AI agents that hatch into native executables.
 
-`cargo-ai` is for people who want the clarity of a simple config file with the reliability of a compiled tool:
-- define the agent in JSON
-- hatch it into a local executable
-- run it with your preferred model profile
-- add local commands, account-backed email actions, or other agents as follow-up steps
-
-It is especially strong when you want to build and refine agents inside Codex. The JSON is readable, diffable, and easy to keep improving without dropping into a full application codebase.
+Cargo AI gives you a fast way to build agents that are **auditable**, **portable**, and **actually yours**. Refine them in Codex, run them locally, and share the definition through CargoAI.org in minutes so other people can hatch it on their own machines without turning the runtime into a black-box hosted service.
 
 ## Why Cargo AI
 
-- **Readable by design**: the agent definition is a small JSON file, not a framework project.
-- **No hand-built CLI required**: Cargo AI generates the executable and the typed runtime scaffolding for you.
-- **Good for non-technical and semi-technical builders**: you can understand the shape of the agent visually and grow it step by step.
-- **Works locally first**: hatch and run from your machine before worrying about hosted definitions.
-- **Account flows are built in**: register once to unlock hosted agent definitions, handles, and account-backed email workflows.
+- **Open Source and Fully Auditable**: inspect the generated code, understand what ships, and keep control of the runtime.
+- **You Own the Output**: hatch a local executable and generated code that you can keep, modify, and run wherever you want.
+- **Portable Across macOS, Linux, and Windows**: keep one readable agent definition and hatch it for the systems you care about.
+- **Built for Codex Iteration**: keep the agent small, readable, diffable, and easy to improve in conversation.
+- **CargoAI.org Extends Local Execution**: register an account to share definitions with anyone in minutes, use repository features, and unlock email-backed workflows while execution still happens on your machine.
+- **Faster Than a One-Off CLI**: skip hand-rolling a custom app just to get a reliable agent with typed output and real actions.
+
+What matters is not that the definition is JSON by itself. It is that the definition stays small enough to read, reason about, diff, and improve without losing trust in what the agent is doing.
 
 ## Quick Start
 
@@ -74,7 +71,7 @@ On Windows, run `adder_test.exe` or just `adder_test`.
 
 ### 4. Register an account
 
-If you want hosted definitions, handles, and email-backed account workflows, create an account early:
+If you want CargoAI.org features such as shareable definitions, your public handle, and email-backed workflows, create an account early:
 
 ```bash
 cargo ai account register you@example.com
@@ -82,7 +79,7 @@ cargo ai account confirm <code-from-email>
 cargo ai account handle --set yourname
 ```
 
-Once registered, you can hatch account-hosted agents directly:
+Once registered, you can pull definitions from your account repository and hatch them locally:
 
 ```bash
 cargo ai account hatch weather_test
