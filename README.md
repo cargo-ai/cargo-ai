@@ -40,17 +40,11 @@ After installation, verify Cargo is available:
 cargo --version
 ```
 
-### 1. Install `cargo-ai`
+### 1. Install `cargo-ai` and verify
 
 ```bash
 cargo install cargo-ai --locked
 cargo ai --help
-```
-
-Check for updates later with:
-
-```bash
-cargo ai version --check
 ```
 
 ### 2. Add a default model profile
