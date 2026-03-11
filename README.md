@@ -82,6 +82,24 @@ cargo ai profile add openai \
 cargo ai profile set openai --token sk-*** --auth api_key
 ```
 
+**Option C: open-source models with Ollama**
+
+Use this path if you want to run `cargo-ai` without ChatGPT or OpenAI at all.
+
+Install Ollama here:
+[Get Ollama](https://ollama.com/download)
+
+Then pull a model such as `mistral` and add a local profile:
+
+```bash
+ollama pull mistral
+
+cargo ai profile add ollama \
+  --server ollama \
+  --model mistral \
+  --default
+```
+
 ### 3. Hatch a sample agent
 
 ```bash
