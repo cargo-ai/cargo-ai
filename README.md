@@ -10,8 +10,9 @@ An open-source toolkit for building agents that are clear, portable, and fully a
 
 ## Why Cargo AI
 
-- **Declarative by Design**: define exactly what the agent does and keep the behavior easy to inspect.
+- **Declarative by Design**: define exactly what the agent does, what actions it can take, and keep the behavior easy to inspect.
 - **Open Source and Fully Auditable**: inspect the generated code, understand what ships, and keep control of the runtime.
+- **Choose Your Own AI**: use OpenAI models today or open-source models through Ollama, with room for more providers over time.
 - **You Own the Output**: hatch a local executable and generated code that you can keep, modify, and run wherever you want.
 - **Portable Across macOS, Linux, and Windows**: keep one readable agent definition and hatch it for the systems you care about.
 - **Easy to Share Through `cargo-ai.org`**: register an account to publish definitions in minutes so other people can hatch them locally on their own machines.
