@@ -17,7 +17,8 @@ An open-source toolkit for building agents that are clear, portable, and fully a
 - **Portable Across macOS, Linux, and Windows**: keep one readable agent definition and hatch it for the systems you care about.
 - **Easy to Share Through `cargo-ai.org`**: register an account to publish definitions in minutes so other people can hatch them locally on their own machines.
 - **Built for AI-Assisted Iteration**: keep the agent readable, diffable, and easy to improve with tools like Codex.
-- **Faster Than a One-Off CLI**: skip hand-rolling a custom app just to get a reliable agent with typed output and real actions.
+- **No Extra Token Plumbing Required**: use your existing Codex workflow when it fits, or bring your own model access when you want direct provider control.
+- **Built to Grow With You**: start with one clear definition, then add commands, email actions, and shared definitions as your workflow expands.
 
 What matters is not that the definition is JSON by itself. It is that the definition stays small enough to read, reason about, diff, and improve without losing trust in what the agent is doing.
 
