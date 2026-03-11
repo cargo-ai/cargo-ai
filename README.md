@@ -19,7 +19,7 @@ cargo ai hatch weather_test --config weather_test.json
 - **Open Source and Fully Auditable**: inspect the generated code, understand what ships, and keep control of the runtime.
 - **Choose Your Own AI**: use OpenAI models today or open-source models through Ollama, with room for more providers over time.
 - **Portable Across macOS, Linux, and Windows**: keep one readable agent definition and hatch it for the systems you care about.
-- **Easy to Share Through `cargo-ai.org`**: register an account to publish definitions in minutes so other people can hatch them locally on their own machines.
+- **Easy to Share Through `cargo-ai.org`**: create a free account to publish definitions in minutes so other people can hatch them locally on their own machines.
 - **No Extra Token Plumbing Required**: use your existing Codex workflow when it fits, or bring your own model access when you want direct provider control.
 - **Built for AI-Assisted Iteration**: keep the agent readable, diffable, and easy to improve with tools like Codex.
 - **Built to Grow With You**: start with one clear definition, then add commands, email actions, and shared definitions as your workflow expands.
