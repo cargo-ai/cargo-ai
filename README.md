@@ -4,17 +4,18 @@
 [![Multi-OS CI](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml/badge.svg)](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml)
 [![Status: Stable – Ongoing Development](https://img.shields.io/badge/Status-Stable_–_Ongoing_Development-blue)](https://github.com/analyzer1/cargo-ai)
 
-Build open-source AI agents that hatch into native executables.
+Build declarative AI agents in one simple file, hatch them into native executables, and share them in minutes so other people can run them on their own machines.
 
-cargo-ai™ gives you a fast way to build agents that are **auditable**, **portable**, and **actually yours**. Refine them in Codex, run them locally, and share the definition through `cargo-ai.org` in minutes so other people can hatch it on their own machines without turning the runtime into a black-box hosted service.
+An open-source toolkit for building agents that are clear, portable, and fully auditable. Define exactly what the agent does in a concise JSON file, refine it quickly with AI tools, including Codex, turn it into a real executable, and keep complete control over the result.
 
 ## Why Cargo AI
 
+- **Declarative by Design**: define exactly what the agent does and keep the behavior easy to inspect.
 - **Open Source and Fully Auditable**: inspect the generated code, understand what ships, and keep control of the runtime.
 - **You Own the Output**: hatch a local executable and generated code that you can keep, modify, and run wherever you want.
 - **Portable Across macOS, Linux, and Windows**: keep one readable agent definition and hatch it for the systems you care about.
-- **Built for Codex Iteration**: keep the agent small, readable, diffable, and easy to improve in conversation.
-- **`cargo-ai.org` Extends Local Execution**: register an account to share definitions with anyone in minutes, use repository features, and unlock email-backed workflows while execution still happens on your machine.
+- **Easy to Share Through `cargo-ai.org`**: register an account to publish definitions in minutes so other people can hatch them locally on their own machines.
+- **Built for AI-Assisted Iteration**: keep the agent readable, diffable, and easy to improve with tools like Codex.
 - **Faster Than a One-Off CLI**: skip hand-rolling a custom app just to get a reliable agent with typed output and real actions.
 
 What matters is not that the definition is JSON by itself. It is that the definition stays small enough to read, reason about, diff, and improve without losing trust in what the agent is doing.
