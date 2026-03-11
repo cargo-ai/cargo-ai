@@ -20,7 +20,7 @@ An open-source toolkit for building agents that are clear, portable, and fully a
 - **No Extra Token Plumbing Required**: use your existing Codex workflow when it fits, or bring your own model access when you want direct provider control.
 - **Built to Grow With You**: start with one clear definition, then add commands, email actions, and shared definitions as your workflow expands.
 
-What matters is not that the definition is JSON by itself. It is that the definition stays small enough to read, reason about, diff, and improve without losing trust in what the agent is doing.
+A concise JSON definition keeps the agent easy to read, review, diff, and improve without losing trust in what it does.
 
 ## Quick Start
 
