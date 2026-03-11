@@ -40,7 +40,7 @@ After installation, verify Cargo is available:
 cargo --version
 ```
 
-### 1. Install `cargo-ai` and verify
+### 1. Install `cargo-ai`
 
 ```bash
 cargo install cargo-ai --locked
