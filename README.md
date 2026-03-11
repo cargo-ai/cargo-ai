@@ -47,9 +47,11 @@ cargo install cargo-ai --locked
 cargo ai --help
 ```
 
-### 2. Add a default model profile
+### 2. Choose your model setup
 
-API-key path:
+Option A: direct provider control
+
+Use this path if you want an explicit model profile with direct provider credentials.
 
 ```bash
 cargo ai profile add openai \
@@ -61,7 +63,9 @@ cargo ai profile add openai \
 cargo ai profile set openai --token sk-*** --auth api_key
 ```
 
-OpenAI account-login path:
+Option B: use your existing OpenAI account workflow
+
+If you already use tools like Codex or ChatGPT, this path avoids separate API-token setup inside `cargo-ai`.
 
 ```bash
 cargo ai profile add openai-account \
