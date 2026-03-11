@@ -1,0 +1,59 @@
+{
+  "version": "2026-03-03.r1",
+  "inputs": [
+    {
+      "type": "text",
+      "text": "Return the preferred temperature unit as F or C and a confidence score greater than 0 and less than or equal to 1."
+    }
+  ],
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "unit": {
+        "type": "string",
+        "description": "Preferred temperature unit.",
+        "enum": ["F", "C"]
+      },
+      "confidence": {
+        "type": "number",
+        "description": "Confidence score greater than 0 and less than or equal to 1.",
+        "exclusiveMinimum": 0,
+        "maximum": 1
+      }
+    }
+  },
+  "actions": [
+    {
+      "name": "is_fahrenheit",
+      "logic": {
+        "==": [
+          { "var": "unit" },
+          "F"
+        ]
+      },
+      "run": [
+        {
+          "kind": "exec",
+          "program": "echo",
+          "args": ["Preferred unit is Fahrenheit."]
+        }
+      ]
+    },
+    {
+      "name": "confident_choice",
+      "logic": {
+        ">=": [
+          { "var": "confidence" },
+          0.8
+        ]
+      },
+      "run": [
+        {
+          "kind": "exec",
+          "program": "echo",
+          "args": ["Confidence is at least 0.8."]
+        }
+      ]
+    }
+  ]
+}

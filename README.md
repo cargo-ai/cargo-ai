@@ -341,7 +341,7 @@ cargo ai account agents hatch weather_test --definition-path /team/ops
 Cargo‑AI gives you two powerful guarantees:
 
 1. **Typed responses from any LLM**  
-   Responses can include integers, booleans, strings, numbers, and arrays of these types — all enforced at compile time.
+   Responses can include top-level integers, booleans, strings, and numbers, together with supported schema metadata such as `description`, string `enum`, and numeric bounds — all enforced through generated Rust types plus local validation.
 
 2. **Full expressive power of JSON Logic**  
    Perform comparisons, branching, variable evaluation, and complex decision logic to drive arbitrary command‑line actions.
@@ -413,6 +413,15 @@ cargo ai hatch weather_test --config weather_test.json
   - `number` → floating-point numbers (f64)  
   - `integer` → whole numbers (i64)  
 
+  Optional top-level property metadata and constraints:
+  - `description` on any supported top-level field
+  - `enum` on `string` fields only
+  - `minimum`, `maximum`, `exclusiveMinimum`, and `exclusiveMaximum` on `number` and `integer` fields
+
+  Current scope intentionally stays flat:
+  - top-level arrays are rejected
+  - nested objects and union types are rejected
+
   Example from [weather_test.json](./weather_test.json):
 
   ```json
@@ -426,6 +435,27 @@ cargo ai hatch weather_test --config weather_test.json
     }
   }
    ```
+
+  Example with enum and numeric bounds:
+
+  ```json
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "unit": {
+        "type": "string",
+        "description": "Temperature unit.",
+        "enum": ["F", "C"]
+      },
+      "confidence": {
+        "type": "number",
+        "description": "Confidence score greater than 0 and less than or equal to 1.",
+        "exclusiveMinimum": 0,
+        "maximum": 1
+      }
+    }
+  }
+  ```
 
 ### 3) Define Actions
 

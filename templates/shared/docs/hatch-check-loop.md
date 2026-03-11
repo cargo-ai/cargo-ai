@@ -5,7 +5,7 @@ Use this deterministic loop when authoring agent configs.
 ## 1) Start from a known-good example
 - Copy one of:
   - `.cargo-ai/examples/agent-minimal.json`
-  - `.cargo-ai/examples/agent-array-valid.json`
+  - `.cargo-ai/examples/agent-enum-bounds-valid.json`
 
 ## 2) Rename and edit
 - Save your draft as `<name>.json`
