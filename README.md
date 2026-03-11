@@ -28,7 +28,19 @@ A concise JSON definition keeps the agent easy to read, review, diff, and improv
 
 ## Quick Start
 
-### 1. Install
+### 0. Install Cargo
+
+Cargo AI requires Rust and Cargo. If you do not already have them, install Rust with `rustup` using the official guide for macOS, Linux, or Windows. This usually takes a few minutes.
+
+Official install guide: [Install Rust](https://rust-lang.org/tools/install/)
+
+After installation, verify Cargo is available:
+
+```bash
+cargo --version
+```
+
+### 1. Install `cargo-ai`
 
 ```bash
 cargo install cargo-ai --locked
