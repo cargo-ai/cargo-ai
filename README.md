@@ -401,6 +401,7 @@ cargo ai hatch weather_test --config weather_test.json
   ```
 
   You can use multiple `text` inputs, multiple `url` inputs, and later local `image` inputs. Runtime flags such as `--input-text`, `--input-url`, and `--input-image` replace the config-defined inputs when present.
+  For `type: "url"`, Cargo AI fetches the content with its own HTTP client before sending the text to the model. Treat the target compatibility bar as comparable to `curl` for ordinary static or server-rendered pages, not as a guarantee for browser-only or JavaScript-rendered content.
 
 ### 2) Define the Response Schema
 
