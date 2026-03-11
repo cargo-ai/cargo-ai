@@ -3,7 +3,7 @@
 //! This module is compiled in both the root crate build script and scaffolded
 //! agent build scripts to keep behavior deterministic across both paths.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env,
     error::Error,
     fmt,
@@ -151,15 +151,42 @@ enum FieldType {
 }
 
 #[derive(Debug, Clone)]
-struct MappedPropertyType {
+enum NumericConstraintValue {
+    Number(f64),
+    Integer(i64),
+}
+
+#[derive(Debug, Clone, Default)]
+struct NumericConstraints {
+    minimum: Option<NumericConstraintValue>,
+    maximum: Option<NumericConstraintValue>,
+    exclusive_minimum: Option<NumericConstraintValue>,
+    exclusive_maximum: Option<NumericConstraintValue>,
+}
+
+impl NumericConstraints {
+    fn has_any(&self) -> bool {
+        self.minimum.is_some()
+            || self.maximum.is_some()
+            || self.exclusive_minimum.is_some()
+            || self.exclusive_maximum.is_some()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AgentProperty {
+    name: String,
     rust_type: String,
     field_type: FieldType,
+    description: Option<String>,
+    enum_values: Option<Vec<String>>,
+    numeric_constraints: NumericConstraints,
 }
 
 #[derive(Debug, Clone)]
 struct AgentConfig {
     inputs: Vec<InputSpec>,
-    fields: Vec<(String, String)>,
+    properties: Vec<AgentProperty>,
     actions: Vec<Action>,
 }
 
@@ -373,21 +400,21 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
     let properties = get_required_object(schema, "properties", "$.agent_schema")?;
 
     let mut schema_field_types: BTreeMap<String, FieldType> = BTreeMap::new();
-    let mut fields = Vec::with_capacity(properties.len());
+    let mut parsed_properties = Vec::with_capacity(properties.len());
     for (name, prop_value) in properties {
         validate_rust_identifier(name, &format!("$.agent_schema.properties.{name}"))?;
         let prop_obj = expect_object(prop_value, &format!("$.agent_schema.properties.{name}"))?;
-        let mapped_type =
-            map_property_type(prop_obj, &format!("$.agent_schema.properties.{name}"))?;
-        schema_field_types.insert(name.clone(), mapped_type.field_type);
-        fields.push((name.clone(), mapped_type.rust_type));
+        let parsed_property =
+            parse_agent_property(name, prop_obj, &format!("$.agent_schema.properties.{name}"))?;
+        schema_field_types.insert(name.clone(), parsed_property.field_type.clone());
+        parsed_properties.push(parsed_property);
     }
 
     let actions = parse_actions(root_obj, &schema_field_types)?;
 
     Ok(AgentConfig {
         inputs,
-        fields,
+        properties: parsed_properties,
         actions,
     })
 }
@@ -1606,78 +1633,290 @@ fn type_name(field_type: &FieldType) -> &'static str {
     }
 }
 
-fn map_property_type(
+fn parse_agent_property(
+    name: &str,
     property: &Map<String, Value>,
     path: &str,
-) -> Result<MappedPropertyType, BuildError> {
+) -> Result<AgentProperty, BuildError> {
     let schema_type = get_schema_type(property, path)?;
-    match schema_type.as_str() {
-        "string" => Ok(MappedPropertyType {
-            rust_type: "String".to_string(),
-            field_type: FieldType::String,
-        }),
-        "boolean" => Ok(MappedPropertyType {
-            rust_type: "bool".to_string(),
-            field_type: FieldType::Boolean,
-        }),
-        "number" => Ok(MappedPropertyType {
-            rust_type: "f64".to_string(),
-            field_type: FieldType::Number,
-        }),
-        "integer" => Ok(MappedPropertyType {
-            rust_type: "i64".to_string(),
-            field_type: FieldType::Integer,
-        }),
-        "array" => map_array_type(property, path),
-        "object" => Err(BuildError::config(
-            format!("{path}.type"),
-            "nested object fields are not supported yet",
-        )),
-        other => Err(BuildError::config(
-            format!("{path}.type"),
-            format!("unsupported schema type `{other}`"),
-        )),
-    }
-}
-
-fn map_array_type(
-    property: &Map<String, Value>,
-    path: &str,
-) -> Result<MappedPropertyType, BuildError> {
-    let items_value = get_required_field(property, "items", path)?;
-    let items_path = format!("{path}.items");
-    let items_obj = expect_object(items_value, &items_path)?;
-    let item_type = get_schema_type(items_obj, &items_path)?;
-
-    let primitive = match item_type.as_str() {
-        "string" => "String",
-        "boolean" => "bool",
-        "number" => "f64",
-        "integer" => "i64",
+    let (rust_type, field_type) = match schema_type.as_str() {
+        "string" => ("String".to_string(), FieldType::String),
+        "boolean" => ("bool".to_string(), FieldType::Boolean),
+        "number" => ("f64".to_string(), FieldType::Number),
+        "integer" => ("i64".to_string(), FieldType::Integer),
         "array" => {
             return Err(BuildError::config(
-                format!("{items_path}.type"),
-                "nested arrays are not supported yet",
+                format!("{path}.type"),
+                "top-level array output fields are not supported in this story",
             ));
         }
         "object" => {
             return Err(BuildError::config(
-                format!("{items_path}.type"),
-                "array items of type `object` are not supported yet",
+                format!("{path}.type"),
+                "nested object fields are not supported yet",
             ));
         }
         other => {
             return Err(BuildError::config(
-                format!("{items_path}.type"),
-                format!("unsupported array item schema type `{other}`"),
+                format!("{path}.type"),
+                format!("unsupported schema type `{other}`"),
             ));
         }
     };
 
-    Ok(MappedPropertyType {
-        rust_type: format!("Vec<{primitive}>"),
-        field_type: FieldType::Array,
+    Ok(AgentProperty {
+        name: name.to_string(),
+        rust_type,
+        field_type: field_type.clone(),
+        description: parse_optional_description(property, path)?,
+        enum_values: parse_optional_string_enum(property, path, &field_type)?,
+        numeric_constraints: parse_numeric_constraints(property, path, &field_type)?,
     })
+}
+
+fn parse_optional_description(
+    property: &Map<String, Value>,
+    path: &str,
+) -> Result<Option<String>, BuildError> {
+    let Some(description_value) = property.get("description") else {
+        return Ok(None);
+    };
+
+    let description_path = format!("{path}.description");
+    let description = description_value.as_str().ok_or_else(|| {
+        BuildError::config(&description_path, "expected `description` to be a string")
+    })?;
+
+    if description.trim().is_empty() {
+        return Err(BuildError::config(
+            description_path,
+            "description cannot be empty when provided",
+        ));
+    }
+
+    Ok(Some(description.to_string()))
+}
+
+fn parse_optional_string_enum(
+    property: &Map<String, Value>,
+    path: &str,
+    field_type: &FieldType,
+) -> Result<Option<Vec<String>>, BuildError> {
+    let Some(enum_value) = property.get("enum") else {
+        return Ok(None);
+    };
+
+    let enum_path = format!("{path}.enum");
+    if field_type != &FieldType::String {
+        return Err(BuildError::config(
+            &enum_path,
+            "`enum` is supported only for `type: \"string\"` fields",
+        ));
+    }
+
+    let values = enum_value.as_array().ok_or_else(|| {
+        BuildError::config(
+            &enum_path,
+            "expected `enum` to be an array of string values",
+        )
+    })?;
+    if values.is_empty() {
+        return Err(BuildError::config(
+            &enum_path,
+            "expected `enum` to contain at least one value",
+        ));
+    }
+
+    let mut seen_values = BTreeSet::new();
+    let mut parsed_values = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        let value_path = format!("{enum_path}[{index}]");
+        let value = value
+            .as_str()
+            .ok_or_else(|| BuildError::config(&value_path, "expected an enum value string"))?;
+        if value.trim().is_empty() {
+            return Err(BuildError::config(
+                &value_path,
+                "enum values cannot be empty",
+            ));
+        }
+        if !seen_values.insert(value.to_string()) {
+            return Err(BuildError::config(
+                &value_path,
+                format!("duplicate enum value `{value}`"),
+            ));
+        }
+        parsed_values.push(value.to_string());
+    }
+
+    Ok(Some(parsed_values))
+}
+
+fn parse_numeric_constraints(
+    property: &Map<String, Value>,
+    path: &str,
+    field_type: &FieldType,
+) -> Result<NumericConstraints, BuildError> {
+    let constraints = NumericConstraints {
+        minimum: parse_numeric_constraint(property, "minimum", path, field_type)?,
+        maximum: parse_numeric_constraint(property, "maximum", path, field_type)?,
+        exclusive_minimum: parse_numeric_constraint(
+            property,
+            "exclusiveMinimum",
+            path,
+            field_type,
+        )?,
+        exclusive_maximum: parse_numeric_constraint(
+            property,
+            "exclusiveMaximum",
+            path,
+            field_type,
+        )?,
+    };
+
+    if constraints.minimum.is_some() && constraints.exclusive_minimum.is_some() {
+        return Err(BuildError::config(
+            format!("{path}.exclusiveMinimum"),
+            "`exclusiveMinimum` cannot be combined with `minimum`",
+        ));
+    }
+    if constraints.maximum.is_some() && constraints.exclusive_maximum.is_some() {
+        return Err(BuildError::config(
+            format!("{path}.exclusiveMaximum"),
+            "`exclusiveMaximum` cannot be combined with `maximum`",
+        ));
+    }
+
+    validate_numeric_constraint_bounds(path, field_type, &constraints)?;
+    Ok(constraints)
+}
+
+fn parse_numeric_constraint(
+    property: &Map<String, Value>,
+    key: &str,
+    path: &str,
+    field_type: &FieldType,
+) -> Result<Option<NumericConstraintValue>, BuildError> {
+    let Some(value) = property.get(key) else {
+        return Ok(None);
+    };
+
+    let value_path = format!("{path}.{key}");
+    if !is_numeric_type(field_type) {
+        return Err(BuildError::config(
+            &value_path,
+            format!(
+                "`{key}` is supported only for `type: \"number\"` or `type: \"integer\"` fields"
+            ),
+        ));
+    }
+
+    let number = value.as_number().ok_or_else(|| {
+        BuildError::config(
+            &value_path,
+            format!("expected `{key}` to be a numeric value"),
+        )
+    })?;
+
+    match field_type {
+        FieldType::Integer => number
+            .as_i64()
+            .map(NumericConstraintValue::Integer)
+            .ok_or_else(|| {
+                BuildError::config(
+                    &value_path,
+                    format!(
+                        "expected `{key}` to be an integer value for `type: \"integer\"` fields"
+                    ),
+                )
+            })
+            .map(Some),
+        FieldType::Number => number
+            .as_f64()
+            .map(NumericConstraintValue::Number)
+            .ok_or_else(|| {
+                BuildError::config(
+                    &value_path,
+                    format!("expected `{key}` to be a finite numeric value"),
+                )
+            })
+            .map(Some),
+        _ => Ok(None),
+    }
+}
+
+fn validate_numeric_constraint_bounds(
+    path: &str,
+    field_type: &FieldType,
+    constraints: &NumericConstraints,
+) -> Result<(), BuildError> {
+    let lower_bound = constraints
+        .minimum
+        .as_ref()
+        .map(|value| (value, false))
+        .or_else(|| {
+            constraints
+                .exclusive_minimum
+                .as_ref()
+                .map(|value| (value, true))
+        });
+    let upper_bound = constraints
+        .maximum
+        .as_ref()
+        .map(|value| (value, false))
+        .or_else(|| {
+            constraints
+                .exclusive_maximum
+                .as_ref()
+                .map(|value| (value, true))
+        });
+
+    let Some((lower_value, lower_exclusive)) = lower_bound else {
+        return Ok(());
+    };
+    let Some((upper_value, upper_exclusive)) = upper_bound else {
+        return Ok(());
+    };
+
+    let ordering = match field_type {
+        FieldType::Integer => {
+            integer_constraint_value(lower_value).cmp(&integer_constraint_value(upper_value))
+        }
+        FieldType::Number => number_constraint_value(lower_value)
+            .partial_cmp(&number_constraint_value(upper_value))
+            .expect("finite numeric constraints must be comparable"),
+        _ => return Ok(()),
+    };
+
+    if ordering.is_gt() {
+        return Err(BuildError::config(
+            path,
+            "lower bound cannot exceed upper bound",
+        ));
+    }
+
+    if ordering.is_eq() && (lower_exclusive || upper_exclusive) {
+        return Err(BuildError::config(
+            path,
+            "equal lower and upper bounds are not allowed when either bound is exclusive",
+        ));
+    }
+
+    Ok(())
+}
+
+fn integer_constraint_value(value: &NumericConstraintValue) -> i64 {
+    match value {
+        NumericConstraintValue::Integer(value) => *value,
+        NumericConstraintValue::Number(_) => unreachable!("integer bounds should remain integer"),
+    }
+}
+
+fn number_constraint_value(value: &NumericConstraintValue) -> f64 {
+    match value {
+        NumericConstraintValue::Number(value) => *value,
+        NumericConstraintValue::Integer(value) => *value as f64,
+    }
 }
 
 fn get_schema_type(property: &Map<String, Value>, path: &str) -> Result<String, BuildError> {
@@ -1865,11 +2104,104 @@ fn render_run_arg_parts(parts: &[RunArg]) -> String {
 
 fn render_agent_model(config: &AgentConfig) -> String {
     let mut struct_fields = String::new();
-    for (name, rust_type) in &config.fields {
-        struct_fields.push_str(&format!("    pub {name}: {rust_type},\n"));
-    }
+    let mut validation_calls = String::new();
+    let mut schema_metadata_calls = String::new();
+    let mut has_enum_validation = false;
+    let mut has_i64_validation = false;
+    let mut has_f64_validation = false;
 
     let mut input_list = String::new();
+    for property in &config.properties {
+        struct_fields.push_str(&format!(
+            "    pub {}: {},\n",
+            property.name, property.rust_type
+        ));
+
+        if let Some(enum_values) = &property.enum_values {
+            has_enum_validation = true;
+            let allowed_values = enum_values
+                .iter()
+                .map(|value| rust_string_literal(value))
+                .collect::<Vec<_>>()
+                .join(", ");
+            validation_calls.push_str(&format!(
+                "        validate_enum_field(&self.{name}, {field_name}, &[{allowed_values}])?;\n",
+                name = property.name,
+                field_name = rust_string_literal(&property.name)
+            ));
+        }
+
+        if property.numeric_constraints.has_any() {
+            let validation_call = match property.field_type {
+                FieldType::Integer => {
+                    has_i64_validation = true;
+                    format!(
+                        "        validate_i64_range(self.{name}, {field_name}, {minimum}, {exclusive_minimum}, {maximum}, {exclusive_maximum})?;\n",
+                        name = property.name,
+                        field_name = rust_string_literal(&property.name),
+                        minimum = render_optional_i64_literal(property.numeric_constraints.minimum.as_ref()),
+                        exclusive_minimum = render_optional_i64_literal(
+                            property.numeric_constraints.exclusive_minimum.as_ref()
+                        ),
+                        maximum = render_optional_i64_literal(property.numeric_constraints.maximum.as_ref()),
+                        exclusive_maximum = render_optional_i64_literal(
+                            property.numeric_constraints.exclusive_maximum.as_ref()
+                        ),
+                    )
+                }
+                FieldType::Number => {
+                    has_f64_validation = true;
+                    format!(
+                        "        validate_f64_range(self.{name}, {field_name}, {minimum}, {exclusive_minimum}, {maximum}, {exclusive_maximum})?;\n",
+                        name = property.name,
+                        field_name = rust_string_literal(&property.name),
+                        minimum = render_optional_f64_literal(property.numeric_constraints.minimum.as_ref()),
+                        exclusive_minimum = render_optional_f64_literal(
+                            property.numeric_constraints.exclusive_minimum.as_ref()
+                        ),
+                        maximum = render_optional_f64_literal(property.numeric_constraints.maximum.as_ref()),
+                        exclusive_maximum = render_optional_f64_literal(
+                            property.numeric_constraints.exclusive_maximum.as_ref()
+                        ),
+                    )
+                }
+                _ => String::new(),
+            };
+            validation_calls.push_str(&validation_call);
+        }
+
+        if property.description.is_some()
+            || property.enum_values.is_some()
+            || property.numeric_constraints.has_any()
+        {
+            schema_metadata_calls.push_str(&format!(
+                "    apply_property_schema_metadata(
+        properties,
+        {field_name},
+        {description},
+        {enum_values},
+        {minimum},
+        {maximum},
+        {exclusive_minimum},
+        {exclusive_maximum},
+    );\n",
+                field_name = rust_string_literal(&property.name),
+                description = render_optional_description(&property.description),
+                enum_values = render_optional_enum_values(property.enum_values.as_ref()),
+                minimum =
+                    render_optional_constraint_json(property.numeric_constraints.minimum.as_ref()),
+                maximum =
+                    render_optional_constraint_json(property.numeric_constraints.maximum.as_ref()),
+                exclusive_minimum = render_optional_constraint_json(
+                    property.numeric_constraints.exclusive_minimum.as_ref()
+                ),
+                exclusive_maximum = render_optional_constraint_json(
+                    property.numeric_constraints.exclusive_maximum.as_ref()
+                ),
+            ));
+        }
+    }
+
     for input in &config.inputs {
         let rendered = match input {
             InputSpec::Text { text } => format!(
@@ -2044,6 +2376,15 @@ fn render_agent_model(config: &AgentConfig) -> String {
         ));
     }
 
+    let validation_helpers =
+        render_validation_helpers(has_enum_validation, has_i64_validation, has_f64_validation);
+    let schema_metadata_helpers = render_schema_metadata_helpers(&schema_metadata_calls);
+    let schema_metadata_apply = if schema_metadata_calls.is_empty() {
+        String::new()
+    } else {
+        "    apply_output_schema_metadata(&mut v);\n".to_string()
+    };
+
     format!(
         r##"
 use schemars::{{JsonSchema, schema_for}};
@@ -2052,6 +2393,14 @@ use serde_json;
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct Output {{
 {struct_fields}}}
+
+impl crate::providers::ValidatedResponse for Output {{
+    fn validate_response(&self) -> Result<(), String> {{
+{validation_calls}        Ok(())
+    }}
+}}
+
+{validation_helpers}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Input {{
@@ -2085,8 +2434,11 @@ pub fn json_schema_value() -> serde_json::Value {{
         }}
     }}
 
+{schema_metadata_apply}
     v
 }}
+
+{schema_metadata_helpers}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum ActionInput {{
@@ -2138,9 +2490,260 @@ pub fn actions() -> Vec<Action> {{
 }}
 "##,
         struct_fields = struct_fields,
+        validation_calls = validation_calls,
+        validation_helpers = validation_helpers,
         input_list = input_list,
+        schema_metadata_apply = schema_metadata_apply,
+        schema_metadata_helpers = schema_metadata_helpers,
         action_code = action_code
     )
+}
+
+fn render_validation_helpers(
+    has_enum_validation: bool,
+    has_i64_validation: bool,
+    has_f64_validation: bool,
+) -> String {
+    let mut helpers = String::new();
+
+    if has_enum_validation {
+        helpers.push_str(
+            r#"
+fn validate_enum_field(value: &str, field_name: &str, allowed_values: &[&str]) -> Result<(), String> {
+    if allowed_values.contains(&value) {
+        return Ok(());
+    }
+
+    let allowed = allowed_values
+        .iter()
+        .map(|value| format!("`{value}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!("field `{field_name}` must be one of: {allowed}"))
+}
+"#,
+        );
+    }
+
+    if has_i64_validation {
+        helpers.push_str(
+            r#"
+fn validate_i64_range(
+    value: i64,
+    field_name: &str,
+    minimum: Option<i64>,
+    exclusive_minimum: Option<i64>,
+    maximum: Option<i64>,
+    exclusive_maximum: Option<i64>,
+) -> Result<(), String> {
+    if let Some(minimum) = minimum {
+        if value < minimum {
+            return Err(format!("field `{field_name}` must be greater than or equal to {minimum}"));
+        }
+    }
+    if let Some(exclusive_minimum) = exclusive_minimum {
+        if value <= exclusive_minimum {
+            return Err(format!("field `{field_name}` must be greater than {exclusive_minimum}"));
+        }
+    }
+    if let Some(maximum) = maximum {
+        if value > maximum {
+            return Err(format!("field `{field_name}` must be less than or equal to {maximum}"));
+        }
+    }
+    if let Some(exclusive_maximum) = exclusive_maximum {
+        if value >= exclusive_maximum {
+            return Err(format!("field `{field_name}` must be less than {exclusive_maximum}"));
+        }
+    }
+    Ok(())
+}
+"#,
+        );
+    }
+
+    if has_f64_validation {
+        helpers.push_str(
+            r#"
+
+fn validate_f64_range(
+    value: f64,
+    field_name: &str,
+    minimum: Option<f64>,
+    exclusive_minimum: Option<f64>,
+    maximum: Option<f64>,
+    exclusive_maximum: Option<f64>,
+) -> Result<(), String> {
+    if let Some(minimum) = minimum {
+        if value < minimum {
+            return Err(format!("field `{field_name}` must be greater than or equal to {minimum}"));
+        }
+    }
+    if let Some(exclusive_minimum) = exclusive_minimum {
+        if value <= exclusive_minimum {
+            return Err(format!("field `{field_name}` must be greater than {exclusive_minimum}"));
+        }
+    }
+    if let Some(maximum) = maximum {
+        if value > maximum {
+            return Err(format!("field `{field_name}` must be less than or equal to {maximum}"));
+        }
+    }
+    if let Some(exclusive_maximum) = exclusive_maximum {
+        if value >= exclusive_maximum {
+            return Err(format!("field `{field_name}` must be less than {exclusive_maximum}"));
+        }
+    }
+    Ok(())
+}
+"#,
+        );
+    }
+
+    helpers
+}
+
+fn render_schema_metadata_helpers(schema_metadata_calls: &str) -> String {
+    if schema_metadata_calls.is_empty() {
+        return String::new();
+    }
+
+    format!(
+        r#"
+fn apply_output_schema_metadata(schema: &mut serde_json::Value) {{
+    let Some(obj) = schema.as_object_mut() else {{
+        return;
+    }};
+    let Some(properties) = obj
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    else {{
+        return;
+    }};
+
+{schema_metadata_calls}}}
+
+fn apply_property_schema_metadata(
+    properties: &mut serde_json::Map<String, serde_json::Value>,
+    field_name: &str,
+    description: Option<&str>,
+    enum_values: Option<Vec<&str>>,
+    minimum: Option<serde_json::Value>,
+    maximum: Option<serde_json::Value>,
+    exclusive_minimum: Option<serde_json::Value>,
+    exclusive_maximum: Option<serde_json::Value>,
+) {{
+    let Some(property_schema) = properties
+        .get_mut(field_name)
+        .and_then(serde_json::Value::as_object_mut)
+    else {{
+        return;
+    }};
+
+    if let Some(description) = description {{
+        property_schema.insert(
+            "description".to_string(),
+            serde_json::Value::String(description.to_string()),
+        );
+    }}
+    if let Some(enum_values) = enum_values {{
+        property_schema.insert(
+            "enum".to_string(),
+            serde_json::Value::Array(
+                enum_values
+                    .into_iter()
+                    .map(|value| serde_json::Value::String(value.to_string()))
+                    .collect(),
+            ),
+        );
+    }}
+    if let Some(minimum) = minimum {{
+        property_schema.insert("minimum".to_string(), minimum);
+    }}
+    if let Some(maximum) = maximum {{
+        property_schema.insert("maximum".to_string(), maximum);
+    }}
+    if let Some(exclusive_minimum) = exclusive_minimum {{
+        property_schema.insert("exclusiveMinimum".to_string(), exclusive_minimum);
+    }}
+    if let Some(exclusive_maximum) = exclusive_maximum {{
+        property_schema.insert("exclusiveMaximum".to_string(), exclusive_maximum);
+    }}
+}}
+"#,
+        schema_metadata_calls = schema_metadata_calls
+    )
+}
+
+fn render_optional_description(description: &Option<String>) -> String {
+    description
+        .as_ref()
+        .map(|description| format!("Some({})", rust_string_literal(description)))
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn render_optional_enum_values(enum_values: Option<&Vec<String>>) -> String {
+    enum_values
+        .map(|values| {
+            let rendered = values
+                .iter()
+                .map(|value| rust_string_literal(value))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("Some(vec![{rendered}])")
+        })
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn render_optional_constraint_json(value: Option<&NumericConstraintValue>) -> String {
+    value
+        .map(|value| format!("Some({})", render_constraint_json(value)))
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn render_constraint_json(value: &NumericConstraintValue) -> String {
+    match value {
+        NumericConstraintValue::Integer(value) => {
+            format!("serde_json::Value::Number(serde_json::Number::from({value}i64))")
+        }
+        NumericConstraintValue::Number(value) => {
+            format!("serde_json::json!({value})")
+        }
+    }
+}
+
+fn render_optional_i64_literal(value: Option<&NumericConstraintValue>) -> String {
+    value
+        .map(|value| format!("Some({})", render_i64_literal(value)))
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn render_i64_literal(value: &NumericConstraintValue) -> String {
+    match value {
+        NumericConstraintValue::Integer(value) => value.to_string(),
+        NumericConstraintValue::Number(_) => {
+            unreachable!("integer constraints should remain integer")
+        }
+    }
+}
+
+fn render_optional_f64_literal(value: Option<&NumericConstraintValue>) -> String {
+    value
+        .map(|value| format!("Some({})", render_f64_literal(value)))
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn render_f64_literal(value: &NumericConstraintValue) -> String {
+    let numeric_value = match value {
+        NumericConstraintValue::Number(value) => value.to_string(),
+        NumericConstraintValue::Integer(value) => (*value as f64).to_string(),
+    };
+
+    if numeric_value.contains(['.', 'e', 'E']) {
+        numeric_value
+    } else {
+        format!("{numeric_value}.0")
+    }
 }
 
 fn rust_string_literal(value: &str) -> String {

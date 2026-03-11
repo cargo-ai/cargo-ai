@@ -4,6 +4,18 @@ Use this file after the user describes the outcome they want. The user should no
 
 ## Pattern Guide
 
+### Start with `schema-features.json` when:
+
+- the user needs more than one scalar output field type in the same agent
+- the user needs `description`, string `enum`, or numeric bounds
+- the main uncertainty is the output schema shape rather than action control flow
+
+### Start with `runtime-file-local-exec.json` when:
+
+- the user wants to summarize or inspect a local file
+- the caller may choose the file at runtime
+- the agent should return structured output and also run a local platform-specific follow-up step
+
 ### Start with `basic-agent.json` when:
 
 - the user wants one agent

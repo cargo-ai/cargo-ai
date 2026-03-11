@@ -18,6 +18,7 @@ Examples:
 - `output_variable` on `agent` or `email_me`
 - missing `program` for `exec`
 - missing `agent` for `kind: "agent"`
+- unsupported or misspelled `platform` values
 
 ### Bad variable references
 
@@ -33,12 +34,36 @@ Check for:
 - `../`
 - child agents that are not written as `./child_name`
 
+### Runtime input confusion
+
+Check for:
+- using `--input-file`, `--input-url`, or `--input-image` without also supplying `--input-text` when the instructions were only baked into JSON
+- expecting runtime input flags to append to JSON `inputs`; they replace the full baked input list for that run
+- using a JSON `file.path` when the caller should really choose the file at invocation time
+
+### Step did not run on the current OS
+
+Check for:
+- `platform` filtering the step out on the current runtime OS
+- a macOS-only command being tested on another platform
+- platform-specific assumptions that belong in sidecar notes
+
+### Child-agent expectations
+
+Check for:
+- expecting parent actions to read child top-level output fields directly
+- missing `status_variable` / `error_variable` when the parent needs to react to child success or failure
+
 ### Portability drift
 
 If the user asked for portability across macOS, Windows, and Linux:
 - remove shell-specific assumptions when possible
 - minimize `exec` usage
 - keep commands and paths as generic as possible
+
+If the user asked for macOS-only local behavior:
+- prefer `/bin/echo` or another explicit executable over a bare shell builtin
+- pair the step with `platform: "macos"` when the step should not run elsewhere
 
 ## Default Fix Loop
 

@@ -1,0 +1,44 @@
+{
+  "version": "2026-03-11.r1",
+  "inputs": [
+    {
+      "type": "text",
+      "text": "Read the attached PDF and return a quick plain-English summary in 2 to 4 sentences."
+    },
+    {
+      "type": "file",
+      "path": "./runtime.pdf"
+    }
+  ],
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "summary": {
+        "type": "string",
+        "description": "Quick plain-English summary of the provided PDF."
+      }
+    }
+  },
+  "actions": [
+    {
+      "name": "echo_summary_locally",
+      "logic": {
+        "!=": [
+          { "var": "summary" },
+          ""
+        ]
+      },
+      "run": [
+        {
+          "kind": "exec",
+          "program": "/bin/echo",
+          "args": [
+            "PDF summary:",
+            { "var": "summary" }
+          ],
+          "platform": "macos"
+        }
+      ]
+    }
+  ]
+}

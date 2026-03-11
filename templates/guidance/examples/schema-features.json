@@ -1,0 +1,102 @@
+{
+  "version": "2026-03-11.r1",
+  "inputs": [
+    {
+      "type": "text",
+      "text": "Return report_title as a short string, summary_style as either bullet or paragraph, urgency as an integer from 1 to 5, confidence as a number greater than 0 and less than or equal to 1, and send_report as true or false."
+    }
+  ],
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "report_title": {
+        "type": "string",
+        "description": "Short report title."
+      },
+      "summary_style": {
+        "type": "string",
+        "description": "Preferred summary style.",
+        "enum": ["bullet", "paragraph"]
+      },
+      "urgency": {
+        "type": "integer",
+        "description": "Urgency from 1 to 5.",
+        "minimum": 1,
+        "maximum": 5
+      },
+      "confidence": {
+        "type": "number",
+        "description": "Confidence greater than 0 and less than or equal to 1.",
+        "exclusiveMinimum": 0,
+        "maximum": 1
+      },
+      "send_report": {
+        "type": "boolean",
+        "description": "Whether the report should be sent."
+      }
+    }
+  },
+  "actions": [
+    {
+      "name": "prepare_report_notice",
+      "logic": {
+        "==": [
+          { "var": "send_report" },
+          true
+        ]
+      },
+      "run": [
+        {
+          "kind": "exec",
+          "program": "echo",
+          "args": [
+            "prepare",
+            { "var": "report_title" },
+            "as",
+            { "var": "summary_style" }
+          ],
+          "output_variable": "prepare_message",
+          "status_variable": "prepare_status",
+          "error_variable": "prepare_error"
+        },
+        {
+          "kind": "email_me",
+          "when": {
+            "==": [
+              { "var": "prepare_status" },
+              "succeeded"
+            ]
+          },
+          "subject": "Report prepared",
+          "text": [
+            "Prepared message: ",
+            { "var": "prepare_message" }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "high_urgency_follow_up",
+      "logic": {
+        ">=": [
+          { "var": "urgency" },
+          4
+        ]
+      },
+      "run": [
+        {
+          "kind": "email_me",
+          "subject": "High urgency report",
+          "text": [
+            "Urgency ",
+            { "var": "urgency" },
+            " for ",
+            { "var": "report_title" },
+            " with confidence ",
+            { "var": "confidence" }
+          ]
+        }
+      ]
+    }
+  ]
+}

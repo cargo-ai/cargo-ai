@@ -13,8 +13,12 @@ pub(crate) enum ContentPart {
     File { filename: String, file_data: String },
 }
 
+pub(crate) trait ValidatedResponse {
+    fn validate_response(&self) -> Result<(), String>;
+}
+
 #[derive(Debug)]
-pub struct Cargo<T: for<'de> Deserialize<'de> + Serialize + Clone> {
+pub struct Cargo<T: for<'de> Deserialize<'de> + Serialize + Clone + ValidatedResponse> {
     inputs: Vec<ContentPart>,
     context: String,
     response: Option<T>,
@@ -23,7 +27,7 @@ pub struct Cargo<T: for<'de> Deserialize<'de> + Serialize + Clone> {
 // We use `for<'de>` to tell the compiler how long any borrowed data inside T
 // must stay valid during deserialization. This annotation only guides the compiler;
 // it does not tie that lifetime to the entire struct.
-impl<T: for<'de> Deserialize<'de> + Serialize + Clone> Cargo<T> {
+impl<T: for<'de> Deserialize<'de> + Serialize + Clone + ValidatedResponse> Cargo<T> {
     pub fn new(inputs: Vec<ContentPart>, context: String) -> Self {
         Cargo {
             inputs,
@@ -47,11 +51,17 @@ impl<T: for<'de> Deserialize<'de> + Serialize + Clone> Cargo<T> {
     }
 
     pub fn set_response(&mut self, response: String) -> bool {
-        match serde_json::from_str(&response) {
-            Ok(response) => {
-                self.response = Some(response);
-                true
-            }
+        match serde_json::from_str::<T>(&response) {
+            Ok(response) => match response.validate_response() {
+                Ok(()) => {
+                    self.response = Some(response);
+                    true
+                }
+                Err(_) => {
+                    self.response = None;
+                    false
+                }
+            },
             Err(_) => {
                 // Keep state deterministic: failed parse must not retain stale success output.
                 self.response = None;
@@ -231,12 +241,29 @@ fn image_media_type(path: &Path) -> Result<&'static str, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cargo, ContentPart};
+    use super::{Cargo, ContentPart, ValidatedResponse};
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
     struct SampleOutput {
         answer: i32,
+    }
+
+    impl ValidatedResponse for SampleOutput {
+        fn validate_response(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+    struct RejectingOutput {
+        answer: i32,
+    }
+
+    impl ValidatedResponse for RejectingOutput {
+        fn validate_response(&self) -> Result<(), String> {
+            Err("rejected".to_string())
+        }
     }
 
     #[test]
@@ -275,6 +302,14 @@ mod tests {
         assert_eq!(cargo.get_response(), Some(SampleOutput { answer: 4 }));
 
         assert!(!cargo.set_response("not-json".to_string()));
+        assert_eq!(cargo.get_response(), None);
+    }
+
+    #[test]
+    fn set_response_rejects_parsed_output_that_fails_local_validation() {
+        let mut cargo = Cargo::<RejectingOutput>::new(vec![], "context".to_string());
+
+        assert!(!cargo.set_response(r#"{"answer":4}"#.to_string()));
         assert_eq!(cargo.get_response(), None);
     }
 

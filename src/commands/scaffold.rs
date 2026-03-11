@@ -16,9 +16,9 @@ const EXAMPLE_AGENT_MINIMAL: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/shared/examples/agent-minimal.json"
 ));
-const EXAMPLE_AGENT_ARRAY_VALID: &str = include_str!(concat!(
+const EXAMPLE_AGENT_ENUM_BOUNDS_VALID: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/templates/shared/examples/agent-array-valid.json"
+    "/templates/shared/examples/agent-enum-bounds-valid.json"
 ));
 const EXAMPLE_AGENT_LOGIC_INVALID_VAR: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -63,8 +63,8 @@ const COMMON_TEMPLATE_ARTIFACTS: [TemplateArtifact; 5] = [
         contents: EXAMPLE_AGENT_MINIMAL,
     },
     TemplateArtifact {
-        relative_path: ".cargo-ai/examples/agent-array-valid.json",
-        contents: EXAMPLE_AGENT_ARRAY_VALID,
+        relative_path: ".cargo-ai/examples/agent-enum-bounds-valid.json",
+        contents: EXAMPLE_AGENT_ENUM_BOUNDS_VALID,
     },
     TemplateArtifact {
         relative_path: ".cargo-ai/examples/invalid/agent-logic-invalid-var.json",
@@ -470,7 +470,7 @@ mod tests {
         assert!(metadata_contents.contains("vcs = \"none\""));
         assert!(dir.join(".cargo-ai/examples/agent-minimal.json").exists());
         assert!(dir
-            .join(".cargo-ai/examples/agent-array-valid.json")
+            .join(".cargo-ai/examples/agent-enum-bounds-valid.json")
             .exists());
         assert!(dir
             .join(".cargo-ai/examples/invalid/agent-logic-invalid-var.json")
