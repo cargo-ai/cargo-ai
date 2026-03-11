@@ -49,9 +49,9 @@ cargo ai --help
 
 ### 2. Choose your model setup
 
-**Option A: recommended if you already use OpenAI + Codex**
+**Option A: recommended if you use ChatGPT Plus or above**
 
-This is the easier path today if you already use OpenAI tools like Codex. `cargo-ai` uses your Codex login state so you do not need to paste a separate API key into Cargo AI.
+Includes Codex at no additional cost. This is the easiest path today. `cargo-ai` uses your Codex login, so no separate API key is required.
 
 ```bash
 codex login
