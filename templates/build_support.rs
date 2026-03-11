@@ -2716,9 +2716,15 @@ fn render_optional_f64_literal(value: Option<&NumericConstraintValue>) -> String
 }
 
 fn render_f64_literal(value: &NumericConstraintValue) -> String {
-    match value {
+    let numeric_value = match value {
         NumericConstraintValue::Number(value) => value.to_string(),
         NumericConstraintValue::Integer(value) => (*value as f64).to_string(),
+    };
+
+    if numeric_value.contains(['.', 'e', 'E']) {
+        numeric_value
+    } else {
+        format!("{numeric_value}.0")
     }
 }
 

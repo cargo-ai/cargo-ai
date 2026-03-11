@@ -113,7 +113,7 @@ fn preserves_numeric_bounds_in_generated_schema_and_runtime_validation() {
     let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
 
     assert!(generated.contains(
-        r#"validate_f64_range(self.confidence, "confidence", Some(0), None, None, Some(1))?;"#
+        r#"validate_f64_range(self.confidence, "confidence", Some(0.0), None, None, Some(1.0))?;"#
     ));
     assert!(generated.contains(r#""minimum".to_string()"#));
     assert!(generated.contains(r#""exclusiveMaximum".to_string()"#));
