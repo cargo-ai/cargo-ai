@@ -49,9 +49,28 @@ cargo ai --help
 
 ### 2. Choose your model setup
 
-Option A: direct provider control
+Option A: recommended if you already use OpenAI + Codex
 
-Use this path if you want an explicit model profile with direct provider credentials.
+This is the easier path today if you already use OpenAI tools like Codex. `cargo-ai` uses your Codex login state so you do not need to paste a separate API key into Cargo AI.
+
+```bash
+codex login
+
+cargo ai profile add openai-account \
+  --server openai \
+  --model gpt-4o \
+  --auth openai_account \
+  --default
+
+cargo ai auth login openai --profile openai-account --set-default
+```
+
+If you do not already have Codex installed, get it here:
+[Codex CLI setup](https://developers.openai.com/codex/cli)
+
+Option B: direct provider control
+
+Use this path if you want an explicit model profile with direct provider credentials and no Codex dependency.
 
 ```bash
 cargo ai profile add openai \
@@ -61,20 +80,6 @@ cargo ai profile add openai \
   --default
 
 cargo ai profile set openai --token sk-*** --auth api_key
-```
-
-Option B: use your existing OpenAI account workflow
-
-If you already use tools like Codex or ChatGPT, this path avoids separate API-token setup inside `cargo-ai`.
-
-```bash
-cargo ai profile add openai-account \
-  --server openai \
-  --model gpt-4o \
-  --auth openai_account \
-  --default
-
-cargo ai auth login openai --profile openai-account --set-default
 ```
 
 ### 3. Hatch a sample agent
