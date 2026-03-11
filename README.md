@@ -50,12 +50,22 @@ Supports both **OpenAI‑API‑compatible servers** and **Ollama**.
 2. **Install cargo-ai**  
    Once Cargo is available, install `cargo-ai`:  
    ```bash
-   cargo install cargo-ai
+   cargo install cargo-ai --locked
    ```
 
     Verify installation:  
     ```bash
     cargo ai --help
+    ```
+
+    Check whether a newer crates.io release is available:
+    ```bash
+    cargo ai version --check
+    ```
+
+    Update later with:
+    ```bash
+    cargo install cargo-ai --locked
     ```
 
 ## ⚡ Quick Start
@@ -188,10 +198,10 @@ The generated guidance is tuned for authoring Cargo AI JSON definitions directly
   ```
  
   This allows you to leverage either the Cargo‑AI repo or a local `.json` file.  
-  For example, using the same `adder_test.json` stored locally:
+  For example, from the repo root using the bundled `adder_test.json`:
 
   ```bash
-  cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json
+  cargo ai hatch adder_test2 --config ./adder_test.json
   ```
 
   This will create a new agent project named `adder_test2` using the contents of your local JSON file.
@@ -203,13 +213,13 @@ The generated guidance is tuned for authoring Cargo AI JSON definitions directly
   To build for an explicit Rust target triple, pass `--target` through to Cargo:
 
   ```bash
-  cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json --target aarch64-apple-darwin
+  cargo ai hatch adder_test2 --config ./adder_test.json --target aarch64-apple-darwin
   ```
 
   To export the built binary to a specific directory while keeping the binary name based on `<name>`:
 
   ```bash
-  cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json --output-dir ./dist
+  cargo ai hatch adder_test2 --config ./adder_test.json --output-dir ./dist
   ```
 
   Cargo AI does not install Rust targets automatically. Generated agents now use Rustls-backed `reqwest` in the default template to avoid the prior common OpenSSL cross-compilation blocker, but if the requested target is missing or the linker/SDK/sysroot toolchain for that target is incomplete, Cargo AI still surfaces the underlying Cargo/Rust error directly.
@@ -217,7 +227,7 @@ The generated guidance is tuned for authoring Cargo AI JSON definitions directly
   By default, Cargo AI still deletes the internal workspace after build/check. To keep it for inspection:
 
   ```bash
-  cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json --keep-project
+  cargo ai hatch adder_test2 --config ./adder_test.json --keep-project
   ```
 
   This preserves the internal project under `~/.cargo/.cargo-ai/agents/<name>/`.
