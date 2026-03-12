@@ -253,6 +253,9 @@ File input:
 }
 ```
 
+<details>
+<summary>Advanced input example: multiple inputs with related scoring</summary>
+
 Multiple inputs with related scoring:
 
 ```json
@@ -300,6 +303,8 @@ You can override the baked inputs any time you run the generated agent. Runtime 
   --input-text "These are the building specifications." \
   --input-file "./building-456-specs.pdf"
 ```
+
+</details>
 
 ### `agent_schema`
 
