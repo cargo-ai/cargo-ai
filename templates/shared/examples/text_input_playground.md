@@ -1,6 +1,6 @@
-# `text-input-playground.json`
+# `text_input_playground.json`
 
-Use this as a simple text-input example you can copy and hatch locally.
+Use this as a simple text-input example you can copy into an empty folder and hatch locally.
 
 ```json
 {
@@ -41,14 +41,11 @@ Use this as a simple text-input example you can copy and hatch locally.
 }
 ```
 
-Validate it:
+Save it as `text_input_playground.json`, then run:
 
 ```bash
-cargo ai hatch text_input_playground --config ./templates/shared/examples/text-input-playground.json --check
+cargo ai hatch text_input_playground.json
+./text_input_playground
 ```
 
-Build it:
-
-```bash
-cargo ai hatch text_input_playground --config ./templates/shared/examples/text-input-playground.json
-```
+For Windows users, run `text_input_playground.exe` or just `text_input_playground`.
