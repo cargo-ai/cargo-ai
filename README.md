@@ -547,6 +547,33 @@ Or target multiple platforms with an array:
 { "kind": "exec", "program": "./save_report.sh", "platform": ["macos", "linux", "windows"], "args": [{ "var": "reason" }] }
 ```
 
+### Child agents
+
+Use child agents for orchestration and handoff, not automatic output merging.
+
+- Use explicit same-level paths such as `./child_reporter`.
+- The default nested child-agent limit is `5`. Override it with `--max-agent-depth`.
+- The default runtime budget for the parent plus any children is `600` seconds. Override it with `--max-runtime-in-sec`.
+- Parent steps may pass child `inputs` and capture child `status_variable` or `error_variable`.
+- Parent steps cannot directly merge the child agent's top-level structured output fields back into the parent variable namespace.
+
+Example:
+
+```json
+{
+  "kind": "agent",
+  "agent": "./child_reporter",
+  "status_variable": "child_status",
+  "error_variable": "child_error",
+  "inputs": [
+    {
+      "type": "text",
+      "text": ["Follow up on this review: ", { "var": "reason" }]
+    }
+  ]
+}
+```
+
 ## Build In Any Editor
 
 You can build a `cargo-ai` agent in any editor you want. If you want to check whether the definition is valid before exporting a binary, run:
