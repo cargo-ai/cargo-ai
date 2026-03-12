@@ -145,7 +145,7 @@ Cargo AI keeps the authoring model intentionally small:
 2. `agent_schema`
    The typed response you expect back.
 3. `actions`
-   What to do after the response is validated.
+   What to do after the response is validated, including the ordered `run` steps inside each action.
 
 A minimal agent looks like this:
 
