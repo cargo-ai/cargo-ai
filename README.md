@@ -1,556 +1,695 @@
-# cargo-ai
+# cargo-ai™
 
 [![Audit Status](https://github.com/analyzer1/cargo-ai/actions/workflows/security-audit.yml/badge.svg)](https://github.com/analyzer1/cargo-ai/actions/workflows/security-audit.yml)
 [![Multi-OS CI](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml/badge.svg)](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml)
 [![Status: Stable – Ongoing Development](https://img.shields.io/badge/Status-Stable_–_Ongoing_Development-blue)](https://github.com/analyzer1/cargo-ai)
-> **Early stable (< v0.1):** reliable base ready for use, with evolving APIs and config patterns.
 
-## 🌐 Overview
-`cargo-ai` is a lightweight, Rust-based framework for building **no-code AI agents** using clean, declarative, JSON configs. Agents compile into fast, secure binaries—perfect for local machines, servers, and with broader embedded device support planned.
+Declarative AI agents. Native executables. Shareable in minutes.
 
-Supports both **OpenAI‑API‑compatible servers** and **Ollama**.
-
-*Lightweight AI agents. Built in Rust. Declared in JSON.*
-
-## ✨ Features
-
-- **Declarative, No-Code Agents** – Define agent logic in JSON  
-- **Portable JSON Configs** – Share agent definitions as JSON; others can "hatch" and run them on their own systems
-- **Full CLI Integration** – Conformed agent outputs can run an arbitrary command-line program
-- **Rust-Powered** – Safe, fast, and portable across environments  
-- **Fully Local & Secure** – All logic executes client-side (no phoning home)  
-- **LLM Connection Profiles** – Store reusable settings for servers, models, auth modes, and timeouts so you don't re-enter them each run
-- **Repository Integration** – Download JSON configurations directly from Cargo-AI and hatch agents without needing local files
-- **Cross‑Platform Support** – Runs on any Linux, macOS, or Windows device
-
-## 🧭 Internal Layout (CLI)
-
-- `src/main.rs` keeps runtime dispatch thin and routes work into `src/commands/*`.
-- `src/args.rs` is the parser root and composes command parsers from `src/args/*`.
-- `src/commands/*` owns command behavior (`preflight`, `hatch`, `profile`, `shipyard`, `account`).
-- `src/commands/account/*` and `src/args/account/*` keep account subcommand paths explicit and testable.
-- `templates/build_support.rs` is the shared build-time hardening/codegen logic used by both build scripts.
-
-## 🚀 Upcoming Features
-
-- **User Repositories (Public & Private)** – Publish agents to your own hosted repository and share them publicly or privately with collaborators.
-- **Email Actions** – Enable agents to send automated emails as action outputs, expanding beyond command-line execution.
-
-## 🔮 Future Features
-- **Microcontroller Support** – Planned support for ultra‑lightweight environments, expanding beyond standard servers to microcontroller‑class devices
-
-## 📦 Installation
-
-### Base Install
-
-1. **Install Rust & Cargo**  
-   Follow the official guide:  
-   [Install Rust & Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html)
-
-2. **Install cargo-ai**  
-   Once Cargo is available, install `cargo-ai`:  
-   ```bash
-   cargo install cargo-ai
-   ```
-
-    Verify installation:  
-    ```bash
-    cargo ai --help
-    ```
-
-## ⚡ Quick Start
-
-### Configure an LLM Profile (Recommended)
-
-Before hatching or running agents, it is recommended to set up a default LLM connection profile.  
-This allows `cargo-ai` to run agents without requiring server, model, or token flags each time.
-
-#### Add a Default OpenAI Profile
-
-Example (using OpenAI GPT 4o):
+An open-source toolkit for building agents that are clear, portable, and fully auditable. Define exactly what the agent does in a concise JSON file, refine it quickly with AI tools, including Codex, hatch it into a native executable, and keep complete control over the result.
 
 ```bash
-cargo ai profile add openai \
-    --server openai \
-    --model gpt-4o \
-    --auth api_key \
-    --default
+cargo ai hatch agent_x
 ```
 
-Set token-based credentials:
+Our mission is to make AI agents that do exactly what you specify: declarative, auditable, and understandable through a single JSON definition.
+
+## Why Cargo AI
+
+- **Declarative by Design**: define exactly what the agent does, what actions it can take, and keep the behavior easy to inspect.
+- **Open Source and Fully Auditable**: inspect the generated code, understand what ships, and keep control of the runtime.
+- **Handles Real Inputs**: work with text, images, URLs, and common files.
+- **Supports Advanced Logic**: add conditions and follow-up behavior without hand-building a custom app.
+- **Real Actions, Not Just Prompts**: run local commands, call child agents, pass command-line arguments, and send email follow-ups.
+- **Choose Your Own AI**: use OpenAI models today or open-source models through Ollama, with room for more providers over time.
+- **You Own the Output**: hatch a local executable and generated code that you can keep, modify, and run wherever you want.
+- **Portable Across macOS, Linux, and Windows**: keep one readable agent definition and hatch it for the systems you care about.
+- **Easy to Share Through `cargo-ai.org`**: create a free account to publish definitions in minutes so other people can hatch them locally on their own machines.
+- **No Extra Token Plumbing Required**: use your existing Codex workflow when it fits, or bring your own model access when you want direct provider control.
+- **Built for AI-Assisted Iteration**: keep the agent readable, diffable, and easy to improve with tools like Codex.
+- **Built to Grow With You**: start with one clear definition, then add commands, email actions, and shared definitions as your workflow expands.
+
+A concise JSON definition keeps the agent easy to read, review, diff, and improve without losing trust in what it does.
+
+## Quick Start
+
+### 0. Install Cargo
+
+Cargo AI requires Rust and Cargo. If you do not already have them, install Rust with `rustup` using the official guide for macOS, Linux, or Windows. This usually takes a few minutes.
+
+Official install guide: [Install Rust](https://rust-lang.org/tools/install/)
+
+After installation, verify Cargo is available:
 
 ```bash
-cargo ai profile set openai --token sk-*** --auth api_key
+cargo --version
 ```
 
-Or use OpenAI account login instead of API key:
+### 1. Install `cargo-ai`
 
 ```bash
-cargo ai profile add openai-account --server openai --model gpt-5.2 --auth openai_account --default
+cargo install cargo-ai --locked
+cargo ai --help
+```
+
+### 2. Choose your model setup
+
+**Option A: recommended if you use ChatGPT Plus or above**
+
+Includes Codex at no additional cost. This is the easiest path today. `cargo-ai` uses your Codex login, so no separate API key is required.
+
+```bash
+codex login
+
+cargo ai profile add openai-account \
+  --server openai \
+  --model gpt-5.3 \
+  --auth openai_account \
+  --default
+
 cargo ai auth login openai --profile openai-account --set-default
 ```
 
-`cargo ai auth login openai` follows OpenAI/Codex browser sign-in semantics and reads session tokens from Codex local auth storage (`$CODEX_HOME/auth.json`, or `~/.codex/auth.json` by default) without importing duplicate OpenAI account tokens into Cargo AI secret stores.
+If you do not already have Codex installed, get it here:
+[Codex CLI setup](https://developers.openai.com/codex/cli)
 
-Cargo-AI supports Ollama and OpenAI‑compatible transformer servers. To change the default URL, use:
-```bash
---url <custom_llm_endpoint>
-```
+**Option B: direct provider control**
 
-#### Credential Storage (Phase 1)
-
-- `config.toml` is metadata-only and no longer persists profile/account secret values.
-- `config.toml` also carries non-secret local Cargo AI metadata in `[cargo_ai_metadata]`, including the installed Cargo AI version, template schema version, build target, install ID, and binary SHA-256.
-- Default secret-store mode is `file` for new installs.
-- `file` mode stores secrets in `credentials.toml` at:
-  - `$CARGO_HOME/.cargo-ai/credentials.toml`, or
-  - `~/.cargo/.cargo-ai/credentials.toml`.
-- `keychain` mode stores secrets in OS keychain backends through Rust `keyring` (3.x stable).
-- Manage mode with:
-  - `cargo ai credentials store status`
-  - `cargo ai credentials store set <file|keychain>`
-  - `cargo ai credentials store set <file|keychain> --migrate --yes`
-- Manage OpenAI auth session with:
-  - `cargo ai auth login openai [--profile <name>] [--set-default]`
-  - `cargo ai auth status [--json]`
-  - `cargo ai auth logout [--global] [--yes]`
-- `cargo ai auth logout` is local-only by default (Cargo AI stops using OpenAI account auth, Codex remains signed in).
-- Use `cargo ai auth logout --global` to also run `codex logout`.
-- Manage profile metadata/auth/token material with:
-  - `cargo ai profile add <name> --server <server> --model <model> [--auth <none|api_key|openai_account>] [--default]`
-  - `cargo ai profile set <name> [--server <server>] [--model <model>] [--auth <none|api_key|openai_account>] [--url <URL> | --clear-url] [--description <TEXT> | --clear-description] [--token <TOKEN> | --stdin | --env <ENV_VAR> | --clear-token] [--default]`
-  - `cargo ai profile list`
-  - `cargo ai profile show <name>`
-  - `cargo ai profile remove <name>`
-- Use `--migrate --dry-run` to preview migration without writes.
-- Fresh installs can switch to `keychain` before any secrets are created (metadata-only switch).
-- Legacy secrets found in `config.toml` are migrated once at startup into the active secret-store path.
-- Generated agents use the same secret-store mode behavior, so default-profile token usage remains compatible.
-
-### Create a Sample Agent
-
-### Add Codex Guidance
-
-To add a local `AGENTS.md` file for Codex in the current directory:
+Use this path if you want an explicit model profile with direct provider credentials and no Codex dependency.
 
 ```bash
-cargo ai add guidance --style codex
+cargo ai profile add openai \
+  --server openai \
+  --model gpt-5.3 \
+  --auth api_key \
+  --default
+
+cargo ai profile set openai --token sk-*** --auth api_key
 ```
 
-This writes `AGENTS.md` only. It does not create `.cargo-ai/project.toml`, example JSON files, or other scaffold assets.
-The generated guidance is tuned for authoring Cargo AI JSON definitions directly and validating them with the hatch/check loop.
+**Option C: open-source models with Ollama**
 
-1. **Hatch a Sample Agent**  
+Use this path if you want to run `cargo-ai` without ChatGPT or OpenAI at all.
 
-   By default, if you don’t provide a config file, `cargo-ai` will hatch a sample “Hello World” style agent (`adder_test`) that simply adds 2 + 2.
+Install Ollama here:
+[Get Ollama](https://ollama.com/download)
 
-   Default example:  
-   ```bash
-   cargo ai hatch adder_test
-   ```
-
-   To hatch your own custom agent from a JSON file, see the section **Create Your Own Weather Agent with JSON** below.
-
-### Run the Sample Agent
-
-2. **Run the compiled agent** using your default profile:
-
-   ```bash
-   ./adder_test
-   ```
-
-   Example output:
-
-   ```
-   Using default profile 'openai'
-   Running 'is_4': echo ["Value return is equal to 4."]
-   Value return is equal to 4.
-   Command completed successfully.
-   ```
-
-   You can override any part of the default profile at runtime using command‑line flags.  
-   For a full listing of options, run:
-
-   ```bash
-   ./adder_test --help
-   ```
-   > **Note for Windows users:**  
-   > On Windows, the agent binary will be created with a `.exe` extension (e.g., `adder_test.exe`).  
-   > You can run it by simply typing `adder_test` in PowerShell or Command Prompt (the `.exe` is implied).  
-   > On macOS and Linux, run the binary from the current directory using `./adder_test`.
-
-### 🧠 Understanding the Sample Agent
-
-  To better understand how agents are created, you can hatch an agent using the generic form of the command:
-
-  ```bash
-  cargo ai hatch <AgentName> --config <path_to_json>
-  ```
- 
-  This allows you to leverage either the Cargo‑AI repo or a local `.json` file.  
-  For example, using the same `adder_test.json` stored locally:
-
-  ```bash
-  cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json
-  ```
-
-  This will create a new agent project named `adder_test2` using the contents of your local JSON file.
-
-  Hatch builds now seed from a Cargo AI-owned warmed template cache under `~/.cargo/.cargo-ai/templates/<cargo-ai-binary-sha256>/<rustc-version>/<target-triple>/`.
-  The first hatch for a new cache key builds that internal template once; later hatches for the same key reuse it.
-  After the active template bucket is confirmed good, Cargo AI prunes stale older Cargo AI hash and `rustc` parent cache directories while preserving sibling target-triple buckets under the active parent.
-
-  To build for an explicit Rust target triple, pass `--target` through to Cargo:
-
-  ```bash
-  cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json --target aarch64-apple-darwin
-  ```
-
-  To export the built binary to a specific directory while keeping the binary name based on `<name>`:
-
-  ```bash
-  cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json --output-dir ./dist
-  ```
-
-  Cargo AI does not install Rust targets automatically. Generated agents now use Rustls-backed `reqwest` in the default template to avoid the prior common OpenSSL cross-compilation blocker, but if the requested target is missing or the linker/SDK/sysroot toolchain for that target is incomplete, Cargo AI still surfaces the underlying Cargo/Rust error directly.
-
-  By default, Cargo AI still deletes the internal workspace after build/check. To keep it for inspection:
-
-  ```bash
-  cargo ai hatch adder_test2 --config ~/Developer/cargo-ai/adder_test.json --keep-project
-  ```
-
-  This preserves the internal project under `~/.cargo/.cargo-ai/agents/<name>/`.
-  If a kept workspace already exists, re-run with `--force` to replace it.
-
-### Hatch from Account Agents
-
-When you are signed in, you can hatch an agent directly from account-hosted definitions:
+Then pull a model such as `mistral` and add a local profile:
 
 ```bash
-# Hatch your own account agent (path defaults to "/")
-cargo ai account agents hatch weather_test
+ollama pull mistral
 
-# Shortcut alias for the same account-hosted hatch flow
-cargo ai account hatch weather_test
-
-# Validate scaffold and compile path only (no binary export)
-cargo ai account hatch weather_test --check
-
-# Use a different remote account agent while keeping a local output name
-cargo ai account hatch weather_test_local --agent weather_test_remote
-
-# Export the built binary to a specific directory
-cargo ai account hatch weather_test --output-dir ./dist
-
-# Overwrite existing local output binary
-cargo ai account agents hatch weather_test --force
-
-# Preserve the internal project workspace for inspection
-cargo ai account agents hatch weather_test --keep-project
-
-# Build an account-hosted agent for an explicit Rust target triple
-cargo ai account agents hatch weather_test --target aarch64-apple-darwin
+cargo ai profile add ollama \
+  --server ollama \
+  --model mistral \
+  --default
 ```
 
-To hatch a public agent from another owner:
+### 3. Hatch a sample agent
 
 ```bash
-cargo ai account agents hatch weather_test --owner-handle alice
+cargo ai hatch adder_test
+./adder_test
 ```
 
-To select a non-root definition path:
+On Windows, run `adder_test.exe` or just `adder_test`.
+
+### 4. Register an account
+
+Define agent email alerts with `cargo-ai.org` and manage your agents in one place. Keep them private, or share them instantly with anyone in the world.
 
 ```bash
-cargo ai account agents hatch weather_test --definition-path /team/ops
+cargo ai account register you@example.com
+cargo ai account confirm <code-from-email>
 ```
 
-  To understand what is happening behind the scenes, we can look at the internal structure of the sample agent JSON file, [`adder_test.json`](./adder_test.json). 
+Optional: set a custom public handle
 
-  ### 1. Inputs and Guaranteed Typed Response
+If you want a specific public handle, set it here. Otherwise, `cargo-ai.org` assigns one automatically, and you can change it later.
 
-  Each agent defines an ordered set of **inputs** together with a strongly‑typed **response schema**.  
-  
-  The schema is compiled into Rust types, guaranteeing that the agent will always receive data in the expected shape.
+```bash
+cargo ai account handle --set your-handle
+```
 
-  ```json
-  {
-    "inputs": [
-      {
-        "type": "text",
-        "text": "What is 2 + 2? Return the answer as a number."
+Once registered, you can push an agent definition to your account repository and hatch it locally:
+
+```bash
+cargo ai account agents push adder_test.json --name adder_test
+cargo ai account agents hatch adder_test
+```
+
+## The Core Mental Model
+
+> [!TIP]
+> You do not need to author this by hand. The fastest path is to tell Codex exactly what kind of agent you want and let it update the file for you. Read this section so the structure is easy to recognize, then review the result and verify exactly what the agent does. When you're ready for that loop, jump to [Best First Workflow in Codex](#best-first-workflow-in-codex).
+
+Cargo AI keeps the authoring model intentionally small:
+
+1. `inputs`
+   Ordered model-facing input such as `text`, `url`, or `image`.
+2. `agent_schema`
+   The typed response you expect back.
+3. `actions`
+   What to do after the response is validated, including the ordered `run` steps inside each action.
+
+The next section expands those same pieces from minimal snippets into richer patterns.
+
+A minimal agent looks like this:
+
+```json
+{
+  "version": "2026-03-03.r1",
+  "inputs": [
+    {
+      "type": "text",
+      "text": "What is 2 + 2? Return the answer as an integer."
+    }
+  ],
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "answer": {
+        "type": "integer",
+        "description": "The result of the math problem."
       }
-    ],
-    "agent_schema": {
-      "type": "object",
-      "properties": {
-        "answer": {
-          "type": "integer",
-          "description": "The result of the math problem."
+    }
+  },
+  "actions": [
+    {
+      "name": "print_answer",
+      "logic": { "==": [{ "var": "answer" }, 4] },
+      "run": [
+        {
+          "kind": "exec",
+          "program": "echo",
+          "args": ["The answer is 4."]
         }
+      ]
+    }
+  ]
+}
+```
+
+That JSON becomes a compiled local executable through:
+
+```bash
+cargo ai hatch my_agent --config ./my_agent.json
+./my_agent
+```
+
+For Windows users, run `my_agent.exe` or just `my_agent`.
+
+You can also override or inject runtime input without editing the JSON. Generated agents accept flags such as `--input-text`, `--input-url`, and `--input-file`.
+
+```bash
+./my_agent --input-text "What is 3 + 3?"
+```
+
+## Start Simple, Then Expand
+
+Use these snippets to recognize how `inputs`, `agent_schema`, and `actions` grow as the agent becomes more capable.
+Click linked labels to open full runnable examples.
+
+### Inputs
+
+Use the input types that fit the job.
+
+[Text input](./templates/shared/examples/text_input_playground.md):
+
+```json
+{
+  "inputs": [
+    { "type": "text", "text": "Summarize the meeting notes." }
+  ]
+}
+```
+
+URL input:
+
+```json
+{
+  "inputs": [
+    { "type": "url", "url": "https://example.com/report" }
+  ]
+}
+```
+
+Image input:
+
+```json
+{
+  "inputs": [
+    { "type": "image", "path": "./invoice.png" }
+  ]
+}
+```
+
+File input:
+
+```json
+{
+  "inputs": [
+    { "type": "file", "path": "./q1-report.pdf" }
+  ]
+}
+```
+
+<details>
+<summary>Expanded example: multiple inputs with related scoring</summary>
+
+Multiple inputs with related scoring:
+
+```json
+{
+  "inputs": [
+    { "type": "text", "text": "Review this building package and decide how urgently it should be inspected." },
+    { "type": "url", "url": "https://example.com/listings/building-123" },
+    { "type": "text", "text": "Front facade image for the same building." },
+    { "type": "image", "path": "./building-front.png" },
+    { "type": "text", "text": "Building specifications and constraints." },
+    { "type": "file", "path": "./building-specs.pdf" }
+  ],
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "priority_rank": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 5,
+        "description": "Inspection priority, where 5 is highest."
+      },
+      "confidence": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 1,
+        "description": "Confidence in the priority ranking."
+      },
+      "reason": {
+        "type": "string",
+        "description": "Short explanation tied to the evidence."
       }
-    },
+    }
   }
-  ```
+}
+```
 
-  In this example, the agent declares that it requires an integer field named `answer`.  
+You can override the baked inputs any time you run the generated agent. Runtime input flags replace the configured `inputs` for that execution, and the order is preserved exactly as you pass it on the command line.
 
-  Because the schema is enforced at compile time, the LLM’s response must supply a valid integer — eliminating ambiguity at runtime.
+```bash
+./agent_x \
+  --input-text "This is the listing page for the building." \
+  --input-url "https://example.com/listings/building-456" \
+  --input-text "This is the front facade image." \
+  --input-image "./building-456-front.png" \
+  --input-text "These are the building specifications." \
+  --input-file "./building-456-specs.pdf"
+```
 
-  ### 2. JSON Logic for Conditional Actions
+</details>
 
-  After receiving the typed response, the agent applies **JSON Logic** rules to determine which actions to run.  
-  (See: https://jsonlogic.com/)
+### `agent_schema`
 
-  Here, the logic expression checks whether `answer` equals `4`.  
-  If true, one command runs; if false, another:
+The `agent_schema` is the output contract for the agent. Start simple, then add more structure as the agent becomes more capable.
 
-  ```json
-    "actions": [
+Minimal output contract:
+
+```json
+{
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "answer": { "type": "integer" }
+    }
+  }
+}
+```
+
+Add clearer field meaning with descriptions:
+
+```json
+{
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "summary": {
+        "type": "string",
+        "description": "One-sentence summary for the operator."
+      },
+      "needs_follow_up": {
+        "type": "boolean",
+        "description": "Whether a human should review the result."
+      }
+    }
+  }
+}
+```
+
+`agent_schema` can include any number of top-level `string`, `integer`, `number`, and `boolean` fields, plus optional `description`, string `enum`, and numeric bounds where supported.
+
+<details>
+<summary>Expanded example: richer constraints and exact output choices</summary>
+
+Then expand into richer constraints and exact output choices:
+
+```json
+{
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "priority_rank": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 5,
+        "description": "Inspection priority, where 5 is highest."
+      },
+      "confidence": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 1,
+        "description": "Confidence in the priority ranking."
+      },
+      "status": {
+        "type": "string",
+        "enum": ["clear", "review", "urgent"],
+        "description": "Final triage status."
+      },
+      "reason": {
+        "type": "string",
+        "description": "Short explanation tied to the evidence."
+      }
+    }
+  }
+}
+```
+
+</details>
+
+### `actions`
+
+`actions` define what the agent is allowed to do after it produces the top-level structured output.
+Action `logic` uses [JSON Logic](https://jsonlogic.com/).
+Within an action, run steps execute in order after the action's JSON Logic condition evaluates true.
+
+Start with one simple local action:
+
+```json
+{
+  "actions": [
+    {
+      "name": "save_note",
+      "logic": {
+        "and": [
+          { "==": [ { "var": "needs_follow_up" }, true ] },
+          { ">": [ { "var": "confidence" }, 0.6 ] }
+        ]
+      },
+      "run": [
         {
-          "name": "is_4",
-          "logic": {
-            "==": [ { "var": "answer" }, 4 ]
-          },
-          "run": [
-            {
-              "kind": "exec",
-              "program": "echo",
-              "args": ["Value return is equal to 4."]
-            }
-          ]
-        },
+          "kind": "exec",
+          "program": "./save_note",
+          "args": [{ "var": "summary" }]
+        }
+      ]
+    }
+  ]
+}
+```
+
+<details>
+<summary>Expanded example: multiple action types</summary>
+
+Then expand into multiple action types:
+
+```json
+{
+  "actions": [
+    {
+      "name": "save_locally",
+      "logic": {
+        "and": [
+          { "==": [ { "var": "status" }, "review" ] },
+          { ">=": [ { "var": "priority_rank" }, 3 ] }
+        ]
+      },
+      "run": [
         {
-          "name": "is_not_4",
-          "logic": {
-            "!=": [ { "var": "answer" }, 4 ]
-          },
-          "run": [
+          "kind": "exec",
+          "program": "./save_report.sh",
+          "args": [{ "var": "reason" }]
+        }
+      ]
+    },
+    {
+      "name": "email_operator",
+      "logic": {
+        "or": [
+          { "==": [ { "var": "status" }, "urgent" ] },
+          {
+            "and": [
+              { ">=": [ { "var": "priority_rank" }, 4 ] },
+              { ">": [ { "var": "confidence" }, 0.85 ] }
+            ]
+          }
+        ]
+      },
+      "run": [
+        {
+          "kind": "email_me",
+          "subject": "Urgent building review",
+          "text": ["Reason: ", { "var": "reason" }]
+        }
+      ]
+    },
+    {
+      "name": "handoff_to_child",
+      "logic": {
+        "and": [
+          { "==": [ { "var": "status" }, "review" ] },
+          { "<": [ { "var": "confidence" }, 0.75 ] }
+        ]
+      },
+      "run": [
+        {
+          "kind": "agent",
+          "agent": "./child_reporter",
+          "inputs": [
             {
-              "kind": "exec",
-              "program": "echo",
-              "args": ["Value return is not equal to 4."]
+              "type": "text",
+              "text": ["Follow up on this building package: ", { "var": "reason" }]
             }
           ]
         }
       ]
-  ```
-
-### Why This Matters
-
-Cargo‑AI gives you two powerful guarantees:
-
-1. **Typed responses from any LLM**  
-   Responses can include top-level integers, booleans, strings, and numbers, together with supported schema metadata such as `description`, string `enum`, and numeric bounds — all enforced through generated Rust types plus local validation.
-
-2. **Full expressive power of JSON Logic**  
-   Perform comparisons, branching, variable evaluation, and complex decision logic to drive arbitrary command‑line actions.
-
-In short:  
-**Now you can create sophisticated, predictable, atomic Rust agents — with no code.**
-
-
-## 🌦️🤖 Create Your Own Weather Agent with JSON
-
-We’ll walk through a [weather_test.json](./weather_test.json) example step-by-step—ordered inputs, expected response schema, and actions.
-
-To define a custom agent, you’ll use a JSON file that specifies:
-1. The ordered **inputs** to send to the AI/transformer server  
-2. The **expected response schema** (properties returned)  
-3. A set of **actions** to run, depending on the agent’s response  
-
-The steps below show how to create the weather_test agent, but once defined, running it is as simple as:
-
-```bash
-# 1. Hatch your weather_test agent from a JSON config
-cargo ai hatch weather_test --config weather_test.json
-
-# 2. Run your weather_test agent using either your default profile or explicit flags
-./weather_test
-# or override the defaults:
-./weather_test -s openai -m gpt-4o --token sk-ABCD1234...
-
-# Expected output if raining tomorrow:
-# bring an umbrella
-```
-> **Note for Windows users:**  
-> Use `weather_test` (or `weather_test.exe`) instead of `./weather_test`.
-
-### 1) Define the Inputs
-
-  The `inputs` array is the ordered model-facing input the agent sends at runtime.  
-  Start with `type: "text"` entries for plain instructions, and add `type: "url"` or `type: "image"` entries when the agent needs fetched web text or local image files.
-
-  Example from [weather_test.json](./weather_test.json):
-
-  ```json
-  "inputs": [
-    {
-      "type": "text",
-      "text": "Will it rain tomorrow between 9am and 5pm? (Consider true if over 40% for any given hour period.)"
-    },
-    {
-      "type": "url",
-      "url": "https://gettimeapi.dev/v1/time?timezone=UTC"
-    },
-    {
-      "type": "url",
-      "url": "https://api.open-meteo.com/v1/forecast?latitude=39.10&longitude=-84.51&hourly=precipitation_probability"
     }
   ]
-  ```
+}
+```
 
-  You can use multiple `text` inputs, multiple `url` inputs, and later local `image` inputs. Runtime flags such as `--input-text`, `--input-url`, and `--input-image` replace the config-defined inputs when present.
-  For `type: "url"`, Cargo AI fetches the content with its own HTTP client before sending the text to the model. Treat the target compatibility bar as comparable to `curl` for ordinary static or server-rendered pages, not as a guarantee for browser-only or JavaScript-rendered content.
+</details>
 
-### 2) Define the Response Schema
+You can keep actions simple or mix local executables, email alerts, and child-agent handoffs in the same agent definition. The next section shows how to sequence multiple run steps and control them with `when`.
 
-  The `agent_schema` describes the shape of the response you expect from the AI/transformer server.  
-  Behind the scenes, this schema is also used to generate the corresponding Rust structures.  
+### `run`
 
-  You can define fields as:
-  - `boolean` → true/false values  
-  - `string` → text values  
-  - `number` → floating-point numbers (f64)  
-  - `integer` → whole numbers (i64)  
+`run` is the ordered step list inside an action.
 
-  Optional top-level property metadata and constraints:
-  - `description` on any supported top-level field
-  - `enum` on `string` fields only
-  - `minimum`, `maximum`, `exclusiveMinimum`, and `exclusiveMaximum` on `number` and `integer` fields
-
-  Current scope intentionally stays flat:
-  - top-level arrays are rejected
-  - nested objects and union types are rejected
-
-  Example from [weather_test.json](./weather_test.json):
-
-  ```json
-  "agent_schema": {
-    "type": "object",
-    "properties": {
-      "raining": {
-        "type": "boolean",
-        "description": "Indicates whether it is raining."
-      }
-    }
-  }
-   ```
-
-  Example with enum and numeric bounds:
-
-  ```json
-  "agent_schema": {
-    "type": "object",
-    "properties": {
-      "unit": {
-        "type": "string",
-        "description": "Temperature unit.",
-        "enum": ["F", "C"]
-      },
-      "confidence": {
-        "type": "number",
-        "description": "Confidence score greater than 0 and less than or equal to 1.",
-        "exclusiveMinimum": 0,
-        "maximum": 1
-      }
-    }
-  }
-  ```
-
-### 3) Define Actions
-
-The `actions` section specifies what the agent should do based on the response.  
-It follows the [JSON Logic](http://jsonlogic.com/) format for conditions.  
-
-Currently, actions can run a command-line executable (`exec`).  
-Future versions will support additional action types.
-
-Action object schema:
+Start with one simple step:
 
 ```json
 {
-  "name": "my_action",
-  "logic": { "==": [ { "var": "answer" }, 4 ] },
   "run": [
     {
       "kind": "exec",
-      "program": "echo",
-      "args": ["Value is 4"]
+      "program": "./save_report.sh",
+      "args": [{ "var": "reason" }]
     }
   ]
 }
 ```
 
-- `name`: Action label shown in execution output/logs.
-- `logic`: JSON Logic condition evaluated against the typed agent response.
-- `run`: Ordered list of steps to execute when `logic` evaluates to true.
+<details>
+<summary>Expanded example: multi-step workflow</summary>
 
-`run` step schema:
+Then expand into a multi-step workflow:
 
 ```json
 {
-  "platform": ["macos", "linux"],
-  "kind": "exec",
-  "program": "echo",
-  "args": ["hello", { "var": "answer" }]
+  "run": [
+    {
+      "kind": "exec",
+      "program": "./save_report.sh",
+      "args": [{ "var": "reason" }],
+      "output_variable": "report_path",
+      "status_variable": "save_status",
+      "error_variable": "save_error",
+      "failure_mode": "continue"
+    },
+    {
+      "kind": "email_me",
+      "when": {
+        "and": [
+          { "==": [ { "var": "save_status" }, "succeeded" ] },
+          { ">=": [ { "var": "priority_rank" }, 4 ] }
+        ]
+      },
+      "subject": "Building report saved",
+      "text": ["Saved report to ", { "var": "report_path" }]
+    },
+    {
+      "kind": "agent",
+      "when": { "==": [ { "var": "save_status" }, "failed" ] },
+      "agent": "./child_reporter",
+      "inputs": [
+        {
+          "type": "text",
+          "text": ["Saving failed for this building review: ", { "var": "save_error" }]
+        },
+        {
+          "type": "text",
+          "text": ["Original reason: ", { "var": "reason" }]
+        }
+      ]
+    }
+  ]
 }
 ```
 
-- `platform`: Optional OS selector. Use `macos`, `linux`, or `windows` as a string or array. Omit it to run the step on every runtime OS.
-- `kind`: Step type. Use `"exec"` for command execution.
-- `program`: Executable name or path to run.
-- `args`: Argument tokens passed directly as argv entries (no shell splitting). Each entry may be a literal string or a `{ "var": "field_name" }` object that pulls from a top-level schema field at runtime.
+</details>
 
-Platform values are matched at the OS level, not by full target triple. For example, both Apple Silicon and Intel macOS builds match `macos`.
-Variable args are limited to top-level scalar fields (`string`, `integer`, `number`, `boolean`). Array fields are not supported for arg substitution in this story.
+Use `run` to sequence multiple side effects in order. `exec` steps can capture output, status, or errors for later steps, and `when` lets later steps react to success or failure without leaving the agent definition.
 
-Example from [weather_test.json](./weather_test.json):
+You can also target individual run steps to specific runtime platforms:
 
 ```json
-"actions": [
-  {
-    "name": "umbrella_hint_exec",
-    "logic": {
-      "==": [ { "var": "raining" }, true ]
-    },
-    "run": [
-      {
-        "platform": ["macos", "linux"],
-        "kind": "exec",
-        "program": "echo",
-        "args": ["bring an umbrella because raining=", { "var": "raining" }]
-      },
-      {
-        "platform": "windows",
-        "kind": "exec",
-        "program": "cmd",
-        "args": ["/C", "echo", "bring an umbrella because raining=", { "var": "raining" }]
-      }
-    ]
-  },
-  {
-    "name": "sunglasses_hint_exec",
-    "logic": {
-      "==": [ { "var": "raining" }, false ]
-    },
-    "run": [
-      {
-        "kind": "exec",
-        "program": "echo",
-        "args": ["bring sunglasses"]
-      }
-    ]
-  }
-]
+{ "kind": "exec", "program": "./save_report.sh", "platform": "macos", "args": [{ "var": "reason" }] }
 ```
 
-In this example:
-- If `raining` is true, the agent prints “bring an umbrella.”
-- If `raining` is false, the agent prints “bring sunglasses.”
-- Platformless steps run everywhere. Platform-targeted steps run only when the current runtime OS matches one of the configured platform values, and matching steps run in listed order.
-- Variable args let a command consume the validated model output directly without shell expansion. `{ "var": "raining" }` resolves to the typed runtime value and is passed as a normal argv token.
+Or target multiple platforms with an array:
 
----
+```json
+{ "kind": "exec", "program": "./save_report.sh", "platform": ["macos", "linux", "windows"], "args": [{ "var": "reason" }] }
+```
 
-`cargo-ai™` is an independent project and is not affiliated with, endorsed by, or sponsored by the Rust Foundation.
+### Child agents
+
+Use child agents when one agent needs to hand work to another agent.
+
+- Point to a child agent that lives next to the parent file, such as `./child_reporter`.
+- By default, an agent can call child agents up to `5` levels deep. Override that with `--max-agent-depth`.
+- By default, the parent plus any child agents share a total runtime budget of `600` seconds. Override that with `--max-runtime-in-sec`.
+- A parent can pass inputs to a child and record whether the child succeeded or failed.
+- A parent cannot automatically pull the child's structured return fields back into its own output.
+
+Example:
+
+```json
+{
+  "kind": "agent",
+  "agent": "./child_reporter",
+  "status_variable": "child_status",
+  "error_variable": "child_error",
+  "inputs": [
+    {
+      "type": "text",
+      "text": ["Follow up on this review: ", { "var": "reason" }]
+    }
+  ]
+}
+```
+
+## Build In Any Editor
+
+You can build a `cargo-ai` agent in any editor you want. If you want to check whether the definition is valid before exporting a binary, run:
+
+```bash
+cargo ai hatch my_agent --config ./my_agent.json --check
+```
+
+If your config file already matches the agent name, the shorthand works too:
+
+```bash
+cargo ai hatch my_agent.json --check
+```
+
+When the file checks cleanly, use the Codex workflow below for the fastest iteration loop.
+
+## Best First Workflow in Codex
+
+If you want the fastest authoring loop, start in a new folder and let Codex build the agent definition with you.
+
+```bash
+mkdir my-agent
+cd my-agent
+cargo ai add guidance --style codex
+codex
+```
+
+This creates `AGENTS.md` plus helper files under `.cargo-ai/guidance/` so Codex knows the Cargo AI contract.
+
+Then tell Codex: `I want to build a Cargo AI agent.` Describe what the agent should do, what inputs it should accept, what structured output it should return, and any follow-up actions you want.
+
+Ask Codex to:
+
+- build the JSON definition
+- run `cargo ai hatch my_agent --config ./my_agent.json --check`
+- update the JSON until the check passes
+
+Then review the generated JSON yourself to make sure it matches your intent.
+
+Cargo AI works best when the definition stays small, understandable, and easy to verify as you iterate.
+
+## Account-Backed Flows
+
+After registration, you can use Cargo AI as more than a local hatching tool:
+
+- store and retrieve agent definitions through your account
+- hatch from your own hosted definitions
+- hatch public definitions from another owner's handle
+- use account-aware email workflows
+
+Examples:
+
+```bash
+# Hatch your own hosted definition
+cargo ai account hatch weather_test
+
+# Validate scaffold and compile path without exporting a binary
+cargo ai account hatch weather_test --check
+
+# Hatch a public definition from another handle
+cargo ai account agents hatch weather_test --owner-handle alice
+```
+
+## Where To Go Next
+
+When you want deeper details, use these files:
+
+- Examples:
+  - [adder_test.json](./adder_test.json)
+  - [weather_test.json](./weather_test.json)
+- JSON/schema reference:
+  - [templates/shared/docs/schema-quick-reference.md](./templates/shared/docs/schema-quick-reference.md)
+  - [templates/guidance/agent-definition-contract.md](./templates/guidance/agent-definition-contract.md)
+- Actions and authoring patterns:
+  - [templates/guidance/action-rules.md](./templates/guidance/action-rules.md)
+  - [templates/guidance/authoring-patterns.md](./templates/guidance/authoring-patterns.md)
+  - [templates/guidance/examples/README.md](./templates/guidance/examples/README.md)
+- Hatch/check workflow:
+  - [templates/shared/docs/hatch-check-loop.md](./templates/shared/docs/hatch-check-loop.md)
+- Troubleshooting:
+  - [templates/guidance/troubleshooting.md](./templates/guidance/troubleshooting.md)
+
+## Notes
+
+- `cargo ai hatch --check` validates scaffold and compile behavior with `cargo check` without exporting a binary.
+- Generated binaries use your configured/default profile unless you override runtime flags.
+- Scheduling is not built into Cargo AI today. To run an agent on a schedule, use your operating system scheduler such as `cron` on macOS/Linux or Task Scheduler on Windows. We know scheduling matters and expect this area to expand over time.
+- Cargo AI recommends manual upgrade via:
+
+```bash
+cargo install cargo-ai --locked
+```
+
+## License
+
+MIT. See [LICENSE](./LICENSE).

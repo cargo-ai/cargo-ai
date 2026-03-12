@@ -1328,8 +1328,7 @@ mod tests {
         configured_agent_action_runtime_budget, format_backend_error_message,
         format_backend_ui_message, insert_action_output_variable, matching_run_steps,
         resolve_run_args, resolve_string_parts, run_agent_step, run_completion_message_for_depth,
-        run_exec_step,
-        step_matches_platform, validate_agent_action_depth, StepExecutionOutcome,
+        run_exec_step, step_matches_platform, validate_agent_action_depth, StepExecutionOutcome,
     };
     use serde_json::json;
 
@@ -1620,7 +1619,10 @@ mod tests {
 
     #[test]
     fn run_completion_message_for_depth_prints_for_root_runs_only() {
-        assert_eq!(run_completion_message_for_depth(0), Some("✅ Run complete."));
+        assert_eq!(
+            run_completion_message_for_depth(0),
+            Some("✅ Run complete.")
+        );
         assert_eq!(run_completion_message_for_depth(1), None);
     }
 

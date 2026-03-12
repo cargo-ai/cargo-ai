@@ -6,6 +6,15 @@ Use this workspace to create and maintain Cargo AI agent definition JSON files. 
 
 ## Start Here
 
+First, calibrate how much help the user wants:
+- If unclear, ask whether they want step-by-step guidance or already know the schema they want.
+- If the request is vague, guide them by eliciting:
+  - inputs
+  - `agent_schema`
+  - actions
+  - portability expectations
+- Prefer the smallest correct readable agent that solves the task. Do not overbuild the JSON.
+
 If no agent JSON exists yet:
 
 1. Ask what the user wants the agent to do.
@@ -40,6 +49,14 @@ Useful examples:
 - `.cargo-ai/guidance/examples/stop-by-default.json`
 - `.cargo-ai/guidance/examples/continue-on-failure.json`
 - `.cargo-ai/guidance/examples/conditional-when.json`
+
+## Supplemental Public Context
+
+Use these for positioning, onboarding flow, and public examples:
+- public README: `https://github.com/analyzer1/cargo-ai#readme`
+- website: `https://cargo-ai.org`
+
+If these conflict with the local `.cargo-ai/guidance/` bundle, follow the local bundle for authoring behavior and validation rules.
 
 ## Working Defaults
 
@@ -83,8 +100,10 @@ Useful examples:
 
 ## Editing Guidance
 
+- Adapt to the user's familiarity. Guide a new user step by step; move faster when the user already knows the structure they want.
 - Make the smallest JSON change that satisfies the request.
 - Explain inferred structure in plain language when the user is new to Cargo AI.
 - When adding a new field or action, preserve surrounding structure and naming patterns.
 - If the user asks for a new agent from scratch, start from the closest local example instead of inventing a shape from memory.
 - Summarize validation failures concretely and then fix the JSON.
+- After updating a definition, explain what changed in plain language and summarize what `hatch --check` proved.

@@ -137,7 +137,7 @@ mod tests {
 
     fn sample_metadata() -> CargoAiMetadata {
         CargoAiMetadata {
-            cargo_ai_version: Some("0.0.10".to_string()),
+            cargo_ai_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             template_schema_version: Some("2026-03-03.r1".to_string()),
             cargo_ai_build_target: Some("aarch64-apple-darwin".to_string()),
             cargo_ai_install_id: Some("install-123".to_string()),
@@ -158,7 +158,7 @@ mod tests {
                     "access_token": "access-token-123"
                 },
                 "cargo_ai_metadata": {
-                    "cargo_ai_version": "0.0.10",
+                    "cargo_ai_version": env!("CARGO_PKG_VERSION"),
                     "template_schema_version": "2026-03-03.r1",
                     "cargo_ai_build_target": "aarch64-apple-darwin",
                     "cargo_ai_install_id": "install-123",
@@ -189,7 +189,7 @@ mod tests {
                     }
                 },
                 "cargo_ai_metadata": {
-                    "cargo_ai_version": "0.0.10",
+                    "cargo_ai_version": env!("CARGO_PKG_VERSION"),
                     "template_schema_version": "2026-03-03.r1",
                     "cargo_ai_build_target": "aarch64-apple-darwin",
                     "cargo_ai_install_id": "install-123",
@@ -220,7 +220,7 @@ mod tests {
                     }
                 },
                 "cargo_ai_metadata": {
-                    "cargo_ai_version": "0.0.10",
+                    "cargo_ai_version": env!("CARGO_PKG_VERSION"),
                     "template_schema_version": "2026-03-03.r1",
                     "cargo_ai_build_target": "aarch64-apple-darwin",
                     "cargo_ai_install_id": "install-123",

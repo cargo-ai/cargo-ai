@@ -7,6 +7,7 @@ use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
 
 use crate::agent_builder::build_target::BuildTarget;
+use crate::agent_builder::project::WorkspaceSeedMode;
 
 /// Execution mode for hatch pipeline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +81,10 @@ where
         build_target,
         output_dir,
     } = request;
+    let workspace_seed_mode = match mode {
+        HatchMode::Build => WorkspaceSeedMode::IncludeBuildArtifacts,
+        HatchMode::Check => WorkspaceSeedMode::SkipBuildArtifacts,
+    };
 
     let _agent_lock = match acquire_lock(project_name.as_str()) {
         Ok(lock) => lock,
@@ -146,6 +151,7 @@ where
         &warmed_template.path,
         project_name.as_str(),
         Ok(file_contents),
+        workspace_seed_mode,
     ) {
         Ok(_) => println!("✅ Project created successfully."),
         Err(e) => {
@@ -184,9 +190,11 @@ where
             }
         }
         HatchMode::Check => {
+            let shared_target_dir = warmed_template.path.join("target");
             match crate::agent_builder::build::check_agent_project(
                 project_name.as_str(),
                 &build_target,
+                Some(shared_target_dir.as_path()),
             ) {
                 Ok(_) => println!("✅ Project checked successfully."),
                 Err(e) => {
