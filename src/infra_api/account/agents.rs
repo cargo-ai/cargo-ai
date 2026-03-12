@@ -477,7 +477,7 @@ mod tests {
 
     fn sample_metadata() -> CargoAiMetadata {
         CargoAiMetadata {
-            cargo_ai_version: Some("0.0.10".to_string()),
+            cargo_ai_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             template_schema_version: Some("2026-03-03.r1".to_string()),
             cargo_ai_build_target: Some("aarch64-apple-darwin".to_string()),
             cargo_ai_install_id: Some("install-123".to_string()),
@@ -496,7 +496,10 @@ mod tests {
 
         assert_eq!(body["action"], "agents");
         assert_eq!(body["agents"]["list"]["owner_handle"], "owner-handle");
-        assert_eq!(body["cargo_ai_metadata"]["cargo_ai_version"], "0.0.10");
+        assert_eq!(
+            body["cargo_ai_metadata"]["cargo_ai_version"],
+            env!("CARGO_PKG_VERSION")
+        );
     }
 
     #[test]
