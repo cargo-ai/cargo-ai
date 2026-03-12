@@ -9,7 +9,7 @@ Declarative AI agents. Native executables. Shareable in minutes.
 An open-source toolkit for building agents that are clear, portable, and fully auditable. Define exactly what the agent does in a concise JSON file, refine it quickly with AI tools, including Codex, hatch it into a native executable, and keep complete control over the result.
 
 ```bash
-cargo ai hatch weather_test --config weather_test.json
+cargo ai hatch adder_test --config adder_test.json
 ```
 
 ## Why Cargo AI
@@ -116,13 +116,21 @@ Define agent email alerts with `cargo-ai.org` and manage your agents in one plac
 ```bash
 cargo ai account register you@example.com
 cargo ai account confirm <code-from-email>
-cargo ai account handle --set yourname
 ```
 
-Once registered, you can pull definitions from your account repository and hatch them locally:
+Optional: set a custom public handle
+
+If you want a specific public handle, set it here. Otherwise, `cargo-ai.org` assigns one automatically, and you can change it later.
 
 ```bash
-cargo ai account hatch weather_test
+cargo ai account handle --set your-handle
+```
+
+Once registered, you can push an agent definition to your account repository and hatch it locally:
+
+```bash
+cargo ai account agents push adder_test.json --name adder_test
+cargo ai account agents hatch adder_test
 ```
 
 ## The Core Mental Model
