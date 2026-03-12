@@ -29,6 +29,11 @@
           "kind": "exec",
           "program": "echo",
           "args": ["Summary created."]
+        },
+        {
+          "kind": "exec",
+          "program": "echo",
+          "args": [{ "var": "summary" }]
         }
       ]
     }

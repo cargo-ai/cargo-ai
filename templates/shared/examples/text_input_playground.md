@@ -34,6 +34,11 @@ Use this as a simple text-input example you can copy into an empty folder and ha
           "kind": "exec",
           "program": "echo",
           "args": ["Summary created."]
+        },
+        {
+          "kind": "exec",
+          "program": "echo",
+          "args": [{ "var": "summary" }]
         }
       ]
     }
@@ -49,6 +54,12 @@ cargo ai hatch text_input_playground.json
 ```
 
 For Windows users, run `text_input_playground.exe` or just `text_input_playground`.
+
+You can also override the baked input at runtime:
+
+```bash
+./text_input_playground --input-text "This was a long meeting about launch timing, customer rollout, support staffing, and pricing changes. Summarize the most important takeaway in one sentence."
+```
 
 If you want the matching explanatory sidecar file next to the JSON, save this as `text_input_playground.md`:
 
@@ -66,8 +77,10 @@ If you want the matching explanatory sidecar file next to the JSON, save this as
 
 ## Action Flow
 - If `summary` is not empty, run `echo "Summary created."`
+- Then print the actual `summary` value.
 
 ## Local Loop
 - Hatch with `cargo ai hatch text_input_playground.json`
 - Run `./text_input_playground`
+- Override the baked text later with `./text_input_playground --input-text "..."`
 ```
