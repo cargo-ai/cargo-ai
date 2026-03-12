@@ -195,7 +195,7 @@ For Windows users, run `my_agent.exe` or just `my_agent`.
 You can also override or inject runtime input without editing the JSON. Generated agents accept flags such as `--input-text`, `--input-url`, and `--input-file`.
 
 ```bash
-./my_agent --input-text "What is 3 + 3? Return the answer as an integer."
+./my_agent --input-text "What is 3 + 3?"
 ```
 
 ## What You Can Build Today
