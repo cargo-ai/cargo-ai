@@ -150,6 +150,8 @@ Cargo AI keeps the authoring model intentionally small:
 3. `actions`
    What to do after the response is validated, including the ordered `run` steps inside each action.
 
+The next section expands those same pieces from minimal snippets into richer patterns.
+
 A minimal agent looks like this:
 
 ```json
@@ -203,7 +205,7 @@ You can also override or inject runtime input without editing the JSON. Generate
 
 ## Start Simple, Then Expand
 
-The example above is intentionally simple. `cargo-ai` can work with richer inputs, logic, and actions while keeping the agent definition concise and auditable.
+Use these snippets to recognize how `inputs`, `agent_schema`, and `actions` grow as the agent becomes more capable.
 
 ### Inputs
 
@@ -584,7 +586,7 @@ Ask Codex to:
 
 Then review the generated JSON yourself to make sure it matches your intent.
 
-The point of Cargo AI is not to make you manage more code. It is to keep the agent definition small, understandable, and easy to verify as you iterate.
+Cargo AI works best when the definition stays small, understandable, and easy to verify as you iterate.
 
 ## Account-Backed Flows
 
@@ -608,9 +610,9 @@ cargo ai account hatch weather_test --check
 cargo ai account agents hatch weather_test --owner-handle alice
 ```
 
-## Reference
+## Where To Go Next
 
-Use the top-level README for orientation. Use these files for the deeper details:
+When you want deeper details, use these files:
 
 - Examples:
   - [adder_test.json](./adder_test.json)
