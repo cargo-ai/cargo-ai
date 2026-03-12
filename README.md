@@ -139,7 +139,7 @@ cargo ai account agents hatch adder_test
 ## The Core Mental Model
 
 > [!TIP]
-> You do not need to author this by hand. The fastest path is to tell Codex exactly what kind of agent you want and let it update the file for you. Read this section so the structure is easy to recognize, then review the result and verify exactly what the agent does.
+> You do not need to author this by hand. The fastest path is to tell Codex exactly what kind of agent you want and let it update the file for you. Read this section so the structure is easy to recognize, then review the result and verify exactly what the agent does. When you're ready for that loop, jump to [Best First Workflow in Codex](#best-first-workflow-in-codex).
 
 Cargo AI keeps the authoring model intentionally small:
 
@@ -532,6 +532,22 @@ Then expand into a multi-step workflow:
 ```
 
 Use `run` to sequence multiple side effects in order. `exec` steps can capture output, status, or errors for later steps, and `when` lets later steps react to success or failure without leaving the agent definition.
+
+## Build In Any Editor
+
+You can build a `cargo-ai` agent in any editor you want. If you want to check whether the definition is valid before exporting a binary, run:
+
+```bash
+cargo ai hatch my_agent --config ./my_agent.json --check
+```
+
+If your config file already matches the agent name, the shorthand works too:
+
+```bash
+cargo ai hatch my_agent.json --check
+```
+
+When the file checks cleanly, use the Codex workflow below for the fastest iteration loop.
 
 ## Best First Workflow in Codex
 
