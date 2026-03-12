@@ -369,6 +369,7 @@ Then expand into richer constraints and exact output choices:
 ### `actions`
 
 `actions` define what the agent is allowed to do after it produces the top-level structured output.
+Action `logic` uses [JSON Logic](https://jsonlogic.com/).
 
 Start with one simple local action:
 
