@@ -660,6 +660,7 @@ When you want deeper details, use these files:
 
 - `cargo ai hatch --check` validates scaffold and compile behavior with `cargo check` without exporting a binary.
 - Generated binaries use your configured/default profile unless you override runtime flags.
+- Scheduling is not built into Cargo AI today. To run an agent on a schedule, use your operating system scheduler such as `cron` on macOS/Linux or Task Scheduler on Windows. We know scheduling matters and expect this area to expand over time.
 - Cargo AI recommends manual upgrade via:
 
 ```bash
