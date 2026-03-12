@@ -111,7 +111,7 @@ On Windows, run `adder_test.exe` or just `adder_test`.
 
 ### 4. Register an account
 
-If you want `cargo-ai.org` features such as shareable definitions, your public handle, and email-backed workflows, create an account early:
+Define agent email alerts with `cargo-ai.org` and manage your agents in one place. Keep them private, or share them instantly with anyone in the world.
 
 ```bash
 cargo ai account register you@example.com
