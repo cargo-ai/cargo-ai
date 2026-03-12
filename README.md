@@ -343,6 +343,11 @@ Add clearer field meaning with descriptions:
 }
 ```
 
+`agent_schema` can include any number of top-level `string`, `integer`, `number`, and `boolean` fields, plus optional `description`, string `enum`, and numeric bounds where supported.
+
+<details>
+<summary>Expanded example: richer constraints and exact output choices</summary>
+
 Then expand into richer constraints and exact output choices:
 
 ```json
@@ -376,7 +381,7 @@ Then expand into richer constraints and exact output choices:
 }
 ```
 
-`agent_schema` can include any number of top-level `string`, `integer`, `number`, and `boolean` fields, plus optional `description`, string `enum`, and numeric bounds where supported.
+</details>
 
 ### `actions`
 
@@ -408,6 +413,9 @@ Start with one simple local action:
   ]
 }
 ```
+
+<details>
+<summary>Expanded example: multiple action types</summary>
 
 Then expand into multiple action types:
 
@@ -476,6 +484,8 @@ Then expand into multiple action types:
 }
 ```
 
+</details>
+
 You can keep actions simple or mix local executables, email alerts, and child-agent handoffs in the same agent definition. The next section shows how to sequence multiple run steps and control them with `when`.
 
 ### `run`
@@ -495,6 +505,9 @@ Start with one simple step:
   ]
 }
 ```
+
+<details>
+<summary>Expanded example: multi-step workflow</summary>
 
 Then expand into a multi-step workflow:
 
@@ -539,6 +552,8 @@ Then expand into a multi-step workflow:
   ]
 }
 ```
+
+</details>
 
 Use `run` to sequence multiple side effects in order. `exec` steps can capture output, status, or errors for later steps, and `when` lets later steps react to success or failure without leaving the agent definition.
 
