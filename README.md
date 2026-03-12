@@ -413,7 +413,7 @@ Then expand into multiple action types:
       "run": [
         {
           "kind": "exec",
-          "program": "./save_report",
+          "program": "./save_report.sh",
           "args": [{ "var": "reason" }]
         }
       ]
