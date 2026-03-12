@@ -366,6 +366,79 @@ Then expand into richer constraints and exact output choices:
 
 `agent_schema` can include any number of top-level `string`, `integer`, `number`, and `boolean` fields, plus optional `description`, string `enum`, and numeric bounds where supported.
 
+### `actions`
+
+`actions` define what the agent is allowed to do after it produces the top-level structured output.
+
+Start with one simple local action:
+
+```json
+{
+  "actions": [
+    {
+      "name": "save_note",
+      "logic": { "==": [ { "var": "needs_follow_up" }, true ] },
+      "run": [
+        {
+          "kind": "exec",
+          "program": "./save_note",
+          "args": [{ "var": "summary" }]
+        }
+      ]
+    }
+  ]
+}
+```
+
+Then expand into multiple action types:
+
+```json
+{
+  "actions": [
+    {
+      "name": "save_locally",
+      "logic": { "==": [ { "var": "status" }, "review" ] },
+      "run": [
+        {
+          "kind": "exec",
+          "program": "./save_report",
+          "args": [{ "var": "reason" }]
+        }
+      ]
+    },
+    {
+      "name": "email_operator",
+      "logic": { "==": [ { "var": "status" }, "urgent" ] },
+      "run": [
+        {
+          "kind": "email_me",
+          "subject": "Urgent building review",
+          "text": ["Reason: ", { "var": "reason" }]
+        }
+      ]
+    },
+    {
+      "name": "handoff_to_child",
+      "logic": { "==": [ { "var": "status" }, "review" ] },
+      "run": [
+        {
+          "kind": "agent",
+          "agent": "./child_reporter",
+          "inputs": [
+            {
+              "type": "text",
+              "text": ["Follow up on this building package: ", { "var": "reason" }]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+You can keep actions simple or mix local executables, email alerts, and child-agent handoffs in the same agent definition. The next section shows how to sequence multiple run steps and control them with `when`.
+
 ## Best First Workflow in Codex
 
 If you are building with Codex, this is the simplest path:
