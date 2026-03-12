@@ -9,7 +9,7 @@ Declarative AI agents. Native executables. Shareable in minutes.
 An open-source toolkit for building agents that are clear, portable, and fully auditable. Define exactly what the agent does in a concise JSON file, refine it quickly with AI tools, including Codex, hatch it into a native executable, and keep complete control over the result.
 
 ```bash
-cargo ai hatch adder_test --config adder_test.json
+cargo ai hatch agent_x
 ```
 
 ## Why Cargo AI
