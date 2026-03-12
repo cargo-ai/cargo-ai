@@ -138,6 +138,9 @@ cargo ai account agents hatch adder_test
 
 ## The Core Mental Model
 
+> [!TIP]
+> You do not need to author this by hand. The fastest path is to tell Codex exactly what kind of agent you want and let it update the file for you. Read this section so the structure is easy to recognize, then review the result and verify exactly what the agent does.
+
 Cargo AI keeps the authoring model intentionally small:
 
 1. `inputs`
