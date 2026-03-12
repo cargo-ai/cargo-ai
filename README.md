@@ -148,7 +148,7 @@ A minimal agent looks like this:
 
 ```json
 {
-  "version": 1,
+  "version": "2026-03-03.r1",
   "inputs": [
     {
       "type": "text",
