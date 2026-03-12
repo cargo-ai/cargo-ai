@@ -379,7 +379,12 @@ Start with one simple local action:
   "actions": [
     {
       "name": "save_note",
-      "logic": { "==": [ { "var": "needs_follow_up" }, true ] },
+      "logic": {
+        "and": [
+          { "==": [ { "var": "needs_follow_up" }, true ] },
+          { ">": [ { "var": "confidence" }, 0.6 ] }
+        ]
+      },
       "run": [
         {
           "kind": "exec",
@@ -399,7 +404,12 @@ Then expand into multiple action types:
   "actions": [
     {
       "name": "save_locally",
-      "logic": { "==": [ { "var": "status" }, "review" ] },
+      "logic": {
+        "and": [
+          { "==": [ { "var": "status" }, "review" ] },
+          { ">=": [ { "var": "priority_rank" }, 3 ] }
+        ]
+      },
       "run": [
         {
           "kind": "exec",
@@ -410,7 +420,17 @@ Then expand into multiple action types:
     },
     {
       "name": "email_operator",
-      "logic": { "==": [ { "var": "status" }, "urgent" ] },
+      "logic": {
+        "or": [
+          { "==": [ { "var": "status" }, "urgent" ] },
+          {
+            "and": [
+              { ">=": [ { "var": "priority_rank" }, 4 ] },
+              { ">": [ { "var": "confidence" }, 0.85 ] }
+            ]
+          }
+        ]
+      },
       "run": [
         {
           "kind": "email_me",
@@ -421,7 +441,12 @@ Then expand into multiple action types:
     },
     {
       "name": "handoff_to_child",
-      "logic": { "==": [ { "var": "status" }, "review" ] },
+      "logic": {
+        "and": [
+          { "==": [ { "var": "status" }, "review" ] },
+          { "<": [ { "var": "confidence" }, 0.75 ] }
+        ]
+      },
       "run": [
         {
           "kind": "agent",
