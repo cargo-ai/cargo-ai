@@ -246,6 +246,44 @@ File input:
 }
 ```
 
+Multiple inputs with numeric bounds:
+
+```json
+{
+  "inputs": [
+    { "type": "text", "text": "Review the release package and score it." },
+    { "type": "url", "url": "https://example.com/release-notes" },
+    { "type": "url", "url": "https://example.com/changelog" },
+    { "type": "image", "path": "./screenshot.png" },
+    { "type": "file", "path": "./release-checklist.pdf" }
+  ],
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "priority": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 5
+      },
+      "confidence": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 1
+      }
+    }
+  }
+}
+```
+
+You can override the baked inputs any time you run the generated agent. Runtime input flags replace the configured `inputs` for that execution:
+
+```bash
+./agent_x \
+  --input-text "Review this new release candidate." \
+  --input-url "https://example.com/release-candidate" \
+  --input-file "./rc-checklist.pdf"
+```
+
 ## Best First Workflow in Codex
 
 If you are building with Codex, this is the simplest path:
