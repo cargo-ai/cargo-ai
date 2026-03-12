@@ -213,7 +213,7 @@ Use these snippets to recognize how `inputs`, `agent_schema`, and `actions` grow
 
 Use the input types that fit the job.
 
-Text input:
+Text input ([full runnable example](./templates/shared/examples/text-input-playground.md)):
 
 ```json
 {
