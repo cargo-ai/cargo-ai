@@ -246,42 +246,52 @@ File input:
 }
 ```
 
-Multiple inputs with numeric bounds:
+Multiple inputs with related scoring:
 
 ```json
 {
   "inputs": [
-    { "type": "text", "text": "Review the release package and score it." },
-    { "type": "url", "url": "https://example.com/release-notes" },
-    { "type": "url", "url": "https://example.com/changelog" },
-    { "type": "image", "path": "./screenshot.png" },
-    { "type": "file", "path": "./release-checklist.pdf" }
+    { "type": "text", "text": "Review this building package and decide how urgently it should be inspected." },
+    { "type": "url", "url": "https://example.com/listings/building-123" },
+    { "type": "text", "text": "Front facade image for the same building." },
+    { "type": "image", "path": "./building-front.png" },
+    { "type": "text", "text": "Building specifications and constraints." },
+    { "type": "file", "path": "./building-specs.pdf" }
   ],
   "agent_schema": {
     "type": "object",
     "properties": {
-      "priority": {
+      "priority_rank": {
         "type": "integer",
         "minimum": 1,
-        "maximum": 5
+        "maximum": 5,
+        "description": "Inspection priority, where 5 is highest."
       },
       "confidence": {
         "type": "number",
         "exclusiveMinimum": 0,
-        "maximum": 1
+        "maximum": 1,
+        "description": "Confidence in the priority ranking."
+      },
+      "reason": {
+        "type": "string",
+        "description": "Short explanation tied to the evidence."
       }
     }
   }
 }
 ```
 
-You can override the baked inputs any time you run the generated agent. Runtime input flags replace the configured `inputs` for that execution:
+You can override the baked inputs any time you run the generated agent. Runtime input flags replace the configured `inputs` for that execution, and the order is preserved exactly as you pass it on the command line.
 
 ```bash
 ./agent_x \
-  --input-text "Review this new release candidate." \
-  --input-url "https://example.com/release-candidate" \
-  --input-file "./rc-checklist.pdf"
+  --input-text "This is the listing page for the building." \
+  --input-url "https://example.com/listings/building-456" \
+  --input-text "This is the front facade image." \
+  --input-image "./building-456-front.png" \
+  --input-text "These are the building specifications." \
+  --input-file "./building-456-specs.pdf"
 ```
 
 ## Best First Workflow in Codex
