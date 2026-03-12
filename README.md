@@ -190,6 +190,14 @@ cargo ai hatch my_agent --config ./my_agent.json
 ./my_agent
 ```
 
+For Windows users, run `my_agent.exe` or just `my_agent`.
+
+You can also override or inject runtime input without editing the JSON. Generated agents accept flags such as `--input-text`, `--input-url`, and `--input-file`.
+
+```bash
+./my_agent --input-text "What is 3 + 3? Return the answer as an integer."
+```
+
 ## What You Can Build Today
 
 - Local agents hatched from JSON files
