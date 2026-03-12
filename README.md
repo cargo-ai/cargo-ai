@@ -551,32 +551,28 @@ When the file checks cleanly, use the Codex workflow below for the fastest itera
 
 ## Best First Workflow in Codex
 
-If you are building with Codex, this is the simplest path:
-
-1. Add local authoring guidance:
+If you want the fastest authoring loop, start in a new folder and let Codex build the agent definition with you.
 
 ```bash
+mkdir my-agent
+cd my-agent
 cargo ai add guidance --style codex
+codex
 ```
 
-2. Start from a sample config:
-   - [adder_test.json](./adder_test.json)
-   - [weather_test.json](./weather_test.json)
+This creates `AGENTS.md` plus helper files under `.cargo-ai/guidance/` so Codex knows the Cargo AI contract.
 
-3. Ask Codex to modify the JSON, not to build a whole framework.
-4. Re-run the loop:
+Then tell Codex: `I want to build a Cargo AI agent.` Describe what the agent should do, what inputs it should accept, what structured output it should return, and any follow-up actions you want.
 
-```bash
-cargo ai hatch my_agent --config ./my_agent.json --check
-```
+Ask Codex to:
 
-5. Hatch the real binary when the definition is ready:
+- build the JSON definition
+- run `cargo ai hatch my_agent --config ./my_agent.json --check`
+- update the JSON until the check passes
 
-```bash
-cargo ai hatch my_agent --config ./my_agent.json
-```
+Then review the generated JSON yourself to make sure it matches your intent.
 
-The point of Cargo AI is not to make you manage more code. It is to let you keep the agent definition small, understandable, and easy to iterate.
+The point of Cargo AI is not to make you manage more code. It is to keep the agent definition small, understandable, and easy to verify as you iterate.
 
 ## Account-Backed Flows
 
