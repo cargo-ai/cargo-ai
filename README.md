@@ -364,7 +364,7 @@ Then expand into richer constraints and exact output choices:
 }
 ```
 
-Today, `agent_schema` stays flat at the top level: `string`, `integer`, `number`, and `boolean` fields, plus optional `description`, string `enum`, and numeric bounds.
+`agent_schema` can include any number of top-level `string`, `integer`, `number`, and `boolean` fields, plus optional `description`, string `enum`, and numeric bounds where supported.
 
 ## Best First Workflow in Codex
 
