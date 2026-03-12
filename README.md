@@ -208,12 +208,13 @@ You can also override or inject runtime input without editing the JSON. Generate
 ## Start Simple, Then Expand
 
 Use these snippets to recognize how `inputs`, `agent_schema`, and `actions` grow as the agent becomes more capable.
+Click linked labels to open full runnable examples.
 
 ### Inputs
 
 Use the input types that fit the job.
 
-Text input ([full runnable example](./templates/shared/examples/text_input_playground.md)):
+[Text input](./templates/shared/examples/text_input_playground.md):
 
 ```json
 {
