@@ -466,6 +466,70 @@ Then expand into multiple action types:
 
 You can keep actions simple or mix local executables, email alerts, and child-agent handoffs in the same agent definition. The next section shows how to sequence multiple run steps and control them with `when`.
 
+### `run`
+
+`run` is the ordered step list inside an action.
+
+Start with one simple step:
+
+```json
+{
+  "run": [
+    {
+      "kind": "exec",
+      "program": "./save_report.sh",
+      "args": [{ "var": "reason" }]
+    }
+  ]
+}
+```
+
+Then expand into a multi-step workflow:
+
+```json
+{
+  "run": [
+    {
+      "kind": "exec",
+      "program": "./save_report.sh",
+      "args": [{ "var": "reason" }],
+      "output_variable": "report_path",
+      "status_variable": "save_status",
+      "error_variable": "save_error",
+      "failure_mode": "continue"
+    },
+    {
+      "kind": "email_me",
+      "when": {
+        "and": [
+          { "==": [ { "var": "save_status" }, "succeeded" ] },
+          { ">=": [ { "var": "priority_rank" }, 4 ] }
+        ]
+      },
+      "subject": "Building report saved",
+      "text": ["Saved report to ", { "var": "report_path" }]
+    },
+    {
+      "kind": "agent",
+      "when": { "==": [ { "var": "save_status" }, "failed" ] },
+      "agent": "./child_reporter",
+      "inputs": [
+        {
+          "type": "text",
+          "text": ["Saving failed for this building review: ", { "var": "save_error" }]
+        },
+        {
+          "type": "text",
+          "text": ["Original reason: ", { "var": "reason" }]
+        }
+      ]
+    }
+  ]
+}
+```
+
+Use `run` to sequence multiple side effects in order. `exec` steps can capture output, status, or errors for later steps, and `when` lets later steps react to success or failure without leaving the agent definition.
+
 ## Best First Workflow in Codex
 
 If you are building with Codex, this is the simplest path:
