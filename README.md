@@ -198,17 +198,53 @@ You can also override or inject runtime input without editing the JSON. Generate
 ./my_agent --input-text "What is 3 + 3?"
 ```
 
-## What You Can Build Today
+## Start Simple, Then Expand
 
-- Local agents hatched from JSON files
-- Account-hosted agents you can hatch by name
-- Typed outputs with flat top-level scalar fields
-- Conditional follow-up behavior through JSON Logic
-- Action steps that run:
-  - local commands via `exec`
-  - account-backed email via `email_me`
-  - child agents via `agent`
-- URL inputs fetched by Cargo AI's own HTTP client with a practical compatibility target comparable to `curl` for ordinary static or server-rendered content
+The example above is intentionally simple. `cargo-ai` can work with richer inputs, logic, and actions while keeping the agent definition concise and auditable.
+
+### Inputs
+
+Use the input types that fit the job.
+
+Text input:
+
+```json
+{
+  "inputs": [
+    { "type": "text", "text": "Summarize the meeting notes." }
+  ]
+}
+```
+
+URL input:
+
+```json
+{
+  "inputs": [
+    { "type": "url", "url": "https://example.com/report" }
+  ]
+}
+```
+
+Image input:
+
+```json
+{
+  "inputs": [
+    { "type": "image", "path": "./invoice.png" }
+  ]
+}
+```
+
+File input:
+
+```json
+{
+  "inputs": [
+    { "type": "file", "path": "./q1-report.pdf" }
+  ]
+}
+```
 
 ## Best First Workflow in Codex
 
