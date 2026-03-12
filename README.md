@@ -12,6 +12,8 @@ An open-source toolkit for building agents that are clear, portable, and fully a
 cargo ai hatch agent_x
 ```
 
+Our mission is to make AI agents that do exactly what you specify: declarative, auditable, and understandable through a single JSON definition.
+
 ## Why Cargo AI
 
 - **Declarative by Design**: define exactly what the agent does, what actions it can take, and keep the behavior easy to inspect.
