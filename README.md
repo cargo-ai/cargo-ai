@@ -549,13 +549,13 @@ Or target multiple platforms with an array:
 
 ### Child agents
 
-Use child agents for orchestration and handoff, not automatic output merging.
+Use child agents when one agent needs to hand work to another agent.
 
-- Use explicit same-level paths such as `./child_reporter`.
-- The default nested child-agent limit is `5`. Override it with `--max-agent-depth`.
-- The default runtime budget for the parent plus any children is `600` seconds. Override it with `--max-runtime-in-sec`.
-- Parent steps may pass child `inputs` and capture child `status_variable` or `error_variable`.
-- Parent steps cannot directly merge the child agent's top-level structured output fields back into the parent variable namespace.
+- Point to a child agent that lives next to the parent file, such as `./child_reporter`.
+- By default, an agent can call child agents up to `5` levels deep. Override that with `--max-agent-depth`.
+- By default, the parent plus any child agents share a total runtime budget of `600` seconds. Override that with `--max-runtime-in-sec`.
+- A parent can pass inputs to a child and record whether the child succeeded or failed.
+- A parent cannot automatically pull the child's structured return fields back into its own output.
 
 Example:
 
