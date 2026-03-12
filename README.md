@@ -254,7 +254,7 @@ File input:
 ```
 
 <details>
-<summary>Advanced input example: multiple inputs with related scoring</summary>
+<summary>Expanded example: multiple inputs with related scoring</summary>
 
 Multiple inputs with related scoring:
 
