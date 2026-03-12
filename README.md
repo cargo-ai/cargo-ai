@@ -533,6 +533,18 @@ Then expand into a multi-step workflow:
 
 Use `run` to sequence multiple side effects in order. `exec` steps can capture output, status, or errors for later steps, and `when` lets later steps react to success or failure without leaving the agent definition.
 
+You can also target individual run steps to specific runtime platforms:
+
+```json
+{ "kind": "exec", "program": "./save_report.sh", "platform": "macos", "args": [{ "var": "reason" }] }
+```
+
+Or target multiple platforms with an array:
+
+```json
+{ "kind": "exec", "program": "./save_report.sh", "platform": ["macos", "linux", "windows"], "args": [{ "var": "reason" }] }
+```
+
 ## Build In Any Editor
 
 You can build a `cargo-ai` agent in any editor you want. If you want to check whether the definition is valid before exporting a binary, run:
