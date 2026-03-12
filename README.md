@@ -294,6 +294,78 @@ You can override the baked inputs any time you run the generated agent. Runtime 
   --input-file "./building-456-specs.pdf"
 ```
 
+### `agent_schema`
+
+The `agent_schema` is the output contract for the agent. Start simple, then add more structure as the agent becomes more capable.
+
+Minimal output contract:
+
+```json
+{
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "answer": { "type": "integer" }
+    }
+  }
+}
+```
+
+Add clearer field meaning with descriptions:
+
+```json
+{
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "summary": {
+        "type": "string",
+        "description": "One-sentence summary for the operator."
+      },
+      "needs_follow_up": {
+        "type": "boolean",
+        "description": "Whether a human should review the result."
+      }
+    }
+  }
+}
+```
+
+Then expand into richer constraints and exact output choices:
+
+```json
+{
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "priority_rank": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 5,
+        "description": "Inspection priority, where 5 is highest."
+      },
+      "confidence": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 1,
+        "description": "Confidence in the priority ranking."
+      },
+      "status": {
+        "type": "string",
+        "enum": ["clear", "review", "urgent"],
+        "description": "Final triage status."
+      },
+      "reason": {
+        "type": "string",
+        "description": "Short explanation tied to the evidence."
+      }
+    }
+  }
+}
+```
+
+Today, `agent_schema` stays flat at the top level: `string`, `integer`, `number`, and `boolean` fields, plus optional `description`, string `enum`, and numeric bounds.
+
 ## Best First Workflow in Codex
 
 If you are building with Codex, this is the simplest path:
