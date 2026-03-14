@@ -591,6 +591,7 @@ Use child agents when one agent needs to hand work to another agent.
 - By default, an agent can call child agents up to `5` levels deep. Override that with `--max-agent-depth`.
 - By default, the parent plus any child agents share a total runtime budget of `600` seconds. Override that with `--max-runtime-in-sec`.
 - A parent can pass inputs to a child and record whether the child succeeded or failed.
+- Child `agent` steps may set `input_mode` to `replace`, `append`, or `prepend` when they also provide child `inputs`.
 - A parent cannot automatically pull the child's structured return fields back into its own output.
 
 Example:
@@ -599,6 +600,7 @@ Example:
 {
   "kind": "agent",
   "agent": "./child_reporter",
+  "input_mode": "append",
   "status_variable": "child_status",
   "error_variable": "child_error",
   "inputs": [

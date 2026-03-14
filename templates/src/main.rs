@@ -1514,7 +1514,8 @@ async fn run_agent_step(
     }
 
     let mut command = tokio::process::Command::new(agent_path);
-    let (child_args, resolution_notes) = child_input_args(step.inputs.as_deref(), data, action_name)?;
+    let (child_args, resolution_notes) =
+        child_input_args(step.input_mode, step.inputs.as_deref(), data, action_name)?;
     for note in resolution_notes {
         println!("ℹ️ {note}");
     }
@@ -1827,12 +1828,32 @@ fn matching_run_steps<'a>(
 }
 
 fn child_input_args(
+    input_mode: Option<ActionInputMode>,
     inputs: Option<&[ActionInput]>,
     data: &serde_json::Value,
     action_name: &str,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut args = Vec::new();
     let mut notes = Vec::new();
+
+    if let Some(input_mode) = input_mode {
+        if inputs.is_none() {
+            return Err(format!(
+                "Action '{}' child-agent `input_mode` requires `inputs`.",
+                action_name
+            ));
+        }
+
+        args.push("--input-mode".to_string());
+        args.push(
+            match input_mode {
+                ActionInputMode::Replace => "replace",
+                ActionInputMode::Append => "append",
+                ActionInputMode::Prepend => "prepend",
+            }
+            .to_string(),
+        );
+    }
 
     if let Some(inputs) = inputs {
         for (index, input) in inputs.iter().enumerate() {

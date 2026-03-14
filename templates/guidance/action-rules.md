@@ -80,6 +80,8 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 ## Child-Agent Data Flow
 
 - Parent actions may pass child-agent `inputs`, including dynamic string parts resolved from current action-local data.
+- Parent `agent` steps may set child `input_mode` to `replace`, `append`, or `prepend` when they also provide child `inputs`.
+- Omitted child `input_mode` keeps the current replace behavior for child inputs.
 - Parent actions may capture child-agent success/failure with `status_variable` and `error_variable`.
 - Parent actions cannot directly capture the child agent's top-level returned output fields into the parent action-local namespace.
 

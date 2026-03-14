@@ -215,6 +215,10 @@ For `kind: "agent"`:
 ## Child-Agent Data Flow
 
 - A parent action may pass child-agent `inputs`.
+- A `kind: "agent"` run step may also set `input_mode` to `replace`, `append`, or `prepend` when child `inputs` are present.
+- If child `input_mode` is omitted, the child step keeps the current default behavior: child `inputs` replace the child agent's baked `inputs`.
+- Child `append` keeps the child agent's baked inputs first, then appends the action-supplied child inputs in declared order.
+- Child `prepend` keeps the action-supplied child inputs first in declared order, then places the child agent's baked inputs after them.
 - Those child inputs may use dynamic string parts resolved from the parent action-local variable bag.
 - A parent may observe child-agent success or failure through `status_variable` and `error_variable`.
 - A parent cannot directly capture the child agent's top-level returned output fields into its own action-local variables.
@@ -231,6 +235,7 @@ Expect `cargo ai hatch <agent-name> --config <config.json> --check` to reject at
 - unsupported run-step kind
 - missing required fields for a step kind
 - invalid child-agent path shape
+- invalid child-agent `input_mode`
 - invalid relative file or image paths
 - invalid `platform` value
 - `output_variable` on non-`exec` steps
