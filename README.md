@@ -199,7 +199,7 @@ cargo ai hatch my_agent --config ./my_agent.json
 
 For Windows users, run `my_agent.exe` or just `my_agent`.
 
-You can also override or inject runtime input without editing the JSON. Generated agents accept flags such as `--input-text`, `--input-url`, and `--input-file`.
+You can also override or inject runtime input without editing the JSON. Generated agents accept flags such as `--input-text`, `--input-url`, and `--input-file`. By default, runtime input flags replace the baked `inputs` array for that run. Use `--input-mode append` to keep baked inputs first, or `--input-mode prepend` to place runtime inputs before the baked inputs.
 
 ```bash
 ./my_agent --input-text "What is 3 + 3?"
@@ -293,7 +293,7 @@ Multiple inputs with related scoring:
 }
 ```
 
-You can override the baked inputs any time you run the generated agent. Runtime input flags replace the configured `inputs` for that execution, and the order is preserved exactly as you pass it on the command line.
+You can override the baked inputs any time you run the generated agent. By default, runtime input flags replace the configured `inputs` for that execution, and the runtime input order is preserved exactly as you pass it on the command line. Use `--input-mode append` to keep baked inputs first, or `--input-mode prepend` to keep runtime inputs first.
 
 ```bash
 ./agent_x \
@@ -302,6 +302,19 @@ You can override the baked inputs any time you run the generated agent. Runtime 
   --input-text "This is the front facade image." \
   --input-image "./building-456-front.png" \
   --input-text "These are the building specifications." \
+  --input-file "./building-456-specs.pdf"
+```
+
+```bash
+./agent_x \
+  --input-mode append \
+  --input-file "./building-456-specs.pdf"
+```
+
+```bash
+./agent_x \
+  --input-mode prepend \
+  --input-text "Read this first." \
   --input-file "./building-456-specs.pdf"
 ```
 

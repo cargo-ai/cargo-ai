@@ -33,5 +33,5 @@ Use these examples as starting points. Copy the closest file, rename it, and the
 - Prefer the smallest example that matches the user's goal.
 - Keep using the action-flow examples for `when`, `failure_mode`, and captured-variable behavior. Use `schema-features.json` when the main question is how to express the supported output fields and constraints.
 - Use `runtime-file-local-exec.json` when the main question is how file summarization, returned output, and a platform-specific local exec step fit together.
-- When converting a baked file example into a caller-supplied runtime file workflow, remember that `--input-file` replaces the full baked `inputs` array. Supply `--input-text` too when the run still needs text instructions.
+- When converting a baked file example into a caller-supplied runtime file workflow, remember that `--input-file` replaces the full baked `inputs` array unless the caller also sets `--input-mode append` or `--input-mode prepend`. Supply `--input-text` too when the run stays in replace mode and still needs text instructions.
 - If the JSON becomes hard to scan, add a same-name sidecar Markdown file and an ASCII flow diagram.

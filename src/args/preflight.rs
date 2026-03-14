@@ -66,6 +66,15 @@ pub fn command() -> Command {
                 .value_parser(clap::value_parser!(u64).range(1..)),
         )
         .arg(
+            Arg::new("input_mode")
+                .long("input-mode")
+                .value_name("MODE")
+                .help(
+                    "How runtime input flags combine with baked inputs: replace, append, or prepend",
+                )
+                .value_parser(["replace", "append", "prepend"]),
+        )
+        .arg(
             Arg::new("input_text")
                 .long("input-text")
                 .help("Text input to provide to the agent at runtime")
@@ -112,5 +121,20 @@ mod tests {
 
         assert!(help.contains("Local supported file path to provide to the agent at runtime"));
         assert!(!help.contains("Local PDF file path to provide to the agent at runtime"));
+    }
+
+    #[test]
+    fn help_describes_input_mode_values() {
+        let mut command = super::command();
+        let mut help = Vec::new();
+        command
+            .write_long_help(&mut help)
+            .expect("preflight help should render");
+        let help = String::from_utf8(help).expect("help should be utf8");
+
+        assert!(help.contains("--input-mode <MODE>"));
+        assert!(help.contains(
+            "How runtime input flags combine with baked inputs: replace, append, or prepend"
+        ));
     }
 }

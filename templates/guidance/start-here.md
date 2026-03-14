@@ -44,6 +44,6 @@ When files, URLs, or images are involved, also clarify:
 
 - Prefer the most minimal portable approach that satisfies the user's goal.
 - Use platform-specific steps only when the user explicitly wants local-machine behavior or the task cannot be met portably.
-- Remember that runtime input flags replace the full baked `inputs` array. If a run still needs text instructions plus a runtime file, URL, or image, supply both kinds of runtime inputs.
+- Remember that runtime input flags replace the full baked `inputs` array unless the caller sets `--input-mode append` or `--input-mode prepend`. If a run still needs text instructions plus a runtime file, URL, or image in replace mode, supply both kinds of runtime inputs.
 - Prefer boxed ASCII diagrams for explanations by default.
 - If Mermaid rendering is clearly supported, offer it as an option and ask whether the user wants it.

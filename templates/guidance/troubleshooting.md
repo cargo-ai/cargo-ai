@@ -37,8 +37,8 @@ Check for:
 ### Runtime input confusion
 
 Check for:
-- using `--input-file`, `--input-url`, or `--input-image` without also supplying `--input-text` when the instructions were only baked into JSON
-- expecting runtime input flags to append to JSON `inputs`; they replace the full baked input list for that run
+- using `--input-file`, `--input-url`, or `--input-image` without also supplying `--input-text` when the instructions were only baked into JSON and the run is still using the default replace behavior
+- expecting runtime input flags to append to JSON `inputs` without also setting `--input-mode append` or `--input-mode prepend`
 - using a JSON `file.path` when the caller should really choose the file at invocation time
 
 ### Step did not run on the current OS
