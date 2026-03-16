@@ -1,6 +1,7 @@
 # Cargo AI Guidance Examples
 
 Use these examples as starting points. Copy the closest file, rename it, and then edit only what the user needs.
+Each example is meant to be validated and hatched into a CLI executable.
 
 ## Example Index
 

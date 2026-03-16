@@ -1,6 +1,6 @@
 # Cargo AI Start Here
 
-Use this file when a user opens a blank folder and wants help creating their first Cargo AI agent.
+Use this file when a user opens a blank folder and wants help creating their first Cargo AI agent that hatches into a CLI tool.
 
 ## First-Run Goal
 
