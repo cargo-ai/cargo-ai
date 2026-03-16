@@ -81,7 +81,7 @@ If these conflict with the local `.cargo-ai/guidance/` bundle, follow the local 
 - For `type: "url"`, prefer content Cargo AI can fetch directly with a normal HTTP request; treat `curl`-comparable ordinary pages as the target floor, not browser-only or JavaScript-rendered pages.
 - Prefer the most minimal portable steps that satisfy the user's goal.
 - Use platform-specific commands only when the user explicitly wants local-machine behavior or the task cannot be met portably.
-- Remember that runtime input flags replace the full baked `inputs` array for that run.
+- Remember that runtime input flags replace the full baked `inputs` array by default; use `--input-mode append` or `--input-mode prepend` when the caller should keep baked inputs too.
 - Recommend a same-name sidecar Markdown file when the JSON becomes structurally complex.
 - Prefer boxed ASCII diagrams for flow explanations.
 - If Mermaid rendering is clearly supported, offer Mermaid as an option and ask whether the user wants it.

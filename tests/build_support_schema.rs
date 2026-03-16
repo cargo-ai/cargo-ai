@@ -337,6 +337,7 @@ fn accepts_agent_step_with_relative_path_and_inputs() {
               {
                 "kind": "agent",
                 "agent": "./summary_agent",
+                "input_mode": "append",
                 "inputs": [
                   { "type": "text", "text": "Summarize this." },
                   { "type": "url", "url": "https://example.com" }
@@ -351,9 +352,93 @@ fn accepts_agent_step_with_relative_path_and_inputs() {
 
     assert!(generated.contains("kind: \"agent\".to_string()"));
     assert!(generated.contains("agent: Some(\"./summary_agent\".to_string())"));
+    assert!(generated.contains("input_mode: Some(ActionInputMode::Append)"));
     assert!(generated.contains(
         "inputs: Some(vec![ActionInput::Text { text: vec![RunArg::Literal(\"Summarize this.\".to_string())] }, ActionInput::Url { url: vec![RunArg::Literal(\"https://example.com\".to_string())] }])"
     ));
+}
+
+#[test]
+fn rejects_agent_input_mode_without_inputs() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./summary_agent",
+                "input_mode": "append"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].input_mode"));
+    assert!(err.contains("requires `inputs`"));
+}
+
+#[test]
+fn rejects_input_mode_on_exec_steps() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "exec_with_mode",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["hello"],
+                "input_mode": "append"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].input_mode"));
+    assert!(err.contains("only supported for `agent` actions"));
+}
+
+#[test]
+fn rejects_input_mode_on_email_steps() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "email_with_mode",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "email_me",
+                "subject": "Hello",
+                "text": "World",
+                "input_mode": "prepend"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].input_mode"));
+    assert!(err.contains("only supported for `agent` actions"));
 }
 
 #[test]

@@ -19,10 +19,12 @@ Use this as a concise reference while authoring agent configs.
 - `url` entries require `url`
 - `image` entries require `path`
 - runtime overrides use:
+  - `--input-mode` with `replace`, `append`, or `prepend`
   - `--input-text`
   - `--input-url`
   - `--input-image`
-- if any runtime input flags are provided, they replace config-defined `inputs`
+- if runtime input flags are provided without `--input-mode`, they replace config-defined `inputs`
+- `--input-mode append` keeps baked inputs first; `--input-mode prepend` keeps runtime inputs first
 
 ## `agent_schema` expectations
 - `agent_schema.type` must be `"object"`

@@ -90,6 +90,13 @@ pub fn build_cli() -> ArgMatches {
                 .global(true)
         )
         .arg(
+            Arg::new("input_mode")
+                .long("input-mode")
+                .help("How runtime input flags combine with baked inputs: replace, append, or prepend")
+                .value_name("MODE")
+                .value_parser(["replace", "append", "prepend"])
+        )
+        .arg(
             Arg::new("input_text")
                 .long("input-text")
                 .help("Text input to provide to the agent at runtime")

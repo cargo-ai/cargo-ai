@@ -119,6 +119,7 @@ struct RunStep {
     text: Option<Vec<RunArg>>,
     agent: Option<String>,
     inputs: Option<Vec<ActionInputSpec>>,
+    input_mode: Option<ActionInputMode>,
     platforms: Option<Vec<String>>,
 }
 
@@ -126,6 +127,13 @@ struct RunStep {
 enum FailureMode {
     Stop,
     Continue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionInputMode {
+    Replace,
+    Append,
+    Prepend,
 }
 
 #[derive(Debug, Clone)]
@@ -646,6 +654,12 @@ fn parse_actions(
                             "`inputs` is only supported for `agent` actions",
                         ));
                     }
+                    if run_obj.contains_key("input_mode") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.input_mode"),
+                            "`input_mode` is only supported for `agent` actions",
+                        ));
+                    }
 
                     let program = get_required_string(run_obj, "program", &run_path)?.to_string();
                     if program.trim().is_empty() {
@@ -676,6 +690,7 @@ fn parse_actions(
                         text: None,
                         agent: None,
                         inputs: None,
+                        input_mode: None,
                         platforms,
                     }
                 }
@@ -710,6 +725,12 @@ fn parse_actions(
                             "`output_variable` is only supported for `exec` actions",
                         ));
                     }
+                    if run_obj.contains_key("input_mode") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.input_mode"),
+                            "`input_mode` is only supported for `agent` actions",
+                        ));
+                    }
 
                     let subject = parse_string_parts_field(
                         run_obj,
@@ -737,6 +758,7 @@ fn parse_actions(
                         text: Some(text),
                         agent: None,
                         inputs: None,
+                        input_mode: None,
                         platforms,
                     }
                 }
@@ -777,6 +799,7 @@ fn parse_actions(
                         .to_string();
                     let agent_path = format!("{run_path}.agent");
                     validate_child_agent_target(&agent, &agent_path)?;
+                    let input_mode = parse_optional_action_input_mode(run_obj, &run_path)?;
 
                     let inputs = match run_obj.get("inputs") {
                         Some(input_value) => {
@@ -796,6 +819,13 @@ fn parse_actions(
                         None => None,
                     };
 
+                    if input_mode.is_some() && inputs.is_none() {
+                        return Err(BuildError::config(
+                            format!("{run_path}.input_mode"),
+                            "`input_mode` requires `inputs` for `agent` actions",
+                        ));
+                    }
+
                     RunStep {
                         kind,
                         program: None,
@@ -809,6 +839,7 @@ fn parse_actions(
                         text: None,
                         agent: Some(agent),
                         inputs,
+                        input_mode,
                         platforms,
                     }
                 }
@@ -910,6 +941,33 @@ fn parse_optional_failure_mode(
         _ => Err(BuildError::config(
             &failure_mode_path,
             "unsupported `failure_mode` (supported: `stop`, `continue`)",
+        )),
+    }
+}
+
+fn parse_optional_action_input_mode(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+) -> Result<Option<ActionInputMode>, BuildError> {
+    let Some(value) = run_obj.get("input_mode") else {
+        return Ok(None);
+    };
+
+    let input_mode_path = format!("{run_path}.input_mode");
+    let input_mode = value.as_str().ok_or_else(|| {
+        BuildError::config(
+            &input_mode_path,
+            "expected `input_mode` to be a string (`replace`, `append`, or `prepend`)",
+        )
+    })?;
+
+    match input_mode.trim() {
+        "replace" => Ok(Some(ActionInputMode::Replace)),
+        "append" => Ok(Some(ActionInputMode::Append)),
+        "prepend" => Ok(Some(ActionInputMode::Prepend)),
+        _ => Err(BuildError::config(
+            &input_mode_path,
+            "unsupported `input_mode` (supported: `replace`, `append`, `prepend`)",
         )),
     }
 }
@@ -2309,6 +2367,15 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         format!("Some(vec![{}])", rendered)
                     })
                     .unwrap_or_else(|| "None".to_string());
+                let input_mode = run_step
+                    .input_mode
+                    .as_ref()
+                    .map(|input_mode| match input_mode {
+                        ActionInputMode::Replace => "Some(ActionInputMode::Replace)".to_string(),
+                        ActionInputMode::Append => "Some(ActionInputMode::Append)".to_string(),
+                        ActionInputMode::Prepend => "Some(ActionInputMode::Prepend)".to_string(),
+                    })
+                    .unwrap_or_else(|| "None".to_string());
                 let platforms = run_step
                     .platforms
                     .as_ref()
@@ -2338,6 +2405,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         text: {},
                         agent: {},
                         inputs: {},
+                        input_mode: {},
                         platforms: {},
                     }}",
                     rust_string_literal(&run_step.kind),
@@ -2358,6 +2426,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     text,
                     agent,
                     inputs,
+                    input_mode,
                     platforms
                 )
             })
@@ -2454,6 +2523,13 @@ pub enum FailureMode {{
     Continue,
 }}
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ActionInputMode {{
+    Replace,
+    Append,
+    Prepend,
+}}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RunStep {{
     kind: String,
@@ -2468,6 +2544,7 @@ pub struct RunStep {{
     text: Option<Vec<RunArg>>,
     agent: Option<String>,
     inputs: Option<Vec<ActionInput>>,
+    input_mode: Option<ActionInputMode>,
     platforms: Option<Vec<String>>,
 }}
 

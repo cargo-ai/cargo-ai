@@ -49,6 +49,13 @@ enum LoadedProfileKind {
     Default,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeInputMode {
+    Replace,
+    Append,
+    Prepend,
+}
+
 fn profile_selection_messages(
     kind: LoadedProfileKind,
     profile_name: &str,
@@ -181,6 +188,17 @@ fn runtime_input_overrides(sub_m: &ArgMatches) -> Vec<crate::Input> {
     ordered.into_iter().map(|(_, input)| input).collect()
 }
 
+fn runtime_input_mode(sub_m: &ArgMatches) -> Result<RuntimeInputMode, String> {
+    match sub_m.get_one::<String>("input_mode").map(String::as_str) {
+        None | Some("replace") => Ok(RuntimeInputMode::Replace),
+        Some("append") => Ok(RuntimeInputMode::Append),
+        Some("prepend") => Ok(RuntimeInputMode::Prepend),
+        Some(other) => Err(format!(
+            "Unsupported --input-mode '{other}'. Expected replace, append, or prepend."
+        )),
+    }
+}
+
 fn collect_flagged_inputs(sub_m: &ArgMatches, id: &str) -> Vec<(usize, String)> {
     match (sub_m.indices_of(id), sub_m.get_many::<String>(id)) {
         (Some(indices), Some(values)) => indices
@@ -191,13 +209,33 @@ fn collect_flagged_inputs(sub_m: &ArgMatches, id: &str) -> Vec<(usize, String)> 
     }
 }
 
-fn resolved_inputs_for_run(sub_m: &ArgMatches) -> Vec<crate::Input> {
+fn resolved_inputs_for_run(sub_m: &ArgMatches) -> Result<Vec<crate::Input>, String> {
     let runtime_inputs = runtime_input_overrides(sub_m);
+
     if runtime_inputs.is_empty() {
-        crate::inputs()
-    } else {
-        runtime_inputs
+        if sub_m.get_one::<String>("input_mode").is_some() {
+            return Err(
+                "--input-mode requires at least one runtime input flag such as --input-text, --input-url, --input-image, or --input-file."
+                    .to_string(),
+            );
+        }
+        return Ok(crate::inputs());
     }
+
+    let input_mode = runtime_input_mode(sub_m)?;
+    Ok(match input_mode {
+        RuntimeInputMode::Replace => runtime_inputs,
+        RuntimeInputMode::Append => {
+            let mut selected_inputs = crate::inputs();
+            selected_inputs.extend(runtime_inputs);
+            selected_inputs
+        }
+        RuntimeInputMode::Prepend => {
+            let mut selected_inputs = runtime_inputs;
+            selected_inputs.extend(crate::inputs());
+            selected_inputs
+        }
+    })
 }
 
 fn inherited_agent_action_max_depth() -> Option<u32> {
@@ -399,7 +437,13 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 
     // End: Argument assignments
 
-    let selected_inputs = resolved_inputs_for_run(sub_m);
+    let selected_inputs = match resolved_inputs_for_run(sub_m) {
+        Ok(selected_inputs) => selected_inputs,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            return false;
+        }
+    };
     let resolved_inputs = match crate::providers::resolve_provider_inputs(&selected_inputs).await {
         Ok(resolved_inputs) => resolved_inputs,
         Err(error) => {
@@ -580,6 +624,10 @@ mod tests {
     };
     use crate::args::test_cli_command;
 
+    fn input_debug_strings(inputs: &[crate::Input]) -> Vec<String> {
+        inputs.iter().map(|input| format!("{input:?}")).collect()
+    }
+
     fn matches(args: &[&str]) -> clap::ArgMatches {
         test_cli_command("cargo-ai")
             .try_get_matches_from(args)
@@ -749,6 +797,116 @@ mod tests {
             &overrides[2],
             crate::Input::Url { url } if url == "https://example.com"
         ));
+    }
+
+    #[test]
+    fn resolved_inputs_for_run_defaults_to_replace_mode() {
+        let cmd = matches(&[
+            "cargo-ai",
+            "preflight",
+            "--input-text",
+            "hello",
+            "--input-file",
+            "./report.pdf",
+        ]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        let selected_inputs =
+            super::resolved_inputs_for_run(preflight).expect("replace mode should resolve");
+
+        assert_eq!(selected_inputs.len(), 2);
+        assert!(matches!(
+            &selected_inputs[0],
+            crate::Input::Text { text } if text == "hello"
+        ));
+        assert!(matches!(
+            &selected_inputs[1],
+            crate::Input::File { path } if path == "./report.pdf"
+        ));
+    }
+
+    #[test]
+    fn resolved_inputs_for_run_explicit_append_keeps_baked_inputs_first() {
+        let baked_inputs = crate::inputs();
+        let baked_debug = input_debug_strings(&baked_inputs);
+        let cmd = matches(&[
+            "cargo-ai",
+            "preflight",
+            "--input-mode",
+            "append",
+            "--input-file",
+            "./report.pdf",
+            "--input-text",
+            "hello",
+        ]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        let selected_inputs =
+            super::resolved_inputs_for_run(preflight).expect("append mode should resolve");
+
+        assert_eq!(selected_inputs.len(), baked_inputs.len() + 2);
+        assert_eq!(
+            input_debug_strings(&selected_inputs[..baked_inputs.len()]),
+            baked_debug
+        );
+        assert!(matches!(
+            &selected_inputs[baked_inputs.len()],
+            crate::Input::File { path } if path == "./report.pdf"
+        ));
+        assert!(matches!(
+            &selected_inputs[baked_inputs.len() + 1],
+            crate::Input::Text { text } if text == "hello"
+        ));
+    }
+
+    #[test]
+    fn resolved_inputs_for_run_explicit_prepend_keeps_runtime_inputs_first() {
+        let baked_inputs = crate::inputs();
+        let baked_debug = input_debug_strings(&baked_inputs);
+        let cmd = matches(&[
+            "cargo-ai",
+            "preflight",
+            "--input-mode",
+            "prepend",
+            "--input-url",
+            "https://example.com",
+            "--input-image",
+            "./image.png",
+        ]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        let selected_inputs =
+            super::resolved_inputs_for_run(preflight).expect("prepend mode should resolve");
+
+        assert_eq!(selected_inputs.len(), baked_inputs.len() + 2);
+        assert!(matches!(
+            &selected_inputs[0],
+            crate::Input::Url { url } if url == "https://example.com"
+        ));
+        assert!(matches!(
+            &selected_inputs[1],
+            crate::Input::Image { path } if path == "./image.png"
+        ));
+        assert_eq!(input_debug_strings(&selected_inputs[2..]), baked_debug);
+    }
+
+    #[test]
+    fn resolved_inputs_for_run_rejects_input_mode_without_runtime_inputs() {
+        let cmd = matches(&["cargo-ai", "preflight", "--input-mode", "append"]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        let error = super::resolved_inputs_for_run(preflight)
+            .expect_err("missing runtime inputs should fail");
+
+        assert!(error.contains("--input-mode requires at least one runtime input flag"));
     }
 
     #[tokio::test]

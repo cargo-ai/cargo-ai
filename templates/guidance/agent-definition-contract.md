@@ -47,6 +47,7 @@ URL guidance:
 ## Runtime Inputs
 
 Generated agent binaries may also accept runtime input flags such as:
+- `--input-mode`
 - `--input-text`
 - `--input-url`
 - `--input-image`
@@ -55,12 +56,15 @@ Generated agent binaries may also accept runtime input flags such as:
 These runtime inputs are separate from the JSON `inputs` array:
 - JSON `inputs` are baked into the definition as default model-facing inputs.
 - Runtime input flags are supplied by the caller when the binary runs.
-- If any runtime input flags are used, they replace the full JSON-defined `inputs` array for that run.
+- If runtime input flags are used without `--input-mode`, they replace the full JSON-defined `inputs` array for that run.
+- `--input-mode replace` explicitly selects runtime-only replacement.
+- `--input-mode append` keeps baked inputs first and appends runtime inputs in CLI order.
+- `--input-mode prepend` keeps runtime inputs in CLI order first and then places baked inputs after them.
 
 Authoring guidance:
 - Use JSON `inputs` when the definition should own a fixed instruction or a fixed local file/image path.
 - Use runtime flags when the caller should choose the content at invocation time.
-- If you use `--input-file` and still need a text instruction, also pass `--input-text` because runtime flags replace the full baked `inputs` array.
+- If you use `--input-file` and still need a text instruction, either also pass `--input-text` in replace mode or choose `--input-mode append` / `--input-mode prepend` so the baked text instruction is still included.
 - `{"type":"file","path":"..."}` is for a definition-owned fixed file path, not for a caller-selected runtime file.
 
 ## `agent_schema`
@@ -211,6 +215,10 @@ For `kind: "agent"`:
 ## Child-Agent Data Flow
 
 - A parent action may pass child-agent `inputs`.
+- A `kind: "agent"` run step may also set `input_mode` to `replace`, `append`, or `prepend` when child `inputs` are present.
+- If child `input_mode` is omitted, the child step keeps the current default behavior: child `inputs` replace the child agent's baked `inputs`.
+- Child `append` keeps the child agent's baked inputs first, then appends the action-supplied child inputs in declared order.
+- Child `prepend` keeps the action-supplied child inputs first in declared order, then places the child agent's baked inputs after them.
 - Those child inputs may use dynamic string parts resolved from the parent action-local variable bag.
 - A parent may observe child-agent success or failure through `status_variable` and `error_variable`.
 - A parent cannot directly capture the child agent's top-level returned output fields into its own action-local variables.
@@ -227,6 +235,7 @@ Expect `cargo ai hatch <agent-name> --config <config.json> --check` to reject at
 - unsupported run-step kind
 - missing required fields for a step kind
 - invalid child-agent path shape
+- invalid child-agent `input_mode`
 - invalid relative file or image paths
 - invalid `platform` value
 - `output_variable` on non-`exec` steps

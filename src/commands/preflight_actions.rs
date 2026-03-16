@@ -513,7 +513,7 @@ async fn run_agent_step(
 
     let mut command = tokio::process::Command::new(agent_path);
     let (child_args, resolution_notes) =
-        child_input_args(step.inputs.as_deref(), data, action_name)?;
+        child_input_args(step.input_mode, step.inputs.as_deref(), data, action_name)?;
     for note in resolution_notes {
         println!("ℹ️ {note}");
     }
@@ -1065,12 +1065,32 @@ fn matching_run_steps<'a>(
 }
 
 fn child_input_args(
+    input_mode: Option<crate::ActionInputMode>,
     inputs: Option<&[crate::ActionInput]>,
     data: &serde_json::Value,
     action_name: &str,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut args = Vec::new();
     let mut notes = Vec::new();
+
+    if let Some(input_mode) = input_mode {
+        if inputs.is_none() {
+            return Err(format!(
+                "Action '{}' child-agent `input_mode` requires `inputs`.",
+                action_name
+            ));
+        }
+
+        args.push("--input-mode".to_string());
+        args.push(
+            match input_mode {
+                crate::ActionInputMode::Replace => "replace",
+                crate::ActionInputMode::Append => "append",
+                crate::ActionInputMode::Prepend => "prepend",
+            }
+            .to_string(),
+        );
+    }
 
     if let Some(inputs) = inputs {
         for (index, input) in inputs.iter().enumerate() {
@@ -1350,6 +1370,7 @@ mod tests {
             text: None,
             agent: None,
             inputs: None,
+            input_mode: None,
             platforms: platforms.map(|platforms| {
                 platforms
                     .iter()
@@ -1471,6 +1492,7 @@ mod tests {
     #[test]
     fn child_input_args_map_to_runtime_flags() {
         let (args, notes) = child_input_args(
+            None,
             Some(&[
                 crate::ActionInput::Text {
                     text: vec![crate::RunArg::Literal("hello".to_string())],
@@ -1507,8 +1529,41 @@ mod tests {
     }
 
     #[test]
+    fn child_input_args_include_explicit_input_mode() {
+        let (args, notes) = child_input_args(
+            Some(crate::ActionInputMode::Prepend),
+            Some(&[crate::ActionInput::Text {
+                text: vec![crate::RunArg::Literal("hello".to_string())],
+            }]),
+            &json!({}),
+            "demo",
+        )
+        .expect("child input args should resolve");
+
+        assert_eq!(
+            args,
+            vec!["--input-mode", "prepend", "--input-text", "hello"]
+        );
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn child_input_args_reject_input_mode_without_inputs() {
+        let error = child_input_args(
+            Some(crate::ActionInputMode::Append),
+            None,
+            &json!({}),
+            "demo",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("child-agent `input_mode` requires `inputs`"));
+    }
+
+    #[test]
     fn child_input_args_resolve_dynamic_text_and_file_path() {
         let (args, notes) = child_input_args(
+            None,
             Some(&[
                 crate::ActionInput::Text {
                     text: vec![
@@ -1548,6 +1603,7 @@ mod tests {
     #[test]
     fn child_input_args_reject_invalid_dynamic_url() {
         let error = child_input_args(
+            None,
             Some(&[crate::ActionInput::Url {
                 url: vec![crate::RunArg::Variable("source_url".to_string())],
             }]),
@@ -1564,6 +1620,7 @@ mod tests {
     #[test]
     fn child_input_args_reject_invalid_dynamic_file_extension() {
         let error = child_input_args(
+            None,
             Some(&[crate::ActionInput::File {
                 path: vec![
                     crate::RunArg::Literal("./reports/".to_string()),
@@ -1583,6 +1640,7 @@ mod tests {
     #[test]
     fn child_input_args_reject_parent_traversal_in_dynamic_path() {
         let error = child_input_args(
+            None,
             Some(&[crate::ActionInput::Image {
                 path: vec![crate::RunArg::Variable("image_path".to_string())],
             }]),
@@ -1645,6 +1703,7 @@ mod tests {
             text: None,
             agent: None,
             inputs: None,
+            input_mode: None,
             platforms: None,
         };
 
@@ -1717,6 +1776,7 @@ mod tests {
                     ],
                 },
             ]),
+            input_mode: Some(crate::ActionInputMode::Append),
             platforms: None,
         };
 
@@ -1746,6 +1806,8 @@ mod tests {
         assert_eq!(
             args.lines().collect::<Vec<_>>(),
             vec![
+                "--input-mode",
+                "append",
                 "--input-text",
                 "hello world",
                 "--input-url",
@@ -1800,6 +1862,7 @@ mod tests {
             text: None,
             agent: None,
             inputs: None,
+            input_mode: None,
             platforms: None,
         };
         let agent_step = crate::RunStep {
@@ -1820,6 +1883,7 @@ mod tests {
                     crate::RunArg::Variable("report_listing".to_string()),
                 ],
             }]),
+            input_mode: None,
             platforms: None,
         };
 
@@ -1899,6 +1963,7 @@ mod tests {
             text: None,
             agent: Some(format!("./{}", script_name)),
             inputs: None,
+            input_mode: None,
             platforms: None,
         };
 
@@ -1937,6 +2002,7 @@ mod tests {
             text: None,
             agent: Some("child_agent".to_string()),
             inputs: None,
+            input_mode: None,
             platforms: None,
         };
 
@@ -1963,6 +2029,7 @@ mod tests {
             text: None,
             agent: Some("./../child_agent".to_string()),
             inputs: None,
+            input_mode: None,
             platforms: None,
         };
 
@@ -1989,6 +2056,7 @@ mod tests {
             text: None,
             agent: Some("./agents/child_agent".to_string()),
             inputs: None,
+            input_mode: None,
             platforms: None,
         };
 
@@ -2032,6 +2100,7 @@ mod tests {
             text: None,
             agent: Some(format!("./{}", script_name)),
             inputs: None,
+            input_mode: None,
             platforms: None,
         };
 
@@ -2082,6 +2151,7 @@ mod tests {
             text: None,
             agent: None,
             inputs: None,
+            input_mode: None,
             platforms: None,
         };
         let second_step = crate::RunStep {
@@ -2097,6 +2167,7 @@ mod tests {
             text: None,
             agent: Some(format!("./{}", script_name)),
             inputs: None,
+            input_mode: None,
             platforms: None,
         };
 
@@ -2158,6 +2229,7 @@ mod tests {
             text: None,
             agent: None,
             inputs: None,
+            input_mode: None,
             platforms: None,
         };
         let second_step = crate::RunStep {
@@ -2173,6 +2245,7 @@ mod tests {
             text: None,
             agent: Some(format!("./{}", script_name)),
             inputs: None,
+            input_mode: None,
             platforms: None,
         };
 

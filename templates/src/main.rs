@@ -81,6 +81,13 @@ enum StepExecutionOutcome {
     SuccessAlreadyPrinted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeInputMode {
+    Replace,
+    Append,
+    Prepend,
+}
+
 #[derive(Debug, Clone)]
 struct AccountAuth {
     access_token: String,
@@ -800,6 +807,17 @@ fn runtime_input_overrides(cmd_args: &clap::ArgMatches) -> Vec<Input> {
     ordered.into_iter().map(|(_, input)| input).collect()
 }
 
+fn runtime_input_mode(cmd_args: &clap::ArgMatches) -> Result<RuntimeInputMode, String> {
+    match cmd_args.get_one::<String>("input_mode").map(String::as_str) {
+        None | Some("replace") => Ok(RuntimeInputMode::Replace),
+        Some("append") => Ok(RuntimeInputMode::Append),
+        Some("prepend") => Ok(RuntimeInputMode::Prepend),
+        Some(other) => Err(format!(
+            "Unsupported --input-mode '{other}'. Expected replace, append, or prepend."
+        )),
+    }
+}
+
 fn collect_flagged_inputs(cmd_args: &clap::ArgMatches, id: &str) -> Vec<(usize, String)> {
     match (cmd_args.indices_of(id), cmd_args.get_many::<String>(id)) {
         (Some(indices), Some(values)) => indices
@@ -810,13 +828,33 @@ fn collect_flagged_inputs(cmd_args: &clap::ArgMatches, id: &str) -> Vec<(usize, 
     }
 }
 
-fn resolved_inputs_for_run(cmd_args: &clap::ArgMatches) -> Vec<Input> {
+fn resolved_inputs_for_run(cmd_args: &clap::ArgMatches) -> Result<Vec<Input>, String> {
     let runtime_inputs = runtime_input_overrides(cmd_args);
+
     if runtime_inputs.is_empty() {
-        inputs()
-    } else {
-        runtime_inputs
+        if cmd_args.get_one::<String>("input_mode").is_some() {
+            return Err(
+                "--input-mode requires at least one runtime input flag such as --input-text, --input-url, --input-image, or --input-file."
+                    .to_string(),
+            );
+        }
+        return Ok(inputs());
     }
+
+    let input_mode = runtime_input_mode(cmd_args)?;
+    Ok(match input_mode {
+        RuntimeInputMode::Replace => runtime_inputs,
+        RuntimeInputMode::Append => {
+            let mut selected_inputs = inputs();
+            selected_inputs.extend(runtime_inputs);
+            selected_inputs
+        }
+        RuntimeInputMode::Prepend => {
+            let mut selected_inputs = runtime_inputs;
+            selected_inputs.extend(inputs());
+            selected_inputs
+        }
+    })
 }
 
 // Initialize Tokio runtime macro
@@ -948,7 +986,13 @@ async fn main() {
         return;
     }
 
-    let selected_inputs = resolved_inputs_for_run(&cmd_args);
+    let selected_inputs = match resolved_inputs_for_run(&cmd_args) {
+        Ok(selected_inputs) => selected_inputs,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            return;
+        }
+    };
     let resolved_inputs = match crate::providers::resolve_provider_inputs(&selected_inputs).await {
         Ok(resolved_inputs) => resolved_inputs,
         Err(error) => {
@@ -1470,7 +1514,8 @@ async fn run_agent_step(
     }
 
     let mut command = tokio::process::Command::new(agent_path);
-    let (child_args, resolution_notes) = child_input_args(step.inputs.as_deref(), data, action_name)?;
+    let (child_args, resolution_notes) =
+        child_input_args(step.input_mode, step.inputs.as_deref(), data, action_name)?;
     for note in resolution_notes {
         println!("ℹ️ {note}");
     }
@@ -1783,12 +1828,32 @@ fn matching_run_steps<'a>(
 }
 
 fn child_input_args(
+    input_mode: Option<ActionInputMode>,
     inputs: Option<&[ActionInput]>,
     data: &serde_json::Value,
     action_name: &str,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut args = Vec::new();
     let mut notes = Vec::new();
+
+    if let Some(input_mode) = input_mode {
+        if inputs.is_none() {
+            return Err(format!(
+                "Action '{}' child-agent `input_mode` requires `inputs`.",
+                action_name
+            ));
+        }
+
+        args.push("--input-mode".to_string());
+        args.push(
+            match input_mode {
+                ActionInputMode::Replace => "replace",
+                ActionInputMode::Append => "append",
+                ActionInputMode::Prepend => "prepend",
+            }
+            .to_string(),
+        );
+    }
 
     if let Some(inputs) = inputs {
         for (index, input) in inputs.iter().enumerate() {

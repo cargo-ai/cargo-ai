@@ -43,8 +43,9 @@ Choose one of these intentionally:
   - let the caller provide values such as `--input-text`, `--input-file`, `--input-url`, or `--input-image`
 
 Important rule:
-- If any runtime input flags are used, they replace the full baked `inputs` array for that run.
-- If the caller supplies `--input-file` but the agent also needs instructions, the caller should also supply `--input-text`.
+- If runtime input flags are used without `--input-mode`, they replace the full baked `inputs` array for that run.
+- Use `--input-mode append` to keep baked inputs first, or `--input-mode prepend` to place runtime inputs first.
+- If the caller supplies `--input-file` in replace mode but the agent also needs instructions, the caller should also supply `--input-text`.
 
 Use baked file/image paths only when the definition should own a fixed local asset. Use runtime flags when the caller should choose the asset.
 
