@@ -134,6 +134,17 @@ Required fields:
 - `subject`
 - `text`
 
+### `generate_image`
+
+Required fields:
+- `kind`
+- `model`
+- `prompt`
+- `path`
+- First slice writes one local image file.
+- For the default OpenAI account transport, use a tool-capable mainline model such as `gpt-5.2`.
+- For a direct OpenAI API token and URL, use an image model such as `gpt-image-1`.
+
 ## Common Optional Step Fields
 
 These fields are available on every step kind:
@@ -173,7 +184,7 @@ Example:
 
 - The top-level `agent_schema` fields are the agent's returned structured output.
 - Actions run after the model has produced that top-level output.
-- `exec`, `agent`, and `email_me` steps are follow-up side effects or orchestration.
+- `exec`, `agent`, `email_me`, and `generate_image` steps are follow-up side effects or orchestration.
 - Action steps do not mutate the returned top-level output object.
 - `output_variable`, `status_variable`, and `error_variable` are action-local only.
 
@@ -238,6 +249,7 @@ Expect `cargo ai hatch <agent-name> --config <config.json> --check` to reject at
 - invalid child-agent path shape
 - invalid child-agent `input_mode`
 - invalid relative file or image paths
+- invalid generated-image output path extension
 - invalid `platform` value
 - `output_variable` on non-`exec` steps
 - captured-variable collisions

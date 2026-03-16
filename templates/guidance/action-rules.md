@@ -24,6 +24,10 @@ These documented step kinds and helper fields are exhaustive for the current MVP
   - Required: `kind`, `agent`
 - `email_me`
   - Required: `kind`, `subject`, `text`
+- `generate_image`
+  - Required: `kind`, `model`, `prompt`, `path`
+  - First slice: OpenAI-backed single-image output only
+  - Use a tool-capable mainline model such as `gpt-5.2` for OpenAI account transport, or an image model such as `gpt-image-1` for direct OpenAI API transport
 
 ## Optional Control Fields
 - `when`
@@ -76,6 +80,7 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - Child agents must use explicit same-level paths such as `./child_reporter`.
 - Local file and image paths should stay relative.
 - Parent-directory traversal such as `../` is invalid.
+- `generate_image` output paths must use one of: `.png`, `.jpg`, `.jpeg`, `.webp`.
 
 ## Child-Agent Data Flow
 

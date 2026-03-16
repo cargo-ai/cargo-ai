@@ -502,7 +502,7 @@ Then expand into multiple action types:
 
 </details>
 
-You can keep actions simple or mix local executables, email alerts, and child-agent handoffs in the same agent definition. The next section shows how to sequence multiple run steps and control them with `when`.
+You can keep actions simple or mix local executables, email alerts, child-agent handoffs, and generated image artifacts in the same agent definition. The next section shows how to sequence multiple run steps and control them with `when`.
 
 ### `run`
 
@@ -571,7 +571,18 @@ Then expand into a multi-step workflow:
 
 </details>
 
-Use `run` to sequence multiple side effects in order. `exec` steps can capture output, status, or errors for later steps, and `when` lets later steps react to success or failure without leaving the agent definition.
+Use `run` to sequence multiple side effects in order. `exec` steps can capture output, status, or errors for later steps, `generate_image` can write a single local image artifact, and `when` lets later steps react to success or failure without leaving the agent definition.
+
+First-slice image generation uses an explicit model and a local output path. For the default OpenAI account transport, use a tool-capable mainline model such as `gpt-5.2`. For a direct OpenAI API token and URL, use an image model such as `gpt-image-1`.
+
+```json
+{
+  "kind": "generate_image",
+  "model": "gpt-5.2",
+  "prompt": ["Create a product render for ", { "var": "reason" }],
+  "path": "./artifacts/product_render.png"
+}
+```
 
 You can also target individual run steps to specific runtime platforms:
 

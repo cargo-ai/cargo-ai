@@ -12,7 +12,9 @@ pub(crate) use error::{
     ProviderError, ProviderKind,
 };
 pub(crate) use ollama::send_request as send_ollama_request;
-pub(crate) use openai::send_request as send_openai_request;
+pub(crate) use openai::{
+    send_image_request as send_openai_image_request, send_request as send_openai_request,
+};
 pub(crate) use runtime::{
     resolve_inputs as resolve_provider_inputs, Cargo as AgentCargo, ValidatedResponse,
 };

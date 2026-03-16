@@ -24,6 +24,14 @@ pub(crate) struct InvocationRuntimeBudget {
     pub(crate) deadline_ms: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ActionProviderContext {
+    pub(crate) provider: crate::providers::ProviderKind,
+    pub(crate) url: String,
+    pub(crate) token: String,
+    pub(crate) inference_timeout_in_sec: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StepExecutionOutcome {
     Completed,
@@ -48,6 +56,7 @@ enum RefreshAccessError {
 pub(crate) async fn apply_actions(
     output: &crate::Output,
     actions: &[crate::Action],
+    provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<(), String> {
@@ -111,6 +120,16 @@ pub(crate) async fn apply_actions(
                                 &action_data,
                                 &action.name,
                                 max_agent_depth,
+                                runtime_budget,
+                            )
+                            .await
+                            .map(|outcome| (outcome, None))
+                        } else if step.kind.eq_ignore_ascii_case("generate_image") {
+                            run_generate_image_step(
+                                step,
+                                &action_data,
+                                &action.name,
+                                provider_context,
                                 runtime_budget,
                             )
                             .await
@@ -483,6 +502,128 @@ async fn run_email_me_step(
     } else {
         StepExecutionOutcome::Completed
     })
+}
+
+async fn run_generate_image_step(
+    step: &crate::RunStep,
+    data: &serde_json::Value,
+    action_name: &str,
+    provider_context: &ActionProviderContext,
+    runtime_budget: InvocationRuntimeBudget,
+) -> Result<StepExecutionOutcome, String> {
+    if provider_context.provider != crate::providers::ProviderKind::OpenAi {
+        return Err(format!(
+            "Action '{}' generate_image step requires `--server openai`; current server is {}.",
+            action_name,
+            provider_context.provider.display_name()
+        ));
+    }
+
+    let model = step.model.as_ref().ok_or_else(|| {
+        format!(
+            "Action '{}' generate_image step is missing required `model`.",
+            action_name
+        )
+    })?;
+
+    if provider_context
+        .url
+        .contains("chatgpt.com/backend-api/codex")
+        && model.starts_with("gpt-image")
+    {
+        return Err(format!(
+            "Action '{}' generate_image step uses OpenAI account transport, so `model` must be a tool-capable mainline model such as `gpt-5.2`, not '{}'.",
+            action_name, model
+        ));
+    }
+    let prompt_parts = step.prompt.as_deref().ok_or_else(|| {
+        format!(
+            "Action '{}' generate_image step is missing required `prompt`.",
+            action_name
+        )
+    })?;
+    let path_parts = step.path.as_deref().ok_or_else(|| {
+        format!(
+            "Action '{}' generate_image step is missing required `path`.",
+            action_name
+        )
+    })?;
+
+    let prompt = resolve_string_parts(prompt_parts, data, action_name, "prompt")
+        .map_err(|error| format!("Action '{}': {error}", action_name))?;
+    let output_path = resolve_string_parts(path_parts, data, action_name, "path")
+        .map_err(|error| format!("Action '{}': {error}", action_name))?;
+    let output_format = generated_image_output_format(output_path.as_str(), action_name)?;
+
+    let remaining = remaining_runtime_duration(
+        runtime_budget,
+        &format!("before starting image generation with model '{}'", model),
+    )
+    .map_err(|context| {
+        action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
+    })?;
+
+    let image_bytes = match tokio::time::timeout(
+        remaining,
+        crate::providers::send_openai_image_request(
+            &provider_context.url,
+            model,
+            prompt.as_str(),
+            provider_context.inference_timeout_in_sec,
+            &provider_context.token,
+            output_format,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(error)) => {
+            let mut lines = vec![format!(
+                "Action '{}' generate_image step failed.",
+                action_name
+            )];
+            lines.extend(crate::providers::provider_error_messages(&error));
+            return Err(lines.join("\n"));
+        }
+        Err(_) => {
+            return Err(action_runtime_timeout_message(
+                action_name,
+                runtime_budget,
+                "while waiting for image generation",
+            ));
+        }
+    };
+
+    let output_path_ref = Path::new(output_path.as_str());
+    validate_generated_image_output_path(output_path_ref, action_name)?;
+    if let Some(parent) = output_path_ref.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "Action '{}' failed to create image output directory '{}': {}",
+                    action_name,
+                    parent.display(),
+                    error
+                )
+            })?;
+        }
+    }
+
+    std::fs::write(output_path_ref, image_bytes).map_err(|error| {
+        format!(
+            "Action '{}' failed to write generated image '{}': {}",
+            action_name,
+            output_path_ref.display(),
+            error
+        )
+    })?;
+
+    println!(
+        "ℹ️ Action '{}' wrote generated image to '{}'.",
+        action_name,
+        output_path_ref.display()
+    );
+    Ok(StepExecutionOutcome::Completed)
 }
 
 async fn run_agent_step(
@@ -1183,6 +1324,53 @@ fn child_input_uses_dynamic_parts(parts: &[crate::RunArg]) -> bool {
         .any(|part| matches!(part, crate::RunArg::Variable(_)))
 }
 
+fn validate_generated_image_output_path(path: &Path, action_name: &str) -> Result<(), String> {
+    let raw_path = path.to_string_lossy();
+    if raw_path.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' generate_image `path` must resolve to a non-empty relative path.",
+            action_name
+        ));
+    }
+    if path.is_absolute() {
+        return Err(format!(
+            "Action '{}' generate_image `path` must resolve to a relative path.",
+            action_name
+        ));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "Action '{}' generate_image `path` must not use parent traversal (`..`).",
+            action_name
+        ));
+    }
+
+    generated_image_output_format(raw_path.as_ref(), action_name).map(|_| ())
+}
+
+fn generated_image_output_format(
+    raw_path: &str,
+    action_name: &str,
+) -> Result<&'static str, String> {
+    let extension = Path::new(raw_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    match extension.as_deref() {
+        Some("png") => Ok("png"),
+        Some("jpg") | Some("jpeg") => Ok("jpeg"),
+        Some("webp") => Ok("webp"),
+        _ => Err(format!(
+            "Action '{}' generate_image `path` must use a supported extension: `.png`, `.jpg`, `.jpeg`, `.webp`.",
+            action_name
+        )),
+    }
+}
+
 fn validate_child_input_url(
     url: &str,
     action_name: &str,
@@ -1348,8 +1536,10 @@ mod tests {
         configured_agent_action_runtime_budget, format_backend_error_message,
         format_backend_ui_message, insert_action_output_variable, matching_run_steps,
         resolve_run_args, resolve_string_parts, run_agent_step, run_completion_message_for_depth,
-        run_exec_step, step_matches_platform, validate_agent_action_depth, StepExecutionOutcome,
+        run_exec_step, run_generate_image_step, step_matches_platform, validate_agent_action_depth,
+        ActionProviderContext, StepExecutionOutcome,
     };
+    use crate::providers::ProviderKind;
     use serde_json::json;
 
     fn run_step(
@@ -1360,12 +1550,15 @@ mod tests {
         crate::RunStep {
             kind: "exec".to_string(),
             program: Some(program.to_string()),
+            model: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
             failure_mode: None,
             when: None,
             args,
+            prompt: None,
+            path: None,
             subject: None,
             text: None,
             agent: None,
@@ -1377,6 +1570,15 @@ mod tests {
                     .map(|platform| platform.to_string())
                     .collect()
             }),
+        }
+    }
+
+    fn provider_context() -> ActionProviderContext {
+        ActionProviderContext {
+            provider: ProviderKind::OpenAi,
+            url: "https://api.openai.com/v1/chat/completions".to_string(),
+            token: "test-token".to_string(),
+            inference_timeout_in_sec: 60,
         }
     }
 
@@ -1690,6 +1892,7 @@ mod tests {
         let step = crate::RunStep {
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
+            model: None,
             output_variable: Some("report_listing".to_string()),
             status_variable: None,
             error_variable: None,
@@ -1699,6 +1902,8 @@ mod tests {
                 crate::RunArg::Literal("-lc".to_string()),
                 crate::RunArg::Literal("printf 'alpha\\nbeta\\n'".to_string()),
             ],
+            prompt: None,
+            path: None,
             subject: None,
             text: None,
             agent: None,
@@ -1716,6 +1921,75 @@ mod tests {
             captured_output,
             Some(("report_listing".to_string(), "alpha\nbeta".to_string()))
         );
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_writes_single_output_file() {
+        use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+
+        let mut server = mockito::Server::new_async().await;
+        let expected_bytes = b"fake-png";
+        let encoded_image = BASE64_STANDARD.encode(expected_bytes);
+        let _mock = server
+            .mock("POST", "/v1/images/generations")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"data":[{{"b64_json":"{}"}}]}}"#,
+                encoded_image
+            ))
+            .create_async()
+            .await;
+
+        let output_name = format!(".tmp-cai2054-generated-image-{}.png", std::process::id());
+        let step = crate::RunStep {
+            kind: "generate_image".to_string(),
+            program: None,
+            model: Some("gpt-image-1".to_string()),
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![
+                crate::RunArg::Literal("Create an image for ".to_string()),
+                crate::RunArg::Variable("customer".to_string()),
+            ]),
+            path: Some(vec![crate::RunArg::Literal(output_name.clone())]),
+            subject: None,
+            text: None,
+            agent: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+        let provider_context = ActionProviderContext {
+            provider: ProviderKind::OpenAi,
+            url: format!("{}/v1/chat/completions", server.url()),
+            token: "test-token".to_string(),
+            inference_timeout_in_sec: 60,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_generate_image_step(
+            &step,
+            &json!({ "customer": "Acme" }),
+            "generate_art",
+            &provider_context,
+            runtime_budget,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "image generation should succeed: {result:?}"
+        );
+
+        let written_bytes =
+            std::fs::read(&output_name).expect("generated image file should be written");
+        let _ = std::fs::remove_file(&output_name);
+        assert_eq!(written_bytes, expected_bytes);
     }
 
     #[cfg(unix)]
@@ -1747,12 +2021,15 @@ mod tests {
         let step = crate::RunStep {
             kind: "agent".to_string(),
             program: None,
+            model: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
             failure_mode: None,
             when: None,
             args: Vec::new(),
+            prompt: None,
+            path: None,
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
@@ -1849,6 +2126,7 @@ mod tests {
         let exec_step = crate::RunStep {
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
+            model: None,
             output_variable: Some("report_listing".to_string()),
             status_variable: None,
             error_variable: None,
@@ -1858,6 +2136,8 @@ mod tests {
                 crate::RunArg::Literal("-lc".to_string()),
                 crate::RunArg::Literal("printf 'q1.pdf | q2.pdf\\n'".to_string()),
             ],
+            prompt: None,
+            path: None,
             subject: None,
             text: None,
             agent: None,
@@ -1868,12 +2148,15 @@ mod tests {
         let agent_step = crate::RunStep {
             kind: "agent".to_string(),
             program: None,
+            model: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
             failure_mode: None,
             when: None,
             args: Vec::new(),
+            prompt: None,
+            path: None,
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
@@ -1953,12 +2236,15 @@ mod tests {
         let step = crate::RunStep {
             kind: "agent".to_string(),
             program: None,
+            model: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
             failure_mode: None,
             when: None,
             args: Vec::new(),
+            prompt: None,
+            path: None,
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
@@ -1992,12 +2278,15 @@ mod tests {
         let step = crate::RunStep {
             kind: "agent".to_string(),
             program: None,
+            model: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
             failure_mode: None,
             when: None,
             args: Vec::new(),
+            prompt: None,
+            path: None,
             subject: None,
             text: None,
             agent: Some("child_agent".to_string()),
@@ -2019,12 +2308,15 @@ mod tests {
         let step = crate::RunStep {
             kind: "agent".to_string(),
             program: None,
+            model: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
             failure_mode: None,
             when: None,
             args: Vec::new(),
+            prompt: None,
+            path: None,
             subject: None,
             text: None,
             agent: Some("./../child_agent".to_string()),
@@ -2046,12 +2338,15 @@ mod tests {
         let step = crate::RunStep {
             kind: "agent".to_string(),
             program: None,
+            model: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
             failure_mode: None,
             when: None,
             args: Vec::new(),
+            prompt: None,
+            path: None,
             subject: None,
             text: None,
             agent: Some("./agents/child_agent".to_string()),
@@ -2090,12 +2385,15 @@ mod tests {
         let step = crate::RunStep {
             kind: "agent".to_string(),
             program: None,
+            model: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
             failure_mode: None,
             when: None,
             args: Vec::new(),
+            prompt: None,
+            path: None,
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
@@ -2138,6 +2436,7 @@ mod tests {
         let failing_step = crate::RunStep {
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
+            model: None,
             output_variable: None,
             status_variable: Some("step_status".to_string()),
             error_variable: Some("step_error".to_string()),
@@ -2147,6 +2446,8 @@ mod tests {
                 crate::RunArg::Literal("-lc".to_string()),
                 crate::RunArg::Literal("exit 7".to_string()),
             ],
+            prompt: None,
+            path: None,
             subject: None,
             text: None,
             agent: None,
@@ -2157,12 +2458,15 @@ mod tests {
         let second_step = crate::RunStep {
             kind: "agent".to_string(),
             program: None,
+            model: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
             failure_mode: None,
             when: None,
             args: Vec::new(),
+            prompt: None,
+            path: None,
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
@@ -2175,6 +2479,7 @@ mod tests {
         let result = apply_actions(
             &crate::Output { answer: 4 },
             &[action(vec![failing_step, second_step])],
+            &provider_context(),
             5,
             runtime_budget,
         )
@@ -2216,6 +2521,7 @@ mod tests {
         let failing_step = crate::RunStep {
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
+            model: None,
             output_variable: None,
             status_variable: Some("step_status".to_string()),
             error_variable: Some("step_error".to_string()),
@@ -2225,6 +2531,8 @@ mod tests {
                 crate::RunArg::Literal("-lc".to_string()),
                 crate::RunArg::Literal("exit 9".to_string()),
             ],
+            prompt: None,
+            path: None,
             subject: None,
             text: None,
             agent: None,
@@ -2235,12 +2543,15 @@ mod tests {
         let second_step = crate::RunStep {
             kind: "agent".to_string(),
             program: None,
+            model: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
             failure_mode: None,
             when: Some(json!({ "==": [{ "var": "step_status" }, "failed"] })),
             args: Vec::new(),
+            prompt: None,
+            path: None,
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
@@ -2253,6 +2564,7 @@ mod tests {
         let result = apply_actions(
             &crate::Output { answer: 4 },
             &[action(vec![failing_step, second_step])],
+            &provider_context(),
             5,
             runtime_budget,
         )
