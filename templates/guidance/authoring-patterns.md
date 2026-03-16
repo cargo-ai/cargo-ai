@@ -1,6 +1,7 @@
 # Cargo AI Authoring Patterns
 
 Use this file for human-readable structure and formatting guidance after you know what the agent should do.
+These patterns shape the JSON that drives the generated CLI tool.
 
 ## Canonical Field Order
 

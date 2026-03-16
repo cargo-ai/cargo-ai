@@ -1,6 +1,7 @@
 # Cargo AI Agent Definition Contract
 
 Use this file as the complete offline contract when you need to author or review a Cargo AI agent definition without looking at repository code.
+That JSON definition is the source for a generated CLI executable: it defines the inputs, structured output, and follow-up actions the hatched tool will use.
 
 Unless a section says otherwise, the supported field lists below are exhaustive for the current MVP contract.
 
