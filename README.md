@@ -4,15 +4,17 @@
 [![Multi-OS CI](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml/badge.svg)](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml)
 [![Status: Stable – Ongoing Development](https://img.shields.io/badge/Status-Stable_–_Ongoing_Development-blue)](https://github.com/analyzer1/cargo-ai)
 
-Declarative AI agents. Native executables. Shareable in minutes.
+Build AI-powered CLI tools from a single JSON definition.
 
-An open-source toolkit for building agents that are clear, portable, and fully auditable. Define exactly what the agent does in a concise JSON file, refine it quickly with AI tools, including Codex, hatch it into a native executable, and keep complete control over the result.
+Define declarative agents in JSON, hatch native executables locally, and share them in minutes.
+
+Cargo AI is an open-source CLI for building auditable AI-powered CLI tools from a single JSON definition. Define inputs, schema, and actions once, hatch a native executable with `cargo ai hatch`, then inspect, run, and share it on your terms.
 
 ```bash
 cargo ai hatch agent_x
 ```
 
-Our mission is to make AI agents that do exactly what you specify: declarative, auditable, and understandable through a single JSON definition.
+Cargo AI keeps agent behavior readable, auditable, and understandable through a single JSON definition.
 
 ## Why Cargo AI
 
