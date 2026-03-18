@@ -23,6 +23,7 @@ const PROVENANCE_HOOK_SNIPPET: &str = r#"    let cmd_args = args::build_cli();
     }"#;
 const GENERATED_AGENT_VERSION_BLOCK_TEMPLATE: &str =
     include_str!("templates/agent_version_block.rs.tmpl");
+const MANIFEST_VERSION_PLACEHOLDER: &str = "__CARGO_AI_PACKAGE_VERSION__";
 const ROOT_EXCLUDED_TEMPLATE_ENTRIES_FOR_CHECK: &[&str] = &["target"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -117,6 +118,10 @@ fn render_workspace_file_contents(
     } else {
         template_contents.to_string()
     };
+
+    if file_name == "Cargo.toml" {
+        rendered = rendered.replace(MANIFEST_VERSION_PLACEHOLDER, generated_by_version);
+    }
 
     if file_name == "src/main.rs" {
         rendered = inject_version_command_hook(&rendered);
@@ -337,6 +342,9 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    const CURRENT_CARGO_AI_VERSION: &str = env!("CARGO_PKG_VERSION");
+    const DIFFERENT_CARGO_AI_VERSION: &str = "9.9.9";
+
     fn temp_dir_path(stem: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -377,7 +385,7 @@ mod tests {
             "src/main.rs",
             "fn main() {\n    let cmd_args = args::build_cli();\n}\n",
             "adder_agent",
-            "0.1.0",
+            CURRENT_CARGO_AI_VERSION,
             "2026-03-03.r1",
         );
 
@@ -396,7 +404,7 @@ mod tests {
         assert!(rendered.contains("embedded_definition_json"));
         assert!(rendered.contains("build_timestamp_utc"));
         assert!(rendered.contains("cargo_ai_metadata"));
-        assert!(rendered.contains("0.1.0"));
+        assert!(rendered.contains(CURRENT_CARGO_AI_VERSION));
         assert!(rendered.contains("2026-03-03.r1"));
     }
 
@@ -406,7 +414,7 @@ mod tests {
             "src/args.rs",
             "const BIN: &str = \"cargo-ai\";\n",
             "adder_agent",
-            "0.1.0",
+            CURRENT_CARGO_AI_VERSION,
             "2026-03-03.r1",
         );
 
@@ -434,7 +442,7 @@ fn main() {
 }
 "#,
             "number_2_email",
-            "0.1.0",
+            CURRENT_CARGO_AI_VERSION,
             "2026-03-03.r1",
         );
 
@@ -449,21 +457,22 @@ fn main() {
     fn still_rewrites_manifest_package_name() {
         let rendered = render_workspace_file_contents(
             "Cargo.toml",
-            "[package]\nname = \"cargo-ai\"\n",
+            "[package]\nname = \"cargo-ai\"\nversion = \"__CARGO_AI_PACKAGE_VERSION__\"\n",
             "number_2_email",
-            "0.1.0",
+            CURRENT_CARGO_AI_VERSION,
             "2026-03-03.r1",
         );
 
         assert!(rendered.contains("name = \"number_2_email\""));
+        assert!(rendered.contains(&format!("version = \"{CURRENT_CARGO_AI_VERSION}\"")));
     }
 
     #[test]
     fn sync_state_is_in_sync_when_versions_match() {
         let state = determine_agent_sync_state(
-            "0.1.0",
+            CURRENT_CARGO_AI_VERSION,
             "2026-03-03.r1",
-            Some("0.1.0"),
+            Some(CURRENT_CARGO_AI_VERSION),
             Some("2026-03-03.r1"),
         );
         assert_eq!(state, AgentSyncState::InSync);
@@ -473,9 +482,9 @@ fn main() {
     #[test]
     fn sync_state_is_out_of_sync_for_exact_mismatch() {
         let state = determine_agent_sync_state(
-            "0.1.0",
+            CURRENT_CARGO_AI_VERSION,
             "2026-03-03.r1",
-            Some("0.1.1"),
+            Some(DIFFERENT_CARGO_AI_VERSION),
             Some("2026-03-03.r1"),
         );
         assert_eq!(state, AgentSyncState::OutOfSync);
@@ -484,8 +493,12 @@ fn main() {
 
     #[test]
     fn sync_state_is_unknown_when_local_baseline_missing() {
-        let state =
-            determine_agent_sync_state("0.1.0", "2026-03-03.r1", None, Some("2026-03-03.r1"));
+        let state = determine_agent_sync_state(
+            CURRENT_CARGO_AI_VERSION,
+            "2026-03-03.r1",
+            None,
+            Some("2026-03-03.r1"),
+        );
         assert_eq!(state, AgentSyncState::Unknown);
         assert_eq!(sync_state_label(state), "unknown");
     }

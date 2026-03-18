@@ -298,6 +298,9 @@ mod tests {
         UPDATE_CHECK_TTL_SECONDS,
     };
 
+    const CURRENT_CARGO_AI_VERSION: &str = env!("CARGO_PKG_VERSION");
+    const PREVIOUS_CARGO_AI_VERSION: &str = "0.0.11";
+
     #[test]
     fn update_mode_defaults_to_check_for_missing_or_unknown_values() {
         assert_eq!(UpdateMode::from_config_value(None), UpdateMode::Check);
@@ -325,11 +328,11 @@ mod tests {
     #[test]
     fn version_compare_identifies_update_and_up_to_date() {
         assert!(matches!(
-            compare_versions("0.0.11", "0.1.0"),
+            compare_versions(PREVIOUS_CARGO_AI_VERSION, CURRENT_CARGO_AI_VERSION),
             VersionStatus::UpdateAvailable { .. }
         ));
         assert!(matches!(
-            compare_versions("0.1.0", "0.1.0"),
+            compare_versions(CURRENT_CARGO_AI_VERSION, CURRENT_CARGO_AI_VERSION),
             VersionStatus::UpToDate { .. }
         ));
     }
@@ -337,7 +340,7 @@ mod tests {
     #[test]
     fn version_compare_handles_unparseable_versions() {
         assert!(matches!(
-            compare_versions("0.1.0", "not-a-version"),
+            compare_versions(CURRENT_CARGO_AI_VERSION, "not-a-version"),
             VersionStatus::UnknownVersionFormat { .. }
         ));
     }
@@ -345,14 +348,15 @@ mod tests {
     #[tokio::test]
     async fn fetch_latest_version_uses_max_version_field() {
         let mut server = mockito::Server::new_async().await;
+        let response_body = format!(
+            r#"{{"crate":{{"id":"cargo-ai","max_version":"{CURRENT_CARGO_AI_VERSION}","max_stable_version":"{PREVIOUS_CARGO_AI_VERSION}"}}}}"#
+        );
         let _mock = server
             .mock("GET", "/api/v1/crates/cargo-ai")
             .match_header("user-agent", mockito::Matcher::Regex("^cargo-ai/".into()))
             .match_header("accept", mockito::Matcher::Regex("application/json".into()))
             .with_status(200)
-            .with_body(
-                r#"{"crate":{"id":"cargo-ai","max_version":"0.1.0","max_stable_version":"0.0.11"}}"#,
-            )
+            .with_body(response_body)
             .create_async()
             .await;
 
@@ -360,6 +364,6 @@ mod tests {
             .await
             .expect("mock response should parse");
 
-        assert_eq!(latest, "0.1.0");
+        assert_eq!(latest, CURRENT_CARGO_AI_VERSION);
     }
 }
