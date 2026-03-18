@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn template_schema_version_rejects_legacy_semver_values() {
         let value = schema_version::extract_schema_version_from_agentcfg(
-            r#"{"version":"0.0.11","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
+            r#"{"version":"0.1.0","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
         );
         assert!(value.is_none());
     }
@@ -258,7 +258,7 @@ mod tests {
 
         persist_metadata_in_config(
             &mut cfg,
-            "0.0.11",
+            "0.1.0",
             "2026-03-03.r1",
             "aarch64-apple-darwin",
             "abc123",
@@ -268,7 +268,7 @@ mod tests {
             .as_ref()
             .expect("cargo-ai metadata should be initialized");
 
-        assert_eq!(metadata.cargo_ai_version.as_deref(), Some("0.0.11"));
+        assert_eq!(metadata.cargo_ai_version.as_deref(), Some("0.1.0"));
         assert_eq!(
             metadata.template_schema_version.as_deref(),
             Some("2026-03-03.r1")
@@ -293,7 +293,7 @@ mod tests {
 
         persist_metadata_in_config(
             &mut cfg,
-            "0.0.11",
+            "0.1.0",
             "2026-03-03.r1",
             "aarch64-apple-darwin",
             "abc123",
@@ -306,7 +306,7 @@ mod tests {
 
         persist_metadata_in_config(
             &mut cfg,
-            "0.0.12",
+            "0.1.1",
             "2026-03-03.r2",
             "aarch64-apple-darwin",
             "def456",
@@ -321,7 +321,7 @@ mod tests {
             Some(install_id.as_str())
         );
         assert_eq!(metadata.cargo_ai_binary_sha256.as_deref(), Some("def456"));
-        assert_eq!(metadata.cargo_ai_version.as_deref(), Some("0.0.12"));
+        assert_eq!(metadata.cargo_ai_version.as_deref(), Some("0.1.1"));
         assert_eq!(
             metadata.template_schema_version.as_deref(),
             Some("2026-03-03.r2")
@@ -349,7 +349,7 @@ mod tests {
         let mut cfg = default_test_config();
         persist_metadata_in_config(
             &mut cfg,
-            "0.0.11",
+            "0.1.0",
             "2026-03-03.r1",
             "aarch64-apple-darwin",
             "abc123",
@@ -360,7 +360,7 @@ mod tests {
 
         let written = fs::read_to_string(&path).expect("written config should be readable");
         assert!(written.contains("cargo_ai_metadata"));
-        assert!(written.contains("cargo_ai_version = \"0.0.11\""));
+        assert!(written.contains("cargo_ai_version = \"0.1.0\""));
         assert!(written.contains("template_schema_version = \"2026-03-03.r1\""));
         assert!(written.contains("cargo_ai_build_target = \"aarch64-apple-darwin\""));
         assert!(written.contains("cargo_ai_binary_sha256 = \"abc123\""));
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn normalized_metadata_trims_values_and_omits_empty_fields() {
         let metadata = CargoAiMetadata {
-            cargo_ai_version: Some(" 0.0.11 ".to_string()),
+            cargo_ai_version: Some(" 0.1.0 ".to_string()),
             template_schema_version: Some(" ".to_string()),
             cargo_ai_build_target: Some(" aarch64-apple-darwin ".to_string()),
             cargo_ai_install_id: Some(String::new()),
@@ -380,7 +380,7 @@ mod tests {
 
         let normalized = normalized_metadata(metadata).expect("metadata should remain present");
 
-        assert_eq!(normalized.cargo_ai_version.as_deref(), Some("0.0.11"));
+        assert_eq!(normalized.cargo_ai_version.as_deref(), Some("0.1.0"));
         assert!(normalized.template_schema_version.is_none());
         assert_eq!(
             normalized.cargo_ai_build_target.as_deref(),

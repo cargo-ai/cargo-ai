@@ -185,9 +185,8 @@ fn parse_stream_failure_message(payload: &serde_json::Value) -> Option<String> {
 fn find_image_generation_result(payload: &serde_json::Value) -> Option<&str> {
     match payload {
         serde_json::Value::Object(map) => {
-            let is_image_generation_call =
-                map.get("type").and_then(serde_json::Value::as_str)
-                    == Some("image_generation_call");
+            let is_image_generation_call = map.get("type").and_then(serde_json::Value::as_str)
+                == Some("image_generation_call");
             if is_image_generation_call {
                 if let Some(result) = map
                     .get("result")

@@ -325,11 +325,11 @@ mod tests {
     #[test]
     fn version_compare_identifies_update_and_up_to_date() {
         assert!(matches!(
-            compare_versions("0.0.10", "0.0.11"),
+            compare_versions("0.0.11", "0.1.0"),
             VersionStatus::UpdateAvailable { .. }
         ));
         assert!(matches!(
-            compare_versions("0.0.11", "0.0.11"),
+            compare_versions("0.1.0", "0.1.0"),
             VersionStatus::UpToDate { .. }
         ));
     }
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn version_compare_handles_unparseable_versions() {
         assert!(matches!(
-            compare_versions("0.0.10", "not-a-version"),
+            compare_versions("0.1.0", "not-a-version"),
             VersionStatus::UnknownVersionFormat { .. }
         ));
     }
@@ -351,7 +351,7 @@ mod tests {
             .match_header("accept", mockito::Matcher::Regex("application/json".into()))
             .with_status(200)
             .with_body(
-                r#"{"crate":{"id":"cargo-ai","max_version":"0.0.11","max_stable_version":"0.0.10"}}"#,
+                r#"{"crate":{"id":"cargo-ai","max_version":"0.1.0","max_stable_version":"0.0.11"}}"#,
             )
             .create_async()
             .await;
@@ -360,6 +360,6 @@ mod tests {
             .await
             .expect("mock response should parse");
 
-        assert_eq!(latest, "0.0.11");
+        assert_eq!(latest, "0.1.0");
     }
 }

@@ -377,7 +377,7 @@ mod tests {
             "src/main.rs",
             "fn main() {\n    let cmd_args = args::build_cli();\n}\n",
             "adder_agent",
-            "0.0.11",
+            "0.1.0",
             "2026-03-03.r1",
         );
 
@@ -396,7 +396,7 @@ mod tests {
         assert!(rendered.contains("embedded_definition_json"));
         assert!(rendered.contains("build_timestamp_utc"));
         assert!(rendered.contains("cargo_ai_metadata"));
-        assert!(rendered.contains("0.0.11"));
+        assert!(rendered.contains("0.1.0"));
         assert!(rendered.contains("2026-03-03.r1"));
     }
 
@@ -406,7 +406,7 @@ mod tests {
             "src/args.rs",
             "const BIN: &str = \"cargo-ai\";\n",
             "adder_agent",
-            "0.0.11",
+            "0.1.0",
             "2026-03-03.r1",
         );
 
@@ -430,11 +430,11 @@ mod tests {
 const KEYCHAIN_SERVICE: &str = "cargo-ai";
 const PATH: &str = ".cargo/.cargo-ai/credentials.toml";
 fn main() {
-    let cmd_args = args::build_cli();
+            let cmd_args = args::build_cli();
 }
 "#,
             "number_2_email",
-            "0.0.11",
+            "0.1.0",
             "2026-03-03.r1",
         );
 
@@ -451,7 +451,7 @@ fn main() {
             "Cargo.toml",
             "[package]\nname = \"cargo-ai\"\n",
             "number_2_email",
-            "0.0.11",
+            "0.1.0",
             "2026-03-03.r1",
         );
 
@@ -461,9 +461,9 @@ fn main() {
     #[test]
     fn sync_state_is_in_sync_when_versions_match() {
         let state = determine_agent_sync_state(
-            "0.0.11",
+            "0.1.0",
             "2026-03-03.r1",
-            Some("0.0.11"),
+            Some("0.1.0"),
             Some("2026-03-03.r1"),
         );
         assert_eq!(state, AgentSyncState::InSync);
@@ -473,9 +473,9 @@ fn main() {
     #[test]
     fn sync_state_is_out_of_sync_for_exact_mismatch() {
         let state = determine_agent_sync_state(
-            "0.0.11",
+            "0.1.0",
             "2026-03-03.r1",
-            Some("0.0.12"),
+            Some("0.1.1"),
             Some("2026-03-03.r1"),
         );
         assert_eq!(state, AgentSyncState::OutOfSync);
@@ -485,7 +485,7 @@ fn main() {
     #[test]
     fn sync_state_is_unknown_when_local_baseline_missing() {
         let state =
-            determine_agent_sync_state("0.0.11", "2026-03-03.r1", None, Some("2026-03-03.r1"));
+            determine_agent_sync_state("0.1.0", "2026-03-03.r1", None, Some("2026-03-03.r1"));
         assert_eq!(state, AgentSyncState::Unknown);
         assert_eq!(sync_state_label(state), "unknown");
     }
