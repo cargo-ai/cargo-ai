@@ -25,6 +25,8 @@ const SUPPORTED_FILE_EXTENSIONS: [&str; 24] = [
     "doc", "dot", "odt", "rtf", "pot", "ppa", "pps", "ppt", "pptx", "pwz", "wiz",
 ];
 const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str = "`.pdf`, `.docx`, `.csv`, `.xla`, `.xlb`, `.xlc`, `.xlm`, `.xls`, `.xlsx`, `.xlt`, `.xlw`, `.tsv`, `.iif`, `.doc`, `.dot`, `.odt`, `.rtf`, `.pot`, `.ppa`, `.pps`, `.ppt`, `.pptx`, `.pwz`, `.wiz`";
+const SUPPORTED_GENERATED_IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
+const SUPPORTED_GENERATED_IMAGE_EXTENSIONS_MESSAGE: &str = "`.png`, `.jpg`, `.jpeg`, `.webp`";
 
 #[derive(Debug)]
 pub enum BuildError {
@@ -109,12 +111,15 @@ enum ActionInputSpec {
 struct RunStep {
     kind: String,
     program: Option<String>,
+    model: Option<String>,
     output_variable: Option<String>,
     status_variable: Option<String>,
     error_variable: Option<String>,
     failure_mode: Option<FailureMode>,
     when: Option<Value>,
     args: Vec<RunArg>,
+    prompt: Option<Vec<RunArg>>,
+    path: Option<Vec<RunArg>>,
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
     agent: Option<String>,
@@ -630,6 +635,24 @@ fn parse_actions(
 
             let run_step = match kind.as_str() {
                 "exec" => {
+                    if run_obj.contains_key("model") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.model"),
+                            "`model` is only supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("prompt") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.prompt"),
+                            "`prompt` is only supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("path") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.path"),
+                            "`path` is only supported for `generate_image` actions",
+                        ));
+                    }
                     if run_obj.contains_key("subject") {
                         return Err(BuildError::config(
                             format!("{run_path}.subject"),
@@ -680,12 +703,15 @@ fn parse_actions(
                     RunStep {
                         kind,
                         program: Some(program),
+                        model: None,
                         output_variable,
                         status_variable,
                         error_variable,
                         failure_mode,
                         when,
                         args,
+                        prompt: None,
+                        path: None,
                         subject: None,
                         text: None,
                         agent: None,
@@ -695,6 +721,24 @@ fn parse_actions(
                     }
                 }
                 "email_me" => {
+                    if run_obj.contains_key("model") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.model"),
+                            "`model` is only supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("prompt") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.prompt"),
+                            "`prompt` is only supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("path") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.path"),
+                            "`path` is only supported for `generate_image` actions",
+                        ));
+                    }
                     if run_obj.contains_key("program") {
                         return Err(BuildError::config(
                             format!("{run_path}.program"),
@@ -748,12 +792,15 @@ fn parse_actions(
                     RunStep {
                         kind,
                         program: None,
+                        model: None,
                         output_variable: None,
                         status_variable,
                         error_variable,
                         failure_mode,
                         when,
                         args: Vec::new(),
+                        prompt: None,
+                        path: None,
                         subject: Some(subject),
                         text: Some(text),
                         agent: None,
@@ -763,6 +810,24 @@ fn parse_actions(
                     }
                 }
                 "agent" => {
+                    if run_obj.contains_key("model") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.model"),
+                            "`model` is only supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("prompt") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.prompt"),
+                            "`prompt` is only supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("path") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.path"),
+                            "`path` is only supported for `generate_image` actions",
+                        ));
+                    }
                     if run_obj.contains_key("program") {
                         return Err(BuildError::config(
                             format!("{run_path}.program"),
@@ -829,12 +894,15 @@ fn parse_actions(
                     RunStep {
                         kind,
                         program: None,
+                        model: None,
                         output_variable: None,
                         status_variable,
                         error_variable,
                         failure_mode,
                         when,
                         args: Vec::new(),
+                        prompt: None,
+                        path: None,
                         subject: None,
                         text: None,
                         agent: Some(agent),
@@ -843,11 +911,114 @@ fn parse_actions(
                         platforms,
                     }
                 }
+                "generate_image" => {
+                    if run_obj.contains_key("program") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.program"),
+                            "`program` is not supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("args") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.args"),
+                            "`args` is not supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("subject") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.subject"),
+                            "`subject` is not supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("text") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.text"),
+                            "`text` is not supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("agent") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.agent"),
+                            "`agent` is not supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("inputs") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.inputs"),
+                            "`inputs` is not supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("output_variable") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.output_variable"),
+                            "`output_variable` is not supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("input_mode") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.input_mode"),
+                            "`input_mode` is only supported for `agent` actions",
+                        ));
+                    }
+
+                    let model = get_required_string(run_obj, "model", &run_path)?.to_string();
+                    if model.trim().is_empty() {
+                        return Err(BuildError::config(
+                            format!("{run_path}.model"),
+                            "must be a non-empty string",
+                        ));
+                    }
+
+                    let prompt = parse_string_parts_field(
+                        run_obj,
+                        "prompt",
+                        &run_path,
+                        &available_field_types,
+                    )?;
+                    let path = parse_string_parts_field(
+                        run_obj,
+                        "path",
+                        &run_path,
+                        &available_field_types,
+                    )?;
+                    if let Some(resolved_path) = resolve_literal_run_args(&path) {
+                        validate_definition_owned_local_path(
+                            &resolved_path,
+                            &format!("{run_path}.path"),
+                            "generated image output",
+                        )?;
+                        validate_generated_image_output_extension(
+                            &resolved_path,
+                            &format!("{run_path}.path"),
+                            "generated image output",
+                        )?;
+                    }
+
+                    RunStep {
+                        kind,
+                        program: None,
+                        model: Some(model),
+                        output_variable: None,
+                        status_variable,
+                        error_variable,
+                        failure_mode,
+                        when,
+                        args: Vec::new(),
+                        prompt: Some(prompt),
+                        path: Some(path),
+                        subject: None,
+                        text: None,
+                        agent: None,
+                        inputs: None,
+                        input_mode: None,
+                        platforms,
+                    }
+                }
                 _ => {
                     return Err(BuildError::config(
                         format!("{run_path}.kind"),
                         format!(
-                            "unsupported kind `{kind}` (supported: `exec`, `email_me`, `agent`)"
+                            "unsupported kind `{kind}` (supported: `exec`, `email_me`, `agent`, `generate_image`)"
                         ),
                     ));
                 }
@@ -1269,6 +1440,27 @@ fn validate_supported_file_extension(
             path,
             format!(
                 "{label} path must use a supported extension: {SUPPORTED_FILE_EXTENSIONS_MESSAGE}"
+            ),
+        )),
+    }
+}
+
+fn validate_generated_image_output_extension(
+    raw_path: &str,
+    path: &str,
+    label: &str,
+) -> Result<(), BuildError> {
+    let extension = Path::new(raw_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    match extension.as_deref() {
+        Some(extension) if SUPPORTED_GENERATED_IMAGE_EXTENSIONS.contains(&extension) => Ok(()),
+        _ => Err(BuildError::config(
+            path,
+            format!(
+                "{label} path must use a supported extension: {SUPPORTED_GENERATED_IMAGE_EXTENSIONS_MESSAGE}"
             ),
         )),
     }
@@ -2290,6 +2482,16 @@ fn render_agent_model(config: &AgentConfig) -> String {
             .iter()
             .map(|run_step| {
                 let args = render_run_arg_parts(&run_step.args);
+                let prompt = run_step
+                    .prompt
+                    .as_ref()
+                    .map(|parts| format!("Some(vec![{}])", render_run_arg_parts(parts)))
+                    .unwrap_or_else(|| "None".to_string());
+                let path = run_step
+                    .path
+                    .as_ref()
+                    .map(|parts| format!("Some(vec![{}])", render_run_arg_parts(parts)))
+                    .unwrap_or_else(|| "None".to_string());
                 let subject = run_step
                     .subject
                     .as_ref()
@@ -2302,6 +2504,11 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     .unwrap_or_else(|| "None".to_string());
                 let output_variable = run_step
                     .output_variable
+                    .as_ref()
+                    .map(|name| format!("Some({}.to_string())", rust_string_literal(name)))
+                    .unwrap_or_else(|| "None".to_string());
+                let model = run_step
+                    .model
                     .as_ref()
                     .map(|name| format!("Some({}.to_string())", rust_string_literal(name)))
                     .unwrap_or_else(|| "None".to_string());
@@ -2395,12 +2602,15 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     "RunStep {{
                         kind: {}.to_string(),
                         program: {},
+                        model: {},
                         output_variable: {},
                         status_variable: {},
                         error_variable: {},
                         failure_mode: {},
                         when: {},
                         args: vec![{}],
+                        prompt: {},
+                        path: {},
                         subject: {},
                         text: {},
                         agent: {},
@@ -2416,12 +2626,15 @@ fn render_agent_model(config: &AgentConfig) -> String {
                             format!("Some({}.to_string())", rust_string_literal(program))
                         })
                         .unwrap_or_else(|| "None".to_string()),
+                    model,
                     output_variable,
                     status_variable,
                     error_variable,
                     failure_mode,
                     when,
                     args,
+                    prompt,
+                    path,
                     subject,
                     text,
                     agent,
@@ -2534,12 +2747,15 @@ pub enum ActionInputMode {{
 pub struct RunStep {{
     kind: String,
     program: Option<String>,
+    model: Option<String>,
     output_variable: Option<String>,
     status_variable: Option<String>,
     error_variable: Option<String>,
     failure_mode: Option<FailureMode>,
     when: Option<serde_json::Value>,
     args: Vec<RunArg>,
+    prompt: Option<Vec<RunArg>>,
+    path: Option<Vec<RunArg>>,
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
     agent: Option<String>,

@@ -599,10 +599,17 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     // Get Actions
     let actions = crate::actions();
     // println!("Actions {:?}", actions);
+    let action_provider_context = super::preflight_actions::ActionProviderContext {
+        provider,
+        url: url.clone(),
+        token: token.clone(),
+        inference_timeout_in_sec,
+    };
 
     match super::preflight_actions::apply_actions(
         &output,
         &actions,
+        &action_provider_context,
         max_agent_depth,
         runtime_budget,
     )

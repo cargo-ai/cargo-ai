@@ -74,6 +74,14 @@ struct InvocationRuntimeBudget {
     deadline_ms: u64,
 }
 
+#[derive(Debug, Clone)]
+struct ActionProviderContext {
+    provider: ProviderKind,
+    url: String,
+    token: String,
+    inference_timeout_in_sec: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StepExecutionOutcome {
     Completed,
@@ -1136,8 +1144,22 @@ async fn main() {
     };
 
     let actions = actions();
+    let action_provider_context = ActionProviderContext {
+        provider,
+        url: url.clone(),
+        token: token.clone(),
+        inference_timeout_in_sec,
+    };
     if let Err(error) =
-        apply_actions(&output, &actions, config.as_ref(), max_agent_depth, runtime_budget).await
+        apply_actions(
+            &output,
+            &actions,
+            config.as_ref(),
+            &action_provider_context,
+            max_agent_depth,
+            runtime_budget,
+        )
+        .await
     {
         eprintln!("❌ {error}");
         std::process::exit(1);
@@ -1148,6 +1170,7 @@ async fn apply_actions(
     output: &Output,
     actions: &[Action],
     config: Option<&config::schema::Config>,
+    provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<(), String> {
@@ -1200,6 +1223,16 @@ async fn apply_actions(
                             &action_data,
                             &action.name,
                             max_agent_depth,
+                            runtime_budget,
+                        )
+                        .await
+                        .map(|outcome| (outcome, None))
+                    } else if step.kind.eq_ignore_ascii_case("generate_image") {
+                        run_generate_image_step(
+                            step,
+                            &action_data,
+                            &action.name,
+                            provider_context,
                             runtime_budget,
                         )
                         .await
@@ -1485,6 +1518,128 @@ async fn run_email_me_step(
     } else {
         StepExecutionOutcome::Completed
     })
+}
+
+async fn run_generate_image_step(
+    step: &RunStep,
+    data: &serde_json::Value,
+    action_name: &str,
+    provider_context: &ActionProviderContext,
+    runtime_budget: InvocationRuntimeBudget,
+) -> Result<StepExecutionOutcome, String> {
+    if provider_context.provider != ProviderKind::OpenAi {
+        return Err(format!(
+            "Action '{}' generate_image step requires `--server openai`; current server is {}.",
+            action_name,
+            provider_context.provider.display_name()
+        ));
+    }
+
+    let model = step.model.as_ref().ok_or_else(|| {
+        format!(
+            "Action '{}' generate_image step is missing required `model`.",
+            action_name
+        )
+    })?;
+
+    if provider_context.url.contains("chatgpt.com/backend-api/codex")
+        && model.starts_with("gpt-image")
+    {
+        return Err(format!(
+            "Action '{}' generate_image step uses OpenAI account transport, so `model` must be a tool-capable mainline model such as `gpt-5.2`, not '{}'.",
+            action_name, model
+        ));
+    }
+    let prompt_parts = step.prompt.as_deref().ok_or_else(|| {
+        format!(
+            "Action '{}' generate_image step is missing required `prompt`.",
+            action_name
+        )
+    })?;
+    let path_parts = step.path.as_deref().ok_or_else(|| {
+        format!(
+            "Action '{}' generate_image step is missing required `path`.",
+            action_name
+        )
+    })?;
+
+    let prompt = resolve_string_parts(prompt_parts, data, action_name, "prompt")
+        .map_err(|error| format!("Action '{}': {error}", action_name))?;
+    let output_path = resolve_string_parts(path_parts, data, action_name, "path")
+        .map_err(|error| format!("Action '{}': {error}", action_name))?;
+    let output_format = generated_image_output_format(output_path.as_str(), action_name)?;
+
+    let remaining = remaining_runtime_duration(
+        runtime_budget,
+        &format!("before starting image generation with model '{}'", model),
+    )
+    .map_err(|context| {
+        action_runtime_timeout_message(
+            action_name,
+            runtime_budget,
+            context.as_str(),
+        )
+    })?;
+
+    let image_bytes = match tokio::time::timeout(
+        remaining,
+        crate::providers::send_openai_image_request(
+            &provider_context.url,
+            model,
+            prompt.as_str(),
+            provider_context.inference_timeout_in_sec,
+            &provider_context.token,
+            output_format,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(error)) => {
+            let mut lines =
+                vec![format!("Action '{}' generate_image step failed.", action_name)];
+            lines.extend(provider_error_messages(&error));
+            return Err(lines.join("\n"));
+        }
+        Err(_) => {
+            return Err(action_runtime_timeout_message(
+                action_name,
+                runtime_budget,
+                "while waiting for image generation",
+            ));
+        }
+    };
+
+    let output_path_ref = Path::new(output_path.as_str());
+    validate_generated_image_output_path(output_path_ref, action_name)?;
+    if let Some(parent) = output_path_ref.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "Action '{}' failed to create image output directory '{}': {}",
+                    action_name,
+                    parent.display(),
+                    error
+                )
+            })?;
+        }
+    }
+
+    std::fs::write(output_path_ref, image_bytes).map_err(|error| {
+        format!(
+            "Action '{}' failed to write generated image '{}': {}",
+            action_name,
+            output_path_ref.display(),
+            error
+        )
+    })?;
+
+    println!(
+        "ℹ️ Action '{}' wrote generated image to '{}'.",
+        action_name,
+        output_path_ref.display()
+    );
+    Ok(StepExecutionOutcome::Completed)
 }
 
 async fn run_agent_step(
@@ -1942,6 +2097,50 @@ fn child_input_args(
 
 fn child_input_uses_dynamic_parts(parts: &[RunArg]) -> bool {
     parts.iter().any(|part| matches!(part, RunArg::Variable(_)))
+}
+
+fn validate_generated_image_output_path(path: &Path, action_name: &str) -> Result<(), String> {
+    let raw_path = path.to_string_lossy();
+    if raw_path.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' generate_image `path` must resolve to a non-empty relative path.",
+            action_name
+        ));
+    }
+    if path.is_absolute() {
+        return Err(format!(
+            "Action '{}' generate_image `path` must resolve to a relative path.",
+            action_name
+        ));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "Action '{}' generate_image `path` must not use parent traversal (`..`).",
+            action_name
+        ));
+    }
+
+    generated_image_output_format(raw_path.as_ref(), action_name).map(|_| ())
+}
+
+fn generated_image_output_format(raw_path: &str, action_name: &str) -> Result<&'static str, String> {
+    let extension = Path::new(raw_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    match extension.as_deref() {
+        Some("png") => Ok("png"),
+        Some("jpg") | Some("jpeg") => Ok("jpeg"),
+        Some("webp") => Ok("webp"),
+        _ => Err(format!(
+            "Action '{}' generate_image `path` must use a supported extension: `.png`, `.jpg`, `.jpeg`, `.webp`.",
+            action_name
+        )),
+    }
 }
 
 fn validate_child_input_url(url: &str, action_name: &str, input_index: usize) -> Result<(), String> {

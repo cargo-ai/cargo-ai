@@ -216,7 +216,7 @@ fn rejects_unsupported_action_kind_with_actionable_path() {
         .to_string();
 
     assert!(err.contains("$.actions[0].run[0].kind"));
-    assert!(err.contains("supported: `exec`, `email_me`, `agent`"));
+    assert!(err.contains("supported: `exec`, `email_me`, `agent`, `generate_image`"));
 }
 
 #[test]
@@ -268,6 +268,95 @@ fn accepts_email_me_string_and_variable_parts() {
     assert!(generated.contains("kind: \"email_me\".to_string()"));
     assert!(generated.contains("subject: Some(vec![RunArg::Literal(\"Weather alert for \".to_string()), RunArg::Variable(\"city\".to_string())])"));
     assert!(generated.contains("text: Some(vec![RunArg::Literal(\"Bring an umbrella because raining=\".to_string()), RunArg::Variable(\"raining\".to_string())])"));
+}
+
+#[test]
+fn accepts_generate_image_step_with_prompt_and_path_parts() {
+    let cfg = config_with(
+        r#""product_name": { "type": "string" }, "product_slug": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "generate_image",
+            "logic": { "==": [ { "var": "product_name" }, "Widget" ] },
+            "run": [
+              {
+                "kind": "generate_image",
+                "model": "gpt-image-1",
+                "prompt": ["Create a render for ", { "var": "product_name" }],
+                "path": ["./artifacts/", { "var": "product_slug" }, ".png"]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains("kind: \"generate_image\".to_string()"));
+    assert!(generated.contains("model: Some(\"gpt-image-1\".to_string())"));
+    assert!(generated.contains(
+        "prompt: Some(vec![RunArg::Literal(\"Create a render for \".to_string()), RunArg::Variable(\"product_name\".to_string())])"
+    ));
+    assert!(generated.contains(
+        "path: Some(vec![RunArg::Literal(\"./artifacts/\".to_string()), RunArg::Variable(\"product_slug\".to_string()), RunArg::Literal(\".png\".to_string())])"
+    ));
+}
+
+#[test]
+fn rejects_generate_image_output_variable() {
+    let cfg = config_with(
+        r#""product_name": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "generate_image",
+            "logic": { "==": [ { "var": "product_name" }, "Widget" ] },
+            "run": [
+              {
+                "kind": "generate_image",
+                "model": "gpt-image-1",
+                "prompt": "Create a render",
+                "path": "./artifacts/widget.png",
+                "output_variable": "image_path"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].output_variable"));
+    assert!(err.contains("not supported for `generate_image`"));
+}
+
+#[test]
+fn rejects_generate_image_unsupported_output_extension() {
+    let cfg = config_with(
+        r#""product_name": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "generate_image",
+            "logic": { "==": [ { "var": "product_name" }, "Widget" ] },
+            "run": [
+              {
+                "kind": "generate_image",
+                "model": "gpt-image-1",
+                "prompt": "Create a render",
+                "path": "./artifacts/widget.gif"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].path"));
+    assert!(err.contains("supported extension"));
 }
 
 #[test]
