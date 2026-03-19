@@ -7,6 +7,13 @@ mod build_support;
 
 use build_support::TemplateSource;
 
+const BUILD_RERUN_PATHS: &[&str] = &[
+    ".agentcfg",
+    "build.rs",
+    "templates",
+    "templates/build_support.rs",
+];
+
 const TEMPLATE_SOURCES: &[TemplateSource] = &[
     TemplateSource {
         destination: "build.rs",
@@ -79,7 +86,7 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
 ];
 
 fn main() -> Result<(), build_support::BuildError> {
-    build_support::run_agent_codegen(&[".agentcfg", "templates", "build.rs"])?;
+    build_support::run_agent_codegen(BUILD_RERUN_PATHS)?;
     build_support::write_generated_templates(TEMPLATE_SOURCES)?;
     Ok(())
 }

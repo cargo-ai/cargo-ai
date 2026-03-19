@@ -204,6 +204,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use uuid::Uuid;
 
+    const CURRENT_CARGO_AI_VERSION: &str = env!("CARGO_PKG_VERSION");
+    const DIFFERENT_CARGO_AI_VERSION: &str = "9.9.9";
+
     fn default_test_config() -> Config {
         Config {
             profile: Vec::new(),
@@ -236,9 +239,10 @@ mod tests {
 
     #[test]
     fn template_schema_version_rejects_legacy_semver_values() {
-        let value = schema_version::extract_schema_version_from_agentcfg(
-            r#"{"version":"0.0.11","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
+        let agentcfg = format!(
+            r#"{{"version":"{CURRENT_CARGO_AI_VERSION}","inputs":[{{"type":"text","text":"x"}}],"agent_schema":{{"type":"object","properties":{{}}}},"actions":[]}}"#
         );
+        let value = schema_version::extract_schema_version_from_agentcfg(&agentcfg);
         assert!(value.is_none());
     }
 
@@ -258,7 +262,7 @@ mod tests {
 
         persist_metadata_in_config(
             &mut cfg,
-            "0.0.11",
+            CURRENT_CARGO_AI_VERSION,
             "2026-03-03.r1",
             "aarch64-apple-darwin",
             "abc123",
@@ -268,7 +272,10 @@ mod tests {
             .as_ref()
             .expect("cargo-ai metadata should be initialized");
 
-        assert_eq!(metadata.cargo_ai_version.as_deref(), Some("0.0.11"));
+        assert_eq!(
+            metadata.cargo_ai_version.as_deref(),
+            Some(CURRENT_CARGO_AI_VERSION)
+        );
         assert_eq!(
             metadata.template_schema_version.as_deref(),
             Some("2026-03-03.r1")
@@ -293,7 +300,7 @@ mod tests {
 
         persist_metadata_in_config(
             &mut cfg,
-            "0.0.11",
+            CURRENT_CARGO_AI_VERSION,
             "2026-03-03.r1",
             "aarch64-apple-darwin",
             "abc123",
@@ -306,7 +313,7 @@ mod tests {
 
         persist_metadata_in_config(
             &mut cfg,
-            "0.0.12",
+            DIFFERENT_CARGO_AI_VERSION,
             "2026-03-03.r2",
             "aarch64-apple-darwin",
             "def456",
@@ -321,7 +328,10 @@ mod tests {
             Some(install_id.as_str())
         );
         assert_eq!(metadata.cargo_ai_binary_sha256.as_deref(), Some("def456"));
-        assert_eq!(metadata.cargo_ai_version.as_deref(), Some("0.0.12"));
+        assert_eq!(
+            metadata.cargo_ai_version.as_deref(),
+            Some(DIFFERENT_CARGO_AI_VERSION)
+        );
         assert_eq!(
             metadata.template_schema_version.as_deref(),
             Some("2026-03-03.r2")
@@ -349,7 +359,7 @@ mod tests {
         let mut cfg = default_test_config();
         persist_metadata_in_config(
             &mut cfg,
-            "0.0.11",
+            CURRENT_CARGO_AI_VERSION,
             "2026-03-03.r1",
             "aarch64-apple-darwin",
             "abc123",
@@ -360,7 +370,9 @@ mod tests {
 
         let written = fs::read_to_string(&path).expect("written config should be readable");
         assert!(written.contains("cargo_ai_metadata"));
-        assert!(written.contains("cargo_ai_version = \"0.0.11\""));
+        assert!(written.contains(&format!(
+            "cargo_ai_version = \"{CURRENT_CARGO_AI_VERSION}\""
+        )));
         assert!(written.contains("template_schema_version = \"2026-03-03.r1\""));
         assert!(written.contains("cargo_ai_build_target = \"aarch64-apple-darwin\""));
         assert!(written.contains("cargo_ai_binary_sha256 = \"abc123\""));
@@ -371,7 +383,7 @@ mod tests {
     #[test]
     fn normalized_metadata_trims_values_and_omits_empty_fields() {
         let metadata = CargoAiMetadata {
-            cargo_ai_version: Some(" 0.0.11 ".to_string()),
+            cargo_ai_version: Some(format!(" {CURRENT_CARGO_AI_VERSION} ")),
             template_schema_version: Some(" ".to_string()),
             cargo_ai_build_target: Some(" aarch64-apple-darwin ".to_string()),
             cargo_ai_install_id: Some(String::new()),
@@ -380,7 +392,10 @@ mod tests {
 
         let normalized = normalized_metadata(metadata).expect("metadata should remain present");
 
-        assert_eq!(normalized.cargo_ai_version.as_deref(), Some("0.0.11"));
+        assert_eq!(
+            normalized.cargo_ai_version.as_deref(),
+            Some(CURRENT_CARGO_AI_VERSION)
+        );
         assert!(normalized.template_schema_version.is_none());
         assert_eq!(
             normalized.cargo_ai_build_target.as_deref(),
