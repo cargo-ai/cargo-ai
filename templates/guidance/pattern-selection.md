@@ -16,6 +16,12 @@ Use this file after the user describes the outcome they want. The user should no
 - the caller may choose the file at runtime
 - the agent should return structured output and also run a local platform-specific follow-up step
 
+### Start with `runtime-vars-image-gating.json` when:
+
+- the caller should gate actions or tune thresholds at runtime
+- the caller should choose an image model at invocation time
+- the agent needs `runtime.*` in `logic`, `when`, string substitution, or `generate_image.model`
+
 ### Start with `basic-agent.json` when:
 
 - the user wants one agent

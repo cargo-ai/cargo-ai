@@ -11,8 +11,9 @@ Every agent definition must be a JSON object with these keys in this order:
 
 1. `version`
 2. `inputs`
-3. `agent_schema`
-4. `actions`
+3. optional `runtime_vars`
+4. `agent_schema`
+5. `actions`
 
 ## `version`
 
@@ -68,6 +69,45 @@ Authoring guidance:
 - If you use `--input-file` and still need a text instruction, either also pass `--input-text` in replace mode or choose `--input-mode append` / `--input-mode prepend` so the baked text instruction is still included.
 - `{"type":"file","path":"..."}` is for a definition-owned fixed file path, not for a caller-selected runtime file.
 
+## `runtime_vars`
+
+- Optional.
+- Object keyed by runtime variable name.
+- Use when the caller should control action behavior or a step-local setting at invocation time without editing the JSON.
+
+Each `runtime_vars.<name>` entry supports:
+- required `type`
+- optional `default`
+
+Supported `type` values:
+- `string`
+- `number`
+- `integer`
+- `boolean`
+
+Rules:
+- runtime variable names are flat
+- runtime variable names cannot contain `.`
+- `runtime` and `runtime.*` are reserved
+- `default`, when present, must match the declared type
+- values are supplied at invocation time through repeatable `--run-var name=value` flags
+- undeclared `--run-var` names fail
+- duplicate `--run-var` names fail
+- if a declared runtime var has no `default`, the caller must supply it when an executed path resolves it
+- quote `--run-var` values normally in the caller's shell when they contain spaces or shell-sensitive characters
+
+Example:
+
+```json
+{
+  "runtime_vars": {
+    "generate_images": { "type": "boolean", "default": false },
+    "hero_image_model": { "type": "string", "default": "gpt-image-1.5" },
+    "score_threshold": { "type": "number", "default": 0.8 }
+  }
+}
+```
+
 ## `agent_schema`
 
 - Required.
@@ -108,7 +148,11 @@ Unsupported schema shapes for the current MVP:
   - `logic`
   - `run`
 
-`logic` uses JSON Logic against the top-level model output object. If it evaluates true, the action's `run` steps execute in order.
+`logic` uses JSON Logic against the top-level action data object. At action start, that means:
+- top-level model output fields
+- declared `runtime.*` values
+
+If `logic` evaluates true, the action's `run` steps execute in order.
 
 ## Supported Run-Step Kinds
 
@@ -142,8 +186,14 @@ Required fields:
 - `prompt`
 - `path`
 - First slice writes one local image file.
-- For the default OpenAI account transport, use a tool-capable mainline model such as `gpt-5.2`.
-- For a direct OpenAI API token and URL, use an image model such as `gpt-image-1`.
+- `model` may be:
+  - a literal non-empty string
+  - a single variable reference such as `{ "var": "runtime.hero_image_model" }`
+  - a single top-level string output field such as `{ "var": "image_model" }`
+- `generate_image.model` may not read captured `output_variable`, `status_variable`, or `error_variable` values in the current contract.
+- For Cargo AI's default OpenAI account transport, use a tool-capable mainline model such as `gpt-5.2`.
+- For a direct OpenAI API token and URL, prefer GPT Image models such as `gpt-image-1.5` or `gpt-image-1-mini`.
+- Current-at-ship-date note: official OpenAI docs list `gpt-image-1.5` as the latest GPT Image model, and the image-generation guide lists `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini` for direct image generation. Verified: 2026-03-28.
 
 ## Common Optional Step Fields
 
@@ -204,14 +254,20 @@ Example:
 Within one action:
 - `output_variable`, `status_variable`, and `error_variable` share one flat namespace.
 - Dotted names are invalid.
+- `runtime` and `runtime.*` are reserved for declared invocation-scoped runtime variables.
 - Captured names cannot collide with top-level `agent_schema` property names.
 - Captured names cannot be reused within the same action.
 
 Across different top-level actions:
 - The same captured names may be reused.
 
-Variable lookup can read:
+Top-level action `logic` can read:
 - top-level model output fields
+- declared `runtime.*` values
+
+Step `when` and string/arg substitutions can read:
+- top-level model output fields
+- declared `runtime.*` values
 - prior `output_variable` values from earlier steps in the same action
 - prior `status_variable` values from earlier steps in the same action
 - prior `error_variable` values from earlier steps in the same action

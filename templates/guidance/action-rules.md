@@ -11,6 +11,7 @@ For broader shape and validation rules, also read:
 - Required top-level keys:
   - `version`
   - `inputs`
+  - optional `runtime_vars`
   - `agent_schema`
   - `actions`
 
@@ -27,7 +28,14 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - `generate_image`
   - Required: `kind`, `model`, `prompt`, `path`
   - First slice: OpenAI-backed single-image output only
-  - Use a tool-capable mainline model such as `gpt-5.2` for OpenAI account transport, or an image model such as `gpt-image-1` for direct OpenAI API transport
+  - `model` may be:
+    - a literal non-empty string
+    - a single variable reference such as `{ "var": "runtime.hero_image_model" }`
+    - a single top-level string output field such as `{ "var": "image_model" }`
+  - `generate_image.model` may not read captured `output_variable`, `status_variable`, or `error_variable` values
+  - Use a tool-capable mainline model such as `gpt-5.2` for OpenAI account transport
+  - For a direct OpenAI API token and URL, prefer GPT Image models such as `gpt-image-1.5` or `gpt-image-1-mini`
+  - Current-at-ship-date note: official OpenAI docs list `gpt-image-1.5` as the latest GPT Image model, and the image-generation guide lists `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini` for direct image generation. Verified: 2026-03-28.
 
 ## Optional Control Fields
 - `when`
@@ -64,13 +72,18 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 ## Variable Namespace Rules
 - Captured names are flat. Dotted names are invalid.
 - `output_variable`, `status_variable`, and `error_variable` share one action-local namespace.
+- `runtime` and `runtime.*` are reserved for declared invocation-scoped runtime variables.
 - Captured names cannot collide with top-level `agent_schema` output field names.
 - Captured names cannot be reused within the same action.
 - The same captured names may be reused in different top-level actions.
 
 ## Variable Lookup Rules
+- Top-level action `logic` can read:
+  - top-level model output fields
+  - declared `runtime.*` values
 - `when` and string-part substitutions can read:
   - top-level model output fields
+  - declared `runtime.*` values
   - prior `output_variable` values from earlier steps in the same action
   - prior `status_variable` values from earlier steps in the same action
   - prior `error_variable` values from earlier steps in the same action
@@ -85,6 +98,7 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 ## Child-Agent Data Flow
 
 - Parent actions may pass child-agent `inputs`, including dynamic string parts resolved from current action-local data.
+- Those child `inputs` may resolve declared `runtime.*` values alongside top-level model output fields and prior captured step variables.
 - Parent `agent` steps may set child `input_mode` to `replace`, `append`, or `prepend` when they also provide child `inputs`.
 - Omitted child `input_mode` keeps the current replace behavior for child inputs.
 - Parent actions may capture child-agent success/failure with `status_variable` and `error_variable`.

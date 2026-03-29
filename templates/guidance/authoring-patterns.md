@@ -9,8 +9,9 @@ Keep top-level keys in this order:
 
 1. `version`
 2. `inputs`
-3. `agent_schema`
-4. `actions`
+3. optional `runtime_vars`
+4. `agent_schema`
+5. `actions`
 
 Keep each action in this order:
 
@@ -34,7 +35,7 @@ Keep each run step in this order:
 - Use explicit captured-variable names such as `child_status` or `report_error`.
 - Do not overload one variable name for multiple meanings.
 
-## Input Strategy
+## Input and Runtime Strategy
 
 Choose one of these intentionally:
 
@@ -49,6 +50,14 @@ Important rule:
 - If the caller supplies `--input-file` in replace mode but the agent also needs instructions, the caller should also supply `--input-text`.
 
 Use baked file/image paths only when the definition should own a fixed local asset. Use runtime flags when the caller should choose the asset.
+
+Use top-level `runtime_vars` when the caller should choose action behavior or a step-local setting without editing the JSON:
+
+- gating flags such as `runtime.generate_images`
+- thresholds such as `runtime.score_threshold`
+- step-local image model selection such as `runtime.hero_image_model`
+
+Reference them as `runtime.<name>` and pass them with `--run-var name=value`.
 
 ## Sidecar Notes
 

@@ -41,6 +41,16 @@ Check for:
 - expecting runtime input flags to append to JSON `inputs` without also setting `--input-mode append` or `--input-mode prepend`
 - using a JSON `file.path` when the caller should really choose the file at invocation time
 
+### Runtime variable confusion
+
+Check for:
+- using `runtime.<name>` without declaring `<name>` in top-level `runtime_vars`
+- passing `--run-var` for a name that is not declared in `runtime_vars`
+- forgetting `--run-var` for a declared runtime var that has no `default`
+- passing an empty `--run-var` value for `boolean`, `integer`, or `number`
+- forgetting to quote a `--run-var` value that contains spaces or shell-sensitive characters
+- trying to use captured step vars in `generate_image.model`; that field only accepts literal strings plus top-level string schema fields and `runtime.*` in the current contract
+
 ### Step did not run on the current OS
 
 Check for:

@@ -63,6 +63,10 @@ const EXAMPLE_CONDITIONAL_WHEN: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/examples/conditional-when.json"
 ));
+const EXAMPLE_RUNTIME_VARS_IMAGE_GATING: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/runtime-vars-image-gating.json"
+));
 
 #[derive(Clone, Copy)]
 struct GuidanceArtifact {
@@ -70,7 +74,7 @@ struct GuidanceArtifact {
     contents: &'static str,
 }
 
-const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 15] = [
+const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 16] = [
     GuidanceArtifact {
         relative_path: "AGENTS.md",
         contents: CODEX_GUIDANCE_TEMPLATE,
@@ -130,6 +134,10 @@ const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 15] = [
     GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/examples/conditional-when.json",
         contents: EXAMPLE_CONDITIONAL_WHEN,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/runtime-vars-image-gating.json",
+        contents: EXAMPLE_RUNTIME_VARS_IMAGE_GATING,
     },
 ];
 
@@ -290,7 +298,7 @@ mod tests {
                 .and_then(|name| name.to_str()),
             Some("AGENTS.md")
         );
-        assert_eq!(report.artifact_paths.len(), 15);
+        assert_eq!(report.artifact_paths.len(), 16);
         assert!(dir
             .join(".cargo-ai/guidance/agent-definition-contract.md")
             .exists());
@@ -323,6 +331,9 @@ mod tests {
         assert!(dir
             .join(".cargo-ai/guidance/examples/conditional-when.json")
             .exists());
+        assert!(dir
+            .join(".cargo-ai/guidance/examples/runtime-vars-image-gating.json")
+            .exists());
 
         let guidance = fs::read_to_string(&report.root_output_path)
             .expect("guidance output should be readable");
@@ -332,6 +343,7 @@ mod tests {
         assert!(guidance.contains(".cargo-ai/guidance/agent-definition-contract.md"));
         assert!(guidance.contains(".cargo-ai/guidance/examples/schema-features.json"));
         assert!(guidance.contains(".cargo-ai/guidance/examples/runtime-file-local-exec.json"));
+        assert!(guidance.contains(".cargo-ai/guidance/examples/runtime-vars-image-gating.json"));
         assert!(guidance.contains("cargo ai hatch <agent-name> --config <config.json> --check"));
         assert!(guidance.contains("portable across macOS, Windows, and Linux"));
 
@@ -340,6 +352,7 @@ mod tests {
         assert!(rules.contains("failure_mode"));
         assert!(rules.contains("status_variable"));
         assert!(rules.contains("when"));
+        assert!(rules.contains("runtime.*"));
         assert!(rules.contains("agent-definition-contract.md"));
 
         let start_here = fs::read_to_string(dir.join(".cargo-ai/guidance/start-here.md"))
@@ -354,6 +367,7 @@ mod tests {
         assert!(patterns.contains("schema-features.json"));
         assert!(patterns.contains("runtime-file-local-exec.json"));
         assert!(patterns.contains("continue-on-failure.json"));
+        assert!(patterns.contains("runtime-vars-image-gating.json"));
 
         let authoring = fs::read_to_string(dir.join(".cargo-ai/guidance/authoring-patterns.md"))
             .expect("authoring patterns guidance should be readable");

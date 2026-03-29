@@ -149,9 +149,11 @@ Cargo AI keeps the authoring model intentionally small:
 
 1. `inputs`
    Ordered model-facing input such as `text`, `url`, or `image`.
-2. `agent_schema`
+2. optional `runtime_vars`
+   Typed caller-supplied values that can control action logic, `when`, and selected run-step fields at invocation time.
+3. `agent_schema`
    The typed response you expect back.
-3. `actions`
+4. `actions`
    What to do after the response is validated, including the ordered `run` steps inside each action.
 
 The next section expands those same pieces from minimal snippets into richer patterns.
@@ -206,6 +208,25 @@ You can also override or inject runtime input without editing the JSON. Generate
 ```bash
 ./my_agent --input-text "What is 3 + 3?"
 ```
+
+You can also declare typed runtime variables for action control and step-local settings. Define them under top-level `runtime_vars`, pass values with repeatable `--run-var name=value`, and reference them in JSON as `runtime.<name>`.
+
+```json
+{
+  "runtime_vars": {
+    "generate_images": { "type": "boolean", "default": false },
+    "hero_image_model": { "type": "string", "default": "gpt-image-1.5" }
+  }
+}
+```
+
+```bash
+./my_agent \
+  --run-var generate_images=true \
+  --run-var hero_image_model=gpt-image-1.5
+```
+
+Quote `--run-var` values when your shell would otherwise split them, for example `--run-var subject="Quarterly Review"`.
 
 ## Start Simple, Then Expand
 
@@ -403,7 +424,7 @@ Then expand into richer constraints and exact output choices:
 
 `actions` define what the agent is allowed to do after it produces the top-level structured output.
 Action `logic` uses [JSON Logic](https://jsonlogic.com/).
-Within an action, run steps execute in order after the action's JSON Logic condition evaluates true.
+Within an action, run steps execute in order after the action's JSON Logic condition evaluates true. That logic can read both top-level model output fields and declared `runtime.*` values.
 
 Start with one simple local action:
 
@@ -573,12 +594,14 @@ Then expand into a multi-step workflow:
 
 Use `run` to sequence multiple side effects in order. `exec` steps can capture output, status, or errors for later steps, `generate_image` can write a single local image artifact, and `when` lets later steps react to success or failure without leaving the agent definition.
 
-First-slice image generation uses an explicit model and a local output path. For the default OpenAI account transport, use a tool-capable mainline model such as `gpt-5.2`. For a direct OpenAI API token and URL, use an image model such as `gpt-image-1`.
+`generate_image.model` may be a literal string or a single variable reference. Prefer a runtime-backed string such as `{ "var": "runtime.hero_image_model" }` when the operator should choose the image model at invocation time. Top-level string schema fields may also drive `generate_image.model`, but captured step variables may not.
+
+For the default OpenAI account transport, use a tool-capable mainline model such as `gpt-5.2`. For a direct OpenAI API token and URL, prefer GPT Image models such as `gpt-image-1.5` or `gpt-image-1-mini`. Official OpenAI docs list `gpt-image-1.5` as the latest GPT Image model, and the image-generation guide lists `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini` for direct image generation. Verified: 2026-03-28.
 
 ```json
 {
   "kind": "generate_image",
-  "model": "gpt-5.2",
+  "model": { "var": "runtime.hero_image_model" },
   "prompt": ["Create a product render for ", { "var": "reason" }],
   "path": "./artifacts/product_render.png"
 }
