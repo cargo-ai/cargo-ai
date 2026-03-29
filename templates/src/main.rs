@@ -9,8 +9,10 @@ use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use config::loader::{find_profile, load_config};
@@ -37,6 +39,318 @@ const DEFAULT_AGENT_ACTION_MAX_DEPTH: u32 = 5;
 const DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS: u64 = 600;
 const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str =
     "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
+
+tokio::task_local! {
+    static ACTION_OUTPUT: ActionOutput;
+}
+
+#[derive(Clone)]
+struct ActionOutput {
+    inner: Arc<Mutex<ActionOutputState>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActionOutputMode {
+    AppendOnly,
+    Live,
+}
+
+struct ActionOutputState {
+    mode: ActionOutputMode,
+    action_execution: ActionExecutionMode,
+    rendered_lines: usize,
+    lanes: BTreeMap<usize, ActionLaneState>,
+}
+
+#[derive(Clone)]
+struct ActionLaneState {
+    action_name: String,
+    status: ActionLaneStatus,
+    current_step: Option<String>,
+    last_message: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActionLaneStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Notice,
+    LogicError,
+    Skipped,
+}
+
+impl ActionOutput {
+    fn new(action_execution: ActionExecutionMode) -> Self {
+        Self::new_for_mode(
+            action_execution,
+            if should_use_live_action_dashboard() {
+                ActionOutputMode::Live
+            } else {
+                ActionOutputMode::AppendOnly
+            },
+        )
+    }
+
+    fn new_for_mode(action_execution: ActionExecutionMode, mode: ActionOutputMode) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(ActionOutputState {
+                mode,
+                action_execution,
+                rendered_lines: 0,
+                lanes: BTreeMap::new(),
+            })),
+        }
+    }
+
+    fn print_execution_header(&self) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::AppendOnly {
+                println!("{}", action_execution_header(state.action_execution));
+            } else {
+                render_live_dashboard(state);
+            }
+        });
+    }
+
+    fn action_started(&self, action_index: usize, action_name: &str) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::AppendOnly {
+                println!("{}", format_action_line(action_index, action_name, "started"));
+                return;
+            }
+
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.status = ActionLaneStatus::Running;
+            lane.last_message = Some("started".to_string());
+            render_live_dashboard(state);
+        });
+    }
+
+    fn action_step_started(
+        &self,
+        action_index: usize,
+        action_name: &str,
+        step_kind: &str,
+        step_number: usize,
+        step_count: usize,
+    ) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::AppendOnly {
+                return;
+            }
+
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.status = ActionLaneStatus::Running;
+            lane.current_step = Some(format!("{}/{} {}", step_number, step_count, step_kind));
+            render_live_dashboard(state);
+        });
+    }
+
+    fn action_line(&self, action_index: usize, action_name: &str, message: &str) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::AppendOnly {
+                println!("{}", format_action_line(action_index, action_name, message));
+                return;
+            }
+
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.last_message = Some(message.to_string());
+            if lane.status == ActionLaneStatus::Pending {
+                lane.status = inferred_lane_status(message);
+            } else if lane.status == ActionLaneStatus::Running {
+                lane.status = match inferred_lane_status(message) {
+                    ActionLaneStatus::Notice => ActionLaneStatus::Running,
+                    other => other,
+                };
+            }
+            render_live_dashboard(state);
+        });
+    }
+
+    fn action_success(&self, action_index: usize, action_name: &str, summary: &str) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::AppendOnly {
+                println!(
+                    "{}",
+                    format_action_line(action_index, action_name, format!("{}.", summary).as_str())
+                );
+                return;
+            }
+
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.status = ActionLaneStatus::Completed;
+            lane.current_step = None;
+            lane.last_message = Some(format!("{}.", summary));
+            render_live_dashboard(state);
+        });
+    }
+
+    fn action_failed(&self, action_index: usize, action_name: &str, error: &str) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::AppendOnly {
+                return;
+            }
+
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.status = ActionLaneStatus::Failed;
+            lane.current_step = None;
+            lane.last_message = Some(format!("failed: {}", error));
+            render_live_dashboard(state);
+        });
+    }
+
+    fn suspend_for_passthrough(&self) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::Live {
+                clear_live_dashboard(state);
+            }
+        });
+    }
+
+    fn resume_after_passthrough(&self) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::Live {
+                render_live_dashboard(state);
+            }
+        });
+    }
+
+    fn finish(&self) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::Live {
+                render_live_dashboard(state);
+                let _ = writeln!(io::stdout());
+                let _ = io::stdout().flush();
+                state.rendered_lines = 0;
+            }
+        });
+    }
+
+    fn with_state(&self, update: impl FnOnce(&mut ActionOutputState)) {
+        let mut state = self
+            .inner
+            .lock()
+            .expect("action output lock should succeed");
+        update(&mut state);
+    }
+}
+
+impl ActionOutputState {
+    fn snapshot_lines(&self) -> Vec<String> {
+        let mut lines = vec![action_execution_header(self.action_execution).to_string()];
+
+        for (lane_index, lane) in &self.lanes {
+            lines.push(String::new());
+            lines.push(format!(
+                "{} {}",
+                action_lane_prefix(*lane_index, lane.action_name.as_str()),
+                lane.status.display_name()
+            ));
+            lines.push(format!(
+                "  step: {}",
+                lane.current_step.as_deref().unwrap_or("-")
+            ));
+            lines.push(format!(
+                "  last: {}",
+                lane.last_message.as_deref().unwrap_or("-")
+            ));
+        }
+
+        lines
+    }
+}
+
+impl ActionLaneStatus {
+    fn display_name(self) -> &'static str {
+        match self {
+            ActionLaneStatus::Pending => "pending",
+            ActionLaneStatus::Running => "running",
+            ActionLaneStatus::Completed => "completed",
+            ActionLaneStatus::Failed => "failed",
+            ActionLaneStatus::Notice => "notice",
+            ActionLaneStatus::LogicError => "logic error",
+            ActionLaneStatus::Skipped => "skipped",
+        }
+    }
+}
+
+fn should_use_live_action_dashboard() -> bool {
+    io::stdout().is_terminal()
+        && std::env::var("TERM").map(|term| term != "dumb").unwrap_or(true)
+        && std::env::var_os("CI").is_none()
+}
+
+fn ensure_lane_state<'a>(
+    state: &'a mut ActionOutputState,
+    action_index: usize,
+    action_name: &str,
+) -> &'a mut ActionLaneState {
+    state
+        .lanes
+        .entry(action_index)
+        .or_insert_with(|| ActionLaneState {
+            action_name: action_name.to_string(),
+            status: ActionLaneStatus::Pending,
+            current_step: None,
+            last_message: None,
+        })
+}
+
+fn inferred_lane_status(message: &str) -> ActionLaneStatus {
+    if message.starts_with("logic evaluation failed:") {
+        ActionLaneStatus::LogicError
+    } else if message.contains("no run steps matched")
+        || message.contains("unsupported step kind")
+    {
+        ActionLaneStatus::Skipped
+    } else {
+        ActionLaneStatus::Notice
+    }
+}
+
+fn render_live_dashboard(state: &mut ActionOutputState) {
+    if cfg!(test) {
+        state.rendered_lines = state.snapshot_lines().len();
+        return;
+    }
+
+    let snapshot = state.snapshot_lines();
+    let mut stdout = io::stdout();
+
+    if state.rendered_lines > 0 {
+        let _ = write!(stdout, "\r");
+        if state.rendered_lines > 1 {
+            let _ = write!(stdout, "\x1b[{}A", state.rendered_lines - 1);
+        }
+        let _ = write!(stdout, "\x1b[J");
+    }
+
+    let _ = write!(stdout, "{}", snapshot.join("\n"));
+    let _ = stdout.flush();
+    state.rendered_lines = snapshot.len();
+}
+
+fn clear_live_dashboard(state: &mut ActionOutputState) {
+    if cfg!(test) {
+        state.rendered_lines = 0;
+        return;
+    }
+
+    if state.rendered_lines == 0 {
+        return;
+    }
+
+    let mut stdout = io::stdout();
+    let _ = write!(stdout, "\r");
+    if state.rendered_lines > 1 {
+        let _ = write!(stdout, "\x1b[{}A", state.rendered_lines - 1);
+    }
+    let _ = write!(stdout, "\x1b[J");
+    let _ = stdout.flush();
+    state.rendered_lines = 0;
+}
 
 fn unknown_server_messages(server: &str) -> Vec<String> {
     let display_server = if server.trim().is_empty() {
@@ -1422,50 +1736,57 @@ async fn apply_actions(
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<(), String> {
-    let data = action_data_from_output(output, runtime_vars)
-        .map_err(|error| format!("Failed to serialize output for action evaluation: {error}"))?;
-    let current_platform = current_action_platform();
-    print_action_execution_header(action_execution);
-    let top_level_failures = match action_execution {
-        ActionExecutionMode::Sequential => {
-            apply_actions_sequential(
-                actions,
-                &data,
-                current_platform,
-                action_execution_override,
-                config,
-                provider_context,
-                max_agent_depth,
-                runtime_budget,
-            )
-            .await?
-        }
-        ActionExecutionMode::Parallel => {
-            apply_actions_parallel(
-                actions,
-                &data,
-                current_platform,
-                action_execution_override,
-                config,
-                provider_context,
-                max_agent_depth,
-                runtime_budget,
-            )
-            .await?
-        }
-    };
+    ACTION_OUTPUT
+        .scope(ActionOutput::new(action_execution), async move {
+            let data = action_data_from_output(output, runtime_vars).map_err(|error| {
+                format!("Failed to serialize output for action evaluation: {error}")
+            })?;
+            let current_platform = current_action_platform();
+            print_action_execution_header(action_execution);
+            let top_level_failures = match action_execution {
+                ActionExecutionMode::Sequential => {
+                    apply_actions_sequential(
+                        actions,
+                        &data,
+                        current_platform,
+                        action_execution_override,
+                        config,
+                        provider_context,
+                        max_agent_depth,
+                        runtime_budget,
+                    )
+                    .await?
+                }
+                ActionExecutionMode::Parallel => {
+                    apply_actions_parallel(
+                        actions,
+                        &data,
+                        current_platform,
+                        action_execution_override,
+                        config,
+                        provider_context,
+                        max_agent_depth,
+                        runtime_budget,
+                    )
+                    .await?
+                }
+            };
 
-    if let Some(message) = root_run_completion_message() {
-        if top_level_failures.is_empty() {
-            println!("{message}");
-        }
-    }
+            finish_action_output();
 
-    if top_level_failures.is_empty() {
-        Ok(())
-    } else {
-        Err(format_top_level_action_failures(&top_level_failures))
-    }
+            if let Some(message) = root_run_completion_message() {
+                if top_level_failures.is_empty() {
+                    println!("{message}");
+                }
+            }
+
+            if top_level_failures.is_empty() {
+                Ok(())
+            } else {
+                Err(format_top_level_action_failures(&top_level_failures))
+            }
+        })
+        .await
 }
 
 async fn apply_actions_sequential(
@@ -1575,6 +1896,7 @@ fn collect_action_execution_result(
             }
         }
         ActionExecutionResult::Failed(error) => {
+            note_action_failure(action_index, &action.name, &error);
             top_level_failures.push(format_action_failure(action_index, &action.name, &error));
         }
     }
@@ -1610,10 +1932,19 @@ async fn run_matching_action_steps(
     let mut outcomes = Vec::with_capacity(matching_steps.len());
     let mut action_data = data.clone();
 
-    for step in matching_steps {
+    let matching_step_count = matching_steps.len();
+    for (step_index, step) in matching_steps.into_iter().enumerate() {
         if !should_run_step(step, &action_data, &action.name)? {
             continue;
         }
+
+        note_action_step_started(
+            action_index,
+            action.name.as_str(),
+            step.kind.as_str(),
+            step_index + 1,
+            matching_step_count,
+        );
 
         let step_result = if step.kind.eq_ignore_ascii_case("exec") {
             run_exec_step(step, &action_data, action_index, &action.name, runtime_budget)
@@ -1783,12 +2114,17 @@ async fn run_exec_step(
             )),
         }
     } else {
-        let mut child = tokio::process::Command::new(program)
+        suspend_action_output_for_passthrough();
+        let child = tokio::process::Command::new(program)
             .args(&resolved_args)
             .spawn()
-            .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
+            .map_err(|error| {
+                resume_action_output_after_passthrough();
+                format!("{action_name}: failed to execute command: {error}.")
+            })?;
+        let mut child = child;
 
-        match tokio::time::timeout(remaining, child.wait()).await {
+        let result = match tokio::time::timeout(remaining, child.wait()).await {
             Ok(Ok(status)) if status.success() => Ok(None),
             Ok(Ok(status)) => Err(format!(
                 "Action '{}' exec step command '{}' exited with status {}.",
@@ -1806,7 +2142,9 @@ async fn run_exec_step(
                     &format!("while waiting for command '{}'", program),
                 ))
             }
-        }
+        };
+        resume_action_output_after_passthrough();
+        result
     }
 }
 
@@ -2191,14 +2529,17 @@ async fn run_agent_step(
         )
     })?;
 
-    let mut child = command.spawn().map_err(|error| {
+    suspend_action_output_for_passthrough();
+    let child = command.spawn().map_err(|error| {
+        resume_action_output_after_passthrough();
         format!(
             "Action '{}' failed to start child agent '{}': {}",
             action_name, agent, error
         )
     })?;
+    let mut child = child;
 
-    match tokio::time::timeout(remaining, child.wait()).await {
+    let result = match tokio::time::timeout(remaining, child.wait()).await {
         Ok(Ok(status)) if status.success() => Ok(StepExecutionOutcome::Completed),
         Ok(Ok(status)) => Err(format!(
             "Action '{}' child agent '{}' exited with status {} at depth {}.",
@@ -2222,7 +2563,9 @@ async fn run_agent_step(
                 &format!("while waiting for child agent '{}' at depth {}", agent, current_depth + 1),
             ))
         }
-    }
+    };
+    resume_action_output_after_passthrough();
+    result
 }
 
 fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'static str> {
@@ -2267,6 +2610,46 @@ fn root_run_completion_message() -> Option<&'static str> {
     run_completion_message_for_depth(current_agent_action_depth())
 }
 
+fn current_action_output() -> Option<ActionOutput> {
+    ACTION_OUTPUT.try_with(Clone::clone).ok()
+}
+
+fn finish_action_output() {
+    if let Some(output) = current_action_output() {
+        output.finish();
+    }
+}
+
+fn note_action_step_started(
+    action_index: usize,
+    action_name: &str,
+    step_kind: &str,
+    step_number: usize,
+    step_count: usize,
+) {
+    if let Some(output) = current_action_output() {
+        output.action_step_started(action_index, action_name, step_kind, step_number, step_count);
+    }
+}
+
+fn note_action_failure(action_index: usize, action_name: &str, error: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_failed(action_index, action_name, error);
+    }
+}
+
+fn suspend_action_output_for_passthrough() {
+    if let Some(output) = current_action_output() {
+        output.suspend_for_passthrough();
+    }
+}
+
+fn resume_action_output_after_passthrough() {
+    if let Some(output) = current_action_output() {
+        output.resume_after_passthrough();
+    }
+}
+
 fn action_execution_header(action_execution: ActionExecutionMode) -> &'static str {
     match action_execution {
         ActionExecutionMode::Sequential => "Action execution: sequential",
@@ -2275,7 +2658,11 @@ fn action_execution_header(action_execution: ActionExecutionMode) -> &'static st
 }
 
 fn print_action_execution_header(action_execution: ActionExecutionMode) {
-    println!("{}", action_execution_header(action_execution));
+    if let Some(output) = current_action_output() {
+        output.print_execution_header();
+    } else {
+        println!("{}", action_execution_header(action_execution));
+    }
 }
 
 fn action_lane_prefix(action_index: usize, action_name: &str) -> String {
@@ -2291,15 +2678,27 @@ fn format_action_failure(action_index: usize, action_name: &str, error: &str) ->
 }
 
 fn print_action_line(action_index: usize, action_name: &str, message: &str) {
-    println!("{}", format_action_line(action_index, action_name, message));
+    if let Some(output) = current_action_output() {
+        output.action_line(action_index, action_name, message);
+    } else {
+        println!("{}", format_action_line(action_index, action_name, message));
+    }
 }
 
 fn print_action_start(action_index: usize, action_name: &str) {
-    print_action_line(action_index, action_name, "started");
+    if let Some(output) = current_action_output() {
+        output.action_started(action_index, action_name);
+    } else {
+        print_action_line(action_index, action_name, "started");
+    }
 }
 
 fn print_action_success(action_index: usize, action_name: &str, summary: &str) {
-    print_action_line(action_index, action_name, format!("{}.", summary).as_str());
+    if let Some(output) = current_action_output() {
+        output.action_success(action_index, action_name, summary);
+    } else {
+        print_action_line(action_index, action_name, format!("{}.", summary).as_str());
+    }
 }
 
 fn render_account_response(response: &serde_json::Value) {

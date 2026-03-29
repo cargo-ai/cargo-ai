@@ -566,7 +566,7 @@ Top-level actions run `sequential`ly by default. If you want matching top-level 
 
 That only changes scheduling across top-level actions. Each individual action still keeps its own `run` list in order, and a hard failure in one top-level action no longer prevents later eligible top-level actions from running. Cargo AI aggregates those top-level hard failures after all eligible actions finish.
 
-Cargo AI now prints one run-level mode header, then prefixes its own action lifecycle lines with deterministic lane labels such as `[A1 first_action]`. That same append-only format is used for both `sequential` and `parallel`, while raw child-agent and `exec` stdout/stderr still pass through unchanged.
+Cargo AI prints one run-level mode header before actions start. When output is redirected, piped, or running in simpler terminals, it uses append-only lane-prefixed lifecycle lines such as `[A1 first_action]`. When attached directly to an interactive terminal, it switches to a compact live lane dashboard that groups each action lane by label, status, current step, and last Cargo AI-generated message. Raw child-agent and `exec` stdout/stderr still pass through unchanged in both views.
 
 If you need a safety/testing pass, invoke a parallel-capable agent with `--action-execution sequential`. That runtime override forces the whole invocation tree down to sequential scheduling for that run, including child-agent handoffs.
 
