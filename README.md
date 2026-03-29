@@ -566,6 +566,8 @@ Top-level actions run `sequential`ly by default. If you want matching top-level 
 
 That only changes scheduling across top-level actions. Each individual action still keeps its own `run` list in order, and a hard failure in one top-level action no longer prevents later eligible top-level actions from running. Cargo AI aggregates those top-level hard failures after all eligible actions finish.
 
+Cargo AI now prints one run-level mode header, then prefixes its own action lifecycle lines with deterministic lane labels such as `[A1 first_action]`. That same append-only format is used for both `sequential` and `parallel`, while raw child-agent and `exec` stdout/stderr still pass through unchanged.
+
 ### `run`
 
 `run` is the ordered step list inside an action.

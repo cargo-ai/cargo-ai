@@ -24,6 +24,9 @@ For broader shape and validation rules, also read:
   - Each individual action's `run` list stays sequential in both modes.
 - A hard failure in one top-level action does not prevent later eligible top-level actions from running.
 - Cargo AI aggregates top-level hard failures after all eligible actions finish.
+- Cargo AI prints one run-level header, `Action execution: sequential` or `Action execution: parallel`, before action work begins.
+- Cargo AI prefixes its own action lifecycle lines with deterministic lane labels such as `[A1 generate_images]`.
+- Raw child-agent and `exec` stdout/stderr are not lane-prefixed in this phase; they still pass through unchanged.
 
 ## Supported Step Kinds
 

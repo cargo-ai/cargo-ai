@@ -1392,6 +1392,7 @@ async fn apply_actions(
     let data = action_data_from_output(output, runtime_vars)
         .map_err(|error| format!("Failed to serialize output for action evaluation: {error}"))?;
     let current_platform = current_action_platform();
+    print_action_execution_header(action_execution);
     let top_level_failures = match action_execution {
         ActionExecutionMode::Sequential => {
             apply_actions_sequential(
@@ -1443,14 +1444,16 @@ async fn apply_actions_sequential(
 ) -> Result<Vec<String>, String> {
     let mut top_level_failures = Vec::new();
 
-    for action in actions {
-        if !action_logic_matches(action, data) {
+    for (action_index, action) in actions.iter().enumerate() {
+        if !action_logic_matches(action_index, action, data) {
             continue;
         }
 
         collect_action_execution_result(
+            action_index,
             action,
             run_matching_action_steps(
+                action_index,
                 action,
                 data,
                 current_platform,
@@ -1479,13 +1482,14 @@ async fn apply_actions_parallel(
     let mut matched_actions = Vec::new();
     let mut lane_futures = Vec::new();
 
-    for action in actions {
-        if !action_logic_matches(action, data) {
+    for (action_index, action) in actions.iter().enumerate() {
+        if !action_logic_matches(action_index, action, data) {
             continue;
         }
 
-        matched_actions.push(action);
+        matched_actions.push((action_index, action));
         lane_futures.push(run_matching_action_steps(
+            action_index,
             action,
             data,
             current_platform,
@@ -1497,23 +1501,30 @@ async fn apply_actions_parallel(
     }
 
     let mut top_level_failures = Vec::new();
-    for (action, result) in matched_actions.into_iter().zip(join_all(lane_futures).await) {
-        collect_action_execution_result(action, result?, &mut top_level_failures);
+    for ((action_index, action), result) in matched_actions.into_iter().zip(join_all(lane_futures).await)
+    {
+        collect_action_execution_result(action_index, action, result?, &mut top_level_failures);
     }
 
     Ok(top_level_failures)
 }
 
-fn action_logic_matches(action: &Action, data: &serde_json::Value) -> bool {
-    if let Ok(result) = apply(&action.logic, data) {
-        result.as_bool() == Some(true)
-    } else {
-        println!("Failed to evaluate logic for action: {}", action.name);
-        false
+fn action_logic_matches(action_index: usize, action: &Action, data: &serde_json::Value) -> bool {
+    match apply(&action.logic, data) {
+        Ok(result) => result.as_bool() == Some(true),
+        Err(error) => {
+            print_action_line(
+                action_index,
+                action.name.as_str(),
+                format!("logic evaluation failed: {}", error).as_str(),
+            );
+            false
+        }
     }
 }
 
 fn collect_action_execution_result(
+    action_index: usize,
     action: &Action,
     result: ActionExecutionResult,
     top_level_failures: &mut Vec<String>,
@@ -1521,16 +1532,17 @@ fn collect_action_execution_result(
     match result {
         ActionExecutionResult::Completed(outcomes) => {
             if let Some(summary) = action_completion_summary(&outcomes) {
-                print_action_success(&action.name, summary);
+                print_action_success(action_index, &action.name, summary);
             }
         }
         ActionExecutionResult::Failed(error) => {
-            top_level_failures.push(error);
+            top_level_failures.push(format_action_failure(action_index, &action.name, &error));
         }
     }
 }
 
 async fn run_matching_action_steps(
+    action_index: usize,
     action: &Action,
     data: &serde_json::Value,
     current_platform: Option<&'static str>,
@@ -1541,15 +1553,19 @@ async fn run_matching_action_steps(
 ) -> Result<ActionExecutionResult, String> {
     let matching_steps = matching_run_steps(&action.run, current_platform);
     if matching_steps.is_empty() {
-        println!(
-            "⚠️ No run steps matched the current platform for action '{}' (current platform: {}).",
-            action.name,
-            current_platform.unwrap_or("unsupported")
+        print_action_line(
+            action_index,
+            action.name.as_str(),
+            format!(
+                "no run steps matched the current platform (current platform: {}).",
+                current_platform.unwrap_or("unsupported")
+            )
+            .as_str(),
         );
         return Ok(ActionExecutionResult::Completed(Vec::new()));
     }
 
-    print_action_start(&action.name);
+    print_action_start(action_index, &action.name);
     let single_step_action = matching_steps.len() == 1;
     let mut outcomes = Vec::with_capacity(matching_steps.len());
     let mut action_data = data.clone();
@@ -1560,13 +1576,14 @@ async fn run_matching_action_steps(
         }
 
         let step_result = if step.kind.eq_ignore_ascii_case("exec") {
-            run_exec_step(step, &action_data, &action.name, runtime_budget)
+            run_exec_step(step, &action_data, action_index, &action.name, runtime_budget)
                 .await
                 .map(|captured_output| (StepExecutionOutcome::Completed, captured_output))
         } else if step.kind.eq_ignore_ascii_case("email_me") {
             run_email_me_step(
                 step,
                 &action_data,
+                action_index,
                 &action.name,
                 config,
                 runtime_budget,
@@ -1578,6 +1595,7 @@ async fn run_matching_action_steps(
             run_agent_step(
                 step,
                 &action_data,
+                action_index,
                 &action.name,
                 max_agent_depth,
                 runtime_budget,
@@ -1588,6 +1606,7 @@ async fn run_matching_action_steps(
             run_generate_image_step(
                 step,
                 &action_data,
+                action_index,
                 &action.name,
                 provider_context,
                 runtime_budget,
@@ -1595,9 +1614,10 @@ async fn run_matching_action_steps(
             .await
             .map(|outcome| (outcome, None))
         } else {
-            println!(
-                "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
-                action.name, step.kind
+            print_action_line(
+                action_index,
+                action.name.as_str(),
+                format!("unsupported step kind '{}'; skipping step.", step.kind).as_str(),
             );
             outcomes.push(StepExecutionOutcome::SoftFailureLogged);
             continue;
@@ -1636,7 +1656,7 @@ async fn run_matching_action_steps(
                 )?;
 
                 if matches!(step_failure_mode(step), FailureMode::Continue) {
-                    println!("{error}");
+                    print_action_line(action_index, action.name.as_str(), error.as_str());
                     outcomes.push(StepExecutionOutcome::SoftFailureLogged);
                 } else {
                     return Ok(ActionExecutionResult::Failed(error));
@@ -1665,6 +1685,7 @@ fn action_data_from_output(
 async fn run_exec_step(
     step: &RunStep,
     data: &serde_json::Value,
+    action_index: usize,
     action_name: &str,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<Option<(String, String)>, String> {
@@ -1699,9 +1720,10 @@ async fn run_exec_step(
                 let captured_output = String::from_utf8_lossy(&output.stdout)
                     .trim_end_matches(['\r', '\n'])
                     .to_string();
-                println!(
-                    "ℹ️ Action '{}' stored exec output in variable '{}'.",
-                    action_name, output_variable
+                print_action_line(
+                    action_index,
+                    action_name,
+                    format!("stored exec output in variable '{}'.", output_variable).as_str(),
                 );
                 Ok(Some((output_variable.to_string(), captured_output)))
             }
@@ -1825,6 +1847,7 @@ fn should_run_step(
 async fn run_email_me_step(
     step: &RunStep,
     data: &serde_json::Value,
+    action_index: usize,
     action_name: &str,
     config: Option<&config::schema::Config>,
     runtime_budget: InvocationRuntimeBudget,
@@ -1869,7 +1892,7 @@ async fn run_email_me_step(
     }
 
     if single_step_action {
-        print_action_success(action_name, "email sent");
+        print_action_success(action_index, action_name, "email sent");
     }
     Ok(if single_step_action {
         StepExecutionOutcome::SuccessAlreadyPrinted
@@ -1881,6 +1904,7 @@ async fn run_email_me_step(
 async fn run_generate_image_step(
     step: &RunStep,
     data: &serde_json::Value,
+    action_index: usize,
     action_name: &str,
     provider_context: &ActionProviderContext,
     runtime_budget: InvocationRuntimeBudget,
@@ -1993,10 +2017,10 @@ async fn run_generate_image_step(
         )
     })?;
 
-    println!(
-        "ℹ️ Action '{}' wrote generated image to '{}'.",
+    print_action_line(
+        action_index,
         action_name,
-        output_path_ref.display()
+        format!("wrote generated image to '{}'.", output_path_ref.display()).as_str(),
     );
     Ok(StepExecutionOutcome::Completed)
 }
@@ -2058,6 +2082,7 @@ fn resolve_generate_image_model(
 async fn run_agent_step(
     step: &RunStep,
     data: &serde_json::Value,
+    action_index: usize,
     action_name: &str,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
@@ -2085,7 +2110,7 @@ async fn run_agent_step(
     let (child_args, resolution_notes) =
         child_input_args(step.input_mode, step.inputs.as_deref(), data, action_name)?;
     for note in resolution_notes {
-        println!("ℹ️ {note}");
+        print_action_line(action_index, action_name, note.as_str());
     }
     for argument in child_args {
         command.arg(argument);
@@ -2193,12 +2218,39 @@ fn root_run_completion_message() -> Option<&'static str> {
     run_completion_message_for_depth(current_agent_action_depth())
 }
 
-fn print_action_start(action_name: &str) {
-    println!("Running action: {}", action_name);
+fn action_execution_header(action_execution: ActionExecutionMode) -> &'static str {
+    match action_execution {
+        ActionExecutionMode::Sequential => "Action execution: sequential",
+        ActionExecutionMode::Parallel => "Action execution: parallel",
+    }
 }
 
-fn print_action_success(action_name: &str, summary: &str) {
-    println!("{action_name}: {summary}.");
+fn print_action_execution_header(action_execution: ActionExecutionMode) {
+    println!("{}", action_execution_header(action_execution));
+}
+
+fn action_lane_prefix(action_index: usize, action_name: &str) -> String {
+    format!("[A{} {}]", action_index + 1, action_name)
+}
+
+fn format_action_line(action_index: usize, action_name: &str, message: &str) -> String {
+    format!("{} {}", action_lane_prefix(action_index, action_name), message)
+}
+
+fn format_action_failure(action_index: usize, action_name: &str, error: &str) -> String {
+    format_action_line(action_index, action_name, format!("failed: {}", error).as_str())
+}
+
+fn print_action_line(action_index: usize, action_name: &str, message: &str) {
+    println!("{}", format_action_line(action_index, action_name, message));
+}
+
+fn print_action_start(action_index: usize, action_name: &str) {
+    print_action_line(action_index, action_name, "started");
+}
+
+fn print_action_success(action_index: usize, action_name: &str, summary: &str) {
+    print_action_line(action_index, action_name, format!("{}.", summary).as_str());
 }
 
 fn render_account_response(response: &serde_json::Value) {

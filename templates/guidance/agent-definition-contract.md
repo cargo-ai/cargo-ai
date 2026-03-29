@@ -172,6 +172,9 @@ If `logic` evaluates true, the action's `run` steps execute in order.
 - In `parallel`, matching top-level actions may overlap, but each action still keeps its own `run` steps in order.
 - A hard failure in one top-level action does not prevent later eligible top-level actions from running.
 - Cargo AI aggregates top-level hard failures after all eligible actions finish.
+- Cargo AI prints one run-level execution header before actions start: `Action execution: sequential` or `Action execution: parallel`.
+- Cargo AI prefixes its own action lifecycle lines with deterministic lane labels such as `[A1 generate_images]`.
+- Raw child-agent and `exec` stdout/stderr still pass through unchanged in the current append-only output phase.
 
 ## Supported Run-Step Kinds
 
