@@ -568,6 +568,8 @@ That only changes scheduling across top-level actions. Each individual action st
 
 Cargo AI now prints one run-level mode header, then prefixes its own action lifecycle lines with deterministic lane labels such as `[A1 first_action]`. That same append-only format is used for both `sequential` and `parallel`, while raw child-agent and `exec` stdout/stderr still pass through unchanged.
 
+If you need a safety/testing pass, invoke a parallel-capable agent with `--action-execution sequential`. That runtime override forces the whole invocation tree down to sequential scheduling for that run, including child-agent handoffs.
+
 ### `run`
 
 `run` is the ordered step list inside an action.

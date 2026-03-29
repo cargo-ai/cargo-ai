@@ -90,6 +90,13 @@ pub fn build_cli() -> ArgMatches {
                 .global(true)
         )
         .arg(
+            Arg::new("action_execution")
+                .long("action-execution")
+                .help("Force top-level actions to run sequentially for this invocation tree")
+                .value_name("MODE")
+                .value_parser(["sequential"])
+        )
+        .arg(
             Arg::new("input_mode")
                 .long("input-mode")
                 .help("How runtime input flags combine with baked inputs: replace, append, or prepend")

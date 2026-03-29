@@ -66,6 +66,13 @@ pub fn command() -> Command {
                 .value_parser(clap::value_parser!(u64).range(1..)),
         )
         .arg(
+            Arg::new("action_execution")
+                .long("action-execution")
+                .value_name("MODE")
+                .help("Force top-level actions to run sequentially for this invocation tree")
+                .value_parser(["sequential"]),
+        )
+        .arg(
             Arg::new("input_mode")
                 .long("input-mode")
                 .value_name("MODE")
@@ -144,6 +151,21 @@ mod tests {
         assert!(help.contains(
             "How runtime input flags combine with baked inputs: replace, append, or prepend"
         ));
+    }
+
+    #[test]
+    fn help_describes_action_execution_override() {
+        let mut command = super::command();
+        let mut help = Vec::new();
+        command
+            .write_long_help(&mut help)
+            .expect("preflight help should render");
+        let help = String::from_utf8(help).expect("help should be utf8");
+
+        assert!(help.contains("--action-execution <MODE>"));
+        assert!(
+            help.contains("Force top-level actions to run sequentially for this invocation tree")
+        );
     }
 
     #[test]

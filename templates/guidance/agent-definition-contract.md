@@ -158,6 +158,8 @@ Structural action-only rule:
   - Omitted means `sequential`
   - `parallel` only changes scheduling across matching top-level actions
   - each action's own `run` list remains sequential in both modes
+  - a runtime safety/testing override may force the invocation tree down to sequential with `--action-execution sequential`
+  - that runtime override is CLI-scoped and inherited by child-agent invocations; parent JSON does not override child JSON
 - Each action must contain:
   - `name`
   - `logic`

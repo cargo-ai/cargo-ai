@@ -22,6 +22,8 @@ For broader shape and validation rules, also read:
   - Omitted means `sequential`.
   - `parallel` only changes scheduling across matching top-level actions.
   - Each individual action's `run` list stays sequential in both modes.
+- Runtime may force a parallel-capable invocation tree down to sequential with `--action-execution sequential`.
+- That runtime override is invocation-scoped and inherits to child-agent steps; parent JSON `action_execution` does not override child JSON.
 - A hard failure in one top-level action does not prevent later eligible top-level actions from running.
 - Cargo AI aggregates top-level hard failures after all eligible actions finish.
 - Cargo AI prints one run-level header, `Action execution: sequential` or `Action execution: parallel`, before action work begins.

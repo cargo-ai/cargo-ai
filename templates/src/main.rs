@@ -185,6 +185,10 @@ fn cli_override_descriptions(
         overrides.push(format!("max_runtime_in_sec={max_runtime}"));
     }
 
+    if let Some(action_execution) = matches.get_one::<String>("action_execution") {
+        overrides.push(format!("action_execution={action_execution}"));
+    }
+
     if include_token_override {
         overrides.push("token=(explicit)".to_string());
     }
@@ -872,6 +876,24 @@ fn resolved_inputs_for_run(cmd_args: &clap::ArgMatches) -> Result<Vec<Input>, St
     })
 }
 
+fn resolved_action_execution_override_for_run(
+    cmd_args: &clap::ArgMatches,
+) -> Result<Option<ActionExecutionMode>, String> {
+    match cmd_args.get_one::<String>("action_execution").map(String::as_str) {
+        None => Ok(None),
+        Some("sequential") => Ok(Some(ActionExecutionMode::Sequential)),
+        Some(other) => Err(format!(
+            "Unsupported --action-execution '{other}'. Expected sequential."
+        )),
+    }
+}
+
+fn effective_action_execution_for_run(
+    action_execution_override: Option<ActionExecutionMode>,
+) -> ActionExecutionMode {
+    action_execution_override.unwrap_or_else(action_execution)
+}
+
 fn validate_structural_action_only_inputs(
     has_output_schema_properties: bool,
     selected_inputs: &[Input],
@@ -1162,6 +1184,14 @@ async fn main() {
             return;
         }
     };
+    let action_execution_override = match resolved_action_execution_override_for_run(&cmd_args) {
+        Ok(action_execution_override) => action_execution_override,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            return;
+        }
+    };
+    let effective_action_execution = effective_action_execution_for_run(action_execution_override);
     let has_output_schema_properties = has_output_schema_properties();
 
     if let Err(error) =
@@ -1191,7 +1221,8 @@ async fn main() {
                 &output,
                 &actions,
                 &runtime_vars,
-                action_execution(),
+                effective_action_execution,
+                action_execution_override,
                 config.as_ref(),
                 &action_provider_context,
                 max_agent_depth,
@@ -1366,7 +1397,8 @@ async fn main() {
             &output,
             &actions,
             &runtime_vars,
-            action_execution(),
+            effective_action_execution,
+            action_execution_override,
             config.as_ref(),
             &action_provider_context,
             max_agent_depth,
@@ -1384,6 +1416,7 @@ async fn apply_actions(
     actions: &[Action],
     runtime_vars: &serde_json::Map<String, serde_json::Value>,
     action_execution: ActionExecutionMode,
+    action_execution_override: Option<ActionExecutionMode>,
     config: Option<&config::schema::Config>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
@@ -1399,6 +1432,7 @@ async fn apply_actions(
                 actions,
                 &data,
                 current_platform,
+                action_execution_override,
                 config,
                 provider_context,
                 max_agent_depth,
@@ -1411,6 +1445,7 @@ async fn apply_actions(
                 actions,
                 &data,
                 current_platform,
+                action_execution_override,
                 config,
                 provider_context,
                 max_agent_depth,
@@ -1437,6 +1472,7 @@ async fn apply_actions_sequential(
     actions: &[Action],
     data: &serde_json::Value,
     current_platform: Option<&'static str>,
+    action_execution_override: Option<ActionExecutionMode>,
     config: Option<&config::schema::Config>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
@@ -1457,6 +1493,7 @@ async fn apply_actions_sequential(
                 action,
                 data,
                 current_platform,
+                action_execution_override,
                 config,
                 provider_context,
                 max_agent_depth,
@@ -1474,6 +1511,7 @@ async fn apply_actions_parallel(
     actions: &[Action],
     data: &serde_json::Value,
     current_platform: Option<&'static str>,
+    action_execution_override: Option<ActionExecutionMode>,
     config: Option<&config::schema::Config>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
@@ -1493,6 +1531,7 @@ async fn apply_actions_parallel(
             action,
             data,
             current_platform,
+            action_execution_override,
             config,
             provider_context,
             max_agent_depth,
@@ -1546,6 +1585,7 @@ async fn run_matching_action_steps(
     action: &Action,
     data: &serde_json::Value,
     current_platform: Option<&'static str>,
+    action_execution_override: Option<ActionExecutionMode>,
     config: Option<&config::schema::Config>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
@@ -1597,6 +1637,7 @@ async fn run_matching_action_steps(
                 &action_data,
                 action_index,
                 &action.name,
+                action_execution_override,
                 max_agent_depth,
                 runtime_budget,
             )
@@ -2084,6 +2125,7 @@ async fn run_agent_step(
     data: &serde_json::Value,
     action_index: usize,
     action_name: &str,
+    action_execution_override: Option<ActionExecutionMode>,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
@@ -2107,6 +2149,13 @@ async fn run_agent_step(
     }
 
     let mut command = tokio::process::Command::new(agent_path);
+    if let Some(action_execution_override) = action_execution_override {
+        command.arg("--action-execution");
+        command.arg(match action_execution_override {
+            ActionExecutionMode::Sequential => "sequential",
+            ActionExecutionMode::Parallel => "parallel",
+        });
+    }
     let (child_args, resolution_notes) =
         child_input_args(step.input_mode, step.inputs.as_deref(), data, action_name)?;
     for note in resolution_notes {

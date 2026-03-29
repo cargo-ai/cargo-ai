@@ -65,6 +65,7 @@ pub(crate) async fn apply_actions(
     actions: &[crate::Action],
     runtime_vars: &serde_json::Map<String, serde_json::Value>,
     action_execution: crate::ActionExecutionMode,
+    action_execution_override: Option<crate::ActionExecutionMode>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
@@ -88,6 +89,7 @@ pub(crate) async fn apply_actions(
                 actions,
                 &data,
                 current_platform,
+                action_execution_override,
                 provider_context,
                 max_agent_depth,
                 runtime_budget,
@@ -99,6 +101,7 @@ pub(crate) async fn apply_actions(
                 actions,
                 &data,
                 current_platform,
+                action_execution_override,
                 provider_context,
                 max_agent_depth,
                 runtime_budget,
@@ -124,6 +127,7 @@ async fn apply_actions_sequential(
     actions: &[crate::Action],
     data: &serde_json::Value,
     current_platform: Option<&'static str>,
+    action_execution_override: Option<crate::ActionExecutionMode>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
@@ -143,6 +147,7 @@ async fn apply_actions_sequential(
                 action,
                 data,
                 current_platform,
+                action_execution_override,
                 provider_context,
                 max_agent_depth,
                 runtime_budget,
@@ -159,6 +164,7 @@ async fn apply_actions_parallel(
     actions: &[crate::Action],
     data: &serde_json::Value,
     current_platform: Option<&'static str>,
+    action_execution_override: Option<crate::ActionExecutionMode>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
@@ -177,6 +183,7 @@ async fn apply_actions_parallel(
             action,
             data,
             current_platform,
+            action_execution_override,
             provider_context,
             max_agent_depth,
             runtime_budget,
@@ -235,6 +242,7 @@ async fn run_matching_action_steps(
     action: &crate::Action,
     data: &serde_json::Value,
     current_platform: Option<&'static str>,
+    action_execution_override: Option<crate::ActionExecutionMode>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
@@ -290,6 +298,7 @@ async fn run_matching_action_steps(
                 &action_data,
                 action_index,
                 &action.name,
+                action_execution_override,
                 max_agent_depth,
                 runtime_budget,
             )
@@ -859,6 +868,7 @@ async fn run_agent_step(
     data: &serde_json::Value,
     action_index: usize,
     action_name: &str,
+    action_execution_override: Option<crate::ActionExecutionMode>,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
@@ -882,6 +892,13 @@ async fn run_agent_step(
     }
 
     let mut command = tokio::process::Command::new(agent_path);
+    if let Some(action_execution_override) = action_execution_override {
+        command.arg("--action-execution");
+        command.arg(match action_execution_override {
+            crate::ActionExecutionMode::Sequential => "sequential",
+            crate::ActionExecutionMode::Parallel => "parallel",
+        });
+    }
     let (child_args, resolution_notes) =
         child_input_args(step.input_mode, step.inputs.as_deref(), data, action_name)?;
     for note in resolution_notes {
@@ -2514,6 +2531,7 @@ mod tests {
             }),
             0,
             "invoke_child",
+            None,
             5,
             runtime_budget,
         )
@@ -2543,6 +2561,83 @@ mod tests {
                 "--input-file",
                 "./reports/report.pdf",
             ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_step_forwards_action_execution_override_to_child() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(
+            ".tmp-cai2067-action-execution-child-{}.sh",
+            std::process::id()
+        );
+        let script_path = current_dir.join(&script_name);
+        let output_path = std::env::temp_dir().join(format!(
+            "cai2067-action-execution-child-args-{}.txt",
+            std::process::id()
+        ));
+
+        let script_body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+            output_path.display()
+        );
+
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            model: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", script_name)),
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_agent_step(
+            &step,
+            &json!({}),
+            0,
+            "invoke_child",
+            Some(crate::ActionExecutionMode::Sequential),
+            5,
+            runtime_budget,
+        )
+        .await;
+
+        let _ = fs::remove_file(&script_path);
+
+        assert!(
+            result.is_ok(),
+            "child agent invocation should succeed: {result:?}"
+        );
+
+        let args = fs::read_to_string(&output_path).expect("child output should be captured");
+        let _ = fs::remove_file(&output_path);
+
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec!["--action-execution", "sequential"]
         );
     }
 
@@ -2639,6 +2734,7 @@ mod tests {
             &action_data,
             0,
             "capture_then_agent",
+            None,
             5,
             runtime_budget,
         )
@@ -2705,7 +2801,16 @@ mod tests {
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let result = run_agent_step(&step, &json!({}), 0, "invoke_child", 7, runtime_budget).await;
+        let result = run_agent_step(
+            &step,
+            &json!({}),
+            0,
+            "invoke_child",
+            None,
+            7,
+            runtime_budget,
+        )
+        .await;
 
         let _ = fs::remove_file(&script_path);
 
@@ -2747,9 +2852,17 @@ mod tests {
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let error = run_agent_step(&step, &json!({}), 0, "invoke_child", 5, runtime_budget)
-            .await
-            .expect_err("bare child agent names should be rejected");
+        let error = run_agent_step(
+            &step,
+            &json!({}),
+            0,
+            "invoke_child",
+            None,
+            5,
+            runtime_budget,
+        )
+        .await
+        .expect_err("bare child agent names should be rejected");
 
         assert!(error.contains("bare child-agent names are not allowed"));
     }
@@ -2777,9 +2890,17 @@ mod tests {
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let error = run_agent_step(&step, &json!({}), 0, "invoke_child", 5, runtime_budget)
-            .await
-            .expect_err("parent traversal should be rejected");
+        let error = run_agent_step(
+            &step,
+            &json!({}),
+            0,
+            "invoke_child",
+            None,
+            5,
+            runtime_budget,
+        )
+        .await
+        .expect_err("parent traversal should be rejected");
 
         assert!(error.contains("parent traversal"));
     }
@@ -2807,9 +2928,17 @@ mod tests {
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let error = run_agent_step(&step, &json!({}), 0, "invoke_child", 5, runtime_budget)
-            .await
-            .expect_err("nested child agent paths should be rejected");
+        let error = run_agent_step(
+            &step,
+            &json!({}),
+            0,
+            "invoke_child",
+            None,
+            5,
+            runtime_budget,
+        )
+        .await
+        .expect_err("nested child agent paths should be rejected");
 
         assert!(error.contains("nested child-agent paths"));
     }
@@ -2854,9 +2983,17 @@ mod tests {
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(1));
-        let error = run_agent_step(&step, &json!({}), 0, "invoke_child", 5, runtime_budget)
-            .await
-            .expect_err("runtime budget should time out the child");
+        let error = run_agent_step(
+            &step,
+            &json!({}),
+            0,
+            "invoke_child",
+            None,
+            5,
+            runtime_budget,
+        )
+        .await
+        .expect_err("runtime budget should time out the child");
 
         let _ = fs::remove_file(&script_path);
 
@@ -2932,6 +3069,7 @@ mod tests {
             &[action(vec![failing_step, second_step])],
             &serde_json::Map::new(),
             crate::ActionExecutionMode::Sequential,
+            None,
             &provider_context(),
             5,
             runtime_budget,
@@ -3025,6 +3163,7 @@ mod tests {
             &[first_action, second_action],
             &serde_json::Map::new(),
             crate::ActionExecutionMode::Sequential,
+            None,
             &provider_context(),
             5,
             runtime_budget,
@@ -3124,6 +3263,7 @@ mod tests {
             &actions,
             &runtime_vars,
             crate::ActionExecutionMode::Parallel,
+            None,
             &provider_context,
             5,
             runtime_budget,
@@ -3223,6 +3363,7 @@ mod tests {
             &actions,
             &serde_json::Map::new(),
             crate::ActionExecutionMode::Parallel,
+            None,
             &provider_context(),
             5,
             runtime_budget,
@@ -3313,6 +3454,7 @@ mod tests {
             &[action(vec![failing_step, second_step])],
             &serde_json::Map::new(),
             crate::ActionExecutionMode::Sequential,
+            None,
             &provider_context(),
             5,
             runtime_budget,
@@ -3384,6 +3526,7 @@ mod tests {
             &[action],
             &runtime_vars(&[("generate_images", json!(true))]),
             crate::ActionExecutionMode::Sequential,
+            None,
             &provider_context(),
             5,
             runtime_budget,
@@ -3448,6 +3591,7 @@ mod tests {
             &[action(vec![step])],
             &runtime_vars(&[("generate_images", json!(true))]),
             crate::ActionExecutionMode::Sequential,
+            None,
             &provider_context(),
             5,
             runtime_budget,
