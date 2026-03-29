@@ -39,6 +39,12 @@ enum StepExecutionOutcome {
     SuccessAlreadyPrinted,
 }
 
+#[derive(Debug)]
+enum ActionExecutionResult {
+    Completed(Vec<StepExecutionOutcome>),
+    Failed(String),
+}
+
 #[derive(Debug, Clone)]
 struct AccountAuth {
     access_token: String,
@@ -73,121 +79,31 @@ pub(crate) async fn apply_actions(
         }
     };
     let current_platform = current_action_platform();
+    let mut top_level_failures = Vec::new();
 
     for action in actions {
         match apply(&action.logic, &data) {
             Ok(result) => {
                 // println!("Action Loop: {:?}", action);
                 if result.as_bool() == Some(true) {
-                    let matching_steps = matching_run_steps(&action.run, current_platform);
-                    if matching_steps.is_empty() {
-                        eprintln!(
-                            "⚠️ No run steps matched the current platform for action '{}' (current platform: {}).",
-                            action.name,
-                            current_platform.unwrap_or("unsupported")
-                        );
-                        continue;
-                    }
-
-                    print_action_start(&action.name);
-                    let single_step_action = matching_steps.len() == 1;
-                    let mut outcomes = Vec::with_capacity(matching_steps.len());
-                    let mut action_data = data.clone();
-
-                    for step in matching_steps {
-                        if !should_run_step(step, &action_data, &action.name)? {
-                            continue;
-                        }
-
-                        let step_result = if step.kind.eq_ignore_ascii_case("exec") {
-                            run_exec_step(step, &action_data, &action.name, runtime_budget)
-                                .await
-                                .map(|captured_output| {
-                                    (StepExecutionOutcome::Completed, captured_output)
-                                })
-                        } else if step.kind.eq_ignore_ascii_case("email_me") {
-                            run_email_me_step(
-                                step,
-                                &action_data,
-                                &action.name,
-                                runtime_budget,
-                                single_step_action,
-                            )
-                            .await
-                            .map(|outcome| (outcome, None))
-                        } else if step.kind.eq_ignore_ascii_case("agent") {
-                            run_agent_step(
-                                step,
-                                &action_data,
-                                &action.name,
-                                max_agent_depth,
-                                runtime_budget,
-                            )
-                            .await
-                            .map(|outcome| (outcome, None))
-                        } else if step.kind.eq_ignore_ascii_case("generate_image") {
-                            run_generate_image_step(
-                                step,
-                                &action_data,
-                                &action.name,
-                                provider_context,
-                                runtime_budget,
-                            )
-                            .await
-                            .map(|outcome| (outcome, None))
-                        } else {
-                            eprintln!(
-                                "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
-                                action.name, step.kind
-                            );
-                            outcomes.push(StepExecutionOutcome::SoftFailureLogged);
-                            continue;
-                        };
-
-                        match step_result {
-                            Ok((outcome, captured_output)) => {
-                                if let Some((name, value)) = captured_output {
-                                    insert_action_output_variable(
-                                        &mut action_data,
-                                        name.as_str(),
-                                        value,
-                                        action.name.as_str(),
-                                    )?;
-                                }
-                                insert_step_status_variable(
-                                    &mut action_data,
-                                    step,
-                                    "succeeded",
-                                    action.name.as_str(),
-                                )?;
-                                outcomes.push(outcome);
-                            }
-                            Err(error) => {
-                                insert_step_status_variable(
-                                    &mut action_data,
-                                    step,
-                                    "failed",
-                                    action.name.as_str(),
-                                )?;
-                                insert_step_error_variable(
-                                    &mut action_data,
-                                    step,
-                                    error.as_str(),
-                                    action.name.as_str(),
-                                )?;
-
-                                if matches!(step_failure_mode(step), crate::FailureMode::Continue) {
-                                    println!("{error}");
-                                    outcomes.push(StepExecutionOutcome::SoftFailureLogged);
-                                } else {
-                                    return Err(error);
-                                }
+                    match run_matching_action_steps(
+                        action,
+                        &data,
+                        current_platform,
+                        provider_context,
+                        max_agent_depth,
+                        runtime_budget,
+                    )
+                    .await?
+                    {
+                        ActionExecutionResult::Completed(outcomes) => {
+                            if let Some(summary) = action_completion_summary(&outcomes) {
+                                print_action_success(&action.name, summary);
                             }
                         }
-                    }
-
-                    if let Some(summary) = action_completion_summary(&outcomes) {
-                        print_action_success(&action.name, summary);
+                        ActionExecutionResult::Failed(error) => {
+                            top_level_failures.push(error);
+                        }
                     }
                 }
             }
@@ -201,10 +117,132 @@ pub(crate) async fn apply_actions(
     }
 
     if let Some(message) = root_run_completion_message() {
-        println!("{message}");
+        if top_level_failures.is_empty() {
+            println!("{message}");
+        }
     }
 
-    Ok(())
+    if top_level_failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format_top_level_action_failures(&top_level_failures))
+    }
+}
+
+async fn run_matching_action_steps(
+    action: &crate::Action,
+    data: &serde_json::Value,
+    current_platform: Option<&'static str>,
+    provider_context: &ActionProviderContext,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+) -> Result<ActionExecutionResult, String> {
+    let matching_steps = matching_run_steps(&action.run, current_platform);
+    if matching_steps.is_empty() {
+        eprintln!(
+            "⚠️ No run steps matched the current platform for action '{}' (current platform: {}).",
+            action.name,
+            current_platform.unwrap_or("unsupported")
+        );
+        return Ok(ActionExecutionResult::Completed(Vec::new()));
+    }
+
+    print_action_start(&action.name);
+    let single_step_action = matching_steps.len() == 1;
+    let mut outcomes = Vec::with_capacity(matching_steps.len());
+    let mut action_data = data.clone();
+
+    for step in matching_steps {
+        if !should_run_step(step, &action_data, &action.name)? {
+            continue;
+        }
+
+        let step_result = if step.kind.eq_ignore_ascii_case("exec") {
+            run_exec_step(step, &action_data, &action.name, runtime_budget)
+                .await
+                .map(|captured_output| (StepExecutionOutcome::Completed, captured_output))
+        } else if step.kind.eq_ignore_ascii_case("email_me") {
+            run_email_me_step(
+                step,
+                &action_data,
+                &action.name,
+                runtime_budget,
+                single_step_action,
+            )
+            .await
+            .map(|outcome| (outcome, None))
+        } else if step.kind.eq_ignore_ascii_case("agent") {
+            run_agent_step(
+                step,
+                &action_data,
+                &action.name,
+                max_agent_depth,
+                runtime_budget,
+            )
+            .await
+            .map(|outcome| (outcome, None))
+        } else if step.kind.eq_ignore_ascii_case("generate_image") {
+            run_generate_image_step(
+                step,
+                &action_data,
+                &action.name,
+                provider_context,
+                runtime_budget,
+            )
+            .await
+            .map(|outcome| (outcome, None))
+        } else {
+            eprintln!(
+                "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
+                action.name, step.kind
+            );
+            outcomes.push(StepExecutionOutcome::SoftFailureLogged);
+            continue;
+        };
+
+        match step_result {
+            Ok((outcome, captured_output)) => {
+                if let Some((name, value)) = captured_output {
+                    insert_action_output_variable(
+                        &mut action_data,
+                        name.as_str(),
+                        value,
+                        action.name.as_str(),
+                    )?;
+                }
+                insert_step_status_variable(
+                    &mut action_data,
+                    step,
+                    "succeeded",
+                    action.name.as_str(),
+                )?;
+                outcomes.push(outcome);
+            }
+            Err(error) => {
+                insert_step_status_variable(
+                    &mut action_data,
+                    step,
+                    "failed",
+                    action.name.as_str(),
+                )?;
+                insert_step_error_variable(
+                    &mut action_data,
+                    step,
+                    error.as_str(),
+                    action.name.as_str(),
+                )?;
+
+                if matches!(step_failure_mode(step), crate::FailureMode::Continue) {
+                    println!("{error}");
+                    outcomes.push(StepExecutionOutcome::SoftFailureLogged);
+                } else {
+                    return Ok(ActionExecutionResult::Failed(error));
+                }
+            }
+        }
+    }
+
+    Ok(ActionExecutionResult::Completed(outcomes))
 }
 
 fn action_data_from_output(
@@ -805,6 +843,21 @@ fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'stat
         None
     } else {
         Some("completed")
+    }
+}
+
+fn format_top_level_action_failures(failures: &[String]) -> String {
+    if failures.len() == 1 {
+        failures
+            .first()
+            .expect("single failure should exist")
+            .clone()
+    } else {
+        format!(
+            "{} top-level actions failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        )
     }
 }
 
@@ -2711,6 +2764,99 @@ mod tests {
             !output_path.exists(),
             "later step should not run after default stop"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_actions_continues_to_later_top_level_actions_after_hard_failure() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2067-later-action-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+        let output_path =
+            std::env::temp_dir().join(format!("cai2067-later-action-{}.txt", std::process::id()));
+
+        let script_body = format!("#!/bin/sh\nprintf 'ran' > \"{}\"\n", output_path.display());
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let first_action = crate::Action {
+            name: "first_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![crate::RunStep {
+                kind: "exec".to_string(),
+                program: Some("/bin/sh".to_string()),
+                model: None,
+                output_variable: None,
+                status_variable: None,
+                error_variable: None,
+                failure_mode: None,
+                when: None,
+                args: vec![
+                    crate::RunArg::Literal("-lc".to_string()),
+                    crate::RunArg::Literal("exit 11".to_string()),
+                ],
+                prompt: None,
+                path: None,
+                subject: None,
+                text: None,
+                agent: None,
+                inputs: None,
+                input_mode: None,
+                platforms: None,
+            }],
+        };
+        let second_action = crate::Action {
+            name: "second_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![crate::RunStep {
+                kind: "agent".to_string(),
+                program: None,
+                model: None,
+                output_variable: None,
+                status_variable: None,
+                error_variable: None,
+                failure_mode: None,
+                when: None,
+                args: Vec::new(),
+                prompt: None,
+                path: None,
+                subject: None,
+                text: None,
+                agent: Some(format!("./{}", script_name)),
+                inputs: None,
+                input_mode: None,
+                platforms: None,
+            }],
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = apply_actions(
+            &crate::Output { answer: 4 },
+            &[first_action, second_action],
+            &serde_json::Map::new(),
+            &provider_context(),
+            5,
+            runtime_budget,
+        )
+        .await;
+
+        let _ = fs::remove_file(&script_path);
+
+        let error = result.expect_err("one failed action should still fail overall");
+        assert!(error.contains("first_action"));
+        assert!(error.contains("exited with status"));
+
+        let file_contents =
+            fs::read_to_string(&output_path).expect("later top-level action should have executed");
+        let _ = fs::remove_file(&output_path);
+        assert_eq!(file_contents, "ran");
     }
 
     #[cfg(unix)]

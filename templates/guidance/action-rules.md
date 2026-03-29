@@ -59,6 +59,7 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 ## Step Outcome Rules
 - Steps stop the action by default when they fail.
 - `failure_mode: "continue"` allows later steps to run after failure.
+- A hard failure still stays local to that action's `run` list; later eligible top-level actions continue and the runtime aggregates top-level failures at the end.
 - If a step is skipped because `when` is false, `status_variable` and `error_variable` stay unset in the MVP.
 - If a step is skipped because `platform` does not match, `status_variable` and `error_variable` stay unset in the MVP.
 - Matching steps still run in listed order.

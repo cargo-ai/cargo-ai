@@ -89,6 +89,12 @@ enum StepExecutionOutcome {
     SuccessAlreadyPrinted,
 }
 
+#[derive(Debug)]
+enum ActionExecutionResult {
+    Completed(Vec<StepExecutionOutcome>),
+    Failed(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeInputMode {
     Replace,
@@ -1382,120 +1388,30 @@ async fn apply_actions(
     let data = action_data_from_output(output, runtime_vars)
         .map_err(|error| format!("Failed to serialize output for action evaluation: {error}"))?;
     let current_platform = current_action_platform();
+    let mut top_level_failures = Vec::new();
 
     for action in actions {
         if let Ok(result) = apply(&action.logic, &data) {
             if result.as_bool() == Some(true) {
-                let matching_steps = matching_run_steps(&action.run, current_platform);
-                if matching_steps.is_empty() {
-                    println!(
-                        "⚠️ No run steps matched the current platform for action '{}' (current platform: {}).",
-                        action.name,
-                        current_platform.unwrap_or("unsupported")
-                        );
-                    continue;
-                }
-
-                print_action_start(&action.name);
-                let single_step_action = matching_steps.len() == 1;
-                let mut outcomes = Vec::with_capacity(matching_steps.len());
-                let mut action_data = data.clone();
-
-                for step in matching_steps {
-                    if !should_run_step(step, &action_data, &action.name)? {
-                        continue;
-                    }
-
-                    let step_result = if step.kind.eq_ignore_ascii_case("exec") {
-                        run_exec_step(step, &action_data, &action.name, runtime_budget)
-                            .await
-                            .map(|captured_output| {
-                                (StepExecutionOutcome::Completed, captured_output)
-                            })
-                    } else if step.kind.eq_ignore_ascii_case("email_me") {
-                        run_email_me_step(
-                            step,
-                            &action_data,
-                            &action.name,
-                            config,
-                            runtime_budget,
-                            single_step_action,
-                        )
-                        .await
-                        .map(|outcome| (outcome, None))
-                    } else if step.kind.eq_ignore_ascii_case("agent") {
-                        run_agent_step(
-                            step,
-                            &action_data,
-                            &action.name,
-                            max_agent_depth,
-                            runtime_budget,
-                        )
-                        .await
-                        .map(|outcome| (outcome, None))
-                    } else if step.kind.eq_ignore_ascii_case("generate_image") {
-                        run_generate_image_step(
-                            step,
-                            &action_data,
-                            &action.name,
-                            provider_context,
-                            runtime_budget,
-                        )
-                        .await
-                        .map(|outcome| (outcome, None))
-                    } else {
-                        println!(
-                            "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
-                            action.name, step.kind
-                        );
-                        outcomes.push(StepExecutionOutcome::SoftFailureLogged);
-                        continue;
-                    };
-
-                    match step_result {
-                        Ok((outcome, captured_output)) => {
-                            if let Some((name, value)) = captured_output {
-                                insert_action_output_variable(
-                                    &mut action_data,
-                                    name.as_str(),
-                                    value,
-                                    action.name.as_str(),
-                                )?;
-                            }
-                            insert_step_status_variable(
-                                &mut action_data,
-                                step,
-                                "succeeded",
-                                action.name.as_str(),
-                            )?;
-                            outcomes.push(outcome);
-                        }
-                        Err(error) => {
-                            insert_step_status_variable(
-                                &mut action_data,
-                                step,
-                                "failed",
-                                action.name.as_str(),
-                            )?;
-                            insert_step_error_variable(
-                                &mut action_data,
-                                step,
-                                error.as_str(),
-                                action.name.as_str(),
-                            )?;
-
-                            if matches!(step_failure_mode(step), FailureMode::Continue) {
-                                println!("{error}");
-                                outcomes.push(StepExecutionOutcome::SoftFailureLogged);
-                            } else {
-                                return Err(error);
-                            }
+                match run_matching_action_steps(
+                    action,
+                    &data,
+                    current_platform,
+                    config,
+                    provider_context,
+                    max_agent_depth,
+                    runtime_budget,
+                )
+                .await?
+                {
+                    ActionExecutionResult::Completed(outcomes) => {
+                        if let Some(summary) = action_completion_summary(&outcomes) {
+                            print_action_success(&action.name, summary);
                         }
                     }
-                }
-
-                if let Some(summary) = action_completion_summary(&outcomes) {
-                    print_action_success(&action.name, summary);
+                    ActionExecutionResult::Failed(error) => {
+                        top_level_failures.push(error);
+                    }
                 }
             }
         } else {
@@ -1504,10 +1420,134 @@ async fn apply_actions(
     }
 
     if let Some(message) = root_run_completion_message() {
-        println!("{message}");
+        if top_level_failures.is_empty() {
+            println!("{message}");
+        }
     }
 
-    Ok(())
+    if top_level_failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format_top_level_action_failures(&top_level_failures))
+    }
+}
+
+async fn run_matching_action_steps(
+    action: &Action,
+    data: &serde_json::Value,
+    current_platform: Option<&'static str>,
+    config: Option<&config::schema::Config>,
+    provider_context: &ActionProviderContext,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+) -> Result<ActionExecutionResult, String> {
+    let matching_steps = matching_run_steps(&action.run, current_platform);
+    if matching_steps.is_empty() {
+        println!(
+            "⚠️ No run steps matched the current platform for action '{}' (current platform: {}).",
+            action.name,
+            current_platform.unwrap_or("unsupported")
+        );
+        return Ok(ActionExecutionResult::Completed(Vec::new()));
+    }
+
+    print_action_start(&action.name);
+    let single_step_action = matching_steps.len() == 1;
+    let mut outcomes = Vec::with_capacity(matching_steps.len());
+    let mut action_data = data.clone();
+
+    for step in matching_steps {
+        if !should_run_step(step, &action_data, &action.name)? {
+            continue;
+        }
+
+        let step_result = if step.kind.eq_ignore_ascii_case("exec") {
+            run_exec_step(step, &action_data, &action.name, runtime_budget)
+                .await
+                .map(|captured_output| (StepExecutionOutcome::Completed, captured_output))
+        } else if step.kind.eq_ignore_ascii_case("email_me") {
+            run_email_me_step(
+                step,
+                &action_data,
+                &action.name,
+                config,
+                runtime_budget,
+                single_step_action,
+            )
+            .await
+            .map(|outcome| (outcome, None))
+        } else if step.kind.eq_ignore_ascii_case("agent") {
+            run_agent_step(
+                step,
+                &action_data,
+                &action.name,
+                max_agent_depth,
+                runtime_budget,
+            )
+            .await
+            .map(|outcome| (outcome, None))
+        } else if step.kind.eq_ignore_ascii_case("generate_image") {
+            run_generate_image_step(
+                step,
+                &action_data,
+                &action.name,
+                provider_context,
+                runtime_budget,
+            )
+            .await
+            .map(|outcome| (outcome, None))
+        } else {
+            println!(
+                "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
+                action.name, step.kind
+            );
+            outcomes.push(StepExecutionOutcome::SoftFailureLogged);
+            continue;
+        };
+
+        match step_result {
+            Ok((outcome, captured_output)) => {
+                if let Some((name, value)) = captured_output {
+                    insert_action_output_variable(
+                        &mut action_data,
+                        name.as_str(),
+                        value,
+                        action.name.as_str(),
+                    )?;
+                }
+                insert_step_status_variable(
+                    &mut action_data,
+                    step,
+                    "succeeded",
+                    action.name.as_str(),
+                )?;
+                outcomes.push(outcome);
+            }
+            Err(error) => {
+                insert_step_status_variable(
+                    &mut action_data,
+                    step,
+                    "failed",
+                    action.name.as_str(),
+                )?;
+                insert_step_error_variable(
+                    &mut action_data,
+                    step,
+                    error.as_str(),
+                    action.name.as_str(),
+                )?;
+
+                if matches!(step_failure_mode(step), FailureMode::Continue) {
+                    println!("{error}");
+                    outcomes.push(StepExecutionOutcome::SoftFailureLogged);
+                } else {
+                    return Ok(ActionExecutionResult::Failed(error));
+                }
+            }
+        }
+    }
+
+    Ok(ActionExecutionResult::Completed(outcomes))
 }
 
 fn action_data_from_output(
@@ -2025,6 +2065,21 @@ fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'stat
         None
     } else {
         Some("completed")
+    }
+}
+
+fn format_top_level_action_failures(failures: &[String]) -> String {
+    if failures.len() == 1 {
+        failures
+            .first()
+            .expect("single failure should exist")
+            .clone()
+    } else {
+        format!(
+            "{} top-level actions failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        )
     }
 }
 

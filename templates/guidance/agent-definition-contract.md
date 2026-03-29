@@ -252,6 +252,7 @@ Example:
 
 - Steps stop the action by default when they fail.
 - Use `failure_mode: "continue"` only when a later step should react to a failure.
+- A hard failure stops the rest of that action's `run` list, but it does not prevent later eligible top-level actions from running; Cargo AI aggregates top-level action failures after the full scan.
 - `status_variable` stores:
   - `succeeded`
   - `failed`
