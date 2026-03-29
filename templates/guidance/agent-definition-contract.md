@@ -153,6 +153,11 @@ Structural action-only rule:
 
 - Required.
 - Array with at least one action.
+- Optional top-level `action_execution` may appear alongside `actions`.
+  - Allowed values: `sequential`, `parallel`
+  - Omitted means `sequential`
+  - `parallel` only changes scheduling across matching top-level actions
+  - each action's own `run` list remains sequential in both modes
 - Each action must contain:
   - `name`
   - `logic`
@@ -163,6 +168,10 @@ Structural action-only rule:
 - declared `runtime.*` values only for the structural action-only shape
 
 If `logic` evaluates true, the action's `run` steps execute in order.
+- In `sequential`, matching top-level actions run one after another.
+- In `parallel`, matching top-level actions may overlap, but each action still keeps its own `run` steps in order.
+- A hard failure in one top-level action does not prevent later eligible top-level actions from running.
+- Cargo AI aggregates top-level hard failures after all eligible actions finish.
 
 ## Supported Run-Step Kinds
 

@@ -5,6 +5,7 @@ mod credentials;
 mod providers;
 
 use jsonlogic::apply;
+use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -1190,6 +1191,7 @@ async fn main() {
                 &output,
                 &actions,
                 &runtime_vars,
+                action_execution(),
                 config.as_ref(),
                 &action_provider_context,
                 max_agent_depth,
@@ -1364,6 +1366,7 @@ async fn main() {
             &output,
             &actions,
             &runtime_vars,
+            action_execution(),
             config.as_ref(),
             &action_provider_context,
             max_agent_depth,
@@ -1380,6 +1383,7 @@ async fn apply_actions(
     output: &Output,
     actions: &[Action],
     runtime_vars: &serde_json::Map<String, serde_json::Value>,
+    action_execution: ActionExecutionMode,
     config: Option<&config::schema::Config>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
@@ -1388,36 +1392,32 @@ async fn apply_actions(
     let data = action_data_from_output(output, runtime_vars)
         .map_err(|error| format!("Failed to serialize output for action evaluation: {error}"))?;
     let current_platform = current_action_platform();
-    let mut top_level_failures = Vec::new();
-
-    for action in actions {
-        if let Ok(result) = apply(&action.logic, &data) {
-            if result.as_bool() == Some(true) {
-                match run_matching_action_steps(
-                    action,
-                    &data,
-                    current_platform,
-                    config,
-                    provider_context,
-                    max_agent_depth,
-                    runtime_budget,
-                )
-                .await?
-                {
-                    ActionExecutionResult::Completed(outcomes) => {
-                        if let Some(summary) = action_completion_summary(&outcomes) {
-                            print_action_success(&action.name, summary);
-                        }
-                    }
-                    ActionExecutionResult::Failed(error) => {
-                        top_level_failures.push(error);
-                    }
-                }
-            }
-        } else {
-            println!("Failed to evaluate logic for action: {}", action.name);
+    let top_level_failures = match action_execution {
+        ActionExecutionMode::Sequential => {
+            apply_actions_sequential(
+                actions,
+                &data,
+                current_platform,
+                config,
+                provider_context,
+                max_agent_depth,
+                runtime_budget,
+            )
+            .await?
         }
-    }
+        ActionExecutionMode::Parallel => {
+            apply_actions_parallel(
+                actions,
+                &data,
+                current_platform,
+                config,
+                provider_context,
+                max_agent_depth,
+                runtime_budget,
+            )
+            .await?
+        }
+    };
 
     if let Some(message) = root_run_completion_message() {
         if top_level_failures.is_empty() {
@@ -1429,6 +1429,104 @@ async fn apply_actions(
         Ok(())
     } else {
         Err(format_top_level_action_failures(&top_level_failures))
+    }
+}
+
+async fn apply_actions_sequential(
+    actions: &[Action],
+    data: &serde_json::Value,
+    current_platform: Option<&'static str>,
+    config: Option<&config::schema::Config>,
+    provider_context: &ActionProviderContext,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+) -> Result<Vec<String>, String> {
+    let mut top_level_failures = Vec::new();
+
+    for action in actions {
+        if !action_logic_matches(action, data) {
+            continue;
+        }
+
+        collect_action_execution_result(
+            action,
+            run_matching_action_steps(
+                action,
+                data,
+                current_platform,
+                config,
+                provider_context,
+                max_agent_depth,
+                runtime_budget,
+            )
+            .await?,
+            &mut top_level_failures,
+        );
+    }
+
+    Ok(top_level_failures)
+}
+
+async fn apply_actions_parallel(
+    actions: &[Action],
+    data: &serde_json::Value,
+    current_platform: Option<&'static str>,
+    config: Option<&config::schema::Config>,
+    provider_context: &ActionProviderContext,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+) -> Result<Vec<String>, String> {
+    let mut matched_actions = Vec::new();
+    let mut lane_futures = Vec::new();
+
+    for action in actions {
+        if !action_logic_matches(action, data) {
+            continue;
+        }
+
+        matched_actions.push(action);
+        lane_futures.push(run_matching_action_steps(
+            action,
+            data,
+            current_platform,
+            config,
+            provider_context,
+            max_agent_depth,
+            runtime_budget,
+        ));
+    }
+
+    let mut top_level_failures = Vec::new();
+    for (action, result) in matched_actions.into_iter().zip(join_all(lane_futures).await) {
+        collect_action_execution_result(action, result?, &mut top_level_failures);
+    }
+
+    Ok(top_level_failures)
+}
+
+fn action_logic_matches(action: &Action, data: &serde_json::Value) -> bool {
+    if let Ok(result) = apply(&action.logic, data) {
+        result.as_bool() == Some(true)
+    } else {
+        println!("Failed to evaluate logic for action: {}", action.name);
+        false
+    }
+}
+
+fn collect_action_execution_result(
+    action: &Action,
+    result: ActionExecutionResult,
+    top_level_failures: &mut Vec<String>,
+) {
+    match result {
+        ActionExecutionResult::Completed(outcomes) => {
+            if let Some(summary) = action_completion_summary(&outcomes) {
+                print_action_success(&action.name, summary);
+            }
+        }
+        ActionExecutionResult::Failed(error) => {
+            top_level_failures.push(error);
+        }
     }
 }
 

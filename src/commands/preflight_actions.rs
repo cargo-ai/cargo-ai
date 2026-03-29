@@ -3,6 +3,7 @@ use crate::config::adder::set_account_tokens;
 use crate::config::loader::{config_path, load_config};
 use crate::credentials::store;
 use crate::infra_api;
+use futures::future::join_all;
 use jsonlogic::apply;
 use std::path::{Component, Path};
 use std::process::Stdio;
@@ -63,6 +64,7 @@ pub(crate) async fn apply_actions(
     output: &crate::Output,
     actions: &[crate::Action],
     runtime_vars: &serde_json::Map<String, serde_json::Value>,
+    action_execution: crate::ActionExecutionMode,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
@@ -79,42 +81,30 @@ pub(crate) async fn apply_actions(
         }
     };
     let current_platform = current_action_platform();
-    let mut top_level_failures = Vec::new();
-
-    for action in actions {
-        match apply(&action.logic, &data) {
-            Ok(result) => {
-                // println!("Action Loop: {:?}", action);
-                if result.as_bool() == Some(true) {
-                    match run_matching_action_steps(
-                        action,
-                        &data,
-                        current_platform,
-                        provider_context,
-                        max_agent_depth,
-                        runtime_budget,
-                    )
-                    .await?
-                    {
-                        ActionExecutionResult::Completed(outcomes) => {
-                            if let Some(summary) = action_completion_summary(&outcomes) {
-                                print_action_success(&action.name, summary);
-                            }
-                        }
-                        ActionExecutionResult::Failed(error) => {
-                            top_level_failures.push(error);
-                        }
-                    }
-                }
-            }
-            Err(error) => {
-                println!(
-                    "Failed to evaluate logic for action '{}': {}",
-                    action.name, error
-                );
-            }
+    let top_level_failures = match action_execution {
+        crate::ActionExecutionMode::Sequential => {
+            apply_actions_sequential(
+                actions,
+                &data,
+                current_platform,
+                provider_context,
+                max_agent_depth,
+                runtime_budget,
+            )
+            .await?
         }
-    }
+        crate::ActionExecutionMode::Parallel => {
+            apply_actions_parallel(
+                actions,
+                &data,
+                current_platform,
+                provider_context,
+                max_agent_depth,
+                runtime_budget,
+            )
+            .await?
+        }
+    };
 
     if let Some(message) = root_run_completion_message() {
         if top_level_failures.is_empty() {
@@ -126,6 +116,107 @@ pub(crate) async fn apply_actions(
         Ok(())
     } else {
         Err(format_top_level_action_failures(&top_level_failures))
+    }
+}
+
+async fn apply_actions_sequential(
+    actions: &[crate::Action],
+    data: &serde_json::Value,
+    current_platform: Option<&'static str>,
+    provider_context: &ActionProviderContext,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+) -> Result<Vec<String>, String> {
+    let mut top_level_failures = Vec::new();
+
+    for action in actions {
+        if !action_logic_matches(action, data) {
+            continue;
+        }
+
+        collect_action_execution_result(
+            action,
+            run_matching_action_steps(
+                action,
+                data,
+                current_platform,
+                provider_context,
+                max_agent_depth,
+                runtime_budget,
+            )
+            .await?,
+            &mut top_level_failures,
+        );
+    }
+
+    Ok(top_level_failures)
+}
+
+async fn apply_actions_parallel(
+    actions: &[crate::Action],
+    data: &serde_json::Value,
+    current_platform: Option<&'static str>,
+    provider_context: &ActionProviderContext,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+) -> Result<Vec<String>, String> {
+    let mut matched_actions = Vec::new();
+    let mut lane_futures = Vec::new();
+
+    for action in actions {
+        if !action_logic_matches(action, data) {
+            continue;
+        }
+
+        matched_actions.push(action);
+        lane_futures.push(run_matching_action_steps(
+            action,
+            data,
+            current_platform,
+            provider_context,
+            max_agent_depth,
+            runtime_budget,
+        ));
+    }
+
+    let mut top_level_failures = Vec::new();
+    for (action, result) in matched_actions
+        .into_iter()
+        .zip(join_all(lane_futures).await)
+    {
+        collect_action_execution_result(action, result?, &mut top_level_failures);
+    }
+
+    Ok(top_level_failures)
+}
+
+fn action_logic_matches(action: &crate::Action, data: &serde_json::Value) -> bool {
+    match apply(&action.logic, data) {
+        Ok(result) => result.as_bool() == Some(true),
+        Err(error) => {
+            println!(
+                "Failed to evaluate logic for action '{}': {}",
+                action.name, error
+            );
+            false
+        }
+    }
+}
+
+fn collect_action_execution_result(
+    action: &crate::Action,
+    result: ActionExecutionResult,
+    top_level_failures: &mut Vec<String>,
+) {
+    match result {
+        ActionExecutionResult::Completed(outcomes) => {
+            if let Some(summary) = action_completion_summary(&outcomes) {
+                print_action_success(&action.name, summary);
+            }
+        }
+        ActionExecutionResult::Failed(error) => {
+            top_level_failures.push(error);
+        }
     }
 }
 
@@ -2749,6 +2840,7 @@ mod tests {
             &crate::Output { answer: 4 },
             &[action(vec![failing_step, second_step])],
             &serde_json::Map::new(),
+            crate::ActionExecutionMode::Sequential,
             &provider_context(),
             5,
             runtime_budget,
@@ -2841,6 +2933,7 @@ mod tests {
             &crate::Output { answer: 4 },
             &[first_action, second_action],
             &serde_json::Map::new(),
+            crate::ActionExecutionMode::Sequential,
             &provider_context(),
             5,
             runtime_budget,
@@ -2857,6 +2950,206 @@ mod tests {
             fs::read_to_string(&output_path).expect("later top-level action should have executed");
         let _ = fs::remove_file(&output_path);
         assert_eq!(file_contents, "ran");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_actions_parallel_starts_matching_actions_without_waiting() {
+        use std::fs;
+
+        let first_output_path =
+            std::env::temp_dir().join(format!("cai2067-parallel-first-{}.txt", std::process::id()));
+        let second_output_path = std::env::temp_dir().join(format!(
+            "cai2067-parallel-second-{}.txt",
+            std::process::id()
+        ));
+
+        let first_action = crate::Action {
+            name: "first_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![crate::RunStep {
+                kind: "exec".to_string(),
+                program: Some("/bin/sh".to_string()),
+                model: None,
+                output_variable: None,
+                status_variable: None,
+                error_variable: None,
+                failure_mode: None,
+                when: None,
+                args: vec![
+                    crate::RunArg::Literal("-lc".to_string()),
+                    crate::RunArg::Literal(format!(
+                        "sleep 1; printf 'first' > \"{}\"",
+                        first_output_path.display()
+                    )),
+                ],
+                prompt: None,
+                path: None,
+                subject: None,
+                text: None,
+                agent: None,
+                inputs: None,
+                input_mode: None,
+                platforms: None,
+            }],
+        };
+        let second_action = crate::Action {
+            name: "second_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![crate::RunStep {
+                kind: "exec".to_string(),
+                program: Some("/bin/sh".to_string()),
+                model: None,
+                output_variable: None,
+                status_variable: None,
+                error_variable: None,
+                failure_mode: None,
+                when: None,
+                args: vec![
+                    crate::RunArg::Literal("-lc".to_string()),
+                    crate::RunArg::Literal(format!(
+                        "printf 'second' > \"{}\"",
+                        second_output_path.display()
+                    )),
+                ],
+                prompt: None,
+                path: None,
+                subject: None,
+                text: None,
+                agent: None,
+                inputs: None,
+                input_mode: None,
+                platforms: None,
+            }],
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let output = crate::Output { answer: 4 };
+        let actions = vec![first_action, second_action];
+        let runtime_vars = serde_json::Map::new();
+        let provider_context = provider_context();
+        let mut future = std::pin::pin!(apply_actions(
+            &output,
+            &actions,
+            &runtime_vars,
+            crate::ActionExecutionMode::Parallel,
+            &provider_context,
+            5,
+            runtime_budget,
+        ));
+
+        tokio::select! {
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(300)) => {}
+            result = &mut future => panic!("parallel actions finished too early: {result:?}"),
+        }
+
+        assert!(
+            second_output_path.exists(),
+            "second action should run before the delayed first action completes"
+        );
+        assert!(
+            !first_output_path.exists(),
+            "first action should still be sleeping when the second action has already completed"
+        );
+
+        let result = future.await;
+
+        let first_contents =
+            fs::read_to_string(&first_output_path).expect("first action should eventually finish");
+        let second_contents = fs::read_to_string(&second_output_path)
+            .expect("second action should have already completed");
+        let _ = fs::remove_file(&first_output_path);
+        let _ = fs::remove_file(&second_output_path);
+
+        assert!(
+            result.is_ok(),
+            "parallel actions should succeed: {result:?}"
+        );
+        assert_eq!(first_contents, "first");
+        assert_eq!(second_contents, "second");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_actions_parallel_reports_failures_in_lane_order() {
+        let first_action = crate::Action {
+            name: "first_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![crate::RunStep {
+                kind: "exec".to_string(),
+                program: Some("/bin/sh".to_string()),
+                model: None,
+                output_variable: None,
+                status_variable: None,
+                error_variable: None,
+                failure_mode: None,
+                when: None,
+                args: vec![
+                    crate::RunArg::Literal("-lc".to_string()),
+                    crate::RunArg::Literal("sleep 1; exit 11".to_string()),
+                ],
+                prompt: None,
+                path: None,
+                subject: None,
+                text: None,
+                agent: None,
+                inputs: None,
+                input_mode: None,
+                platforms: None,
+            }],
+        };
+        let second_action = crate::Action {
+            name: "second_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![crate::RunStep {
+                kind: "exec".to_string(),
+                program: Some("/bin/sh".to_string()),
+                model: None,
+                output_variable: None,
+                status_variable: None,
+                error_variable: None,
+                failure_mode: None,
+                when: None,
+                args: vec![
+                    crate::RunArg::Literal("-lc".to_string()),
+                    crate::RunArg::Literal("exit 12".to_string()),
+                ],
+                prompt: None,
+                path: None,
+                subject: None,
+                text: None,
+                agent: None,
+                inputs: None,
+                input_mode: None,
+                platforms: None,
+            }],
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let actions = vec![first_action, second_action];
+        let error = apply_actions(
+            &crate::Output { answer: 4 },
+            &actions,
+            &serde_json::Map::new(),
+            crate::ActionExecutionMode::Parallel,
+            &provider_context(),
+            5,
+            runtime_budget,
+        )
+        .await
+        .expect_err("parallel hard failures should fail overall");
+
+        let first_idx = error
+            .find("first_action")
+            .expect("aggregated error should mention first lane");
+        let second_idx = error
+            .find("second_action")
+            .expect("aggregated error should mention second lane");
+
+        assert!(
+            first_idx < second_idx,
+            "parallel failure reporting should remain in JSON/lane order: {error}"
+        );
     }
 
     #[cfg(unix)]
@@ -2928,6 +3221,7 @@ mod tests {
             &crate::Output { answer: 4 },
             &[action(vec![failing_step, second_step])],
             &serde_json::Map::new(),
+            crate::ActionExecutionMode::Sequential,
             &provider_context(),
             5,
             runtime_budget,
@@ -2998,6 +3292,7 @@ mod tests {
             &crate::Output { answer: 4 },
             &[action],
             &runtime_vars(&[("generate_images", json!(true))]),
+            crate::ActionExecutionMode::Sequential,
             &provider_context(),
             5,
             runtime_budget,
@@ -3061,6 +3356,7 @@ mod tests {
             &crate::Output { answer: 4 },
             &[action(vec![step])],
             &runtime_vars(&[("generate_images", json!(true))]),
+            crate::ActionExecutionMode::Sequential,
             &provider_context(),
             5,
             runtime_budget,

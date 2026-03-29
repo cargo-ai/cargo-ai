@@ -556,6 +556,16 @@ Then expand into multiple action types:
 
 You can keep actions simple or mix local executables, email alerts, child-agent handoffs, and generated image artifacts in the same agent definition. The next section shows how to sequence multiple run steps and control them with `when`.
 
+Top-level actions run `sequential`ly by default. If you want matching top-level actions to overlap, add:
+
+```json
+{
+  "action_execution": "parallel"
+}
+```
+
+That only changes scheduling across top-level actions. Each individual action still keeps its own `run` list in order, and a hard failure in one top-level action no longer prevents later eligible top-level actions from running. Cargo AI aggregates those top-level hard failures after all eligible actions finish.
+
 ### `run`
 
 `run` is the ordered step list inside an action.

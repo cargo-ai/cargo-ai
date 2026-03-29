@@ -135,6 +135,12 @@ enum FailureMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionExecutionMode {
+    Sequential,
+    Parallel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActionInputMode {
     Replace,
     Append,
@@ -208,6 +214,7 @@ struct AgentConfig {
     inputs: Vec<InputSpec>,
     runtime_vars: Vec<RuntimeVarSpec>,
     properties: Vec<AgentProperty>,
+    action_execution: ActionExecutionMode,
     actions: Vec<Action>,
 }
 
@@ -409,6 +416,7 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
     validate_schema_version(schema_version, "$.version")?;
 
     let runtime_vars = parse_runtime_vars(root_obj)?;
+    let action_execution = parse_action_execution(root_obj)?;
 
     let schema = get_required_object(root_obj, "agent_schema", "$")?;
     let schema_type = get_required_string(schema, "type", "$.agent_schema")?;
@@ -447,8 +455,32 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
         inputs,
         runtime_vars,
         properties: parsed_properties,
+        action_execution,
         actions,
     })
+}
+
+fn parse_action_execution(
+    root_obj: &Map<String, Value>,
+) -> Result<ActionExecutionMode, BuildError> {
+    let Some(value) = root_obj.get("action_execution") else {
+        return Ok(ActionExecutionMode::Sequential);
+    };
+
+    let execution = value
+        .as_str()
+        .ok_or_else(|| BuildError::config("$.action_execution", "expected a string"))?
+        .trim()
+        .to_ascii_lowercase();
+
+    match execution.as_str() {
+        "sequential" => Ok(ActionExecutionMode::Sequential),
+        "parallel" => Ok(ActionExecutionMode::Parallel),
+        _ => Err(BuildError::config(
+            "$.action_execution",
+            "expected `sequential` or `parallel`",
+        )),
+    }
 }
 
 fn validate_schema_version(value: &str, path: &str) -> Result<(), BuildError> {
@@ -2944,6 +2976,10 @@ fn render_agent_model(config: &AgentConfig) -> String {
         .collect::<Vec<_>>()
         .join("");
     let has_output_schema_properties = !config.properties.is_empty();
+    let action_execution = match config.action_execution {
+        ActionExecutionMode::Sequential => "ActionExecutionMode::Sequential",
+        ActionExecutionMode::Parallel => "ActionExecutionMode::Parallel",
+    };
 
     format!(
         r##"
@@ -2976,6 +3012,16 @@ pub fn inputs() -> Vec<Input> {{
 
 pub fn has_output_schema_properties() -> bool {{
     {has_output_schema_properties}
+}}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ActionExecutionMode {{
+    Sequential,
+    Parallel,
+}}
+
+pub fn action_execution() -> ActionExecutionMode {{
+    {action_execution}
 }}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -3090,6 +3136,7 @@ pub fn actions() -> Vec<Action> {{
         schema_metadata_apply = schema_metadata_apply,
         schema_metadata_helpers = schema_metadata_helpers,
         runtime_var_specs_code = runtime_var_specs_code,
+        action_execution = action_execution,
         action_code = action_code
     )
 }

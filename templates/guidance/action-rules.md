@@ -11,9 +11,19 @@ For broader shape and validation rules, also read:
 - Required top-level keys:
   - `version`
   - optional `inputs`
+  - optional `action_execution`
   - optional `runtime_vars`
   - `agent_schema`
   - `actions`
+
+## Top-Level Action Execution
+- `action_execution`
+  - Allowed values: `sequential`, `parallel`
+  - Omitted means `sequential`.
+  - `parallel` only changes scheduling across matching top-level actions.
+  - Each individual action's `run` list stays sequential in both modes.
+- A hard failure in one top-level action does not prevent later eligible top-level actions from running.
+- Cargo AI aggregates top-level hard failures after all eligible actions finish.
 
 ## Supported Step Kinds
 

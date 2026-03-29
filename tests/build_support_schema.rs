@@ -31,6 +31,22 @@ fn config_with_optional_inputs(
     actions: &str,
     inputs: Option<&str>,
 ) -> String {
+    config_with_optional_inputs_and_action_execution(
+        properties,
+        runtime_vars,
+        actions,
+        inputs,
+        None,
+    )
+}
+
+fn config_with_optional_inputs_and_action_execution(
+    properties: &str,
+    runtime_vars: &str,
+    actions: &str,
+    inputs: Option<&str>,
+    action_execution: Option<&str>,
+) -> String {
     let inputs_block = if let Some(inputs) = inputs {
         format!(
             r#",
@@ -49,10 +65,18 @@ fn config_with_optional_inputs(
     }}"#
         )
     };
+    let action_execution_block = if let Some(action_execution) = action_execution {
+        format!(
+            r#",
+    "action_execution": "{action_execution}""#
+        )
+    } else {
+        String::new()
+    };
 
     format!(
         r#"{{
-    "version": "2026-03-03.r1"{inputs_block},
+    "version": "2026-03-03.r1"{inputs_block}{action_execution_block},
     "agent_schema": {{
         "type": "object",
         "properties": {{
@@ -72,6 +96,11 @@ fn accepts_schema_backed_agents_without_baked_inputs() {
 
     assert!(generated.contains("pub fn inputs() -> Vec<Input> {\n    vec![]\n}"));
     assert!(generated.contains("pub fn has_output_schema_properties() -> bool {\n    true\n}"));
+    assert!(
+        generated.contains(
+            "pub fn action_execution() -> ActionExecutionMode {\n    ActionExecutionMode::Sequential\n}"
+        )
+    );
 }
 
 #[test]
@@ -87,6 +116,41 @@ fn accepts_structural_action_only_agents_without_inputs() {
 
     assert!(generated.contains("pub fn inputs() -> Vec<Input> {\n    vec![]\n}"));
     assert!(generated.contains("pub fn has_output_schema_properties() -> bool {\n    false\n}"));
+}
+
+#[test]
+fn emits_parallel_action_execution_when_declared() {
+    let cfg = config_with_optional_inputs_and_action_execution(
+        r#""answer": { "type": "integer" }"#,
+        "",
+        "[]",
+        None,
+        Some("parallel"),
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains(
+        "pub fn action_execution() -> ActionExecutionMode {\n    ActionExecutionMode::Parallel\n}"
+    ));
+}
+
+#[test]
+fn rejects_invalid_action_execution_values() {
+    let cfg = config_with_optional_inputs_and_action_execution(
+        r#""answer": { "type": "integer" }"#,
+        "",
+        "[]",
+        None,
+        Some("fanout"),
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.action_execution"));
+    assert!(err.contains("expected `sequential` or `parallel`"));
 }
 
 #[test]
