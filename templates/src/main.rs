@@ -865,6 +865,140 @@ fn resolved_inputs_for_run(cmd_args: &clap::ArgMatches) -> Result<Vec<Input>, St
     })
 }
 
+fn resolved_runtime_vars_for_run(
+    cmd_args: &clap::ArgMatches,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    resolve_runtime_vars_from_specs(cmd_args, &runtime_var_specs())
+}
+
+fn resolve_runtime_vars_from_specs(
+    cmd_args: &clap::ArgMatches,
+    specs: &[RuntimeVarSpec],
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let mut declared_specs = std::collections::BTreeMap::new();
+    for spec in specs {
+        declared_specs.insert(spec.name.as_str(), spec);
+    }
+
+    let mut resolved = serde_json::Map::new();
+    let mut provided_names = std::collections::BTreeSet::new();
+
+    for raw_assignment in cmd_args
+        .get_many::<String>("run_var")
+        .into_iter()
+        .flatten()
+    {
+        let (name, raw_value) = parse_runtime_var_assignment(raw_assignment)?;
+        let Some(spec) = declared_specs.get(name) else {
+            return Err(format!(
+                "Runtime variable '{name}' was provided via --run-var but is not declared in runtime_vars."
+            ));
+        };
+
+        if !provided_names.insert(name.to_string()) {
+            return Err(format!(
+                "Duplicate runtime variable '{name}' provided via --run-var; each runtime variable may be set at most once per invocation."
+            ));
+        }
+
+        let parsed_value = parse_runtime_var_value(spec.field_type, raw_value, name)?;
+        resolved.insert(name.to_string(), parsed_value);
+    }
+
+    for spec in specs {
+        if resolved.contains_key(&spec.name) {
+            continue;
+        }
+
+        if let Some(default_value) = spec.default_value.clone() {
+            resolved.insert(spec.name.clone(), default_value);
+            continue;
+        }
+
+        return Err(format!(
+            "Runtime variable '{}' is declared in runtime_vars with no default; provide it via --run-var {}=<value>.",
+            spec.name, spec.name
+        ));
+    }
+
+    Ok(resolved)
+}
+
+fn parse_runtime_var_assignment(raw_assignment: &str) -> Result<(&str, &str), String> {
+    let Some((name, value)) = raw_assignment.split_once('=') else {
+        return Err(format!(
+            "Invalid --run-var '{raw_assignment}'; expected NAME=VALUE."
+        ));
+    };
+
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return Err(format!(
+            "Invalid --run-var '{raw_assignment}'; runtime variable name cannot be empty."
+        ));
+    }
+
+    Ok((trimmed_name, value))
+}
+
+fn parse_runtime_var_value(
+    field_type: RuntimeVarType,
+    raw_value: &str,
+    name: &str,
+) -> Result<serde_json::Value, String> {
+    match field_type {
+        RuntimeVarType::String => Ok(serde_json::Value::String(raw_value.to_string())),
+        RuntimeVarType::Boolean => match raw_value {
+            "true" => Ok(serde_json::Value::Bool(true)),
+            "false" => Ok(serde_json::Value::Bool(false)),
+            "" => Err(format!(
+                "Runtime variable '{name}' is declared as boolean and cannot be empty."
+            )),
+            _ => Err(format!(
+                "Runtime variable '{name}' is declared as boolean; expected `true` or `false`, received '{raw_value}'."
+            )),
+        },
+        RuntimeVarType::Integer => {
+            if raw_value.is_empty() {
+                return Err(format!(
+                    "Runtime variable '{name}' is declared as integer and cannot be empty."
+                ));
+            }
+
+            raw_value.parse::<i64>().map(serde_json::Value::from).map_err(|_| {
+                format!(
+                    "Runtime variable '{name}' is declared as integer; expected a base-10 whole number, received '{raw_value}'."
+                )
+            })
+        }
+        RuntimeVarType::Number => {
+            if raw_value.is_empty() {
+                return Err(format!(
+                    "Runtime variable '{name}' is declared as number and cannot be empty."
+                ));
+            }
+
+            let parsed = raw_value.parse::<f64>().map_err(|_| {
+                format!(
+                    "Runtime variable '{name}' is declared as number; expected a numeric value, received '{raw_value}'."
+                )
+            })?;
+            if !parsed.is_finite() {
+                return Err(format!(
+                    "Runtime variable '{name}' must be a finite number, received '{raw_value}'."
+                ));
+            }
+
+            let Some(number) = serde_json::Number::from_f64(parsed) else {
+                return Err(format!(
+                    "Runtime variable '{name}' must be a finite number, received '{raw_value}'."
+                ));
+            };
+            Ok(serde_json::Value::Number(number))
+        }
+    }
+}
+
 // Initialize Tokio runtime macro
 #[tokio::main]
 async fn main() {
@@ -996,6 +1130,13 @@ async fn main() {
 
     let selected_inputs = match resolved_inputs_for_run(&cmd_args) {
         Ok(selected_inputs) => selected_inputs,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            return;
+        }
+    };
+    let runtime_vars = match resolved_runtime_vars_for_run(&cmd_args) {
+        Ok(runtime_vars) => runtime_vars,
         Err(error) => {
             eprintln!("❌ {error}");
             return;
@@ -1154,6 +1295,7 @@ async fn main() {
         apply_actions(
             &output,
             &actions,
+            &runtime_vars,
             config.as_ref(),
             &action_provider_context,
             max_agent_depth,
@@ -1169,12 +1311,14 @@ async fn main() {
 async fn apply_actions(
     output: &Output,
     actions: &[Action],
+    runtime_vars: &serde_json::Map<String, serde_json::Value>,
     config: Option<&config::schema::Config>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<(), String> {
-    let data = serde_json::to_value(output).unwrap();
+    let data = action_data_from_output(output, runtime_vars)
+        .map_err(|error| format!("Failed to serialize output for action evaluation: {error}"))?;
     let current_platform = current_action_platform();
 
     for action in actions {
@@ -1302,6 +1446,20 @@ async fn apply_actions(
     }
 
     Ok(())
+}
+
+fn action_data_from_output(
+    output: &Output,
+    runtime_vars: &serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut data = serde_json::to_value(output)?;
+    if let Some(object) = data.as_object_mut() {
+        object.insert(
+            "runtime".to_string(),
+            serde_json::Value::Object(runtime_vars.clone()),
+        );
+    }
+    Ok(data)
 }
 
 async fn run_exec_step(
@@ -2418,9 +2576,9 @@ fn resolve_run_arg(
     match arg {
         RunArg::Literal(literal) => Ok(literal.clone()),
         RunArg::Variable(variable) => {
-            let Some(value) = data.get(variable) else {
+            let Some(value) = lookup_action_variable(data, variable) else {
                 return Err(format!(
-                    "Action '{}' arg {} references missing output field '{}'.",
+                    "Action '{}' arg {} references missing variable '{}'.",
                     action_name, index, variable
                 ));
             };
@@ -2430,18 +2588,33 @@ fn resolve_run_arg(
                 serde_json::Value::Bool(boolean) => Ok(boolean.to_string()),
                 serde_json::Value::Number(number) => Ok(number.to_string()),
                 serde_json::Value::Array(_) => Err(format!(
-                    "Action '{}' arg {} references array-valued field '{}', which is unsupported for arg substitution.",
+                    "Action '{}' arg {} references array-valued variable '{}', which is unsupported for arg substitution.",
                     action_name, index, variable
                 )),
                 serde_json::Value::Object(_) => Err(format!(
-                    "Action '{}' arg {} references object-valued field '{}', which is unsupported for arg substitution.",
+                    "Action '{}' arg {} references object-valued variable '{}', which is unsupported for arg substitution.",
                     action_name, index, variable
                 )),
                 serde_json::Value::Null => Err(format!(
-                    "Action '{}' arg {} references null field '{}', which is unsupported for arg substitution.",
+                    "Action '{}' arg {} references null variable '{}', which is unsupported for arg substitution.",
                     action_name, index, variable
                 )),
             }
         }
     }
+}
+
+fn lookup_action_variable<'a>(data: &'a serde_json::Value, variable: &str) -> Option<&'a serde_json::Value> {
+    if let Some(runtime_name) = variable.strip_prefix("runtime.") {
+        return data
+            .get("runtime")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|runtime| runtime.get(runtime_name));
+    }
+
+    if variable.contains('.') {
+        return None;
+    }
+
+    data.get(variable)
 }

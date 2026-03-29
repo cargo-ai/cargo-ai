@@ -97,6 +97,14 @@ pub fn build_cli() -> ArgMatches {
                 .value_parser(["replace", "append", "prepend"])
         )
         .arg(
+            Arg::new("run_var")
+                .long("run-var")
+                .help("Runtime variable assignment declared in runtime_vars (repeatable: name=value)")
+                .value_name("NAME=VALUE")
+                .action(ArgAction::Append)
+                .num_args(1)
+        )
+        .arg(
             Arg::new("input_text")
                 .long("input-text")
                 .help("Text input to provide to the agent at runtime")

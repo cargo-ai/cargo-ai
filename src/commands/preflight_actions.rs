@@ -56,13 +56,14 @@ enum RefreshAccessError {
 pub(crate) async fn apply_actions(
     output: &crate::Output,
     actions: &[crate::Action],
+    runtime_vars: &serde_json::Map<String, serde_json::Value>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<(), String> {
     // println!("DEBUG: Applying actions -> {:?}", actions);
 
-    let data = match serde_json::to_value(output) {
+    let data = match action_data_from_output(output, runtime_vars) {
         Ok(data) => data,
         Err(error) => {
             eprintln!("❌ Failed to serialize output for action evaluation: {error}");
@@ -204,6 +205,20 @@ pub(crate) async fn apply_actions(
     }
 
     Ok(())
+}
+
+fn action_data_from_output(
+    output: &crate::Output,
+    runtime_vars: &serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut data = serde_json::to_value(output)?;
+    if let Some(object) = data.as_object_mut() {
+        object.insert(
+            "runtime".to_string(),
+            serde_json::Value::Object(runtime_vars.clone()),
+        );
+    }
+    Ok(data)
 }
 
 async fn run_exec_step(
@@ -1501,9 +1516,9 @@ fn resolve_run_arg(
     match arg {
         crate::RunArg::Literal(literal) => Ok(literal.clone()),
         crate::RunArg::Variable(variable) => {
-            let Some(value) = data.get(variable) else {
+            let Some(value) = lookup_action_variable(data, variable) else {
                 return Err(format!(
-                    "Action '{}' arg {} references missing output field '{}'.",
+                    "Action '{}' arg {} references missing variable '{}'.",
                     action_name, index, variable
                 ));
             };
@@ -1513,20 +1528,38 @@ fn resolve_run_arg(
                 serde_json::Value::Bool(boolean) => Ok(boolean.to_string()),
                 serde_json::Value::Number(number) => Ok(number.to_string()),
                 serde_json::Value::Array(_) => Err(format!(
-                    "Action '{}' arg {} references array-valued field '{}', which is unsupported for arg substitution.",
+                    "Action '{}' arg {} references array-valued variable '{}', which is unsupported for arg substitution.",
                     action_name, index, variable
                 )),
                 serde_json::Value::Object(_) => Err(format!(
-                    "Action '{}' arg {} references object-valued field '{}', which is unsupported for arg substitution.",
+                    "Action '{}' arg {} references object-valued variable '{}', which is unsupported for arg substitution.",
                     action_name, index, variable
                 )),
                 serde_json::Value::Null => Err(format!(
-                    "Action '{}' arg {} references null field '{}', which is unsupported for arg substitution.",
+                    "Action '{}' arg {} references null variable '{}', which is unsupported for arg substitution.",
                     action_name, index, variable
                 )),
             }
         }
     }
+}
+
+fn lookup_action_variable<'a>(
+    data: &'a serde_json::Value,
+    variable: &str,
+) -> Option<&'a serde_json::Value> {
+    if let Some(runtime_name) = variable.strip_prefix("runtime.") {
+        return data
+            .get("runtime")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|runtime| runtime.get(runtime_name));
+    }
+
+    if variable.contains('.') {
+        return None;
+    }
+
+    data.get(variable)
 }
 
 #[cfg(test)]
@@ -1588,6 +1621,15 @@ mod tests {
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run,
         }
+    }
+
+    fn runtime_vars(
+        entries: &[(&str, serde_json::Value)],
+    ) -> serde_json::Map<String, serde_json::Value> {
+        entries
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), value.clone()))
+            .collect()
     }
 
     #[test]
@@ -1656,7 +1698,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.contains("missing output field 'answer'"));
+        assert!(error.contains("missing variable 'answer'"));
     }
 
     #[test]
@@ -1670,7 +1712,48 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.contains("array-valued field 'numbers'"));
+        assert!(error.contains("array-valued variable 'numbers'"));
+    }
+
+    #[test]
+    fn resolves_runtime_variable_args() {
+        let resolved = resolve_run_args(
+            &[
+                crate::RunArg::Literal("mode=".to_string()),
+                crate::RunArg::Variable("runtime.image_model".to_string()),
+                crate::RunArg::Variable("runtime.generate_images".to_string()),
+            ],
+            &json!({
+                "runtime": {
+                    "image_model": "gpt-image-1",
+                    "generate_images": true
+                }
+            }),
+            "demo",
+        )
+        .expect("runtime args should resolve");
+
+        assert_eq!(resolved, vec!["mode=", "gpt-image-1", "true"]);
+    }
+
+    #[test]
+    fn resolves_runtime_variable_string_parts() {
+        let resolved = resolve_string_parts(
+            &[
+                crate::RunArg::Literal("subject=".to_string()),
+                crate::RunArg::Variable("runtime.report_suffix".to_string()),
+            ],
+            &json!({
+                "runtime": {
+                    "report_suffix": "nightly"
+                }
+            }),
+            "demo",
+            "subject",
+        )
+        .expect("runtime string parts should resolve");
+
+        assert_eq!(resolved, "subject=nightly");
     }
 
     #[test]
@@ -2479,6 +2562,7 @@ mod tests {
         let result = apply_actions(
             &crate::Output { answer: 4 },
             &[action(vec![failing_step, second_step])],
+            &serde_json::Map::new(),
             &provider_context(),
             5,
             runtime_budget,
@@ -2564,6 +2648,7 @@ mod tests {
         let result = apply_actions(
             &crate::Output { answer: 4 },
             &[action(vec![failing_step, second_step])],
+            &serde_json::Map::new(),
             &provider_context(),
             5,
             runtime_budget,
@@ -2581,6 +2666,137 @@ mod tests {
             fs::read_to_string(&output_path).expect("later step should have executed");
         let _ = fs::remove_file(&output_path);
 
+        assert_eq!(file_contents, "ran");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_actions_allows_runtime_vars_in_action_logic() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2055-runtime-logic-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+        let output_path =
+            std::env::temp_dir().join(format!("cai2055-runtime-logic-{}.txt", std::process::id()));
+
+        let script_body = format!("#!/bin/sh\nprintf 'ran' > \"{}\"\n", output_path.display());
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            model: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", script_name)),
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+        let action = crate::Action {
+            name: "runtime_gate".to_string(),
+            logic: json!({ "==": [{ "var": "runtime.generate_images" }, true] }),
+            run: vec![step],
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = apply_actions(
+            &crate::Output { answer: 4 },
+            &[action],
+            &runtime_vars(&[("generate_images", json!(true))]),
+            &provider_context(),
+            5,
+            runtime_budget,
+        )
+        .await;
+
+        let _ = fs::remove_file(&script_path);
+
+        assert!(
+            result.is_ok(),
+            "runtime-gated action should succeed: {result:?}"
+        );
+
+        let file_contents = fs::read_to_string(&output_path).expect("action should have run");
+        let _ = fs::remove_file(&output_path);
+        assert_eq!(file_contents, "ran");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_actions_allows_runtime_vars_in_step_when() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2055-runtime-when-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+        let output_path =
+            std::env::temp_dir().join(format!("cai2055-runtime-when-{}.txt", std::process::id()));
+
+        let script_body = format!("#!/bin/sh\nprintf 'ran' > \"{}\"\n", output_path.display());
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            model: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: Some(json!({ "==": [{ "var": "runtime.generate_images" }, true] })),
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", script_name)),
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = apply_actions(
+            &crate::Output { answer: 4 },
+            &[action(vec![step])],
+            &runtime_vars(&[("generate_images", json!(true))]),
+            &provider_context(),
+            5,
+            runtime_budget,
+        )
+        .await;
+
+        let _ = fs::remove_file(&script_path);
+
+        assert!(
+            result.is_ok(),
+            "runtime-gated step should succeed: {result:?}"
+        );
+
+        let file_contents = fs::read_to_string(&output_path).expect("step should have run");
+        let _ = fs::remove_file(&output_path);
         assert_eq!(file_contents, "ran");
     }
 

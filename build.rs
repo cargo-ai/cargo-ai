@@ -7,6 +7,8 @@ mod build_support;
 
 use build_support::TemplateSource;
 
+const _: &str = include_str!("templates/build_support.rs");
+
 const BUILD_RERUN_PATHS: &[&str] = &[
     ".agentcfg",
     "build.rs",

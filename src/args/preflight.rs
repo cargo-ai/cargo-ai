@@ -75,6 +75,14 @@ pub fn command() -> Command {
                 .value_parser(["replace", "append", "prepend"]),
         )
         .arg(
+            Arg::new("run_var")
+                .long("run-var")
+                .help("Runtime variable assignment declared in runtime_vars (repeatable: name=value)")
+                .value_name("NAME=VALUE")
+                .action(ArgAction::Append)
+                .num_args(1),
+        )
+        .arg(
             Arg::new("input_text")
                 .long("input-text")
                 .help("Text input to provide to the agent at runtime")
@@ -135,6 +143,21 @@ mod tests {
         assert!(help.contains("--input-mode <MODE>"));
         assert!(help.contains(
             "How runtime input flags combine with baked inputs: replace, append, or prepend"
+        ));
+    }
+
+    #[test]
+    fn help_describes_run_var_assignments() {
+        let mut command = super::command();
+        let mut help = Vec::new();
+        command
+            .write_long_help(&mut help)
+            .expect("preflight help should render");
+        let help = String::from_utf8(help).expect("help should be utf8");
+
+        assert!(help.contains("--run-var <NAME=VALUE>"));
+        assert!(help.contains(
+            "Runtime variable assignment declared in runtime_vars (repeatable: name=value)"
         ));
     }
 }

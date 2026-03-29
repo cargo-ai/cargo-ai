@@ -154,6 +154,13 @@ struct Action {
     run: Vec<RunStep>,
 }
 
+#[derive(Debug, Clone)]
+struct RuntimeVarSpec {
+    name: String,
+    field_type: FieldType,
+    default_value: Option<Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FieldType {
     String,
@@ -199,6 +206,7 @@ struct AgentProperty {
 #[derive(Debug, Clone)]
 struct AgentConfig {
     inputs: Vec<InputSpec>,
+    runtime_vars: Vec<RuntimeVarSpec>,
     properties: Vec<AgentProperty>,
     actions: Vec<Action>,
 }
@@ -401,6 +409,7 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
     validate_schema_version(schema_version, "$.version")?;
 
     let inputs = parse_inputs(root_obj)?;
+    let runtime_vars = parse_runtime_vars(root_obj)?;
 
     let schema = get_required_object(root_obj, "agent_schema", "$")?;
     let schema_type = get_required_string(schema, "type", "$.agent_schema")?;
@@ -415,6 +424,7 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
     let mut schema_field_types: BTreeMap<String, FieldType> = BTreeMap::new();
     let mut parsed_properties = Vec::with_capacity(properties.len());
     for (name, prop_value) in properties {
+        validate_reserved_top_level_name(name, &format!("$.agent_schema.properties.{name}"))?;
         validate_rust_identifier(name, &format!("$.agent_schema.properties.{name}"))?;
         let prop_obj = expect_object(prop_value, &format!("$.agent_schema.properties.{name}"))?;
         let parsed_property =
@@ -423,10 +433,12 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
         parsed_properties.push(parsed_property);
     }
 
-    let actions = parse_actions(root_obj, &schema_field_types)?;
+    let action_field_types = action_field_types(&schema_field_types, &runtime_vars);
+    let actions = parse_actions(root_obj, &schema_field_types, &action_field_types)?;
 
     Ok(AgentConfig {
         inputs,
+        runtime_vars,
         properties: parsed_properties,
         actions,
     })
@@ -594,6 +606,7 @@ fn parse_input_specs(inputs: &[Value], base_path: &str) -> Result<Vec<InputSpec>
 fn parse_actions(
     root_obj: &Map<String, Value>,
     schema_field_types: &BTreeMap<String, FieldType>,
+    action_field_types: &BTreeMap<String, FieldType>,
 ) -> Result<Vec<Action>, BuildError> {
     let actions = get_required_array(root_obj, "actions", "$")?;
     let mut parsed = Vec::with_capacity(actions.len());
@@ -604,11 +617,11 @@ fn parse_actions(
 
         let name = get_required_string(action_obj, "name", &action_path)?.to_string();
         let logic = get_required_field(action_obj, "logic", &action_path)?.clone();
-        validate_logic_expression(&logic, &format!("{action_path}.logic"), schema_field_types)?;
+        validate_logic_expression(&logic, &format!("{action_path}.logic"), action_field_types)?;
 
         let runs = get_required_array(action_obj, "run", &action_path)?;
         let mut run_steps = Vec::with_capacity(runs.len());
-        let mut available_field_types = schema_field_types.clone();
+        let mut available_field_types = action_field_types.clone();
         let mut captured_variable_names = BTreeMap::new();
         for (run_idx, run_value) in runs.iter().enumerate() {
             let run_path = format!("{action_path}.run[{run_idx}]");
@@ -1068,6 +1081,7 @@ fn parse_optional_capture_variable(
     })?;
     let normalized = variable_name.trim();
     validate_action_capture_variable_name(normalized, &variable_path)?;
+    validate_reserved_top_level_name(normalized, &variable_path)?;
 
     if schema_field_types.contains_key(normalized) {
         return Err(BuildError::config(
@@ -1198,6 +1212,175 @@ fn validate_action_capture_variable_name(name: &str, path: &str) -> Result<(), B
     }
 
     Ok(())
+}
+
+fn validate_reserved_top_level_name(name: &str, path: &str) -> Result<(), BuildError> {
+    if name == "runtime" {
+        return Err(BuildError::config(
+            path,
+            "`runtime` is reserved for invocation-scoped runtime variables",
+        ));
+    }
+
+    Ok(())
+}
+
+fn parse_runtime_vars(root_obj: &Map<String, Value>) -> Result<Vec<RuntimeVarSpec>, BuildError> {
+    let Some(value) = root_obj.get("runtime_vars") else {
+        return Ok(Vec::new());
+    };
+
+    let runtime_vars = expect_object(value, "$.runtime_vars")?;
+    let mut parsed = Vec::with_capacity(runtime_vars.len());
+
+    for (name, raw_spec) in runtime_vars {
+        let path = format!("$.runtime_vars.{name}");
+        validate_runtime_var_name(name, &path)?;
+        let spec = expect_object(raw_spec, &path)?;
+        let field_type = parse_runtime_var_type(spec, &path)?;
+        let default_value = parse_runtime_var_default(spec, &path, &field_type)?;
+        parsed.push(RuntimeVarSpec {
+            name: name.clone(),
+            field_type,
+            default_value,
+        });
+    }
+
+    Ok(parsed)
+}
+
+fn validate_runtime_var_name(name: &str, path: &str) -> Result<(), BuildError> {
+    if name.trim().is_empty() {
+        return Err(BuildError::config(
+            path,
+            "runtime variable name cannot be empty",
+        ));
+    }
+
+    if name != name.trim() {
+        return Err(BuildError::config(
+            path,
+            "runtime variable names cannot start or end with whitespace",
+        ));
+    }
+
+    if name.chars().any(char::is_whitespace) {
+        return Err(BuildError::config(
+            path,
+            "runtime variable names cannot contain whitespace",
+        ));
+    }
+
+    if name.contains('.') {
+        return Err(BuildError::config(
+            path,
+            "runtime variable names must be flat; nested names with `.` are not supported",
+        ));
+    }
+
+    validate_reserved_top_level_name(name, path)
+}
+
+fn parse_runtime_var_type(spec: &Map<String, Value>, path: &str) -> Result<FieldType, BuildError> {
+    let schema_type = get_schema_type(spec, path)?;
+    match schema_type.as_str() {
+        "string" => Ok(FieldType::String),
+        "boolean" => Ok(FieldType::Boolean),
+        "number" => Ok(FieldType::Number),
+        "integer" => Ok(FieldType::Integer),
+        "array" => Err(BuildError::config(
+            format!("{path}.type"),
+            "runtime variables do not support `array` values in this story",
+        )),
+        "object" => Err(BuildError::config(
+            format!("{path}.type"),
+            "runtime variables do not support `object` values in this story",
+        )),
+        other => Err(BuildError::config(
+            format!("{path}.type"),
+            format!("unsupported runtime variable type `{other}`"),
+        )),
+    }
+}
+
+fn parse_runtime_var_default(
+    spec: &Map<String, Value>,
+    path: &str,
+    field_type: &FieldType,
+) -> Result<Option<Value>, BuildError> {
+    let Some(default_value) = spec.get("default") else {
+        return Ok(None);
+    };
+
+    validate_runtime_default_value(default_value, &format!("{path}.default"), field_type)?;
+    Ok(Some(default_value.clone()))
+}
+
+fn validate_runtime_default_value(
+    value: &Value,
+    path: &str,
+    field_type: &FieldType,
+) -> Result<(), BuildError> {
+    match field_type {
+        FieldType::String => {
+            if value.is_string() {
+                Ok(())
+            } else {
+                Err(BuildError::config(
+                    path,
+                    "default must be a string for `type: \"string\"` runtime variables",
+                ))
+            }
+        }
+        FieldType::Boolean => {
+            if value.is_boolean() {
+                Ok(())
+            } else {
+                Err(BuildError::config(
+                    path,
+                    "default must be a boolean for `type: \"boolean\"` runtime variables",
+                ))
+            }
+        }
+        FieldType::Integer => {
+            if value.as_i64().is_some() {
+                Ok(())
+            } else {
+                Err(BuildError::config(
+                    path,
+                    "default must be an integer for `type: \"integer\"` runtime variables",
+                ))
+            }
+        }
+        FieldType::Number => {
+            if value.as_f64().is_some() {
+                Ok(())
+            } else {
+                Err(BuildError::config(
+                    path,
+                    "default must be a number for `type: \"number\"` runtime variables",
+                ))
+            }
+        }
+        FieldType::Array => Err(BuildError::config(
+            path,
+            "array runtime variable defaults are not supported in this story",
+        )),
+    }
+}
+
+fn action_field_types(
+    schema_field_types: &BTreeMap<String, FieldType>,
+    runtime_vars: &[RuntimeVarSpec],
+) -> BTreeMap<String, FieldType> {
+    let mut field_types = schema_field_types.clone();
+    for runtime_var in runtime_vars {
+        field_types.insert(
+            format!("runtime.{}", runtime_var.name),
+            runtime_var.field_type.clone(),
+        );
+    }
+    field_types
 }
 
 fn parse_action_input_specs(
@@ -1514,12 +1697,7 @@ fn parse_run_arg(
                 BuildError::config(&variable_path, "expected `var` to be a string field name")
             })?;
             let normalized_name = variable_name.trim();
-            if normalized_name.is_empty() {
-                return Err(BuildError::config(
-                    &variable_path,
-                    "variable name cannot be empty",
-                ));
-            }
+            validate_variable_lookup_name(normalized_name, &variable_path)?;
 
             let field_type = resolve_var_field_type(
                 &Value::String(normalized_name.to_string()),
@@ -1839,16 +2017,7 @@ fn resolve_var_field_type(
         }
     };
 
-    if var_name.trim().is_empty() {
-        return Err(BuildError::config(path, "variable name cannot be empty"));
-    }
-
-    if var_name.contains('.') {
-        return Err(BuildError::config(
-            path,
-            "nested variable paths are not supported; use top-level schema property names",
-        ));
-    }
+    validate_variable_lookup_name(var_name.trim(), path)?;
 
     schema_field_types.get(var_name).cloned().ok_or_else(|| {
         BuildError::config(
@@ -1863,6 +2032,37 @@ fn resolve_var_field_type(
             ),
         )
     })
+}
+
+fn validate_variable_lookup_name(name: &str, path: &str) -> Result<(), BuildError> {
+    if name.is_empty() {
+        return Err(BuildError::config(path, "variable name cannot be empty"));
+    }
+
+    if let Some(runtime_name) = name.strip_prefix("runtime.") {
+        if runtime_name.is_empty() {
+            return Err(BuildError::config(
+                path,
+                "runtime variable lookup must include a name after `runtime.`",
+            ));
+        }
+        if runtime_name.contains('.') {
+            return Err(BuildError::config(
+                path,
+                "runtime variable names must be flat after the reserved `runtime.` prefix",
+            ));
+        }
+        return Ok(());
+    }
+
+    if name.contains('.') {
+        return Err(BuildError::config(
+            path,
+            "nested variable paths are not supported outside the reserved `runtime.` namespace",
+        ));
+    }
+
+    Ok(())
 }
 
 fn is_numeric_type(field_type: &FieldType) -> bool {
@@ -2666,6 +2866,35 @@ fn render_agent_model(config: &AgentConfig) -> String {
     } else {
         "    apply_output_schema_metadata(&mut v);\n".to_string()
     };
+    let runtime_var_specs_code = config
+        .runtime_vars
+        .iter()
+        .map(|runtime_var| {
+            let field_type = render_runtime_var_type_expr(&runtime_var.field_type);
+            let default_value = runtime_var
+                .default_value
+                .as_ref()
+                .map(|value| {
+                    format!(
+                        "Some(serde_json::from_str({}).expect(\"generated runtime-var default must be valid JSON\"))",
+                        rust_string_literal(&value.to_string())
+                    )
+                })
+                .unwrap_or_else(|| "None".to_string());
+
+            format!(
+                "RuntimeVarSpec {{
+                    name: {}.to_string(),
+                    field_type: {},
+                    default_value: {},
+                }},",
+                rust_string_literal(&runtime_var.name),
+                field_type,
+                default_value
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
 
     format!(
         r##"
@@ -2694,6 +2923,25 @@ pub enum Input {{
 
 pub fn inputs() -> Vec<Input> {{
     vec![{input_list}]
+}}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum RuntimeVarType {{
+    String,
+    Boolean,
+    Number,
+    Integer,
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeVarSpec {{
+    name: String,
+    field_type: RuntimeVarType,
+    default_value: Option<serde_json::Value>,
+}}
+
+pub fn runtime_var_specs() -> Vec<RuntimeVarSpec> {{
+    vec![{runtime_var_specs_code}]
 }}
 
 /// JSON Schema that defines the expected LLM output structure.
@@ -2788,6 +3036,7 @@ pub fn actions() -> Vec<Action> {{
         input_list = input_list,
         schema_metadata_apply = schema_metadata_apply,
         schema_metadata_helpers = schema_metadata_helpers,
+        runtime_var_specs_code = runtime_var_specs_code,
         action_code = action_code
     )
 }
@@ -3041,6 +3290,16 @@ fn render_f64_literal(value: &NumericConstraintValue) -> String {
 
 fn rust_string_literal(value: &str) -> String {
     format!("{value:?}")
+}
+
+fn render_runtime_var_type_expr(field_type: &FieldType) -> &'static str {
+    match field_type {
+        FieldType::String => "RuntimeVarType::String",
+        FieldType::Boolean => "RuntimeVarType::Boolean",
+        FieldType::Number => "RuntimeVarType::Number",
+        FieldType::Integer => "RuntimeVarType::Integer",
+        FieldType::Array => unreachable!("array runtime vars are rejected during parsing"),
+    }
 }
 
 #[cfg(test)]
