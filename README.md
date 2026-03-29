@@ -147,7 +147,7 @@ cargo ai account agents hatch adder_test
 
 Cargo AI keeps the authoring model intentionally small:
 
-1. `inputs`
+1. optional `inputs`
    Ordered model-facing input such as `text`, `url`, or `image`.
 2. optional `runtime_vars`
    Typed caller-supplied values that can control action logic, `when`, and selected run-step fields at invocation time.
@@ -203,7 +203,7 @@ cargo ai hatch my_agent --config ./my_agent.json
 
 For Windows users, run `my_agent.exe` or just `my_agent`.
 
-You can also override or inject runtime input without editing the JSON. Generated agents accept flags such as `--input-text`, `--input-url`, and `--input-file`. By default, runtime input flags replace the baked `inputs` array for that run. Use `--input-mode append` to keep baked inputs first, or `--input-mode prepend` to place runtime inputs before the baked inputs.
+You can also override or inject runtime input without editing the JSON. Generated agents accept flags such as `--input-text`, `--input-url`, and `--input-file`. By default, runtime input flags replace the baked `inputs` array for that run. Use `--input-mode append` to keep baked inputs first, or `--input-mode prepend` to place runtime inputs before the baked inputs. If `agent_schema.properties` is empty, those model-facing runtime input flags are invalid because Cargo AI skips the initial model call in that structural action-only shape.
 
 ```bash
 ./my_agent --input-text "What is 3 + 3?"
@@ -227,6 +227,36 @@ You can also declare typed runtime variables for action control and step-local s
 ```
 
 Quote `--run-var` values when your shell would otherwise split them, for example `--run-var subject="Quarterly Review"`.
+
+You can also author a structural action-only worker by leaving `agent_schema.properties` empty and omitting top-level `inputs`. In that shape, Cargo AI skips the initial model pass and starts directly at action `logic`, which can read declared `runtime.*` values.
+
+```json
+{
+  "version": "2026-03-03.r1",
+  "runtime_vars": {
+    "generate_images": { "type": "boolean", "default": true },
+    "hero_image_model": { "type": "string" }
+  },
+  "agent_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "actions": [
+    {
+      "name": "generate_launch_assets",
+      "logic": { "==": [{ "var": "runtime.generate_images" }, true] },
+      "run": [
+        {
+          "kind": "generate_image",
+          "model": { "var": "runtime.hero_image_model" },
+          "prompt": "Create the launch image.",
+          "path": "./artifacts/launch.png"
+        }
+      ]
+    }
+  ]
+}
+```
 
 ## Start Simple, Then Expand
 

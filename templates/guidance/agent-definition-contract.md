@@ -10,7 +10,7 @@ Unless a section says otherwise, the supported field lists below are exhaustive 
 Every agent definition must be a JSON object with these keys in this order:
 
 1. `version`
-2. `inputs`
+2. optional `inputs`
 3. optional `runtime_vars`
 4. `agent_schema`
 5. `actions`
@@ -24,8 +24,8 @@ Every agent definition must be a JSON object with these keys in this order:
 
 ## `inputs`
 
-- Required.
-- Array with at least one item.
+- Optional.
+- If present, must be an array with at least one item.
 - Supported input shapes:
   - `text`
     - required: `type`, `text`
@@ -68,6 +68,7 @@ Authoring guidance:
 - Use runtime flags when the caller should choose the content at invocation time.
 - If you use `--input-file` and still need a text instruction, either also pass `--input-text` in replace mode or choose `--input-mode append` / `--input-mode prepend` so the baked text instruction is still included.
 - `{"type":"file","path":"..."}` is for a definition-owned fixed file path, not for a caller-selected runtime file.
+- If `agent_schema.properties` is empty, runtime `--input-*` flags are invalid because Cargo AI skips the model call in that structural action-only shape.
 
 ## `runtime_vars`
 
@@ -116,6 +117,7 @@ Example:
   - `properties: { ... }`
 - Each property must define a `type`.
 - Top-level property names are reserved for action-variable lookup. Step-captured variable names cannot reuse them.
+- `properties` may be empty. That declares the structural action-only shape.
 
 Supported top-level property `type` values:
 - `string`
@@ -139,6 +141,14 @@ Unsupported schema shapes for the current MVP:
 - nested objects
 - union types
 
+Structural action-only rule:
+- If `agent_schema.properties` is empty, Cargo AI skips the initial model call and begins at the action layer.
+- In that shape, baked top-level `inputs` must be absent.
+- In that shape, runtime model-facing `--input-*` flags are invalid.
+- Top-level action `logic` starts with declared `runtime.*` values only.
+- Step `when` and substitution surfaces may use declared `runtime.*` values plus prior captured step variables as the action runs.
+- References to top-level model-output fields are invalid in that shape because no initial model output exists.
+
 ## `actions`
 
 - Required.
@@ -149,8 +159,8 @@ Unsupported schema shapes for the current MVP:
   - `run`
 
 `logic` uses JSON Logic against the top-level action data object. At action start, that means:
-- top-level model output fields
-- declared `runtime.*` values
+- top-level model output fields plus declared `runtime.*` values for schema-backed agents
+- declared `runtime.*` values only for the structural action-only shape
 
 If `logic` evaluates true, the action's `run` steps execute in order.
 

@@ -865,6 +865,26 @@ fn resolved_inputs_for_run(cmd_args: &clap::ArgMatches) -> Result<Vec<Input>, St
     })
 }
 
+fn validate_structural_action_only_inputs(
+    has_output_schema_properties: bool,
+    selected_inputs: &[Input],
+) -> Result<(), String> {
+    if has_output_schema_properties || selected_inputs.is_empty() {
+        return Ok(());
+    }
+
+    Err(
+        "This agent declares empty `agent_schema.properties`; runtime model-facing input flags such as --input-text, --input-url, --input-image, and --input-file are not allowed because there is no model pass to consume them."
+            .to_string(),
+    )
+}
+
+fn empty_action_only_output() -> Result<Output, String> {
+    serde_json::from_value(serde_json::json!({})).map_err(|error| {
+        format!("Internal error: failed to initialize action-only output placeholder: {error}")
+    })
+}
+
 fn resolved_runtime_vars_for_run(
     cmd_args: &clap::ArgMatches,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
@@ -1121,13 +1141,6 @@ async fn main() {
         }
     }
 
-    if let Err(validation_issues) = validate_provider_request(provider, &model, &url, &token) {
-        for issue in validation_issues {
-            eprintln!("{issue}");
-        }
-        return;
-    }
-
     let selected_inputs = match resolved_inputs_for_run(&cmd_args) {
         Ok(selected_inputs) => selected_inputs,
         Err(error) => {
@@ -1142,6 +1155,55 @@ async fn main() {
             return;
         }
     };
+    let has_output_schema_properties = has_output_schema_properties();
+
+    if let Err(error) =
+        validate_structural_action_only_inputs(has_output_schema_properties, &selected_inputs)
+    {
+        eprintln!("❌ {error}");
+        return;
+    }
+
+    if !has_output_schema_properties {
+        let output = match empty_action_only_output() {
+            Ok(output) => output,
+            Err(error) => {
+                eprintln!("❌ {error}");
+                return;
+            }
+        };
+        let actions = actions();
+        let action_provider_context = ActionProviderContext {
+            provider,
+            url: url.clone(),
+            token: token.clone(),
+            inference_timeout_in_sec,
+        };
+        if let Err(error) =
+            apply_actions(
+                &output,
+                &actions,
+                &runtime_vars,
+                config.as_ref(),
+                &action_provider_context,
+                max_agent_depth,
+                runtime_budget,
+            )
+            .await
+        {
+            eprintln!("❌ {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if let Err(validation_issues) = validate_provider_request(provider, &model, &url, &token) {
+        for issue in validation_issues {
+            eprintln!("{issue}");
+        }
+        return;
+    }
+
     let resolved_inputs = match crate::providers::resolve_provider_inputs(&selected_inputs).await {
         Ok(resolved_inputs) => resolved_inputs,
         Err(error) => {
