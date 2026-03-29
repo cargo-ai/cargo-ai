@@ -111,7 +111,7 @@ enum ActionInputSpec {
 struct RunStep {
     kind: String,
     program: Option<String>,
-    model: Option<String>,
+    model: Option<RunArg>,
     output_variable: Option<String>,
     status_variable: Option<String>,
     error_variable: Option<String>,
@@ -974,13 +974,8 @@ fn parse_actions(
                         ));
                     }
 
-                    let model = get_required_string(run_obj, "model", &run_path)?.to_string();
-                    if model.trim().is_empty() {
-                        return Err(BuildError::config(
-                            format!("{run_path}.model"),
-                            "must be a non-empty string",
-                        ));
-                    }
+                    let model =
+                        parse_generate_image_model_field(run_obj, &run_path, action_field_types)?;
 
                     let prompt = parse_string_parts_field(
                         run_obj,
@@ -1194,6 +1189,54 @@ fn parse_run_args(
             )
         })
         .collect()
+}
+
+fn parse_generate_image_model_field(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+    action_field_types: &BTreeMap<String, FieldType>,
+) -> Result<RunArg, BuildError> {
+    let field_path = format!("{run_path}.model");
+    let value = get_required_field(run_obj, "model", run_path)?;
+    let parsed = parse_run_arg(value, &field_path, action_field_types)?;
+
+    match &parsed {
+        RunArg::Literal(model) => {
+            if model.trim().is_empty() {
+                return Err(BuildError::config(
+                    &field_path,
+                    "must be a non-empty string",
+                ));
+            }
+        }
+        RunArg::Variable(variable) => {
+            let field_type = action_field_types.get(variable).ok_or_else(|| {
+                BuildError::config(
+                    &field_path,
+                    format!(
+                        "unknown variable `{variable}`; expected one of: {}",
+                        action_field_types
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                )
+            })?;
+
+            if *field_type != FieldType::String {
+                return Err(BuildError::config(
+                    &field_path,
+                    format!(
+                        "generate_image `model` variables must resolve from string fields; `{variable}` is {}",
+                        type_name(field_type)
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(parsed)
 }
 
 fn validate_action_capture_variable_name(name: &str, path: &str) -> Result<(), BuildError> {
@@ -2710,7 +2753,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                 let model = run_step
                     .model
                     .as_ref()
-                    .map(|name| format!("Some({}.to_string())", rust_string_literal(name)))
+                    .map(|model| format!("Some({})", render_run_arg(model)))
                     .unwrap_or_else(|| "None".to_string());
                 let status_variable = run_step
                     .status_variable
@@ -2995,7 +3038,7 @@ pub enum ActionInputMode {{
 pub struct RunStep {{
     kind: String,
     program: Option<String>,
-    model: Option<String>,
+    model: Option<RunArg>,
     output_variable: Option<String>,
     status_variable: Option<String>,
     error_variable: Option<String>,

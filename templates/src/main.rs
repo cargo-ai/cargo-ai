@@ -1693,12 +1693,13 @@ async fn run_generate_image_step(
         ));
     }
 
-    let model = step.model.as_ref().ok_or_else(|| {
+    let model_arg = step.model.as_ref().ok_or_else(|| {
         format!(
             "Action '{}' generate_image step is missing required `model`.",
             action_name
         )
     })?;
+    let model = resolve_generate_image_model(model_arg, data, action_name)?;
 
     if provider_context.url.contains("chatgpt.com/backend-api/codex")
         && model.starts_with("gpt-image")
@@ -1743,7 +1744,7 @@ async fn run_generate_image_step(
         remaining,
         crate::providers::send_openai_image_request(
             &provider_context.url,
-            model,
+            &model,
             prompt.as_str(),
             provider_context.inference_timeout_in_sec,
             &provider_context.token,
@@ -1798,6 +1799,60 @@ async fn run_generate_image_step(
         output_path_ref.display()
     );
     Ok(StepExecutionOutcome::Completed)
+}
+
+fn resolve_generate_image_model(
+    model: &RunArg,
+    data: &serde_json::Value,
+    action_name: &str,
+) -> Result<String, String> {
+    match model {
+        RunArg::Literal(literal) => {
+            if literal.trim().is_empty() {
+                return Err(format!(
+                    "Action '{}' generate_image `model` must resolve to a non-empty string.",
+                    action_name
+                ));
+            }
+            Ok(literal.clone())
+        }
+        RunArg::Variable(variable) => {
+            let Some(value) = lookup_action_variable(data, variable) else {
+                return Err(format!(
+                    "Action '{}' generate_image `model` references missing variable '{}'.",
+                    action_name, variable
+                ));
+            };
+
+            match value {
+                serde_json::Value::String(text) if !text.trim().is_empty() => Ok(text.clone()),
+                serde_json::Value::String(_) => Err(format!(
+                    "Action '{}' generate_image `model` resolved to an empty string.",
+                    action_name
+                )),
+                serde_json::Value::Bool(_) => Err(format!(
+                    "Action '{}' generate_image `model` must resolve to a string, found boolean for variable '{}'.",
+                    action_name, variable
+                )),
+                serde_json::Value::Number(_) => Err(format!(
+                    "Action '{}' generate_image `model` must resolve to a string, found number for variable '{}'.",
+                    action_name, variable
+                )),
+                serde_json::Value::Array(_) => Err(format!(
+                    "Action '{}' generate_image `model` must resolve to a string, found array for variable '{}'.",
+                    action_name, variable
+                )),
+                serde_json::Value::Object(_) => Err(format!(
+                    "Action '{}' generate_image `model` must resolve to a string, found object for variable '{}'.",
+                    action_name, variable
+                )),
+                serde_json::Value::Null => Err(format!(
+                    "Action '{}' generate_image `model` must resolve to a string, found null for variable '{}'.",
+                    action_name, variable
+                )),
+            }
+        }
+    }
 }
 
 async fn run_agent_step(
