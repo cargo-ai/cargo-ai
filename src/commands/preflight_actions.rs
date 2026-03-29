@@ -3,7 +3,6 @@ use crate::config::adder::set_account_tokens;
 use crate::config::loader::{config_path, load_config};
 use crate::credentials::store;
 use crate::infra_api;
-use futures::future::join_all;
 use jsonlogic::apply;
 use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Write};
@@ -57,6 +56,7 @@ enum ActionLaneStatus {
     Running,
     Completed,
     Failed,
+    Aborted,
     Notice,
     LogicError,
     Skipped,
@@ -185,6 +185,42 @@ impl ActionOutput {
         });
     }
 
+    fn action_aborted(&self, action_index: usize, action_name: &str, error: &str) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::AppendOnly {
+                println!(
+                    "{}",
+                    format_action_line(
+                        action_index,
+                        action_name,
+                        format!("abort requested: {}", error).as_str(),
+                    )
+                );
+                return;
+            }
+
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.status = ActionLaneStatus::Aborted;
+            lane.current_step = None;
+            lane.last_message = Some(format!("abort requested: {}", error));
+            render_live_dashboard(state);
+        });
+    }
+
+    fn action_stopped_by_abort(&self, action_index: usize, action_name: &str) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::AppendOnly {
+                return;
+            }
+
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.status = ActionLaneStatus::Aborted;
+            lane.current_step = None;
+            lane.last_message = Some("stopped after invocation abort.".to_string());
+            render_live_dashboard(state);
+        });
+    }
+
     fn suspend_for_passthrough(&self) {
         self.with_state(|state| {
             if state.mode == ActionOutputMode::Live {
@@ -261,6 +297,7 @@ impl ActionLaneStatus {
             ActionLaneStatus::Running => "running",
             ActionLaneStatus::Completed => "completed",
             ActionLaneStatus::Failed => "failed",
+            ActionLaneStatus::Aborted => "aborted",
             ActionLaneStatus::Notice => "notice",
             ActionLaneStatus::LogicError => "logic error",
             ActionLaneStatus::Skipped => "skipped",
@@ -371,6 +408,63 @@ enum StepExecutionOutcome {
 enum ActionExecutionResult {
     Completed(Vec<StepExecutionOutcome>),
     Failed(String),
+    Aborted(String),
+    StoppedByAbort,
+}
+
+#[derive(Debug, Clone)]
+struct InvocationAbortSignal {
+    inner: Arc<Mutex<InvocationAbortState>>,
+}
+
+#[derive(Debug, Clone)]
+struct InvocationAbortRecord {
+    action_index: usize,
+    action_name: String,
+    error: String,
+}
+
+#[derive(Debug, Default)]
+struct InvocationAbortState {
+    record: Option<InvocationAbortRecord>,
+}
+
+impl InvocationAbortSignal {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(InvocationAbortState::default())),
+        }
+    }
+
+    fn is_triggered(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("abort signal lock should succeed")
+            .record
+            .is_some()
+    }
+
+    fn trigger(&self, action_index: usize, action_name: &str, error: &str) -> bool {
+        let mut state = self.inner.lock().expect("abort signal lock should succeed");
+        if state.record.is_none() {
+            state.record = Some(InvocationAbortRecord {
+                action_index,
+                action_name: action_name.to_string(),
+                error: error.to_string(),
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    fn record(&self) -> Option<InvocationAbortRecord> {
+        self.inner
+            .lock()
+            .expect("abort signal lock should succeed")
+            .record
+            .clone()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -399,6 +493,7 @@ pub(crate) async fn apply_actions(
 ) -> Result<(), String> {
     ACTION_OUTPUT
         .scope(ActionOutput::new(action_execution), async move {
+            let abort_signal = InvocationAbortSignal::new();
             let data = match action_data_from_output(output, runtime_vars) {
                 Ok(data) => data,
                 Err(error) => {
@@ -420,6 +515,7 @@ pub(crate) async fn apply_actions(
                         provider_context,
                         max_agent_depth,
                         runtime_budget,
+                        &abort_signal,
                     )
                     .await?
                 }
@@ -432,12 +528,17 @@ pub(crate) async fn apply_actions(
                         provider_context,
                         max_agent_depth,
                         runtime_budget,
+                        &abort_signal,
                     )
                     .await?
                 }
             };
 
             finish_action_output();
+
+            if let Some(abort) = abort_signal.record() {
+                return Err(format_abort_summary(&abort));
+            }
 
             if let Some(message) = root_run_completion_message() {
                 if top_level_failures.is_empty() {
@@ -462,15 +563,20 @@ async fn apply_actions_sequential(
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
+    abort_signal: &InvocationAbortSignal,
 ) -> Result<Vec<String>, String> {
     let mut top_level_failures = Vec::new();
 
     for (action_index, action) in actions.iter().enumerate() {
+        if abort_signal.is_triggered() {
+            break;
+        }
+
         if !action_logic_matches(action_index, action, data) {
             continue;
         }
 
-        collect_action_execution_result(
+        let should_abort = collect_action_execution_result(
             action_index,
             action,
             run_matching_action_steps(
@@ -482,10 +588,15 @@ async fn apply_actions_sequential(
                 provider_context,
                 max_agent_depth,
                 runtime_budget,
+                abort_signal,
             )
             .await?,
             &mut top_level_failures,
         );
+
+        if should_abort {
+            break;
+        }
     }
 
     Ok(top_level_failures)
@@ -499,34 +610,61 @@ async fn apply_actions_parallel(
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
+    abort_signal: &InvocationAbortSignal,
 ) -> Result<Vec<String>, String> {
     let mut matched_actions = Vec::new();
-    let mut lane_futures = Vec::new();
+    let mut lane_tasks = Vec::new();
+    let action_output = current_action_output();
 
     for (action_index, action) in actions.iter().enumerate() {
+        if abort_signal.is_triggered() {
+            break;
+        }
+
         if !action_logic_matches(action_index, action, data) {
             continue;
         }
 
-        matched_actions.push((action_index, action));
-        lane_futures.push(run_matching_action_steps(
-            action_index,
-            action,
-            data,
-            current_platform,
-            action_execution_override,
-            provider_context,
-            max_agent_depth,
-            runtime_budget,
-        ));
+        matched_actions.push((action_index, action.clone()));
+
+        let action_clone = action.clone();
+        let data_clone = data.clone();
+        let provider_context_clone = provider_context.clone();
+        let abort_signal_clone = abort_signal.clone();
+        let action_output_clone = action_output.clone();
+
+        lane_tasks.push(tokio::spawn(async move {
+            let lane_future = async move {
+                run_matching_action_steps(
+                    action_index,
+                    &action_clone,
+                    &data_clone,
+                    current_platform,
+                    action_execution_override,
+                    &provider_context_clone,
+                    max_agent_depth,
+                    runtime_budget,
+                    &abort_signal_clone,
+                )
+                .await
+            };
+
+            if let Some(output) = action_output_clone {
+                ACTION_OUTPUT.scope(output, lane_future).await
+            } else {
+                lane_future.await
+            }
+        }));
+
+        tokio::task::yield_now().await;
     }
 
     let mut top_level_failures = Vec::new();
-    for ((action_index, action), result) in matched_actions
-        .into_iter()
-        .zip(join_all(lane_futures).await)
-    {
-        collect_action_execution_result(action_index, action, result?, &mut top_level_failures);
+    for ((action_index, action), task) in matched_actions.into_iter().zip(lane_tasks.into_iter()) {
+        let result = task
+            .await
+            .map_err(|error| format!("parallel action task failed: {error}"))??;
+        collect_action_execution_result(action_index, &action, result, &mut top_level_failures);
     }
 
     Ok(top_level_failures)
@@ -555,16 +693,31 @@ fn collect_action_execution_result(
     action: &crate::Action,
     result: ActionExecutionResult,
     top_level_failures: &mut Vec<String>,
-) {
+) -> bool {
     match result {
         ActionExecutionResult::Completed(outcomes) => {
             if let Some(summary) = action_completion_summary(&outcomes) {
                 print_action_success(action_index, &action.name, summary);
             }
+            false
         }
         ActionExecutionResult::Failed(error) => {
             note_action_failure(action_index, &action.name, &error);
             top_level_failures.push(format_action_failure(action_index, &action.name, &error));
+            false
+        }
+        ActionExecutionResult::Aborted(error) => {
+            note_action_abort(action_index, &action.name, &error);
+            top_level_failures.push(format_action_failure(
+                action_index,
+                &action.name,
+                format!("abort requested: {}", error).as_str(),
+            ));
+            true
+        }
+        ActionExecutionResult::StoppedByAbort => {
+            note_action_stopped_by_abort(action_index, &action.name);
+            false
         }
     }
 }
@@ -578,7 +731,12 @@ async fn run_matching_action_steps(
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
+    abort_signal: &InvocationAbortSignal,
 ) -> Result<ActionExecutionResult, String> {
+    if abort_signal.is_triggered() {
+        return Ok(ActionExecutionResult::StoppedByAbort);
+    }
+
     let matching_steps = matching_run_steps(&action.run, current_platform);
     if matching_steps.is_empty() {
         print_action_line(
@@ -600,8 +758,16 @@ async fn run_matching_action_steps(
 
     let matching_step_count = matching_steps.len();
     for (step_index, step) in matching_steps.into_iter().enumerate() {
+        if abort_signal.is_triggered() {
+            return Ok(ActionExecutionResult::StoppedByAbort);
+        }
+
         if !should_run_step(step, &action_data, &action.name)? {
             continue;
+        }
+
+        if abort_signal.is_triggered() {
+            return Ok(ActionExecutionResult::StoppedByAbort);
         }
 
         note_action_step_started(
@@ -698,11 +864,18 @@ async fn run_matching_action_steps(
                     action.name.as_str(),
                 )?;
 
-                if matches!(step_failure_mode(step), crate::FailureMode::Continue) {
-                    print_action_line(action_index, action.name.as_str(), error.as_str());
-                    outcomes.push(StepExecutionOutcome::SoftFailureLogged);
-                } else {
-                    return Ok(ActionExecutionResult::Failed(error));
+                match step_failure_mode(step) {
+                    crate::FailureMode::Continue => {
+                        print_action_line(action_index, action.name.as_str(), error.as_str());
+                        outcomes.push(StepExecutionOutcome::SoftFailureLogged);
+                    }
+                    crate::FailureMode::Stop => {
+                        return Ok(ActionExecutionResult::Failed(error));
+                    }
+                    crate::FailureMode::Abort => {
+                        abort_signal.trigger(action_index, action.name.as_str(), error.as_str());
+                        return Ok(ActionExecutionResult::Aborted(error));
+                    }
                 }
             }
         }
@@ -1354,6 +1527,14 @@ fn format_top_level_action_failures(failures: &[String]) -> String {
     }
 }
 
+fn format_abort_summary(abort: &InvocationAbortRecord) -> String {
+    format!(
+        "Run aborted by {}: {}",
+        action_lane_prefix(abort.action_index, abort.action_name.as_str()),
+        abort.error
+    )
+}
+
 fn run_completion_message_for_depth(depth: u32) -> Option<&'static str> {
     if depth == 0 {
         Some("✅ Run complete.")
@@ -1397,6 +1578,18 @@ fn note_action_step_started(
 fn note_action_failure(action_index: usize, action_name: &str, error: &str) {
     if let Some(output) = current_action_output() {
         output.action_failed(action_index, action_name, error);
+    }
+}
+
+fn note_action_abort(action_index: usize, action_name: &str, error: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_aborted(action_index, action_name, error);
+    }
+}
+
+fn note_action_stopped_by_abort(action_index: usize, action_name: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_stopped_by_abort(action_index, action_name);
     }
 }
 
@@ -3845,6 +4038,262 @@ mod tests {
         assert!(
             first_idx < second_idx,
             "parallel failure reporting should remain in JSON/lane order: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_actions_abort_stops_current_and_later_top_level_work() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2067-abort-child-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+        let output_path =
+            std::env::temp_dir().join(format!("cai2067-abort-output-{}.txt", std::process::id()));
+
+        let script_body = format!("#!/bin/sh\nprintf 'ran' > \"{}\"\n", output_path.display());
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let first_action = crate::Action {
+            name: "first_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![
+                crate::RunStep {
+                    kind: "exec".to_string(),
+                    program: Some("/bin/sh".to_string()),
+                    model: None,
+                    output_variable: None,
+                    status_variable: Some("abort_status".to_string()),
+                    error_variable: Some("abort_error".to_string()),
+                    failure_mode: Some(crate::FailureMode::Abort),
+                    when: None,
+                    args: vec![
+                        crate::RunArg::Literal("-lc".to_string()),
+                        crate::RunArg::Literal("exit 17".to_string()),
+                    ],
+                    prompt: None,
+                    path: None,
+                    subject: None,
+                    text: None,
+                    agent: None,
+                    inputs: None,
+                    input_mode: None,
+                    platforms: None,
+                },
+                crate::RunStep {
+                    kind: "agent".to_string(),
+                    program: None,
+                    model: None,
+                    output_variable: None,
+                    status_variable: None,
+                    error_variable: None,
+                    failure_mode: None,
+                    when: None,
+                    args: Vec::new(),
+                    prompt: None,
+                    path: None,
+                    subject: None,
+                    text: None,
+                    agent: Some(format!("./{}", script_name)),
+                    inputs: None,
+                    input_mode: None,
+                    platforms: None,
+                },
+            ],
+        };
+        let second_action = crate::Action {
+            name: "second_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![crate::RunStep {
+                kind: "agent".to_string(),
+                program: None,
+                model: None,
+                output_variable: None,
+                status_variable: None,
+                error_variable: None,
+                failure_mode: None,
+                when: None,
+                args: Vec::new(),
+                prompt: None,
+                path: None,
+                subject: None,
+                text: None,
+                agent: Some(format!("./{}", script_name)),
+                inputs: None,
+                input_mode: None,
+                platforms: None,
+            }],
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = apply_actions(
+            &crate::Output { answer: 4 },
+            &[first_action, second_action],
+            &serde_json::Map::new(),
+            crate::ActionExecutionMode::Sequential,
+            None,
+            &provider_context(),
+            5,
+            runtime_budget,
+        )
+        .await
+        .expect_err("abort should fail the invocation");
+
+        let output_exists = output_path.exists();
+        let _ = fs::remove_file(&script_path);
+        let _ = fs::remove_file(&output_path);
+
+        assert!(error.contains("Run aborted by [A1 first_action]"));
+        assert!(error.contains("exit status: 17"));
+        assert!(
+            !output_exists,
+            "abort should stop later steps in the lane and later top-level actions"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_actions_parallel_abort_stops_other_lanes_before_next_step() {
+        use std::fs;
+
+        let later_output_path = std::env::temp_dir().join(format!(
+            "cai2067-parallel-abort-output-{}.txt",
+            std::process::id()
+        ));
+
+        let first_action = crate::Action {
+            name: "first_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![
+                crate::RunStep {
+                    kind: "exec".to_string(),
+                    program: Some("/bin/sh".to_string()),
+                    model: None,
+                    output_variable: None,
+                    status_variable: None,
+                    error_variable: None,
+                    failure_mode: None,
+                    when: None,
+                    args: vec![
+                        crate::RunArg::Literal("-lc".to_string()),
+                        crate::RunArg::Literal("sleep 0.1".to_string()),
+                    ],
+                    prompt: None,
+                    path: None,
+                    subject: None,
+                    text: None,
+                    agent: None,
+                    inputs: None,
+                    input_mode: None,
+                    platforms: None,
+                },
+                crate::RunStep {
+                    kind: "exec".to_string(),
+                    program: Some("/bin/sh".to_string()),
+                    model: None,
+                    output_variable: None,
+                    status_variable: None,
+                    error_variable: None,
+                    failure_mode: Some(crate::FailureMode::Abort),
+                    when: None,
+                    args: vec![
+                        crate::RunArg::Literal("-lc".to_string()),
+                        crate::RunArg::Literal("exit 19".to_string()),
+                    ],
+                    prompt: None,
+                    path: None,
+                    subject: None,
+                    text: None,
+                    agent: None,
+                    inputs: None,
+                    input_mode: None,
+                    platforms: None,
+                },
+            ],
+        };
+        let second_action = crate::Action {
+            name: "second_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![
+                crate::RunStep {
+                    kind: "exec".to_string(),
+                    program: Some("/bin/sh".to_string()),
+                    model: None,
+                    output_variable: None,
+                    status_variable: None,
+                    error_variable: None,
+                    failure_mode: None,
+                    when: None,
+                    args: vec![
+                        crate::RunArg::Literal("-lc".to_string()),
+                        crate::RunArg::Literal("sleep 0.2".to_string()),
+                    ],
+                    prompt: None,
+                    path: None,
+                    subject: None,
+                    text: None,
+                    agent: None,
+                    inputs: None,
+                    input_mode: None,
+                    platforms: None,
+                },
+                crate::RunStep {
+                    kind: "exec".to_string(),
+                    program: Some("/bin/sh".to_string()),
+                    model: None,
+                    output_variable: None,
+                    status_variable: None,
+                    error_variable: None,
+                    failure_mode: None,
+                    when: None,
+                    args: vec![
+                        crate::RunArg::Literal("-lc".to_string()),
+                        crate::RunArg::Literal(format!(
+                            "printf 'late' > \"{}\"",
+                            later_output_path.display()
+                        )),
+                    ],
+                    prompt: None,
+                    path: None,
+                    subject: None,
+                    text: None,
+                    agent: None,
+                    inputs: None,
+                    input_mode: None,
+                    platforms: None,
+                },
+            ],
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = apply_actions(
+            &crate::Output { answer: 4 },
+            &[first_action, second_action],
+            &serde_json::Map::new(),
+            crate::ActionExecutionMode::Parallel,
+            None,
+            &provider_context(),
+            5,
+            runtime_budget,
+        )
+        .await
+        .expect_err("abort should fail the parallel invocation");
+
+        let later_output_exists = later_output_path.exists();
+        let _ = fs::remove_file(&later_output_path);
+
+        assert!(error.contains("Run aborted by [A1 first_action]"));
+        assert!(error.contains("exit status: 19"));
+        assert!(
+            !later_output_exists,
+            "other lanes should not start later steps after a peer lane aborts"
         );
     }
 

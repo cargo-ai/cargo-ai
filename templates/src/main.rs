@@ -5,7 +5,6 @@ mod credentials;
 mod providers;
 
 use jsonlogic::apply;
-use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -76,6 +75,7 @@ enum ActionLaneStatus {
     Running,
     Completed,
     Failed,
+    Aborted,
     Notice,
     LogicError,
     Skipped,
@@ -201,6 +201,42 @@ impl ActionOutput {
         });
     }
 
+    fn action_aborted(&self, action_index: usize, action_name: &str, error: &str) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::AppendOnly {
+                println!(
+                    "{}",
+                    format_action_line(
+                        action_index,
+                        action_name,
+                        format!("abort requested: {}", error).as_str(),
+                    )
+                );
+                return;
+            }
+
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.status = ActionLaneStatus::Aborted;
+            lane.current_step = None;
+            lane.last_message = Some(format!("abort requested: {}", error));
+            render_live_dashboard(state);
+        });
+    }
+
+    fn action_stopped_by_abort(&self, action_index: usize, action_name: &str) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::AppendOnly {
+                return;
+            }
+
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.status = ActionLaneStatus::Aborted;
+            lane.current_step = None;
+            lane.last_message = Some("stopped after invocation abort.".to_string());
+            render_live_dashboard(state);
+        });
+    }
+
     fn suspend_for_passthrough(&self) {
         self.with_state(|state| {
             if state.mode == ActionOutputMode::Live {
@@ -269,6 +305,7 @@ impl ActionLaneStatus {
             ActionLaneStatus::Running => "running",
             ActionLaneStatus::Completed => "completed",
             ActionLaneStatus::Failed => "failed",
+            ActionLaneStatus::Aborted => "aborted",
             ActionLaneStatus::Notice => "notice",
             ActionLaneStatus::LogicError => "logic error",
             ActionLaneStatus::Skipped => "skipped",
@@ -408,6 +445,66 @@ enum StepExecutionOutcome {
 enum ActionExecutionResult {
     Completed(Vec<StepExecutionOutcome>),
     Failed(String),
+    Aborted(String),
+    StoppedByAbort,
+}
+
+#[derive(Debug, Clone)]
+struct InvocationAbortSignal {
+    inner: Arc<Mutex<InvocationAbortState>>,
+}
+
+#[derive(Debug, Clone)]
+struct InvocationAbortRecord {
+    action_index: usize,
+    action_name: String,
+    error: String,
+}
+
+#[derive(Debug, Default)]
+struct InvocationAbortState {
+    record: Option<InvocationAbortRecord>,
+}
+
+impl InvocationAbortSignal {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(InvocationAbortState::default())),
+        }
+    }
+
+    fn is_triggered(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("abort signal lock should succeed")
+            .record
+            .is_some()
+    }
+
+    fn trigger(&self, action_index: usize, action_name: &str, error: &str) -> bool {
+        let mut state = self
+            .inner
+            .lock()
+            .expect("abort signal lock should succeed");
+        if state.record.is_none() {
+            state.record = Some(InvocationAbortRecord {
+                action_index,
+                action_name: action_name.to_string(),
+                error: error.to_string(),
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    fn record(&self) -> Option<InvocationAbortRecord> {
+        self.inner
+            .lock()
+            .expect("abort signal lock should succeed")
+            .record
+            .clone()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -890,9 +987,9 @@ fn persist_account_tokens_to_keychain(
 fn persist_refreshed_account_tokens(
     access_token: &str,
     refresh_token: Option<&str>,
-    config: Option<&config::schema::Config>,
+    secret_store_mode: Option<SecretStoreMode>,
 ) -> Result<(), String> {
-    match config.and_then(|cfg| cfg.secret_store) {
+    match secret_store_mode {
         Some(SecretStoreMode::File) => persist_account_tokens_to_file(access_token, refresh_token),
         Some(SecretStoreMode::Keychain) => {
             persist_account_tokens_to_keychain(access_token, refresh_token)
@@ -904,11 +1001,10 @@ fn persist_refreshed_account_tokens(
     }
 }
 
-fn load_account_auth(config: Option<&config::schema::Config>) -> Result<AccountAuth, String> {
-    let configured_mode = config.and_then(|cfg| cfg.secret_store);
-    let auth = match configured_mode {
-        Some(config::schema::SecretStoreMode::File) => load_account_tokens_from_file()?,
-        Some(config::schema::SecretStoreMode::Keychain) => load_account_tokens_from_keychain()?,
+fn load_account_auth(secret_store_mode: Option<SecretStoreMode>) -> Result<AccountAuth, String> {
+    let auth = match secret_store_mode {
+        Some(SecretStoreMode::File) => load_account_tokens_from_file()?,
+        Some(SecretStoreMode::Keychain) => load_account_tokens_from_keychain()?,
         None => match load_account_tokens_from_keychain() {
             Ok(Some(tokens)) => Some(tokens),
             Ok(None) | Err(_) => load_account_tokens_from_file()?,
@@ -989,9 +1085,9 @@ async fn send_account_mail_request(
 async fn run_email_me_action(
     subject: &str,
     text: &str,
-    config: Option<&config::schema::Config>,
+    secret_store_mode: Option<SecretStoreMode>,
 ) -> Result<(), String> {
-    let auth = load_account_auth(config)?;
+    let auth = load_account_auth(secret_store_mode)?;
     let access_token = auth.access_token;
     let refresh_token = auth.refresh_token;
 
@@ -1027,7 +1123,7 @@ async fn run_email_me_action(
         if let Err(error) = persist_refreshed_account_tokens(
             refreshed_access_token.as_str(),
             Some(refresh_token),
-            config,
+            secret_store_mode,
         ) {
             eprintln!("⚠️ Failed to update account tokens in credential store: {error}");
         }
@@ -1738,6 +1834,8 @@ async fn apply_actions(
 ) -> Result<(), String> {
     ACTION_OUTPUT
         .scope(ActionOutput::new(action_execution), async move {
+            let abort_signal = InvocationAbortSignal::new();
+            let action_secret_store_mode = config.and_then(|cfg| cfg.secret_store);
             let data = action_data_from_output(output, runtime_vars).map_err(|error| {
                 format!("Failed to serialize output for action evaluation: {error}")
             })?;
@@ -1750,10 +1848,11 @@ async fn apply_actions(
                         &data,
                         current_platform,
                         action_execution_override,
-                        config,
+                        action_secret_store_mode,
                         provider_context,
                         max_agent_depth,
                         runtime_budget,
+                        &abort_signal,
                     )
                     .await?
                 }
@@ -1763,16 +1862,21 @@ async fn apply_actions(
                         &data,
                         current_platform,
                         action_execution_override,
-                        config,
+                        action_secret_store_mode,
                         provider_context,
                         max_agent_depth,
                         runtime_budget,
+                        &abort_signal,
                     )
                     .await?
                 }
             };
 
             finish_action_output();
+
+            if let Some(abort) = abort_signal.record() {
+                return Err(format_abort_summary(&abort));
+            }
 
             if let Some(message) = root_run_completion_message() {
                 if top_level_failures.is_empty() {
@@ -1794,19 +1898,24 @@ async fn apply_actions_sequential(
     data: &serde_json::Value,
     current_platform: Option<&'static str>,
     action_execution_override: Option<ActionExecutionMode>,
-    config: Option<&config::schema::Config>,
+    action_secret_store_mode: Option<SecretStoreMode>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
+    abort_signal: &InvocationAbortSignal,
 ) -> Result<Vec<String>, String> {
     let mut top_level_failures = Vec::new();
 
     for (action_index, action) in actions.iter().enumerate() {
+        if abort_signal.is_triggered() {
+            break;
+        }
+
         if !action_logic_matches(action_index, action, data) {
             continue;
         }
 
-        collect_action_execution_result(
+        let should_abort = collect_action_execution_result(
             action_index,
             action,
             run_matching_action_steps(
@@ -1815,14 +1924,19 @@ async fn apply_actions_sequential(
                 data,
                 current_platform,
                 action_execution_override,
-                config,
+                action_secret_store_mode,
                 provider_context,
                 max_agent_depth,
                 runtime_budget,
+                abort_signal,
             )
             .await?,
             &mut top_level_failures,
         );
+
+        if should_abort {
+            break;
+        }
     }
 
     Ok(top_level_failures)
@@ -1833,37 +1947,66 @@ async fn apply_actions_parallel(
     data: &serde_json::Value,
     current_platform: Option<&'static str>,
     action_execution_override: Option<ActionExecutionMode>,
-    config: Option<&config::schema::Config>,
+    action_secret_store_mode: Option<SecretStoreMode>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
+    abort_signal: &InvocationAbortSignal,
 ) -> Result<Vec<String>, String> {
     let mut matched_actions = Vec::new();
-    let mut lane_futures = Vec::new();
+    let mut lane_tasks = Vec::new();
+    let action_output = current_action_output();
 
     for (action_index, action) in actions.iter().enumerate() {
+        if abort_signal.is_triggered() {
+            break;
+        }
+
         if !action_logic_matches(action_index, action, data) {
             continue;
         }
 
-        matched_actions.push((action_index, action));
-        lane_futures.push(run_matching_action_steps(
-            action_index,
-            action,
-            data,
-            current_platform,
-            action_execution_override,
-            config,
-            provider_context,
-            max_agent_depth,
-            runtime_budget,
-        ));
+        matched_actions.push((action_index, action.clone()));
+
+        let action_clone = action.clone();
+        let data_clone = data.clone();
+        let provider_context_clone = provider_context.clone();
+        let abort_signal_clone = abort_signal.clone();
+        let action_output_clone = action_output.clone();
+
+        lane_tasks.push(tokio::spawn(async move {
+            let lane_future = async move {
+                run_matching_action_steps(
+                    action_index,
+                    &action_clone,
+                    &data_clone,
+                    current_platform,
+                    action_execution_override,
+                    action_secret_store_mode,
+                    &provider_context_clone,
+                    max_agent_depth,
+                    runtime_budget,
+                    &abort_signal_clone,
+                )
+                .await
+            };
+
+            if let Some(output) = action_output_clone {
+                ACTION_OUTPUT.scope(output, lane_future).await
+            } else {
+                lane_future.await
+            }
+        }));
+
+        tokio::task::yield_now().await;
     }
 
     let mut top_level_failures = Vec::new();
-    for ((action_index, action), result) in matched_actions.into_iter().zip(join_all(lane_futures).await)
-    {
-        collect_action_execution_result(action_index, action, result?, &mut top_level_failures);
+    for ((action_index, action), task) in matched_actions.into_iter().zip(lane_tasks.into_iter()) {
+        let result = task
+            .await
+            .map_err(|error| format!("parallel action task failed: {error}"))??;
+        collect_action_execution_result(action_index, &action, result, &mut top_level_failures);
     }
 
     Ok(top_level_failures)
@@ -1888,16 +2031,31 @@ fn collect_action_execution_result(
     action: &Action,
     result: ActionExecutionResult,
     top_level_failures: &mut Vec<String>,
-) {
+) -> bool {
     match result {
         ActionExecutionResult::Completed(outcomes) => {
             if let Some(summary) = action_completion_summary(&outcomes) {
                 print_action_success(action_index, &action.name, summary);
             }
+            false
         }
         ActionExecutionResult::Failed(error) => {
             note_action_failure(action_index, &action.name, &error);
             top_level_failures.push(format_action_failure(action_index, &action.name, &error));
+            false
+        }
+        ActionExecutionResult::Aborted(error) => {
+            note_action_abort(action_index, &action.name, &error);
+            top_level_failures.push(format_action_failure(
+                action_index,
+                &action.name,
+                format!("abort requested: {}", error).as_str(),
+            ));
+            true
+        }
+        ActionExecutionResult::StoppedByAbort => {
+            note_action_stopped_by_abort(action_index, &action.name);
+            false
         }
     }
 }
@@ -1908,11 +2066,16 @@ async fn run_matching_action_steps(
     data: &serde_json::Value,
     current_platform: Option<&'static str>,
     action_execution_override: Option<ActionExecutionMode>,
-    config: Option<&config::schema::Config>,
+    action_secret_store_mode: Option<SecretStoreMode>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
+    abort_signal: &InvocationAbortSignal,
 ) -> Result<ActionExecutionResult, String> {
+    if abort_signal.is_triggered() {
+        return Ok(ActionExecutionResult::StoppedByAbort);
+    }
+
     let matching_steps = matching_run_steps(&action.run, current_platform);
     if matching_steps.is_empty() {
         print_action_line(
@@ -1934,8 +2097,16 @@ async fn run_matching_action_steps(
 
     let matching_step_count = matching_steps.len();
     for (step_index, step) in matching_steps.into_iter().enumerate() {
+        if abort_signal.is_triggered() {
+            return Ok(ActionExecutionResult::StoppedByAbort);
+        }
+
         if !should_run_step(step, &action_data, &action.name)? {
             continue;
+        }
+
+        if abort_signal.is_triggered() {
+            return Ok(ActionExecutionResult::StoppedByAbort);
         }
 
         note_action_step_started(
@@ -1956,7 +2127,7 @@ async fn run_matching_action_steps(
                 &action_data,
                 action_index,
                 &action.name,
-                config,
+                action_secret_store_mode,
                 runtime_budget,
                 single_step_action,
             )
@@ -2027,11 +2198,18 @@ async fn run_matching_action_steps(
                     action.name.as_str(),
                 )?;
 
-                if matches!(step_failure_mode(step), FailureMode::Continue) {
-                    print_action_line(action_index, action.name.as_str(), error.as_str());
-                    outcomes.push(StepExecutionOutcome::SoftFailureLogged);
-                } else {
-                    return Ok(ActionExecutionResult::Failed(error));
+                match step_failure_mode(step) {
+                    FailureMode::Continue => {
+                        print_action_line(action_index, action.name.as_str(), error.as_str());
+                        outcomes.push(StepExecutionOutcome::SoftFailureLogged);
+                    }
+                    FailureMode::Stop => {
+                        return Ok(ActionExecutionResult::Failed(error));
+                    }
+                    FailureMode::Abort => {
+                        abort_signal.trigger(action_index, action.name.as_str(), error.as_str());
+                        return Ok(ActionExecutionResult::Aborted(error));
+                    }
                 }
             }
         }
@@ -2228,7 +2406,7 @@ async fn run_email_me_step(
     data: &serde_json::Value,
     action_index: usize,
     action_name: &str,
-    config: Option<&config::schema::Config>,
+    secret_store_mode: Option<SecretStoreMode>,
     runtime_budget: InvocationRuntimeBudget,
     single_step_action: bool,
 ) -> Result<StepExecutionOutcome, String> {
@@ -2255,7 +2433,7 @@ async fn run_email_me_step(
 
     match tokio::time::timeout(
         remaining,
-        run_email_me_action(subject.as_str(), text.as_str(), config),
+        run_email_me_action(subject.as_str(), text.as_str(), secret_store_mode),
     )
     .await
     {
@@ -2598,6 +2776,14 @@ fn format_top_level_action_failures(failures: &[String]) -> String {
     }
 }
 
+fn format_abort_summary(abort: &InvocationAbortRecord) -> String {
+    format!(
+        "Run aborted by {}: {}",
+        action_lane_prefix(abort.action_index, abort.action_name.as_str()),
+        abort.error
+    )
+}
+
 fn run_completion_message_for_depth(depth: u32) -> Option<&'static str> {
     if depth == 0 {
         Some("✅ Run complete.")
@@ -2635,6 +2821,18 @@ fn note_action_step_started(
 fn note_action_failure(action_index: usize, action_name: &str, error: &str) {
     if let Some(output) = current_action_output() {
         output.action_failed(action_index, action_name, error);
+    }
+}
+
+fn note_action_abort(action_index: usize, action_name: &str, error: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_aborted(action_index, action_name, error);
+    }
+}
+
+fn note_action_stopped_by_abort(action_index: usize, action_name: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_stopped_by_abort(action_index, action_name);
     }
 }
 

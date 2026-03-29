@@ -970,6 +970,31 @@ fn accepts_step_control_fields_for_later_steps() {
 }
 
 #[test]
+fn accepts_abort_failure_mode_for_run_steps() {
+    let cfg = config_with(
+        r#""answer": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "abort_action",
+            "logic": { "==": [ { "var": "answer" }, 4 ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "/bin/false",
+                "args": [],
+                "failure_mode": "abort"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains("failure_mode: Some(FailureMode::Abort)"));
+}
+
+#[test]
 fn rejects_duplicate_output_variable_names_within_one_action() {
     let cfg = config_with(
         r#""customer": { "type": "string" }"#,

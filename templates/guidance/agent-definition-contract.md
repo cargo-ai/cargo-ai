@@ -268,7 +268,10 @@ Example:
 
 - Steps stop the action by default when they fail.
 - Use `failure_mode: "continue"` only when a later step should react to a failure.
+- Use `failure_mode: "abort"` when the whole invocation should stop scheduling new work and fail with an explicit abort summary.
 - A hard failure stops the rest of that action's `run` list, but it does not prevent later eligible top-level actions from running; Cargo AI aggregates top-level action failures after the full scan.
+- In the first `abort` slice, already-running work settles cooperatively unless a safe cancellation path already exists.
+- Child-agent abort stays local to the child invocation first; the parent lane then handles that failed child exit according to the parent step's own `failure_mode`.
 - `status_variable` stores:
   - `succeeded`
   - `failed`

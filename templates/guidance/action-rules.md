@@ -62,7 +62,7 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - `when`
   - JSON Logic object evaluated by the parent action runner.
 - `failure_mode`
-  - Allowed values: `stop`, `continue`
+  - Allowed values: `stop`, `continue`, `abort`
   - Omitted means `stop`.
 - `platform`
   - Allowed values: `macos`, `linux`, `windows`
@@ -80,7 +80,9 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 ## Step Outcome Rules
 - Steps stop the action by default when they fail.
 - `failure_mode: "continue"` allows later steps to run after failure.
+- `failure_mode: "abort"` stops scheduling new work for the current invocation, lets already-running work settle in the first slice, and fails the run with an explicit abort summary.
 - A hard failure still stays local to that action's `run` list; later eligible top-level actions continue and the runtime aggregates top-level failures at the end.
+- Child-agent abort stays local to the child invocation first; the parent lane then handles that failed child exit according to the parent step's own `failure_mode`.
 - If a step is skipped because `when` is false, `status_variable` and `error_variable` stay unset in the MVP.
 - If a step is skipped because `platform` does not match, `status_variable` and `error_variable` stay unset in the MVP.
 - Matching steps still run in listed order.

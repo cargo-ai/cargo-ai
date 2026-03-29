@@ -455,7 +455,7 @@ Then expand into richer constraints and exact output choices:
 `actions` define what the agent is allowed to do after it produces the top-level structured output.
 Action `logic` uses [JSON Logic](https://jsonlogic.com/).
 Within an action, run steps execute in order after the action's JSON Logic condition evaluates true. That logic can read both top-level model output fields and declared `runtime.*` values.
-By default, a failed step stops the rest of that action's `run` list unless you set `failure_mode: "continue"`, but later eligible top-level actions still run and Cargo AI aggregates top-level failures at the end.
+By default, a failed step stops the rest of that action's `run` list unless you set `failure_mode: "continue"`, but later eligible top-level actions still run and Cargo AI aggregates top-level failures at the end. If a step is truly fatal for the whole invocation, use `failure_mode: "abort"` to stop scheduling new work, let already-running work settle, and fail the run with an explicit abort summary.
 
 Start with one simple local action:
 

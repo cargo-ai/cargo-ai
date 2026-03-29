@@ -132,6 +132,7 @@ struct RunStep {
 enum FailureMode {
     Stop,
     Continue,
+    Abort,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1148,16 +1149,17 @@ fn parse_optional_failure_mode(
     let failure_mode = value.as_str().ok_or_else(|| {
         BuildError::config(
             &failure_mode_path,
-            "expected `failure_mode` to be a string (`stop` or `continue`)",
+            "expected `failure_mode` to be a string (`stop`, `continue`, or `abort`)",
         )
     })?;
 
     match failure_mode.trim() {
         "stop" => Ok(Some(FailureMode::Stop)),
         "continue" => Ok(Some(FailureMode::Continue)),
+        "abort" => Ok(Some(FailureMode::Abort)),
         _ => Err(BuildError::config(
             &failure_mode_path,
-            "unsupported `failure_mode` (supported: `stop`, `continue`)",
+            "unsupported `failure_mode` (supported: `stop`, `continue`, `abort`)",
         )),
     }
 }
@@ -2808,6 +2810,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     .map(|mode| match mode {
                         FailureMode::Stop => "Some(FailureMode::Stop)".to_string(),
                         FailureMode::Continue => "Some(FailureMode::Continue)".to_string(),
+                        FailureMode::Abort => "Some(FailureMode::Abort)".to_string(),
                     })
                     .unwrap_or_else(|| "None".to_string());
                 let when = run_step
@@ -3081,6 +3084,7 @@ pub enum ActionInput {{
 pub enum FailureMode {{
     Stop,
     Continue,
+    Abort,
 }}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
