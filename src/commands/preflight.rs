@@ -238,6 +238,26 @@ fn resolved_inputs_for_run(sub_m: &ArgMatches) -> Result<Vec<crate::Input>, Stri
     })
 }
 
+fn validate_structural_action_only_inputs(
+    has_output_schema_properties: bool,
+    selected_inputs: &[crate::Input],
+) -> Result<(), String> {
+    if has_output_schema_properties || selected_inputs.is_empty() {
+        return Ok(());
+    }
+
+    Err(
+        "This agent declares empty `agent_schema.properties`; runtime model-facing input flags such as --input-text, --input-url, --input-image, and --input-file are not allowed because there is no model pass to consume them."
+            .to_string(),
+    )
+}
+
+fn empty_action_only_output() -> Result<crate::Output, String> {
+    serde_json::from_value(serde_json::json!({})).map_err(|error| {
+        format!("Internal error: failed to initialize action-only output placeholder: {error}")
+    })
+}
+
 fn resolved_runtime_vars_for_run(
     sub_m: &ArgMatches,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
@@ -558,15 +578,6 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         }
     }
 
-    if let Err(validation_issues) = validate_provider_request(provider, &model, &url, &token) {
-        for issue in validation_issues {
-            eprintln!("{issue}");
-        }
-        return false;
-    }
-
-    // End: Argument assignments
-
     let selected_inputs = match resolved_inputs_for_run(sub_m) {
         Ok(selected_inputs) => selected_inputs,
         Err(error) => {
@@ -581,6 +592,58 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             return false;
         }
     };
+    let has_output_schema_properties = crate::has_output_schema_properties();
+
+    if let Err(error) =
+        validate_structural_action_only_inputs(has_output_schema_properties, &selected_inputs)
+    {
+        eprintln!("❌ {error}");
+        return false;
+    }
+
+    if !has_output_schema_properties {
+        let output = match empty_action_only_output() {
+            Ok(output) => output,
+            Err(error) => {
+                eprintln!("❌ {error}");
+                return false;
+            }
+        };
+        let actions = crate::actions();
+        let action_provider_context = super::preflight_actions::ActionProviderContext {
+            provider,
+            url: url.clone(),
+            token: token.clone(),
+            inference_timeout_in_sec,
+        };
+
+        return match super::preflight_actions::apply_actions(
+            &output,
+            &actions,
+            &runtime_vars,
+            &action_provider_context,
+            max_agent_depth,
+            runtime_budget,
+        )
+        .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("❌ {error}");
+                false
+            }
+        };
+    }
+
+    if let Err(validation_issues) = validate_provider_request(provider, &model, &url, &token) {
+        for issue in validation_issues {
+            eprintln!("{issue}");
+        }
+        return false;
+    }
+
+    // End: Argument assignments
+
     let resolved_inputs = match crate::providers::resolve_provider_inputs(&selected_inputs).await {
         Ok(resolved_inputs) => resolved_inputs,
         Err(error) => {
@@ -765,7 +828,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 mod tests {
     use super::{
         cli_override_descriptions, profile_selection_messages, resolve_runtime_vars_from_specs,
-        unknown_server_messages, LoadedProfileKind,
+        unknown_server_messages, validate_structural_action_only_inputs, LoadedProfileKind,
     };
     use crate::args::test_cli_command;
     use serde_json::json;
@@ -1227,6 +1290,42 @@ mod tests {
         .expect_err("empty integers should fail");
 
         assert!(error.contains("cannot be empty"));
+    }
+
+    #[test]
+    fn validate_structural_action_only_inputs_allows_empty_input_set() {
+        let selected_inputs = Vec::new();
+
+        let result = validate_structural_action_only_inputs(false, &selected_inputs);
+
+        assert!(result.is_ok(), "empty input set should be allowed");
+    }
+
+    #[test]
+    fn validate_structural_action_only_inputs_rejects_runtime_inputs() {
+        let selected_inputs = vec![crate::Input::Text {
+            text: "hello".to_string(),
+        }];
+
+        let error = validate_structural_action_only_inputs(false, &selected_inputs)
+            .expect_err("runtime inputs should be rejected");
+
+        assert!(error.contains("empty `agent_schema.properties`"));
+        assert!(error.contains("--input-text"));
+    }
+
+    #[test]
+    fn validate_structural_action_only_inputs_allows_schema_backed_agents() {
+        let selected_inputs = vec![crate::Input::Text {
+            text: "hello".to_string(),
+        }];
+
+        let result = validate_structural_action_only_inputs(true, &selected_inputs);
+
+        assert!(
+            result.is_ok(),
+            "schema-backed agents should keep accepting inputs"
+        );
     }
 
     #[tokio::test]

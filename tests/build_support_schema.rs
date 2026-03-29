@@ -13,6 +13,32 @@ fn config_with(properties: &str, actions: &str) -> String {
 }
 
 fn config_with_runtime_vars(properties: &str, runtime_vars: &str, actions: &str) -> String {
+    config_with_optional_inputs(
+        properties,
+        runtime_vars,
+        actions,
+        Some(
+            r#"[
+        { "type": "text", "text": "Test prompt" }
+    ]"#,
+        ),
+    )
+}
+
+fn config_with_optional_inputs(
+    properties: &str,
+    runtime_vars: &str,
+    actions: &str,
+    inputs: Option<&str>,
+) -> String {
+    let inputs_block = if let Some(inputs) = inputs {
+        format!(
+            r#",
+    "inputs": {inputs}"#
+        )
+    } else {
+        String::new()
+    };
     let runtime_vars_block = if runtime_vars.trim().is_empty() {
         String::new()
     } else {
@@ -26,10 +52,7 @@ fn config_with_runtime_vars(properties: &str, runtime_vars: &str, actions: &str)
 
     format!(
         r#"{{
-    "version": "2026-03-03.r1",
-    "inputs": [
-        {{ "type": "text", "text": "Test prompt" }}
-    ],
+    "version": "2026-03-03.r1"{inputs_block},
     "agent_schema": {{
         "type": "object",
         "properties": {{
@@ -39,6 +62,52 @@ fn config_with_runtime_vars(properties: &str, runtime_vars: &str, actions: &str)
     "actions": {actions}
 }}"#
     )
+}
+
+#[test]
+fn accepts_schema_backed_agents_without_baked_inputs() {
+    let cfg = config_with_optional_inputs(r#""answer": { "type": "integer" }"#, "", "[]", None);
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains("pub fn inputs() -> Vec<Input> {\n    vec![]\n}"));
+    assert!(generated.contains("pub fn has_output_schema_properties() -> bool {\n    true\n}"));
+}
+
+#[test]
+fn accepts_structural_action_only_agents_without_inputs() {
+    let cfg = config_with_optional_inputs(
+        "",
+        r#""generate_images": { "type": "boolean", "default": true }"#,
+        "[]",
+        None,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains("pub fn inputs() -> Vec<Input> {\n    vec![]\n}"));
+    assert!(generated.contains("pub fn has_output_schema_properties() -> bool {\n    false\n}"));
+}
+
+#[test]
+fn rejects_baked_inputs_when_schema_properties_are_empty() {
+    let cfg = config_with_optional_inputs(
+        "",
+        "",
+        "[]",
+        Some(
+            r#"[
+        { "type": "text", "text": "Test prompt" }
+    ]"#,
+        ),
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.inputs"));
+    assert!(err.contains("are not allowed when `agent_schema.properties` is empty"));
 }
 
 #[test]

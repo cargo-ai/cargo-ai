@@ -10,7 +10,7 @@ For broader shape and validation rules, also read:
 ## Top-Level Shape
 - Required top-level keys:
   - `version`
-  - `inputs`
+  - optional `inputs`
   - optional `runtime_vars`
   - `agent_schema`
   - `actions`
@@ -68,6 +68,8 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - Top-level `agent_schema` fields are the returned output of the agent.
 - Action steps are side effects or follow-up orchestration after that output exists.
 - `output_variable` captures step-local stdout only. It does not change the returned top-level output object.
+- If `agent_schema.properties` is empty, Cargo AI skips the initial model call and starts directly at the action layer.
+- In that structural action-only shape, top-level `inputs` and runtime `--input-*` flags are invalid.
 
 ## Variable Namespace Rules
 - Captured names are flat. Dotted names are invalid.
@@ -81,6 +83,7 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - Top-level action `logic` can read:
   - top-level model output fields
   - declared `runtime.*` values
+  - for the structural action-only shape, only declared `runtime.*` values are available at action start
 - `when` and string-part substitutions can read:
   - top-level model output fields
   - declared `runtime.*` values

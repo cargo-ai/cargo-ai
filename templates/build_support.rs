@@ -408,7 +408,6 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
     let schema_version = get_required_string(root_obj, "version", "$")?;
     validate_schema_version(schema_version, "$.version")?;
 
-    let inputs = parse_inputs(root_obj)?;
     let runtime_vars = parse_runtime_vars(root_obj)?;
 
     let schema = get_required_object(root_obj, "agent_schema", "$")?;
@@ -433,6 +432,14 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
         parsed_properties.push(parsed_property);
     }
 
+    if parsed_properties.is_empty() && root_obj.contains_key("inputs") {
+        return Err(BuildError::config(
+            "$.inputs",
+            "top-level `inputs` are not allowed when `agent_schema.properties` is empty; remove `inputs` or declare at least one schema property",
+        ));
+    }
+
+    let inputs = parse_inputs(root_obj)?;
     let action_field_types = action_field_types(&schema_field_types, &runtime_vars);
     let actions = parse_actions(root_obj, &schema_field_types, &action_field_types)?;
 
@@ -522,14 +529,12 @@ fn is_leap_year(year: u32) -> bool {
 }
 
 fn parse_inputs(root_obj: &Map<String, Value>) -> Result<Vec<InputSpec>, BuildError> {
-    let inputs = get_required_array(root_obj, "inputs", "$")?;
-    if inputs.is_empty() {
-        return Err(BuildError::config(
-            "$.inputs",
-            "must contain at least one entry",
-        ));
-    }
-
+    let Some(inputs_value) = root_obj.get("inputs") else {
+        return Ok(Vec::new());
+    };
+    let inputs = inputs_value
+        .as_array()
+        .ok_or_else(|| BuildError::config("$.inputs", "expected an array"))?;
     parse_input_specs(inputs, "$.inputs")
 }
 
@@ -2938,6 +2943,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
         })
         .collect::<Vec<_>>()
         .join("");
+    let has_output_schema_properties = !config.properties.is_empty();
 
     format!(
         r##"
@@ -2966,6 +2972,10 @@ pub enum Input {{
 
 pub fn inputs() -> Vec<Input> {{
     vec![{input_list}]
+}}
+
+pub fn has_output_schema_properties() -> bool {{
+    {has_output_schema_properties}
 }}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
