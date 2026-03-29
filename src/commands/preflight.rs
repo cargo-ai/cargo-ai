@@ -238,6 +238,136 @@ fn resolved_inputs_for_run(sub_m: &ArgMatches) -> Result<Vec<crate::Input>, Stri
     })
 }
 
+fn resolved_runtime_vars_for_run(
+    sub_m: &ArgMatches,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    resolve_runtime_vars_from_specs(sub_m, &crate::runtime_var_specs())
+}
+
+fn resolve_runtime_vars_from_specs(
+    sub_m: &ArgMatches,
+    specs: &[crate::RuntimeVarSpec],
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let mut declared_specs = std::collections::BTreeMap::new();
+    for spec in specs {
+        declared_specs.insert(spec.name.as_str(), spec);
+    }
+
+    let mut resolved = serde_json::Map::new();
+    let mut provided_names = std::collections::BTreeSet::new();
+
+    for raw_assignment in sub_m.get_many::<String>("run_var").into_iter().flatten() {
+        let (name, raw_value) = parse_runtime_var_assignment(raw_assignment)?;
+        let Some(spec) = declared_specs.get(name) else {
+            return Err(format!(
+                "Runtime variable '{name}' was provided via --run-var but is not declared in runtime_vars."
+            ));
+        };
+
+        if !provided_names.insert(name.to_string()) {
+            return Err(format!(
+                "Duplicate runtime variable '{name}' provided via --run-var; each runtime variable may be set at most once per invocation."
+            ));
+        }
+
+        let parsed_value = parse_runtime_var_value(spec.field_type, raw_value, name)?;
+        resolved.insert(name.to_string(), parsed_value);
+    }
+
+    for spec in specs {
+        if resolved.contains_key(&spec.name) {
+            continue;
+        }
+
+        if let Some(default_value) = spec.default_value.clone() {
+            resolved.insert(spec.name.clone(), default_value);
+            continue;
+        }
+
+        return Err(format!(
+            "Runtime variable '{}' is declared in runtime_vars with no default; provide it via --run-var {}=<value>.",
+            spec.name, spec.name
+        ));
+    }
+
+    Ok(resolved)
+}
+
+fn parse_runtime_var_assignment(raw_assignment: &str) -> Result<(&str, &str), String> {
+    let Some((name, value)) = raw_assignment.split_once('=') else {
+        return Err(format!(
+            "Invalid --run-var '{raw_assignment}'; expected NAME=VALUE."
+        ));
+    };
+
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return Err(format!(
+            "Invalid --run-var '{raw_assignment}'; runtime variable name cannot be empty."
+        ));
+    }
+
+    Ok((trimmed_name, value))
+}
+
+fn parse_runtime_var_value(
+    field_type: crate::RuntimeVarType,
+    raw_value: &str,
+    name: &str,
+) -> Result<serde_json::Value, String> {
+    match field_type {
+        crate::RuntimeVarType::String => Ok(serde_json::Value::String(raw_value.to_string())),
+        crate::RuntimeVarType::Boolean => match raw_value {
+            "true" => Ok(serde_json::Value::Bool(true)),
+            "false" => Ok(serde_json::Value::Bool(false)),
+            "" => Err(format!(
+                "Runtime variable '{name}' is declared as boolean and cannot be empty."
+            )),
+            _ => Err(format!(
+                "Runtime variable '{name}' is declared as boolean; expected `true` or `false`, received '{raw_value}'."
+            )),
+        },
+        crate::RuntimeVarType::Integer => {
+            if raw_value.is_empty() {
+                return Err(format!(
+                    "Runtime variable '{name}' is declared as integer and cannot be empty."
+                ));
+            }
+
+            raw_value.parse::<i64>().map(serde_json::Value::from).map_err(|_| {
+                format!(
+                    "Runtime variable '{name}' is declared as integer; expected a base-10 whole number, received '{raw_value}'."
+                )
+            })
+        }
+        crate::RuntimeVarType::Number => {
+            if raw_value.is_empty() {
+                return Err(format!(
+                    "Runtime variable '{name}' is declared as number and cannot be empty."
+                ));
+            }
+
+            let parsed = raw_value.parse::<f64>().map_err(|_| {
+                format!(
+                    "Runtime variable '{name}' is declared as number; expected a numeric value, received '{raw_value}'."
+                )
+            })?;
+            if !parsed.is_finite() {
+                return Err(format!(
+                    "Runtime variable '{name}' must be a finite number, received '{raw_value}'."
+                ));
+            }
+
+            let Some(number) = serde_json::Number::from_f64(parsed) else {
+                return Err(format!(
+                    "Runtime variable '{name}' must be a finite number, received '{raw_value}'."
+                ));
+            };
+            Ok(serde_json::Value::Number(number))
+        }
+    }
+}
+
 fn inherited_agent_action_max_depth() -> Option<u32> {
     std::env::var(AGENT_ACTION_MAX_DEPTH_ENV)
         .ok()
@@ -444,6 +574,13 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             return false;
         }
     };
+    let runtime_vars = match resolved_runtime_vars_for_run(sub_m) {
+        Ok(runtime_vars) => runtime_vars,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            return false;
+        }
+    };
     let resolved_inputs = match crate::providers::resolve_provider_inputs(&selected_inputs).await {
         Ok(resolved_inputs) => resolved_inputs,
         Err(error) => {
@@ -609,6 +746,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     match super::preflight_actions::apply_actions(
         &output,
         &actions,
+        &runtime_vars,
         &action_provider_context,
         max_agent_depth,
         runtime_budget,
@@ -626,10 +764,11 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cli_override_descriptions, profile_selection_messages, unknown_server_messages,
-        LoadedProfileKind,
+        cli_override_descriptions, profile_selection_messages, resolve_runtime_vars_from_specs,
+        unknown_server_messages, LoadedProfileKind,
     };
     use crate::args::test_cli_command;
+    use serde_json::json;
 
     fn input_debug_strings(inputs: &[crate::Input]) -> Vec<String> {
         inputs.iter().map(|input| format!("{input:?}")).collect()
@@ -639,6 +778,18 @@ mod tests {
         test_cli_command("cargo-ai")
             .try_get_matches_from(args)
             .expect("cargo-ai args should parse")
+    }
+
+    fn runtime_var_spec(
+        name: &str,
+        field_type: crate::RuntimeVarType,
+        default_value: Option<serde_json::Value>,
+    ) -> crate::RuntimeVarSpec {
+        crate::RuntimeVarSpec {
+            name: name.to_string(),
+            field_type,
+            default_value,
+        }
     }
 
     #[test]
@@ -914,6 +1065,168 @@ mod tests {
             .expect_err("missing runtime inputs should fail");
 
         assert!(error.contains("--input-mode requires at least one runtime input flag"));
+    }
+
+    #[test]
+    fn resolve_runtime_vars_from_specs_parses_declared_types_and_defaults() {
+        let cmd = matches(&[
+            "cargo-ai",
+            "preflight",
+            "--run-var",
+            "subject=Quarterly Review",
+            "--run-var",
+            "generate_images=true",
+            "--run-var",
+            "retry_count=3",
+            "--run-var",
+            "score_threshold=0.85",
+        ]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        let runtime_vars = resolve_runtime_vars_from_specs(
+            preflight,
+            &[
+                runtime_var_spec("subject", crate::RuntimeVarType::String, None),
+                runtime_var_spec("generate_images", crate::RuntimeVarType::Boolean, None),
+                runtime_var_spec("retry_count", crate::RuntimeVarType::Integer, None),
+                runtime_var_spec(
+                    "score_threshold",
+                    crate::RuntimeVarType::Number,
+                    Some(json!(0.75)),
+                ),
+            ],
+        )
+        .expect("runtime vars should parse");
+
+        assert_eq!(
+            runtime_vars.get("subject"),
+            Some(&json!("Quarterly Review"))
+        );
+        assert_eq!(runtime_vars.get("generate_images"), Some(&json!(true)));
+        assert_eq!(runtime_vars.get("retry_count"), Some(&json!(3)));
+        assert_eq!(runtime_vars.get("score_threshold"), Some(&json!(0.85)));
+    }
+
+    #[test]
+    fn resolve_runtime_vars_from_specs_uses_defaults_when_cli_value_is_missing() {
+        let cmd = matches(&["cargo-ai", "preflight"]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        let runtime_vars = resolve_runtime_vars_from_specs(
+            preflight,
+            &[runtime_var_spec(
+                "generate_images",
+                crate::RuntimeVarType::Boolean,
+                Some(json!(false)),
+            )],
+        )
+        .expect("defaulted runtime vars should resolve");
+
+        assert_eq!(runtime_vars.get("generate_images"), Some(&json!(false)));
+    }
+
+    #[test]
+    fn resolve_runtime_vars_from_specs_rejects_duplicates() {
+        let cmd = matches(&[
+            "cargo-ai",
+            "preflight",
+            "--run-var",
+            "subject=alpha",
+            "--run-var",
+            "subject=beta",
+        ]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        let error = resolve_runtime_vars_from_specs(
+            preflight,
+            &[runtime_var_spec(
+                "subject",
+                crate::RuntimeVarType::String,
+                None,
+            )],
+        )
+        .expect_err("duplicate runtime vars should fail");
+
+        assert!(error.contains("Duplicate runtime variable 'subject'"));
+    }
+
+    #[test]
+    fn resolve_runtime_vars_from_specs_rejects_undeclared_names() {
+        let cmd = matches(&["cargo-ai", "preflight", "--run-var", "subject=alpha"]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        let error = resolve_runtime_vars_from_specs(preflight, &[])
+            .expect_err("undeclared runtime vars should fail");
+
+        assert!(error.contains("is not declared in runtime_vars"));
+    }
+
+    #[test]
+    fn resolve_runtime_vars_from_specs_requires_missing_non_defaulted_vars() {
+        let cmd = matches(&["cargo-ai", "preflight"]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        let error = resolve_runtime_vars_from_specs(
+            preflight,
+            &[runtime_var_spec(
+                "subject",
+                crate::RuntimeVarType::String,
+                None,
+            )],
+        )
+        .expect_err("missing runtime vars should fail");
+
+        assert!(error.contains("provide it via --run-var subject=<value>"));
+    }
+
+    #[test]
+    fn resolve_runtime_vars_from_specs_rejects_invalid_boolean_value() {
+        let cmd = matches(&["cargo-ai", "preflight", "--run-var", "generate_images=yes"]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        let error = resolve_runtime_vars_from_specs(
+            preflight,
+            &[runtime_var_spec(
+                "generate_images",
+                crate::RuntimeVarType::Boolean,
+                None,
+            )],
+        )
+        .expect_err("invalid booleans should fail");
+
+        assert!(error.contains("expected `true` or `false`"));
+    }
+
+    #[test]
+    fn resolve_runtime_vars_from_specs_rejects_empty_non_string_values() {
+        let cmd = matches(&["cargo-ai", "preflight", "--run-var", "retry_count="]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        let error = resolve_runtime_vars_from_specs(
+            preflight,
+            &[runtime_var_spec(
+                "retry_count",
+                crate::RuntimeVarType::Integer,
+                None,
+            )],
+        )
+        .expect_err("empty integers should fail");
+
+        assert!(error.contains("cannot be empty"));
     }
 
     #[tokio::test]

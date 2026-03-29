@@ -19,6 +19,8 @@ Each example is meant to be validated and hatched into a CLI executable.
   - Shows `failure_mode: "continue"` with `status_variable`, `error_variable`, and follow-up behavior.
 - `conditional-when.json`
   - Shows step-level `when` gating and branching inside one action.
+- `runtime-vars-image-gating.json`
+  - Shows top-level `runtime_vars`, `--run-var`-driven action gating, typed runtime vars in JSON Logic, and runtime-backed `generate_image.model`.
 
 ## How To Use The Examples
 
@@ -34,5 +36,14 @@ Each example is meant to be validated and hatched into a CLI executable.
 - Prefer the smallest example that matches the user's goal.
 - Keep using the action-flow examples for `when`, `failure_mode`, and captured-variable behavior. Use `schema-features.json` when the main question is how to express the supported output fields and constraints.
 - Use `runtime-file-local-exec.json` when the main question is how file summarization, returned output, and a platform-specific local exec step fit together.
+- Use `runtime-vars-image-gating.json` when the main question is how caller-supplied typed runtime vars control action behavior or image-model selection.
 - When converting a baked file example into a caller-supplied runtime file workflow, remember that `--input-file` replaces the full baked `inputs` array unless the caller also sets `--input-mode append` or `--input-mode prepend`. Supply `--input-text` too when the run stays in replace mode and still needs text instructions.
 - If the JSON becomes hard to scan, add a same-name sidecar Markdown file and an ASCII flow diagram.
+
+## Recommended Smoke Checks
+
+After `cargo ai hatch <agent-name> --config <config.json> --check` passes, prefer one small manual smoke loop for runtime-heavy definitions:
+
+1. Run one invocation that supplies `--run-var` values and proves the expected action `logic` branch executes.
+2. If the definition uses `when`, run one invocation where `when` should skip the step and one where it should pass.
+3. If the definition uses `generate_image.model`, run one invocation that sets the image model through `--run-var` and confirm the step resolves the expected model string.

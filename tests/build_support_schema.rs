@@ -9,6 +9,21 @@ use sha2::{Digest, Sha256};
 /// Constructs a minimal `.agentcfg` JSON document with caller-provided schema
 /// properties and actions sections.
 fn config_with(properties: &str, actions: &str) -> String {
+    config_with_runtime_vars(properties, "", actions)
+}
+
+fn config_with_runtime_vars(properties: &str, runtime_vars: &str, actions: &str) -> String {
+    let runtime_vars_block = if runtime_vars.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#",
+    "runtime_vars": {{
+        {runtime_vars}
+    }}"#
+        )
+    };
+
     format!(
         r#"{{
     "version": "2026-03-03.r1",
@@ -20,7 +35,7 @@ fn config_with(properties: &str, actions: &str) -> String {
         "properties": {{
             {properties}
         }}
-    }},
+    }}{runtime_vars_block},
     "actions": {actions}
 }}"#
     )
@@ -185,6 +200,87 @@ fn rejects_invalid_field_identifiers() {
 }
 
 #[test]
+fn rejects_reserved_runtime_top_level_output_field_name() {
+    let cfg = config_with(r#""runtime": { "type": "string" }"#, "[]");
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.agent_schema.properties.runtime"));
+    assert!(err.contains("`runtime` is reserved"));
+}
+
+#[test]
+fn emits_runtime_var_specs_for_declared_runtime_vars() {
+    let cfg = config_with_runtime_vars(
+        r#""answer": { "type": "integer" }"#,
+        r#"
+        "subject": { "type": "string", "default": "Test" },
+        "generate_images": { "type": "boolean", "default": false },
+        "retry_count": { "type": "integer" },
+        "score_threshold": { "type": "number", "default": 0.75 }
+        "#,
+        "[]",
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains("pub enum RuntimeVarType"));
+    assert!(generated.contains("pub struct RuntimeVarSpec"));
+    assert!(generated.contains("pub fn runtime_var_specs() -> Vec<RuntimeVarSpec>"));
+    assert!(generated.contains("name: \"subject\".to_string()"));
+    assert!(generated.contains("field_type: RuntimeVarType::Boolean"));
+    assert!(generated.contains("generated runtime-var default must be valid JSON"));
+}
+
+#[test]
+fn rejects_runtime_var_default_type_mismatch() {
+    let cfg = config_with_runtime_vars(
+        r#""answer": { "type": "integer" }"#,
+        r#""generate_images": { "type": "boolean", "default": "true" }"#,
+        "[]",
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.runtime_vars.generate_images.default"));
+    assert!(err.contains("default must be a boolean"));
+}
+
+#[test]
+fn accepts_runtime_vars_in_logic_when_and_substitution_surfaces() {
+    let cfg = config_with_runtime_vars(
+        r#""answer": { "type": "integer" }"#,
+        r#"
+        "generate_images": { "type": "boolean", "default": false },
+        "report_suffix": { "type": "string", "default": "nightly" }
+        "#,
+        r#"[
+          {
+            "name": "demo",
+            "logic": { "==": [ { "var": "runtime.generate_images" }, true ] },
+            "run": [
+              {
+                "kind": "email_me",
+                "when": { "==": [ { "var": "runtime.generate_images" }, true ] },
+                "subject": ["Report ", { "var": "runtime.report_suffix" }],
+                "text": ["Answer=", { "var": "answer" }]
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains(r#"RunArg::Variable("runtime.report_suffix".to_string())"#));
+    assert!(generated.contains(r#"generated step `when` must be valid JSON"#));
+}
+
+#[test]
 fn rejects_reserved_keyword_field_identifiers() {
     let cfg = config_with(r#""union": { "type": "string" }"#, "[]");
 
@@ -293,7 +389,7 @@ fn accepts_generate_image_step_with_prompt_and_path_parts() {
     let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
 
     assert!(generated.contains("kind: \"generate_image\".to_string()"));
-    assert!(generated.contains("model: Some(\"gpt-image-1\".to_string())"));
+    assert!(generated.contains("model: Some(RunArg::Literal(\"gpt-image-1\".to_string()))"));
     assert!(generated.contains(
         "prompt: Some(vec![RunArg::Literal(\"Create a render for \".to_string()), RunArg::Variable(\"product_name\".to_string())])"
     ));
@@ -357,6 +453,103 @@ fn rejects_generate_image_unsupported_output_extension() {
 
     assert!(err.contains("$.actions[0].run[0].path"));
     assert!(err.contains("supported extension"));
+}
+
+#[test]
+fn accepts_generate_image_model_from_runtime_or_schema_string_variables() {
+    let cfg = config_with_runtime_vars(
+        r#""image_model": { "type": "string" }, "product_name": { "type": "string" }"#,
+        r#""runtime_image_model": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "generate_image",
+            "logic": { "==": [ { "var": "product_name" }, "Widget" ] },
+            "run": [
+              {
+                "kind": "generate_image",
+                "model": { "var": "runtime.runtime_image_model" },
+                "prompt": "Create a render",
+                "path": "./artifacts/widget.png"
+              },
+              {
+                "kind": "generate_image",
+                "model": { "var": "image_model" },
+                "prompt": "Create another render",
+                "path": "./artifacts/widget2.png"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated
+        .contains("model: Some(RunArg::Variable(\"runtime.runtime_image_model\".to_string()))"));
+    assert!(generated.contains("model: Some(RunArg::Variable(\"image_model\".to_string()))"));
+}
+
+#[test]
+fn rejects_generate_image_model_from_non_string_variable() {
+    let cfg = config_with_runtime_vars(
+        r#""product_name": { "type": "string" }"#,
+        r#""runtime_image_model": { "type": "boolean" }"#,
+        r#"[
+          {
+            "name": "generate_image",
+            "logic": { "==": [ { "var": "product_name" }, "Widget" ] },
+            "run": [
+              {
+                "kind": "generate_image",
+                "model": { "var": "runtime.runtime_image_model" },
+                "prompt": "Create a render",
+                "path": "./artifacts/widget.png"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].model"));
+    assert!(err.contains("must resolve from string fields"));
+}
+
+#[test]
+fn rejects_generate_image_model_from_captured_variable() {
+    let cfg = config_with(
+        r#""product_name": { "type": "string" }"#,
+        r#"[
+          {
+            "name": "generate_image",
+            "logic": { "==": [ { "var": "product_name" }, "Widget" ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["gpt-image-1"],
+                "output_variable": "image_model"
+              },
+              {
+                "kind": "generate_image",
+                "model": { "var": "image_model" },
+                "prompt": "Create a render",
+                "path": "./artifacts/widget.png"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[1].model"));
+    assert!(err.contains("unknown variable `image_model`"));
 }
 
 #[test]
@@ -764,6 +957,34 @@ fn rejects_status_variable_name_collisions_with_agent_output_fields() {
 
     assert!(err.contains("$.actions[0].run[0].status_variable"));
     assert!(err.contains("collides with an agent output field"));
+}
+
+#[test]
+fn rejects_reserved_runtime_capture_variable_name() {
+    let cfg = config_with(
+        r#""answer": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [ { "var": "answer" }, 4 ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["ok"],
+                "status_variable": "runtime"
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].status_variable"));
+    assert!(err.contains("`runtime` is reserved"));
 }
 
 #[test]

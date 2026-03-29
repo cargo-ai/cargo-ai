@@ -25,11 +25,12 @@ If no agent JSON exists yet:
 5. Near the end, ask where it should run:
    - on the user's current machine
    - or portable across macOS, Windows, and Linux
-6. If the runtime exposes the current OS, treat that as a hint only. Still confirm whether the user wants local-only behavior or cross-platform portability.
-7. Infer the right Cargo AI pattern using `.cargo-ai/guidance/pattern-selection.md`.
-8. Do not ask the user to choose between "single agent", "action agent", or "parent/child" unless the user already understands those terms.
-9. Draft from the closest example in `.cargo-ai/guidance/examples/`.
-10. Validate with `cargo ai hatch <agent-name> --config <config.json> --check`.
+6. Ask whether the caller should control any behavior at runtime, such as gating an action, choosing a threshold, or selecting an image model.
+7. If the runtime exposes the current OS, treat that as a hint only. Still confirm whether the user wants local-only behavior or cross-platform portability.
+8. Infer the right Cargo AI pattern using `.cargo-ai/guidance/pattern-selection.md`.
+9. Do not ask the user to choose between "single agent", "action agent", or "parent/child" unless the user already understands those terms.
+10. Draft from the closest example in `.cargo-ai/guidance/examples/`.
+11. Validate with `cargo ai hatch <agent-name> --config <config.json> --check`.
 
 ## Local Guidance Bundle
 
@@ -50,6 +51,7 @@ Useful examples:
 - `.cargo-ai/guidance/examples/stop-by-default.json`
 - `.cargo-ai/guidance/examples/continue-on-failure.json`
 - `.cargo-ai/guidance/examples/conditional-when.json`
+- `.cargo-ai/guidance/examples/runtime-vars-image-gating.json`
 
 ## Supplemental Public Context
 
@@ -66,6 +68,7 @@ If these conflict with the local `.cargo-ai/guidance/` bundle, follow the local 
 - Use canonical field order:
   - `version`
   - `inputs`
+  - optional `runtime_vars`
   - `agent_schema`
   - `actions`
 - The current supported output schema is flat and top-level only:
@@ -83,6 +86,10 @@ If these conflict with the local `.cargo-ai/guidance/` bundle, follow the local 
 - Prefer the most minimal portable steps that satisfy the user's goal.
 - Use platform-specific commands only when the user explicitly wants local-machine behavior or the task cannot be met portably.
 - Remember that runtime input flags replace the full baked `inputs` array by default; use `--input-mode append` or `--input-mode prepend` when the caller should keep baked inputs too.
+- Use top-level `runtime_vars` when the caller should control action behavior or step-local settings at invocation time without editing the JSON.
+- Reference declared runtime vars as `runtime.<name>` and pass them with repeatable `--run-var name=value` flags.
+- If a `--run-var` value contains spaces or shell-sensitive characters, quote it normally for the caller's shell.
+- For `generate_image.model`, prefer a runtime-backed string such as `{ "var": "runtime.hero_image_model" }` when the operator should choose the image model at invocation time.
 - Recommend a same-name sidecar Markdown file when the JSON becomes structurally complex.
 - Prefer boxed ASCII diagrams for flow explanations.
 - If Mermaid rendering is clearly supported, offer Mermaid as an option and ask whether the user wants it.

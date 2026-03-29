@@ -22,6 +22,11 @@ When files, URLs, or images are involved, also clarify:
 - should this content be baked into the JSON as a fixed default?
 - or should the caller supply it at runtime with flags such as `--input-file` or `--input-url`?
 
+When action behavior may vary by invocation, also clarify:
+- should the caller gate the action or adjust a threshold at runtime?
+- should the caller choose the image model at runtime?
+- if yes, prefer top-level `runtime_vars` plus `--run-var` over asking the caller to edit JSON for each run
+
 ## How To Drive The Conversation
 
 - Keep the questions in plain language.
@@ -33,7 +38,7 @@ When files, URLs, or images are involved, also clarify:
 
 1. Use `pattern-selection.md` to infer the right Cargo AI shape.
 2. Copy the closest example from `examples/`.
-3. Decide which inputs are baked into JSON and which will be supplied at runtime.
+3. Decide which inputs are baked into JSON, which are caller-supplied runtime inputs, and whether any action behavior belongs in `runtime_vars`.
 4. Draft the JSON in canonical field order.
 5. If the flow becomes complex, recommend a same-name sidecar Markdown file.
 6. Validate with:

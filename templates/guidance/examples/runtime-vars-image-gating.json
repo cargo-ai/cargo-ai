@@ -1,0 +1,85 @@
+{
+  "version": "2026-03-28.r1",
+  "inputs": [
+    {
+      "type": "text",
+      "text": "Return product_name, product_slug, and score for this launch asset request."
+    }
+  ],
+  "runtime_vars": {
+    "generate_images": {
+      "type": "boolean",
+      "default": false
+    },
+    "hero_image_model": {
+      "type": "string",
+      "default": "gpt-image-1.5"
+    },
+    "score_threshold": {
+      "type": "number",
+      "default": 0.8
+    },
+    "report_suffix": {
+      "type": "string",
+      "default": "launch"
+    }
+  },
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "product_name": {
+        "type": "string",
+        "description": "Product name used in the launch image."
+      },
+      "product_slug": {
+        "type": "string",
+        "description": "Filesystem-safe slug for output paths."
+      },
+      "score": {
+        "type": "number",
+        "description": "Model confidence score for whether launch assets should be generated."
+      }
+    }
+  },
+  "actions": [
+    {
+      "name": "generate_launch_assets",
+      "logic": {
+        "and": [
+          { "==": [{ "var": "runtime.generate_images" }, true] },
+          { ">=": [{ "var": "score" }, { "var": "runtime.score_threshold" }] }
+        ]
+      },
+      "run": [
+        {
+          "kind": "generate_image",
+          "model": { "var": "runtime.hero_image_model" },
+          "prompt": [
+            "Create a polished hero render for ",
+            { "var": "product_name" }
+          ],
+          "path": [
+            "./artifacts/",
+            { "var": "product_slug" },
+            "-",
+            { "var": "runtime.report_suffix" },
+            ".png"
+          ]
+        },
+        {
+          "kind": "email_me",
+          "subject": [
+            "Launch image ready: ",
+            { "var": "product_name" }
+          ],
+          "text": [
+            "Generated with model ",
+            { "var": "runtime.hero_image_model" },
+            " at threshold ",
+            { "var": "runtime.score_threshold" }
+          ]
+        }
+      ]
+    }
+  ]
+}
