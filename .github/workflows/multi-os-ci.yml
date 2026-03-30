@@ -20,6 +20,8 @@ jobs:
   test:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     strategy:
       # Prevents one OS job failure (e.g., Ubuntu) from canceling all matrix jobs
@@ -56,9 +58,9 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_openai_smoke == true && secrets.OPENAI_API_KEY != '' }}
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            ./adder_test.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }}
+            ./adder_test.exe -s openai -m gpt-4o --token "$OPENAI_API_KEY"
           else
-            ./adder_test -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }}
+            ./adder_test -s openai -m gpt-4o --token "$OPENAI_API_KEY"
           fi
         shell: bash
 
@@ -66,9 +68,9 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_openai_smoke == true && secrets.OPENAI_API_KEY != '' }}
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            OUTPUT=$(./adder_test.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }})
+            OUTPUT=$(./adder_test.exe -s openai -m gpt-4o --token "$OPENAI_API_KEY")
           else
-            OUTPUT=$(./adder_test -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }})
+            OUTPUT=$(./adder_test -s openai -m gpt-4o --token "$OPENAI_API_KEY")
           fi
 
           echo "$OUTPUT"
@@ -83,9 +85,9 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_openai_smoke == true && secrets.OPENAI_API_KEY != '' }}
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            OUTPUT=$(./adder_test.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --input-text "What is 2 + 3? Return the answer as a number.")
+            OUTPUT=$(./adder_test.exe -s openai -m gpt-4o --token "$OPENAI_API_KEY" --input-text "What is 2 + 3? Return the answer as a number.")
           else
-            OUTPUT=$(./adder_test -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --input-text "What is 2 + 3? Return the answer as a number.")
+            OUTPUT=$(./adder_test -s openai -m gpt-4o --token "$OPENAI_API_KEY" --input-text "What is 2 + 3? Return the answer as a number.")
           fi
 
           echo "$OUTPUT"
