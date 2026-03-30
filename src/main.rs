@@ -11,8 +11,6 @@ mod credentials;
 mod infra_api;
 mod providers;
 mod schema_version;
-#[cfg(feature = "shipyard-ui")]
-mod shipyard_ui;
 mod ui;
 mod update_check;
 mod web_resources;
@@ -68,8 +66,6 @@ async fn main() {
             commands::init::run(sub_m)
         } else if let Some(sub_m) = cmd_args.subcommand_matches("new") {
             commands::new::run(sub_m)
-        } else if let Some(sub_m) = cmd_args.subcommand_matches("shipyard") {
-            commands::shipyard::run(sub_m)
         } else if let Some(sub_m) = cmd_args.subcommand_matches("account") {
             commands::account::run(sub_m).await
         } else if let Some(sub_m) = cmd_args.subcommand_matches("auth") {

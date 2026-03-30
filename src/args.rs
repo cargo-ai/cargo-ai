@@ -13,7 +13,6 @@ mod init;
 mod new;
 mod preflight;
 mod profile;
-mod shipyard;
 mod version;
 
 fn cli_command(bin_name: &'static str) -> Command {
@@ -35,7 +34,6 @@ fn cli_command(bin_name: &'static str) -> Command {
         .subcommand(account::command())
         .subcommand(version::command())
         .subcommand(preflight::command())
-        .subcommand(shipyard::command())
         .subcommand(new::command())
         .subcommand(init::command())
 }

@@ -15,23 +15,18 @@ categories = [
 ]
 build = "build.rs"
 
-[features]
-default = []
-shipyard-ui = ["dep:slint"]
-
 [dependencies]
 base64 = { version = "0.22.1", default-features = false, features = ["std"] }
 clap = "4.5.35"
 dirs = "6.0.0"
 futures = "0.3.31"
 jsonlogic = "0.5.1"
-reqwest = { version = "0.12.15", features = ["json", "blocking"] }
+reqwest = { version = "0.12.15", default-features = false, features = ["json", "blocking", "rustls-tls"] }
 schemars = { version = "1.0.4", features = ["derive"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 semver = "1.0.26"
 sha2 = { version = "0.10.9", default-features = false, features = ["std"] }
-slint = { version = "1.15.1", default-features = false, features = ["backend-winit", "renderer-femtovg", "compat-1-2"], optional = true }
 tokio = { version = "1.44.1", features = ["full"] }
 toml = "0.9.8"
 uuid = { version = "1.21.0", default-features = false, features = ["std", "v4"] }
