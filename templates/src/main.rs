@@ -6,7 +6,7 @@ mod providers;
 
 use jsonlogic::apply;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
@@ -38,6 +38,7 @@ const DEFAULT_AGENT_ACTION_MAX_DEPTH: u32 = 5;
 const DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS: u64 = 600;
 const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str =
     "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
+const ACTION_LANE_OUTPUT_BUFFER_LIMIT: usize = 6;
 
 tokio::task_local! {
     static ACTION_OUTPUT: ActionOutput;
@@ -67,6 +68,7 @@ struct ActionLaneState {
     status: ActionLaneStatus,
     current_step: Option<String>,
     last_message: Option<String>,
+    output_lines: VecDeque<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -151,12 +153,15 @@ impl ActionOutput {
     fn action_line(&self, action_index: usize, action_name: &str, message: &str) {
         self.with_state(|state| {
             if state.mode == ActionOutputMode::AppendOnly {
-                println!("{}", format_action_line(action_index, action_name, message));
+                for line in split_action_output_lines(message) {
+                    println!("{}", format_action_line(action_index, action_name, line.as_str()));
+                }
                 return;
             }
 
             let lane = ensure_lane_state(state, action_index, action_name);
-            lane.last_message = Some(message.to_string());
+            lane.last_message = compact_action_output_line(message);
+            push_lane_output_message(lane, message);
             if lane.status == ActionLaneStatus::Pending {
                 lane.status = inferred_lane_status(message);
             } else if lane.status == ActionLaneStatus::Running {
@@ -196,7 +201,10 @@ impl ActionOutput {
             let lane = ensure_lane_state(state, action_index, action_name);
             lane.status = ActionLaneStatus::Failed;
             lane.current_step = None;
-            lane.last_message = Some(format!("failed: {}", error));
+            lane.last_message = compact_action_output_line(error)
+                .map(|line| format!("failed: {}", line))
+                .or_else(|| Some("failed".to_string()));
+            push_lane_output_message(lane, error);
             render_live_dashboard(state);
         });
     }
@@ -218,7 +226,10 @@ impl ActionOutput {
             let lane = ensure_lane_state(state, action_index, action_name);
             lane.status = ActionLaneStatus::Aborted;
             lane.current_step = None;
-            lane.last_message = Some(format!("abort requested: {}", error));
+            lane.last_message = compact_action_output_line(error)
+                .map(|line| format!("abort requested: {}", line))
+                .or_else(|| Some("abort requested".to_string()));
+            push_lane_output_message(lane, error);
             render_live_dashboard(state);
         });
     }
@@ -234,22 +245,6 @@ impl ActionOutput {
             lane.current_step = None;
             lane.last_message = Some("stopped after invocation abort.".to_string());
             render_live_dashboard(state);
-        });
-    }
-
-    fn suspend_for_passthrough(&self) {
-        self.with_state(|state| {
-            if state.mode == ActionOutputMode::Live {
-                clear_live_dashboard(state);
-            }
-        });
-    }
-
-    fn resume_after_passthrough(&self) {
-        self.with_state(|state| {
-            if state.mode == ActionOutputMode::Live {
-                render_live_dashboard(state);
-            }
         });
     }
 
@@ -284,14 +279,17 @@ impl ActionOutputState {
                 action_lane_prefix(*lane_index, lane.action_name.as_str()),
                 lane.status.display_name()
             ));
-            lines.push(format!(
-                "  step: {}",
-                lane.current_step.as_deref().unwrap_or("-")
-            ));
+            lines.push(format!("  step: {}", lane_step_label(lane)));
             lines.push(format!(
                 "  last: {}",
                 lane.last_message.as_deref().unwrap_or("-")
             ));
+            if !lane.output_lines.is_empty() {
+                lines.push("  output:".to_string());
+                for line in &lane.output_lines {
+                    lines.push(format!("    {}", line));
+                }
+            }
         }
 
         lines
@@ -332,6 +330,7 @@ fn ensure_lane_state<'a>(
             status: ActionLaneStatus::Pending,
             current_step: None,
             last_message: None,
+            output_lines: VecDeque::new(),
         })
 }
 
@@ -344,6 +343,41 @@ fn inferred_lane_status(message: &str) -> ActionLaneStatus {
         ActionLaneStatus::Skipped
     } else {
         ActionLaneStatus::Notice
+    }
+}
+
+fn split_action_output_lines(message: &str) -> Vec<String> {
+    message
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn compact_action_output_line(message: &str) -> Option<String> {
+    split_action_output_lines(message).into_iter().next()
+}
+
+fn push_lane_output_message(lane: &mut ActionLaneState, message: &str) {
+    for line in split_action_output_lines(message) {
+        if lane.output_lines.len() == ACTION_LANE_OUTPUT_BUFFER_LIMIT {
+            lane.output_lines.pop_front();
+        }
+        lane.output_lines.push_back(line);
+    }
+}
+
+fn lane_step_label(lane: &ActionLaneState) -> String {
+    match lane.status {
+        ActionLaneStatus::Completed => "✓ done".to_string(),
+        ActionLaneStatus::Failed | ActionLaneStatus::LogicError => "✗ failed".to_string(),
+        ActionLaneStatus::Aborted => "! aborted".to_string(),
+        ActionLaneStatus::Skipped => "skipped".to_string(),
+        _ => lane
+            .current_step
+            .clone()
+            .unwrap_or_else(|| "-".to_string()),
     }
 }
 
@@ -367,26 +401,6 @@ fn render_live_dashboard(state: &mut ActionOutputState) {
     let _ = write!(stdout, "{}", snapshot.join("\n"));
     let _ = stdout.flush();
     state.rendered_lines = snapshot.len();
-}
-
-fn clear_live_dashboard(state: &mut ActionOutputState) {
-    if cfg!(test) {
-        state.rendered_lines = 0;
-        return;
-    }
-
-    if state.rendered_lines == 0 {
-        return;
-    }
-
-    let mut stdout = io::stdout();
-    let _ = write!(stdout, "\r");
-    if state.rendered_lines > 1 {
-        let _ = write!(stdout, "\x1b[{}A", state.rendered_lines - 1);
-    }
-    let _ = write!(stdout, "\x1b[J");
-    let _ = stdout.flush();
-    state.rendered_lines = 0;
 }
 
 fn unknown_server_messages(server: &str) -> Vec<String> {
@@ -1086,7 +1100,7 @@ async fn run_email_me_action(
     subject: &str,
     text: &str,
     secret_store_mode: Option<SecretStoreMode>,
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     let auth = load_account_auth(secret_store_mode)?;
     let access_token = auth.access_token;
     let refresh_token = auth.refresh_token;
@@ -1139,8 +1153,7 @@ async fn run_email_me_action(
         .unwrap_or(false);
 
     if succeeded {
-        render_account_response(&response);
-        Ok(())
+        Ok(response)
     } else {
         Err(format_backend_error_message(&response)
             .unwrap_or_else(|| format!("email_me request failed.\n{}", pretty_backend_json(&response))))
@@ -2261,12 +2274,19 @@ async fn run_exec_step(
         let child = tokio::process::Command::new(program)
             .args(&resolved_args)
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
 
         match tokio::time::timeout(remaining, child.wait_with_output()).await {
             Ok(Ok(output)) if output.status.success() => {
+                emit_exec_output_lines(
+                    action_index,
+                    action_name,
+                    &output.stdout,
+                    &output.stderr,
+                    false,
+                );
                 let captured_output = String::from_utf8_lossy(&output.stdout)
                     .trim_end_matches(['\r', '\n'])
                     .to_string();
@@ -2277,10 +2297,19 @@ async fn run_exec_step(
                 );
                 Ok(Some((output_variable.to_string(), captured_output)))
             }
-            Ok(Ok(output)) => Err(format!(
-                "Action '{}' exec step command '{}' exited with status {}.",
-                action_name, program, output.status
-            )),
+            Ok(Ok(output)) => {
+                emit_exec_output_lines(
+                    action_index,
+                    action_name,
+                    &output.stdout,
+                    &output.stderr,
+                    true,
+                );
+                Err(format!(
+                    "Action '{}' exec step command '{}' exited with status {}.",
+                    action_name, program, output.status
+                ))
+            }
             Ok(Err(error)) => Err(format!(
                 "Action '{}' exec step failed while waiting for command '{}': {}",
                 action_name, program, error
@@ -2292,37 +2321,69 @@ async fn run_exec_step(
             )),
         }
     } else {
-        suspend_action_output_for_passthrough();
         let child = tokio::process::Command::new(program)
             .args(&resolved_args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| {
-                resume_action_output_after_passthrough();
-                format!("{action_name}: failed to execute command: {error}.")
-            })?;
-        let mut child = child;
+            .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
 
-        let result = match tokio::time::timeout(remaining, child.wait()).await {
-            Ok(Ok(status)) if status.success() => Ok(None),
-            Ok(Ok(status)) => Err(format!(
-                "Action '{}' exec step command '{}' exited with status {}.",
-                action_name, program, status
-            )),
+        match tokio::time::timeout(remaining, child.wait_with_output()).await {
+            Ok(Ok(output)) if output.status.success() => {
+                emit_exec_output_lines(
+                    action_index,
+                    action_name,
+                    &output.stdout,
+                    &output.stderr,
+                    true,
+                );
+                Ok(None)
+            }
+            Ok(Ok(output)) => {
+                emit_exec_output_lines(
+                    action_index,
+                    action_name,
+                    &output.stdout,
+                    &output.stderr,
+                    true,
+                );
+                Err(format!(
+                    "Action '{}' exec step command '{}' exited with status {}.",
+                    action_name, program, output.status
+                ))
+            }
             Ok(Err(error)) => Err(format!(
                 "Action '{}' exec step failed while waiting for command '{}': {}",
                 action_name, program, error
             )),
             Err(_) => {
-                let _ = child.kill().await;
                 Err(action_runtime_timeout_message(
                     action_name,
                     runtime_budget,
                     &format!("while waiting for command '{}'", program),
                 ))
             }
-        };
-        resume_action_output_after_passthrough();
-        result
+        }
+    }
+}
+
+fn emit_exec_output_lines(
+    action_index: usize,
+    action_name: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+    include_stdout: bool,
+) {
+    if include_stdout {
+        emit_action_output_bytes(action_index, action_name, stdout);
+    }
+    emit_action_output_bytes(action_index, action_name, stderr);
+}
+
+fn emit_action_output_bytes(action_index: usize, action_name: &str, bytes: &[u8]) {
+    let rendered = String::from_utf8_lossy(bytes);
+    for line in split_action_output_lines(rendered.as_ref()) {
+        print_action_line(action_index, action_name, line.as_str());
     }
 }
 
@@ -2431,13 +2492,13 @@ async fn run_email_me_step(
             action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
         })?;
 
-    match tokio::time::timeout(
+    let response = match tokio::time::timeout(
         remaining,
         run_email_me_action(subject.as_str(), text.as_str(), secret_store_mode),
     )
     .await
     {
-        Ok(Ok(())) => {}
+        Ok(Ok(response)) => response,
         Ok(Err(error)) => return Err(format!("Action '{}': {error}", action_name)),
         Err(_) => {
             return Err(action_runtime_timeout_message(
@@ -2446,10 +2507,13 @@ async fn run_email_me_step(
                 "while sending email",
             ));
         }
-    }
+    };
 
     if single_step_action {
         print_action_success(action_index, action_name, "email sent");
+    }
+    for line in render_account_response_lines(&response) {
+        print_action_line(action_index, action_name, line.as_str());
     }
     Ok(if single_step_action {
         StepExecutionOutcome::SuccessAlreadyPrinted
@@ -2694,6 +2758,8 @@ async fn run_agent_step(
         AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV,
         runtime_budget.deadline_ms.to_string(),
     );
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
 
     let remaining = remaining_runtime_duration(
         runtime_budget,
@@ -2707,25 +2773,38 @@ async fn run_agent_step(
         )
     })?;
 
-    suspend_action_output_for_passthrough();
     let child = command.spawn().map_err(|error| {
-        resume_action_output_after_passthrough();
         format!(
             "Action '{}' failed to start child agent '{}': {}",
             action_name, agent, error
         )
     })?;
     let mut child = child;
+    print_action_line(
+        action_index,
+        action_name,
+        format!("child: started {}", agent).as_str(),
+    );
 
     let result = match tokio::time::timeout(remaining, child.wait()).await {
-        Ok(Ok(status)) if status.success() => Ok(StepExecutionOutcome::Completed),
-        Ok(Ok(status)) => Err(format!(
-            "Action '{}' child agent '{}' exited with status {} at depth {}.",
-            action_name,
-            agent,
-            status,
-            current_depth + 1
-        )),
+        Ok(Ok(status)) if status.success() => {
+            print_action_line(action_index, action_name, "child: completed successfully");
+            Ok(StepExecutionOutcome::Completed)
+        }
+        Ok(Ok(status)) => {
+            print_action_line(
+                action_index,
+                action_name,
+                format!("child: exited with status {}", status).as_str(),
+            );
+            Err(format!(
+                "Action '{}' child agent '{}' exited with status {} at depth {}.",
+                action_name,
+                agent,
+                status,
+                current_depth + 1
+            ))
+        }
         Ok(Err(error)) => Err(format!(
             "Action '{}' failed while waiting for child agent '{}' at depth {}: {}",
             action_name,
@@ -2735,6 +2814,11 @@ async fn run_agent_step(
         )),
         Err(_) => {
             let _ = child.kill().await;
+            print_action_line(
+                action_index,
+                action_name,
+                format!("child: timed out {}", agent).as_str(),
+            );
             Err(action_runtime_timeout_message(
                 action_name,
                 runtime_budget,
@@ -2742,7 +2826,6 @@ async fn run_agent_step(
             ))
         }
     };
-    resume_action_output_after_passthrough();
     result
 }
 
@@ -2836,18 +2919,6 @@ fn note_action_stopped_by_abort(action_index: usize, action_name: &str) {
     }
 }
 
-fn suspend_action_output_for_passthrough() {
-    if let Some(output) = current_action_output() {
-        output.suspend_for_passthrough();
-    }
-}
-
-fn resume_action_output_after_passthrough() {
-    if let Some(output) = current_action_output() {
-        output.resume_after_passthrough();
-    }
-}
-
 fn action_execution_header(action_execution: ActionExecutionMode) -> &'static str {
     match action_execution {
         ActionExecutionMode::Sequential => "Action execution: sequential",
@@ -2899,11 +2970,11 @@ fn print_action_success(action_index: usize, action_name: &str, summary: &str) {
     }
 }
 
-fn render_account_response(response: &serde_json::Value) {
+fn render_account_response_lines(response: &serde_json::Value) -> Vec<String> {
     if let Some(message) = format_backend_ui_message(response, true) {
-        println!("{message}");
+        split_action_output_lines(message.as_str())
     } else {
-        println!("{}", pretty_backend_json(response));
+        split_action_output_lines(pretty_backend_json(response).as_str())
     }
 }
 

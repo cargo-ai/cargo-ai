@@ -175,10 +175,11 @@ If `logic` evaluates true, the action's `run` steps execute in order.
 - A hard failure in one top-level action does not prevent later eligible top-level actions from running.
 - Cargo AI aggregates top-level hard failures after all eligible actions finish.
 - Cargo AI prints one run-level execution header before actions start: `Action execution: sequential` or `Action execution: parallel`.
-- In redirected, piped, CI, or simpler terminal output, Cargo AI prefixes its own action lifecycle lines with deterministic lane labels such as `[A1 generate_images]`.
+- In redirected, piped, CI, or simpler terminal output, Cargo AI prefixes parent-visible action output with deterministic lane labels such as `[A1 generate_images]`.
 - When attached directly to an interactive terminal, Cargo AI switches to a compact live lane dashboard.
-- The first live dashboard slice shows lane label, lane status, current step when known, and the last Cargo AI-generated message.
-- Raw child-agent and `exec` stdout/stderr still pass through unchanged and do not render inside the live lane blocks.
+- The first live dashboard slice shows lane label, lane status, terminal step marker or current step when known, the last lifecycle message, and a compact buffered `output` section for parent-visible action output.
+- Parent-run `exec` and `email_me` output is bucketed into the originating lane.
+- Child-agent steps stay minimal in the parent lane with start/completion or exit-summary lines instead of recursively inlining the child transcript.
 
 ## Supported Run-Step Kinds
 
