@@ -51,8 +51,11 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - `email_me`
   - Required: `kind`, `subject`, `text`
 - `generate_image`
-  - Required: `kind`, `model`, `prompt`, `path`
+  - Required: `kind`, `prompt`, `path`
+  - Optional: `model`
   - First slice: OpenAI-backed single-image output only
+  - If `model` is omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override.
+  - If neither the step nor the invocation provides a model, the step fails clearly at runtime.
   - `model` may be:
     - a literal non-empty string
     - a single variable reference such as `{ "var": "runtime.hero_image_model" }`

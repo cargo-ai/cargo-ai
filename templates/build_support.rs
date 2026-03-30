@@ -1043,7 +1043,7 @@ fn parse_actions(
                     RunStep {
                         kind,
                         program: None,
-                        model: Some(model),
+                        model,
                         output_variable: None,
                         status_variable,
                         error_variable,
@@ -1234,9 +1234,11 @@ fn parse_generate_image_model_field(
     run_obj: &Map<String, Value>,
     run_path: &str,
     action_field_types: &BTreeMap<String, FieldType>,
-) -> Result<RunArg, BuildError> {
+) -> Result<Option<RunArg>, BuildError> {
     let field_path = format!("{run_path}.model");
-    let value = get_required_field(run_obj, "model", run_path)?;
+    let Some(value) = run_obj.get("model") else {
+        return Ok(None);
+    };
     let parsed = parse_run_arg(value, &field_path, action_field_types)?;
 
     match &parsed {
@@ -1275,7 +1277,7 @@ fn parse_generate_image_model_field(
         }
     }
 
-    Ok(parsed)
+    Ok(Some(parsed))
 }
 
 fn validate_action_capture_variable_name(name: &str, path: &str) -> Result<(), BuildError> {
@@ -3474,5 +3476,39 @@ mod tests {
                 .to_string();
 
         assert!(error.contains("parent traversal"));
+    }
+
+    #[test]
+    fn accepts_generate_image_without_explicit_model() {
+        let generated = generate_agent_model_from_str(
+            r#"{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        { "type": "text", "text": "Describe the image to create." }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "reason": { "type": "string" }
+        }
+    },
+    "actions": [
+        {
+            "name": "render_image",
+            "logic": { "==": [ { "var": "reason" }, "ok" ] },
+            "run": [
+                {
+                    "kind": "generate_image",
+                    "prompt": [ "Create a product render for ", { "var": "reason" } ],
+                    "path": "./artifacts/product.png"
+                }
+            ]
+        }
+    ]
+}"#,
+        )
+        .expect("generate_image without explicit model should compile");
+
+        assert!(generated.contains("model: None"));
     }
 }

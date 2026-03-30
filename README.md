@@ -639,7 +639,7 @@ Then expand into a multi-step workflow:
 
 Use `run` to sequence multiple side effects in order. `exec` steps can capture output, status, or errors for later steps, `generate_image` can write a single local image artifact, and `when` lets later steps react to success or failure without leaving the agent definition.
 
-`generate_image.model` may be a literal string or a single variable reference. Prefer a runtime-backed string such as `{ "var": "runtime.hero_image_model" }` when the operator should choose the image model at invocation time. Top-level string schema fields may also drive `generate_image.model`, but captured step variables may not.
+`generate_image.model` is optional. If omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override. If neither the step nor the invocation provides a model, the run fails clearly instead of guessing. When the image step should use a different model from the main invocation, set `generate_image.model` explicitly as either a literal string or a single variable reference. Prefer a runtime-backed string such as `{ "var": "runtime.hero_image_model" }` when the operator should choose the image model at invocation time. Top-level string schema fields may also drive `generate_image.model`, but captured step variables may not.
 
 For the default OpenAI account transport, use a tool-capable mainline model such as `gpt-5.2`. For a direct OpenAI API token and URL, prefer GPT Image models such as `gpt-image-1.5` or `gpt-image-1-mini`. Official OpenAI docs list `gpt-image-1.5` as the latest GPT Image model, and the image-generation guide lists `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini` for direct image generation. Verified: 2026-03-28.
 

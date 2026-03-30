@@ -645,6 +645,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         let actions = crate::actions();
         let action_provider_context = super::preflight_actions::ActionProviderContext {
             provider,
+            model: model.clone(),
             url: url.clone(),
             token: token.clone(),
             inference_timeout_in_sec,
@@ -836,6 +837,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     // println!("Actions {:?}", actions);
     let action_provider_context = super::preflight_actions::ActionProviderContext {
         provider,
+        model: model.clone(),
         url: url.clone(),
         token: token.clone(),
         inference_timeout_in_sec,

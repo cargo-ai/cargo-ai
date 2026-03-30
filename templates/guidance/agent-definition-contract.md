@@ -211,10 +211,13 @@ Required fields:
 
 Required fields:
 - `kind`
-- `model`
 - `prompt`
 - `path`
+- Optional:
+  - `model`
 - First slice writes one local image file.
+- If `model` is omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override.
+- If neither the step nor the invocation provides a model, the step fails clearly at runtime.
 - `model` may be:
   - a literal non-empty string
   - a single variable reference such as `{ "var": "runtime.hero_image_model" }`

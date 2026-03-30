@@ -569,6 +569,7 @@ pub(crate) struct InvocationRuntimeBudget {
 #[derive(Debug, Clone)]
 pub(crate) struct ActionProviderContext {
     pub(crate) provider: crate::providers::ProviderKind,
+    pub(crate) model: String,
     pub(crate) url: String,
     pub(crate) token: String,
     pub(crate) inference_timeout_in_sec: u64,
@@ -1456,13 +1457,8 @@ async fn run_generate_image_step(
         ));
     }
 
-    let model_arg = step.model.as_ref().ok_or_else(|| {
-        format!(
-            "Action '{}' generate_image step is missing required `model`.",
-            action_name
-        )
-    })?;
-    let model = resolve_generate_image_model(model_arg, data, action_name)?;
+    let model =
+        resolve_generate_image_model(step.model.as_ref(), data, action_name, provider_context)?;
 
     if provider_context
         .url
@@ -1565,10 +1561,21 @@ async fn run_generate_image_step(
 }
 
 fn resolve_generate_image_model(
-    model: &crate::RunArg,
+    model: Option<&crate::RunArg>,
     data: &serde_json::Value,
     action_name: &str,
+    provider_context: &ActionProviderContext,
 ) -> Result<String, String> {
+    let Some(model) = model else {
+        if provider_context.model.trim().is_empty() {
+            return Err(format!(
+                "Action '{}' generate_image step omitted `model`, and no effective invocation model is configured. Set `generate_image.model`, pass `--model`, or configure a profile model.",
+                action_name
+            ));
+        }
+        return Ok(provider_context.model.clone());
+    };
+
     match model {
         crate::RunArg::Literal(literal) => {
             if literal.trim().is_empty() {
@@ -2750,6 +2757,7 @@ mod tests {
     fn provider_context() -> ActionProviderContext {
         ActionProviderContext {
             provider: ProviderKind::OpenAi,
+            model: "gpt-5.2".to_string(),
             url: "https://api.openai.com/v1/chat/completions".to_string(),
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
@@ -3361,6 +3369,7 @@ mod tests {
         };
         let provider_context = ActionProviderContext {
             provider: ProviderKind::OpenAi,
+            model: "gpt-5.2".to_string(),
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
@@ -3436,6 +3445,7 @@ mod tests {
         };
         let provider_context = ActionProviderContext {
             provider: ProviderKind::OpenAi,
+            model: "gpt-5.2".to_string(),
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
@@ -3465,6 +3475,131 @@ mod tests {
             std::fs::read(&output_name).expect("generated image file should be written");
         let _ = std::fs::remove_file(&output_name);
         assert_eq!(written_bytes, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_falls_back_to_effective_invocation_model() {
+        use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+
+        let mut server = mockito::Server::new_async().await;
+        let expected_bytes = b"fake-png-fallback";
+        let encoded_image = BASE64_STANDARD.encode(expected_bytes);
+        let _mock = server
+            .mock("POST", "/v1/images/generations")
+            .match_body(mockito::Matcher::PartialJson(
+                json!({ "model": "gpt-image-1.5" }),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"data":[{{"b64_json":"{}"}}]}}"#,
+                encoded_image
+            ))
+            .create_async()
+            .await;
+
+        let output_name = format!(
+            ".tmp-cai2067-generated-image-fallback-{}.png",
+            std::process::id()
+        );
+        let step = crate::RunStep {
+            kind: "generate_image".to_string(),
+            program: None,
+            model: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![crate::RunArg::Literal(
+                "Create an image for Acme".to_string(),
+            )]),
+            path: Some(vec![crate::RunArg::Literal(output_name.clone())]),
+            subject: None,
+            text: None,
+            agent: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+        let provider_context = ActionProviderContext {
+            provider: ProviderKind::OpenAi,
+            model: "gpt-image-1.5".to_string(),
+            url: format!("{}/v1/chat/completions", server.url()),
+            token: "test-token".to_string(),
+            inference_timeout_in_sec: 60,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_generate_image_step(
+            &step,
+            &json!({}),
+            0,
+            "generate_art",
+            &provider_context,
+            runtime_budget,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "fallback-image generation should succeed: {result:?}"
+        );
+
+        let written_bytes =
+            std::fs::read(&output_name).expect("generated image file should be written");
+        let _ = std::fs::remove_file(&output_name);
+        assert_eq!(written_bytes, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_requires_model_when_step_and_invocation_omit_it() {
+        let step = crate::RunStep {
+            kind: "generate_image".to_string(),
+            program: None,
+            model: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![crate::RunArg::Literal(
+                "Create an image for Acme".to_string(),
+            )]),
+            path: Some(vec![crate::RunArg::Literal(
+                "./artifacts/missing-model.png".to_string(),
+            )]),
+            subject: None,
+            text: None,
+            agent: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+        let provider_context = ActionProviderContext {
+            provider: ProviderKind::OpenAi,
+            model: String::new(),
+            url: "https://api.openai.com/v1/chat/completions".to_string(),
+            token: "test-token".to_string(),
+            inference_timeout_in_sec: 60,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = run_generate_image_step(
+            &step,
+            &json!({}),
+            0,
+            "generate_art",
+            &provider_context,
+            runtime_budget,
+        )
+        .await
+        .expect_err("missing step and invocation model should fail");
+
+        assert!(error.contains("omitted `model`"));
+        assert!(error.contains("pass `--model`"));
     }
 
     #[cfg(unix)]

@@ -608,6 +608,7 @@ struct InvocationRuntimeBudget {
 #[derive(Debug, Clone)]
 struct ActionProviderContext {
     provider: ProviderKind,
+    model: String,
     url: String,
     token: String,
     inference_timeout_in_sec: u64,
@@ -1800,6 +1801,7 @@ async fn main() {
         let actions = actions();
         let action_provider_context = ActionProviderContext {
             provider,
+            model: model.clone(),
             url: url.clone(),
             token: token.clone(),
             inference_timeout_in_sec,
@@ -1976,6 +1978,7 @@ async fn main() {
     let actions = actions();
     let action_provider_context = ActionProviderContext {
         provider,
+        model: model.clone(),
         url: url.clone(),
         token: token.clone(),
         inference_timeout_in_sec,
@@ -2712,13 +2715,8 @@ async fn run_generate_image_step(
         ));
     }
 
-    let model_arg = step.model.as_ref().ok_or_else(|| {
-        format!(
-            "Action '{}' generate_image step is missing required `model`.",
-            action_name
-        )
-    })?;
-    let model = resolve_generate_image_model(model_arg, data, action_name)?;
+    let model =
+        resolve_generate_image_model(step.model.as_ref(), data, action_name, provider_context)?;
 
     if provider_context.url.contains("chatgpt.com/backend-api/codex")
         && model.starts_with("gpt-image")
@@ -2821,10 +2819,21 @@ async fn run_generate_image_step(
 }
 
 fn resolve_generate_image_model(
-    model: &RunArg,
+    model: Option<&RunArg>,
     data: &serde_json::Value,
     action_name: &str,
+    provider_context: &ActionProviderContext,
 ) -> Result<String, String> {
+    let Some(model) = model else {
+        if provider_context.model.trim().is_empty() {
+            return Err(format!(
+                "Action '{}' generate_image step omitted `model`, and no effective invocation model is configured. Set `generate_image.model`, pass `--model`, or configure a profile model.",
+                action_name
+            ));
+        }
+        return Ok(provider_context.model.clone());
+    };
+
     match model {
         RunArg::Literal(literal) => {
             if literal.trim().is_empty() {
