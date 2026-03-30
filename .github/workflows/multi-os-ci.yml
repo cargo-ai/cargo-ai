@@ -9,6 +9,12 @@ on:
       - main
       - develop
   workflow_dispatch:  # allows manual ad hoc runs from GitHub UI
+    inputs:
+      run_live_openai_smoke:
+        description: "Run provider-backed OpenAI smoke checks after the local hatch smoke"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   test:
@@ -37,10 +43,17 @@ jobs:
       - name: Run smoke test via installed CLI
         run: cargo ai hatch adder_test
 
-      - name: Set OPENAI_API_KEY environment variable
-        run: echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> $GITHUB_ENV
+      - name: Note live OpenAI smoke policy
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.run_live_openai_smoke }}" == "true" ]]; then
+            echo "Live OpenAI smoke is enabled for this manual run."
+          else
+            echo "Skipping live OpenAI smoke on the default push matrix; build, install, and hatch smoke remain required."
+          fi
+        shell: bash
 
       - name: Run agent_adder with OpenAI token
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_openai_smoke == true && secrets.OPENAI_API_KEY != '' }}
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             ./adder_test.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }}
@@ -50,6 +63,7 @@ jobs:
         shell: bash
 
       - name: Validate agent_adder output with default prompt
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_openai_smoke == true && secrets.OPENAI_API_KEY != '' }}
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             OUTPUT=$(./adder_test.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }})
@@ -66,6 +80,7 @@ jobs:
         shell: bash
 
       - name: Validate agent_adder output with overridden text input
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_openai_smoke == true && secrets.OPENAI_API_KEY != '' }}
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             OUTPUT=$(./adder_test.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --input-text "What is 2 + 3? Return the answer as a number.")
