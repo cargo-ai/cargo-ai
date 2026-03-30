@@ -112,6 +112,7 @@ struct RunStep {
     kind: String,
     program: Option<String>,
     model: Option<RunArg>,
+    profile: Option<RunArg>,
     output_variable: Option<String>,
     status_variable: Option<String>,
     error_variable: Option<String>,
@@ -132,6 +133,13 @@ struct RunStep {
 enum FailureMode {
     Stop,
     Continue,
+    Abort,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionExecutionMode {
+    Sequential,
+    Parallel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,6 +216,7 @@ struct AgentConfig {
     inputs: Vec<InputSpec>,
     runtime_vars: Vec<RuntimeVarSpec>,
     properties: Vec<AgentProperty>,
+    action_execution: ActionExecutionMode,
     actions: Vec<Action>,
 }
 
@@ -409,6 +418,7 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
     validate_schema_version(schema_version, "$.version")?;
 
     let runtime_vars = parse_runtime_vars(root_obj)?;
+    let action_execution = parse_action_execution(root_obj)?;
 
     let schema = get_required_object(root_obj, "agent_schema", "$")?;
     let schema_type = get_required_string(schema, "type", "$.agent_schema")?;
@@ -447,8 +457,32 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
         inputs,
         runtime_vars,
         properties: parsed_properties,
+        action_execution,
         actions,
     })
+}
+
+fn parse_action_execution(
+    root_obj: &Map<String, Value>,
+) -> Result<ActionExecutionMode, BuildError> {
+    let Some(value) = root_obj.get("action_execution") else {
+        return Ok(ActionExecutionMode::Sequential);
+    };
+
+    let execution = value
+        .as_str()
+        .ok_or_else(|| BuildError::config("$.action_execution", "expected a string"))?
+        .trim()
+        .to_ascii_lowercase();
+
+    match execution.as_str() {
+        "sequential" => Ok(ActionExecutionMode::Sequential),
+        "parallel" => Ok(ActionExecutionMode::Parallel),
+        _ => Err(BuildError::config(
+            "$.action_execution",
+            "expected `sequential` or `parallel`",
+        )),
+    }
 }
 
 fn validate_schema_version(value: &str, path: &str) -> Result<(), BuildError> {
@@ -653,6 +687,12 @@ fn parse_actions(
 
             let run_step = match kind.as_str() {
                 "exec" => {
+                    if run_obj.contains_key("profile") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.profile"),
+                            "`profile` is only supported for `agent` and `generate_image` actions",
+                        ));
+                    }
                     if run_obj.contains_key("model") {
                         return Err(BuildError::config(
                             format!("{run_path}.model"),
@@ -722,6 +762,7 @@ fn parse_actions(
                         kind,
                         program: Some(program),
                         model: None,
+                        profile: None,
                         output_variable,
                         status_variable,
                         error_variable,
@@ -739,6 +780,12 @@ fn parse_actions(
                     }
                 }
                 "email_me" => {
+                    if run_obj.contains_key("profile") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.profile"),
+                            "`profile` is only supported for `agent` and `generate_image` actions",
+                        ));
+                    }
                     if run_obj.contains_key("model") {
                         return Err(BuildError::config(
                             format!("{run_path}.model"),
@@ -811,6 +858,7 @@ fn parse_actions(
                         kind,
                         program: None,
                         model: None,
+                        profile: None,
                         output_variable: None,
                         status_variable,
                         error_variable,
@@ -882,6 +930,8 @@ fn parse_actions(
                         .to_string();
                     let agent_path = format!("{run_path}.agent");
                     validate_child_agent_target(&agent, &agent_path)?;
+                    let profile =
+                        parse_optional_profile_field(run_obj, &run_path, action_field_types)?;
                     let input_mode = parse_optional_action_input_mode(run_obj, &run_path)?;
 
                     let inputs = match run_obj.get("inputs") {
@@ -913,6 +963,7 @@ fn parse_actions(
                         kind,
                         program: None,
                         model: None,
+                        profile,
                         output_variable: None,
                         status_variable,
                         error_variable,
@@ -981,6 +1032,8 @@ fn parse_actions(
 
                     let model =
                         parse_generate_image_model_field(run_obj, &run_path, action_field_types)?;
+                    let profile =
+                        parse_optional_profile_field(run_obj, &run_path, action_field_types)?;
 
                     let prompt = parse_string_parts_field(
                         run_obj,
@@ -1010,7 +1063,8 @@ fn parse_actions(
                     RunStep {
                         kind,
                         program: None,
-                        model: Some(model),
+                        model,
+                        profile,
                         output_variable: None,
                         status_variable,
                         error_variable,
@@ -1116,16 +1170,17 @@ fn parse_optional_failure_mode(
     let failure_mode = value.as_str().ok_or_else(|| {
         BuildError::config(
             &failure_mode_path,
-            "expected `failure_mode` to be a string (`stop` or `continue`)",
+            "expected `failure_mode` to be a string (`stop`, `continue`, or `abort`)",
         )
     })?;
 
     match failure_mode.trim() {
         "stop" => Ok(Some(FailureMode::Stop)),
         "continue" => Ok(Some(FailureMode::Continue)),
+        "abort" => Ok(Some(FailureMode::Abort)),
         _ => Err(BuildError::config(
             &failure_mode_path,
-            "unsupported `failure_mode` (supported: `stop`, `continue`)",
+            "unsupported `failure_mode` (supported: `stop`, `continue`, `abort`)",
         )),
     }
 }
@@ -1200,14 +1255,46 @@ fn parse_generate_image_model_field(
     run_obj: &Map<String, Value>,
     run_path: &str,
     action_field_types: &BTreeMap<String, FieldType>,
-) -> Result<RunArg, BuildError> {
-    let field_path = format!("{run_path}.model");
-    let value = get_required_field(run_obj, "model", run_path)?;
+) -> Result<Option<RunArg>, BuildError> {
+    parse_optional_string_run_arg_field(
+        run_obj,
+        "model",
+        run_path,
+        action_field_types,
+        "generate_image `model`",
+    )
+}
+
+fn parse_optional_profile_field(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+    action_field_types: &BTreeMap<String, FieldType>,
+) -> Result<Option<RunArg>, BuildError> {
+    parse_optional_string_run_arg_field(
+        run_obj,
+        "profile",
+        run_path,
+        action_field_types,
+        "`profile`",
+    )
+}
+
+fn parse_optional_string_run_arg_field(
+    run_obj: &Map<String, Value>,
+    field_name: &str,
+    run_path: &str,
+    action_field_types: &BTreeMap<String, FieldType>,
+    field_description: &str,
+) -> Result<Option<RunArg>, BuildError> {
+    let field_path = format!("{run_path}.{field_name}");
+    let Some(value) = run_obj.get(field_name) else {
+        return Ok(None);
+    };
     let parsed = parse_run_arg(value, &field_path, action_field_types)?;
 
     match &parsed {
-        RunArg::Literal(model) => {
-            if model.trim().is_empty() {
+        RunArg::Literal(text) => {
+            if text.trim().is_empty() {
                 return Err(BuildError::config(
                     &field_path,
                     "must be a non-empty string",
@@ -1233,7 +1320,7 @@ fn parse_generate_image_model_field(
                 return Err(BuildError::config(
                     &field_path,
                     format!(
-                        "generate_image `model` variables must resolve from string fields; `{variable}` is {}",
+                        "{field_description} variables must resolve from string fields; `{variable}` is {}",
                         type_name(field_type)
                     ),
                 ));
@@ -1241,7 +1328,7 @@ fn parse_generate_image_model_field(
         }
     }
 
-    Ok(parsed)
+    Ok(Some(parsed))
 }
 
 fn validate_action_capture_variable_name(name: &str, path: &str) -> Result<(), BuildError> {
@@ -2760,6 +2847,11 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     .as_ref()
                     .map(|model| format!("Some({})", render_run_arg(model)))
                     .unwrap_or_else(|| "None".to_string());
+                let profile = run_step
+                    .profile
+                    .as_ref()
+                    .map(|profile| format!("Some({})", render_run_arg(profile)))
+                    .unwrap_or_else(|| "None".to_string());
                 let status_variable = run_step
                     .status_variable
                     .as_ref()
@@ -2776,6 +2868,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     .map(|mode| match mode {
                         FailureMode::Stop => "Some(FailureMode::Stop)".to_string(),
                         FailureMode::Continue => "Some(FailureMode::Continue)".to_string(),
+                        FailureMode::Abort => "Some(FailureMode::Abort)".to_string(),
                     })
                     .unwrap_or_else(|| "None".to_string());
                 let when = run_step
@@ -2851,6 +2944,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         kind: {}.to_string(),
                         program: {},
                         model: {},
+                        profile: {},
                         output_variable: {},
                         status_variable: {},
                         error_variable: {},
@@ -2875,6 +2969,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         })
                         .unwrap_or_else(|| "None".to_string()),
                     model,
+                    profile,
                     output_variable,
                     status_variable,
                     error_variable,
@@ -2944,6 +3039,10 @@ fn render_agent_model(config: &AgentConfig) -> String {
         .collect::<Vec<_>>()
         .join("");
     let has_output_schema_properties = !config.properties.is_empty();
+    let action_execution = match config.action_execution {
+        ActionExecutionMode::Sequential => "ActionExecutionMode::Sequential",
+        ActionExecutionMode::Parallel => "ActionExecutionMode::Parallel",
+    };
 
     format!(
         r##"
@@ -2976,6 +3075,16 @@ pub fn inputs() -> Vec<Input> {{
 
 pub fn has_output_schema_properties() -> bool {{
     {has_output_schema_properties}
+}}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ActionExecutionMode {{
+    Sequential,
+    Parallel,
+}}
+
+pub fn action_execution() -> ActionExecutionMode {{
+    {action_execution}
 }}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -3035,6 +3144,7 @@ pub enum ActionInput {{
 pub enum FailureMode {{
     Stop,
     Continue,
+    Abort,
 }}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -3049,6 +3159,7 @@ pub struct RunStep {{
     kind: String,
     program: Option<String>,
     model: Option<RunArg>,
+    profile: Option<RunArg>,
     output_variable: Option<String>,
     status_variable: Option<String>,
     error_variable: Option<String>,
@@ -3090,6 +3201,7 @@ pub fn actions() -> Vec<Action> {{
         schema_metadata_apply = schema_metadata_apply,
         schema_metadata_helpers = schema_metadata_helpers,
         runtime_var_specs_code = runtime_var_specs_code,
+        action_execution = action_execution,
         action_code = action_code
     )
 }
@@ -3423,5 +3535,122 @@ mod tests {
                 .to_string();
 
         assert!(error.contains("parent traversal"));
+    }
+
+    #[test]
+    fn accepts_generate_image_without_explicit_model() {
+        let generated = generate_agent_model_from_str(
+            r#"{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        { "type": "text", "text": "Describe the image to create." }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "reason": { "type": "string" }
+        }
+    },
+    "actions": [
+        {
+            "name": "render_image",
+            "logic": { "==": [ { "var": "reason" }, "ok" ] },
+            "run": [
+                {
+                    "kind": "generate_image",
+                    "prompt": [ "Create a product render for ", { "var": "reason" } ],
+                    "path": "./artifacts/product.png"
+                }
+            ]
+        }
+    ]
+}"#,
+        )
+        .expect("generate_image without explicit model should compile");
+
+        assert!(generated.contains("model: None"));
+    }
+
+    #[test]
+    fn accepts_step_level_profile_for_agent_and_generate_image() {
+        let generated = generate_agent_model_from_str(
+            r#"{
+    "version": "2026-03-03.r1",
+    "runtime_vars": {
+        "child_profile": { "type": "string" }
+    },
+    "inputs": [
+        { "type": "text", "text": "Describe the image to create." }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "reason": { "type": "string" }
+        }
+    },
+    "actions": [
+        {
+            "name": "render_image",
+            "logic": { "==": [ { "var": "reason" }, "ok" ] },
+            "run": [
+                {
+                    "kind": "generate_image",
+                    "profile": "image_profile",
+                    "prompt": [ "Create a product render for ", { "var": "reason" } ],
+                    "path": "./artifacts/product.png"
+                },
+                {
+                    "kind": "agent",
+                    "agent": "./childagent",
+                    "profile": { "var": "runtime.child_profile" }
+                }
+            ]
+        }
+    ]
+}"#,
+        )
+        .expect("step-level profiles should compile");
+
+        assert!(generated.contains("profile: Some(RunArg::Literal(\"image_profile\".to_string()))"));
+        assert!(generated
+            .contains("profile: Some(RunArg::Variable(\"runtime.child_profile\".to_string()))"));
+    }
+
+    #[test]
+    fn rejects_profile_on_exec_actions() {
+        let error = generate_agent_model_from_str(
+            r#"{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        { "type": "text", "text": "Test prompt" }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "ok": { "type": "boolean" }
+        }
+    },
+    "actions": [
+        {
+            "name": "demo",
+            "logic": { "==": [ { "var": "ok" }, true ] },
+            "run": [
+                {
+                    "kind": "exec",
+                    "program": "/bin/echo",
+                    "args": ["hello"],
+                    "profile": "image_profile"
+                }
+            ]
+        }
+    ]
+}"#,
+        )
+        .expect_err("exec steps must reject profile")
+        .to_string();
+
+        assert!(
+            error.contains("`profile` is only supported for `agent` and `generate_image` actions")
+        );
     }
 }

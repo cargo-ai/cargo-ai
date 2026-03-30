@@ -103,11 +103,36 @@ fn cli_override_descriptions(sub_m: &ArgMatches, include_token_override: bool) -
         overrides.push(format!("max_runtime_in_sec={max_runtime}"));
     }
 
+    if let Some(action_execution) = sub_m.get_one::<String>("action_execution") {
+        overrides.push(format!("action_execution={action_execution}"));
+    }
+
     if include_token_override {
         overrides.push("token=(explicit)".to_string());
     }
 
     overrides
+}
+
+fn resolved_action_execution_override_for_run(
+    sub_m: &ArgMatches,
+) -> Result<Option<crate::ActionExecutionMode>, String> {
+    match sub_m
+        .get_one::<String>("action_execution")
+        .map(String::as_str)
+    {
+        None => Ok(None),
+        Some("sequential") => Ok(Some(crate::ActionExecutionMode::Sequential)),
+        Some(other) => Err(format!(
+            "Unsupported --action-execution '{other}'. Expected sequential."
+        )),
+    }
+}
+
+fn effective_action_execution_for_run(
+    action_execution_override: Option<crate::ActionExecutionMode>,
+) -> crate::ActionExecutionMode {
+    action_execution_override.unwrap_or_else(crate::action_execution)
 }
 
 fn resolve_profile_api_token(profile: &SelectedProfile) -> Result<String, String> {
@@ -592,6 +617,14 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             return false;
         }
     };
+    let action_execution_override = match resolved_action_execution_override_for_run(sub_m) {
+        Ok(action_execution_override) => action_execution_override,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            return false;
+        }
+    };
+    let effective_action_execution = effective_action_execution_for_run(action_execution_override);
     let has_output_schema_properties = crate::has_output_schema_properties();
 
     if let Err(error) =
@@ -612,6 +645,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         let actions = crate::actions();
         let action_provider_context = super::preflight_actions::ActionProviderContext {
             provider,
+            model: model.clone(),
             url: url.clone(),
             token: token.clone(),
             inference_timeout_in_sec,
@@ -621,6 +655,8 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             &output,
             &actions,
             &runtime_vars,
+            effective_action_execution,
+            action_execution_override,
             &action_provider_context,
             max_agent_depth,
             runtime_budget,
@@ -801,6 +837,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     // println!("Actions {:?}", actions);
     let action_provider_context = super::preflight_actions::ActionProviderContext {
         provider,
+        model: model.clone(),
         url: url.clone(),
         token: token.clone(),
         inference_timeout_in_sec,
@@ -810,6 +847,8 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         &output,
         &actions,
         &runtime_vars,
+        effective_action_execution,
+        action_execution_override,
         &action_provider_context,
         max_agent_depth,
         runtime_budget,
@@ -827,7 +866,8 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cli_override_descriptions, profile_selection_messages, resolve_runtime_vars_from_specs,
+        cli_override_descriptions, effective_action_execution_for_run, profile_selection_messages,
+        resolve_runtime_vars_from_specs, resolved_action_execution_override_for_run,
         unknown_server_messages, validate_structural_action_only_inputs, LoadedProfileKind,
     };
     use crate::args::test_cli_command;
@@ -905,6 +945,8 @@ mod tests {
             "3",
             "--max-runtime-in-sec",
             "180",
+            "--action-execution",
+            "sequential",
             "--input-text",
             "Return 4",
         ]);
@@ -922,7 +964,59 @@ mod tests {
                 "inference_timeout_in_sec=90".to_string(),
                 "max_agent_depth=3".to_string(),
                 "max_runtime_in_sec=180".to_string(),
+                "action_execution=sequential".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn preflight_accepts_action_execution_override() {
+        let cmd = matches(&[
+            "cargo-ai",
+            "preflight",
+            "--action-execution",
+            "sequential",
+            "--input-text",
+            "Return 4",
+        ]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        assert_eq!(
+            preflight
+                .get_one::<String>("action_execution")
+                .map(String::as_str),
+            Some("sequential")
+        );
+    }
+
+    #[test]
+    fn resolved_action_execution_override_for_run_reads_cli_override() {
+        let cmd = matches(&[
+            "cargo-ai",
+            "preflight",
+            "--action-execution",
+            "sequential",
+            "--input-text",
+            "Return 4",
+        ]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        assert_eq!(
+            resolved_action_execution_override_for_run(preflight)
+                .expect("action execution override should resolve"),
+            Some(crate::ActionExecutionMode::Sequential)
+        );
+    }
+
+    #[test]
+    fn effective_action_execution_for_run_prefers_runtime_override() {
+        assert_eq!(
+            effective_action_execution_for_run(Some(crate::ActionExecutionMode::Sequential)),
+            crate::ActionExecutionMode::Sequential
         );
     }
 

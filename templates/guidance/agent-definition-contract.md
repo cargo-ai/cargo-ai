@@ -153,6 +153,13 @@ Structural action-only rule:
 
 - Required.
 - Array with at least one action.
+- Optional top-level `action_execution` may appear alongside `actions`.
+  - Allowed values: `sequential`, `parallel`
+  - Omitted means `sequential`
+  - `parallel` only changes scheduling across matching top-level actions
+  - each action's own `run` list remains sequential in both modes
+  - a runtime safety/testing override may force the invocation tree down to sequential with `--action-execution sequential`
+  - that runtime override is CLI-scoped and inherited by child-agent invocations; parent JSON does not override child JSON
 - Each action must contain:
   - `name`
   - `logic`
@@ -163,6 +170,18 @@ Structural action-only rule:
 - declared `runtime.*` values only for the structural action-only shape
 
 If `logic` evaluates true, the action's `run` steps execute in order.
+- In `sequential`, matching top-level actions run one after another.
+- In `parallel`, matching top-level actions may overlap, but each action still keeps its own `run` steps in order.
+- A hard failure in one top-level action does not prevent later eligible top-level actions from running.
+- Cargo AI aggregates top-level hard failures after all eligible actions finish.
+- Cargo AI prints one run-level execution header before actions start: `Action execution: sequential` or `Action execution: parallel`.
+- In redirected, piped, CI, or simpler terminal output, Cargo AI prefixes parent-visible action output with deterministic lane labels such as `[A1 generate_images]`.
+- In append-only output, long-running steps also emit a step-start liveness line such as `step 2/2 generate_image started; waiting for provider response...`.
+- Terminal lane summaries and the final run footer also include wall-clock durations, for example `completed in 31s.` and `✅ Run complete in 32s.`.
+- When attached directly to an interactive terminal, Cargo AI switches to a compact live lane dashboard.
+- The first live dashboard slice shows lane label, lane status with elapsed time while running and after terminal completion/failure, terminal step marker or current step when known, the last lifecycle message, and a compact buffered `output` section for parent-visible action output.
+- Parent-run `exec` and `email_me` output is bucketed into the originating lane.
+- Child-agent steps stay minimal in the parent lane with start/completion or exit-summary lines instead of recursively inlining the child transcript.
 
 ## Supported Run-Step Kinds
 
@@ -181,6 +200,9 @@ Required fields:
 - `kind`
 - `agent`
 
+Optional fields:
+- `profile`
+
 ### `email_me`
 
 Required fields:
@@ -192,10 +214,16 @@ Required fields:
 
 Required fields:
 - `kind`
-- `model`
 - `prompt`
 - `path`
+- Optional:
+  - `model`
+  - `profile`
 - First slice writes one local image file.
+- If `model` is omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override.
+- If `profile` is present, Cargo AI resolves that profile at step runtime and uses it for the image step's provider/url/token context.
+- With `generate_image.profile`, explicit `model` still wins, then the step-profile model, then the parent invocation model.
+- If neither the step nor the invocation provides a model, the step fails clearly at runtime.
 - `model` may be:
   - a literal non-empty string
   - a single variable reference such as `{ "var": "runtime.hero_image_model" }`
@@ -252,6 +280,10 @@ Example:
 
 - Steps stop the action by default when they fail.
 - Use `failure_mode: "continue"` only when a later step should react to a failure.
+- Use `failure_mode: "abort"` when the whole invocation should stop scheduling new work and fail with an explicit abort summary.
+- A hard failure stops the rest of that action's `run` list, but it does not prevent later eligible top-level actions from running; Cargo AI aggregates top-level action failures after the full scan.
+- In the first `abort` slice, already-running work settles cooperatively unless a safe cancellation path already exists.
+- Child-agent abort stays local to the child invocation first; the parent lane then handles that failed child exit according to the parent step's own `failure_mode`.
 - `status_variable` stores:
   - `succeeded`
   - `failed`
@@ -293,6 +325,7 @@ For `kind: "agent"`:
 ## Child-Agent Data Flow
 
 - A parent action may pass child-agent `inputs`.
+- A `kind: "agent"` run step may also set `profile` as a literal string or single variable reference; Cargo AI resolves it at step runtime and forwards `--profile <name>` to the child.
 - A `kind: "agent"` run step may also set `input_mode` to `replace`, `append`, or `prepend` when child `inputs` are present.
 - If child `input_mode` is omitted, the child step keeps the current default behavior: child `inputs` replace the child agent's baked `inputs`.
 - Child `append` keeps the child agent's baked inputs first, then appends the action-supplied child inputs in declared order.

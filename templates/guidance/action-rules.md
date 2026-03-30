@@ -11,9 +11,34 @@ For broader shape and validation rules, also read:
 - Required top-level keys:
   - `version`
   - optional `inputs`
+  - optional `action_execution`
   - optional `runtime_vars`
   - `agent_schema`
   - `actions`
+
+## Top-Level Action Execution
+- `action_execution`
+  - Allowed values: `sequential`, `parallel`
+  - Omitted means `sequential`.
+  - `parallel` only changes scheduling across matching top-level actions.
+  - Each individual action's `run` list stays sequential in both modes.
+- Runtime may force a parallel-capable invocation tree down to sequential with `--action-execution sequential`.
+- That runtime override is invocation-scoped and inherits to child-agent steps; parent JSON `action_execution` does not override child JSON.
+- A hard failure in one top-level action does not prevent later eligible top-level actions from running.
+- Cargo AI aggregates top-level hard failures after all eligible actions finish.
+- Cargo AI prints one run-level header, `Action execution: sequential` or `Action execution: parallel`, before action work begins.
+- In redirected, piped, CI, or simpler terminal output, Cargo AI prefixes parent-visible action output with deterministic lane labels such as `[A1 generate_images]`.
+- In append-only output, long-running steps also emit a step-start liveness line such as `step 2/2 generate_image started; waiting for provider response...`.
+- Terminal lane summaries and the final run footer also include wall-clock durations, for example `completed in 31s.` and `✅ Run complete in 32s.`.
+- When attached directly to an interactive terminal, Cargo AI switches to a compact live lane dashboard instead of append-only lifecycle lines.
+- The first live dashboard slice keeps each lane block compact:
+  - lane label
+  - lane status with elapsed time while running and after terminal completion/failure
+  - terminal step marker or current step when known
+  - last lifecycle message
+  - compact buffered `output` section for parent-visible action output
+- Parent-run `exec` and `email_me` output is bucketed into the originating lane.
+- Child-agent steps stay minimal in the parent lane with start/completion or exit-summary lines instead of recursively inlining the child transcript.
 
 ## Supported Step Kinds
 
@@ -23,11 +48,17 @@ These documented step kinds and helper fields are exhaustive for the current MVP
   - Required: `kind`, `program`, `args`
 - `agent`
   - Required: `kind`, `agent`
+  - Optional: `profile`
 - `email_me`
   - Required: `kind`, `subject`, `text`
 - `generate_image`
-  - Required: `kind`, `model`, `prompt`, `path`
+  - Required: `kind`, `prompt`, `path`
+  - Optional: `model`, `profile`
   - First slice: OpenAI-backed single-image output only
+  - If `model` is omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override.
+  - If `profile` is present, Cargo AI resolves that profile at step runtime and uses it for the image step's provider/url/token context.
+  - With `generate_image.profile`, explicit `model` still wins, then the step-profile model, then the parent invocation model.
+  - If neither the step nor the invocation provides a model, the step fails clearly at runtime.
   - `model` may be:
     - a literal non-empty string
     - a single variable reference such as `{ "var": "runtime.hero_image_model" }`
@@ -41,7 +72,7 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - `when`
   - JSON Logic object evaluated by the parent action runner.
 - `failure_mode`
-  - Allowed values: `stop`, `continue`
+  - Allowed values: `stop`, `continue`, `abort`
   - Omitted means `stop`.
 - `platform`
   - Allowed values: `macos`, `linux`, `windows`
@@ -59,6 +90,9 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 ## Step Outcome Rules
 - Steps stop the action by default when they fail.
 - `failure_mode: "continue"` allows later steps to run after failure.
+- `failure_mode: "abort"` stops scheduling new work for the current invocation, lets already-running work settle in the first slice, and fails the run with an explicit abort summary.
+- A hard failure still stays local to that action's `run` list; later eligible top-level actions continue and the runtime aggregates top-level failures at the end.
+- Child-agent abort stays local to the child invocation first; the parent lane then handles that failed child exit according to the parent step's own `failure_mode`.
 - If a step is skipped because `when` is false, `status_variable` and `error_variable` stay unset in the MVP.
 - If a step is skipped because `platform` does not match, `status_variable` and `error_variable` stay unset in the MVP.
 - Matching steps still run in listed order.
@@ -103,6 +137,7 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - Parent actions may pass child-agent `inputs`, including dynamic string parts resolved from current action-local data.
 - Those child `inputs` may resolve declared `runtime.*` values alongside top-level model output fields and prior captured step variables.
 - Parent `agent` steps may set child `input_mode` to `replace`, `append`, or `prepend` when they also provide child `inputs`.
+- Parent `agent` steps may also set a step-level `profile` as a literal string or single variable reference; Cargo AI resolves it at step runtime and forwards `--profile <name>` to the child.
 - Omitted child `input_mode` keeps the current replace behavior for child inputs.
 - Parent actions may capture child-agent success/failure with `status_variable` and `error_variable`.
 - Parent actions cannot directly capture the child agent's top-level returned output fields into the parent action-local namespace.

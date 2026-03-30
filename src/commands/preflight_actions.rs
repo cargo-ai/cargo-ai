@@ -1,12 +1,18 @@
 //! Action execution helpers for preflight/test flows.
 use crate::config::adder::set_account_tokens;
-use crate::config::loader::{config_path, load_config};
+use crate::config::loader::{config_path, find_profile, load_config};
+use crate::config::schema::ProfileAuthMode;
+use crate::credentials::openai_oauth;
 use crate::credentials::store;
 use crate::infra_api;
 use jsonlogic::apply;
+use std::collections::{BTreeMap, VecDeque};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Component, Path};
 use std::process::Stdio;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
 const AGENT_ACTION_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_DEPTH";
@@ -16,6 +22,544 @@ const AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_STA
 const AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_DEADLINE_MS";
 const DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS: u64 = 600;
 const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str = "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
+const ACTION_LANE_OUTPUT_BUFFER_LIMIT: usize = 6;
+
+tokio::task_local! {
+    static ACTION_OUTPUT: ActionOutput;
+}
+
+#[derive(Clone)]
+struct ActionOutput {
+    inner: Arc<Mutex<ActionOutputState>>,
+    live_refresh_stop: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActionOutputMode {
+    AppendOnly,
+    Live,
+}
+
+struct ActionOutputState {
+    mode: ActionOutputMode,
+    action_execution: crate::ActionExecutionMode,
+    rendered_lines: usize,
+    lanes: BTreeMap<usize, ActionLaneState>,
+}
+
+#[derive(Clone)]
+struct ActionLaneState {
+    action_name: String,
+    status: ActionLaneStatus,
+    lane_started_at: Option<Instant>,
+    lane_finished_after: Option<Duration>,
+    current_step: Option<String>,
+    step_started_at: Option<Instant>,
+    last_message: Option<String>,
+    output_lines: VecDeque<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActionLaneStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Aborted,
+    Notice,
+    LogicError,
+    Skipped,
+}
+
+impl ActionOutput {
+    fn new(action_execution: crate::ActionExecutionMode) -> Self {
+        Self::new_for_mode(
+            action_execution,
+            if should_use_live_action_dashboard() {
+                ActionOutputMode::Live
+            } else {
+                ActionOutputMode::AppendOnly
+            },
+        )
+    }
+
+    fn new_for_mode(action_execution: crate::ActionExecutionMode, mode: ActionOutputMode) -> Self {
+        let inner = Arc::new(Mutex::new(ActionOutputState {
+            mode,
+            action_execution,
+            rendered_lines: 0,
+            lanes: BTreeMap::new(),
+        }));
+        let live_refresh_stop = Arc::new(AtomicBool::new(false));
+        maybe_spawn_live_action_refresh(inner.clone(), live_refresh_stop.clone(), mode);
+        Self {
+            inner,
+            live_refresh_stop,
+        }
+    }
+
+    fn print_execution_header(&self) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::AppendOnly {
+                println!("{}", action_execution_header(state.action_execution));
+            } else {
+                render_live_dashboard(state);
+            }
+        });
+    }
+
+    fn action_started(&self, action_index: usize, action_name: &str) {
+        self.with_state(|state| {
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.status = ActionLaneStatus::Running;
+            lane.lane_started_at = Some(Instant::now());
+            lane.lane_finished_after = None;
+            lane.last_message = Some("started".to_string());
+            if state.mode == ActionOutputMode::AppendOnly {
+                println!(
+                    "{}",
+                    format_action_line(action_index, action_name, "started")
+                );
+            } else {
+                render_live_dashboard(state);
+            }
+        });
+    }
+
+    fn action_step_started(
+        &self,
+        action_index: usize,
+        action_name: &str,
+        step_kind: &str,
+        step_number: usize,
+        step_count: usize,
+    ) {
+        self.with_state(|state| {
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.status = ActionLaneStatus::Running;
+            lane.current_step = Some(format!("{}/{} {}", step_number, step_count, step_kind));
+            lane.step_started_at = Some(Instant::now());
+            lane.last_message = Some(waiting_message_for_step_kind(step_kind).to_string());
+            if state.mode == ActionOutputMode::AppendOnly {
+                println!(
+                    "{}",
+                    format_action_line(
+                        action_index,
+                        action_name,
+                        format!(
+                            "step {}/{} {} started; {}",
+                            step_number,
+                            step_count,
+                            step_kind,
+                            waiting_message_for_step_kind(step_kind)
+                        )
+                        .as_str(),
+                    )
+                );
+            } else {
+                render_live_dashboard(state);
+            }
+        });
+    }
+
+    fn action_line(&self, action_index: usize, action_name: &str, message: &str) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::AppendOnly {
+                for line in split_action_output_lines(message) {
+                    println!(
+                        "{}",
+                        format_action_line(action_index, action_name, line.as_str())
+                    );
+                }
+                return;
+            }
+
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.last_message = compact_action_output_line(message);
+            push_lane_output_message(lane, message);
+            if lane.status == ActionLaneStatus::Pending {
+                lane.status = inferred_lane_status(message);
+            } else if lane.status == ActionLaneStatus::Running {
+                lane.status = match inferred_lane_status(message) {
+                    ActionLaneStatus::Notice => ActionLaneStatus::Running,
+                    other => other,
+                };
+            }
+            render_live_dashboard(state);
+        });
+    }
+
+    fn action_success(&self, action_index: usize, action_name: &str, summary: &str) {
+        self.with_state(|state| {
+            let append_only = state.mode == ActionOutputMode::AppendOnly;
+            let append_message = {
+                let lane = ensure_lane_state(state, action_index, action_name);
+                lane.status = ActionLaneStatus::Completed;
+                lane.current_step = None;
+                lane.step_started_at = None;
+                lane.lane_finished_after =
+                    lane.lane_started_at.map(|started_at| started_at.elapsed());
+                lane.last_message = Some(format!("{}.", summary));
+                if append_only {
+                    Some(format!(
+                        "{} in {}.",
+                        summary,
+                        format_elapsed_duration(
+                            lane.lane_finished_after
+                                .unwrap_or_else(|| Duration::from_secs(0))
+                        )
+                    ))
+                } else {
+                    None
+                }
+            };
+            if let Some(message) = append_message {
+                println!(
+                    "{}",
+                    format_action_line(action_index, action_name, message.as_str())
+                );
+            } else {
+                render_live_dashboard(state);
+            }
+        });
+    }
+
+    fn action_failed(&self, action_index: usize, action_name: &str, error: &str) {
+        self.with_state(|state| {
+            let append_only = state.mode == ActionOutputMode::AppendOnly;
+            let append_message = {
+                let lane = ensure_lane_state(state, action_index, action_name);
+                lane.status = ActionLaneStatus::Failed;
+                lane.current_step = None;
+                lane.step_started_at = None;
+                lane.lane_finished_after =
+                    lane.lane_started_at.map(|started_at| started_at.elapsed());
+                lane.last_message = compact_action_output_line(error)
+                    .map(|line| format!("failed: {}", line))
+                    .or_else(|| Some("failed".to_string()));
+                push_lane_output_message(lane, error);
+                if append_only {
+                    Some(format!(
+                        "failed in {}.",
+                        format_elapsed_duration(
+                            lane.lane_finished_after
+                                .unwrap_or_else(|| Duration::from_secs(0))
+                        )
+                    ))
+                } else {
+                    None
+                }
+            };
+            if let Some(message) = append_message {
+                println!(
+                    "{}",
+                    format_action_line(action_index, action_name, message.as_str())
+                );
+            } else {
+                render_live_dashboard(state);
+            }
+        });
+    }
+
+    fn action_aborted(&self, action_index: usize, action_name: &str, error: &str) {
+        self.with_state(|state| {
+            let append_only = state.mode == ActionOutputMode::AppendOnly;
+            let append_message = {
+                let lane = ensure_lane_state(state, action_index, action_name);
+                lane.status = ActionLaneStatus::Aborted;
+                lane.current_step = None;
+                lane.step_started_at = None;
+                lane.lane_finished_after =
+                    lane.lane_started_at.map(|started_at| started_at.elapsed());
+                lane.last_message = compact_action_output_line(error)
+                    .map(|line| format!("abort requested: {}", line))
+                    .or_else(|| Some("abort requested".to_string()));
+                push_lane_output_message(lane, error);
+                if append_only {
+                    Some(format!(
+                        "abort requested in {}: {}",
+                        format_elapsed_duration(
+                            lane.lane_finished_after
+                                .unwrap_or_else(|| Duration::from_secs(0))
+                        ),
+                        error
+                    ))
+                } else {
+                    None
+                }
+            };
+            if let Some(message) = append_message {
+                println!(
+                    "{}",
+                    format_action_line(action_index, action_name, message.as_str())
+                );
+            } else {
+                render_live_dashboard(state);
+            }
+        });
+    }
+
+    fn action_stopped_by_abort(&self, action_index: usize, action_name: &str) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::AppendOnly {
+                return;
+            }
+
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.status = ActionLaneStatus::Aborted;
+            lane.current_step = None;
+            lane.step_started_at = None;
+            lane.lane_finished_after = lane.lane_started_at.map(|started_at| started_at.elapsed());
+            lane.last_message = Some("stopped after invocation abort.".to_string());
+            render_live_dashboard(state);
+        });
+    }
+
+    fn finish(&self) {
+        self.live_refresh_stop.store(true, Ordering::Relaxed);
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::Live {
+                render_live_dashboard(state);
+                let _ = writeln!(io::stdout());
+                let _ = io::stdout().flush();
+                state.rendered_lines = 0;
+            }
+        });
+    }
+
+    #[cfg(test)]
+    fn snapshot_lines_for_test(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .expect("action output lock should succeed")
+            .snapshot_lines()
+    }
+
+    fn with_state(&self, update: impl FnOnce(&mut ActionOutputState)) {
+        let mut state = self
+            .inner
+            .lock()
+            .expect("action output lock should succeed");
+        update(&mut state);
+    }
+}
+
+impl ActionOutputState {
+    fn snapshot_lines(&self) -> Vec<String> {
+        let mut lines = vec![action_execution_header(self.action_execution).to_string()];
+
+        for (lane_index, lane) in &self.lanes {
+            lines.push(String::new());
+            lines.push(format!(
+                "{} {}",
+                action_lane_prefix(*lane_index, lane.action_name.as_str()),
+                lane_status_label(lane)
+            ));
+            lines.push(format!("  step: {}", lane_step_label(lane)));
+            lines.push(format!(
+                "  last: {}",
+                lane.last_message.as_deref().unwrap_or("-")
+            ));
+            if !lane.output_lines.is_empty() {
+                lines.push("  output:".to_string());
+                for line in &lane.output_lines {
+                    lines.push(format!("    {}", line));
+                }
+            }
+        }
+
+        lines
+    }
+}
+
+impl ActionLaneStatus {
+    fn display_name(self) -> &'static str {
+        match self {
+            ActionLaneStatus::Pending => "pending",
+            ActionLaneStatus::Running => "running",
+            ActionLaneStatus::Completed => "completed",
+            ActionLaneStatus::Failed => "failed",
+            ActionLaneStatus::Aborted => "aborted",
+            ActionLaneStatus::Notice => "notice",
+            ActionLaneStatus::LogicError => "logic error",
+            ActionLaneStatus::Skipped => "skipped",
+        }
+    }
+}
+
+fn should_use_live_action_dashboard() -> bool {
+    io::stdout().is_terminal()
+        && std::env::var("TERM")
+            .map(|term| term != "dumb")
+            .unwrap_or(true)
+        && std::env::var_os("CI").is_none()
+}
+
+fn ensure_lane_state<'a>(
+    state: &'a mut ActionOutputState,
+    action_index: usize,
+    action_name: &str,
+) -> &'a mut ActionLaneState {
+    state
+        .lanes
+        .entry(action_index)
+        .or_insert_with(|| ActionLaneState {
+            action_name: action_name.to_string(),
+            status: ActionLaneStatus::Pending,
+            lane_started_at: None,
+            lane_finished_after: None,
+            current_step: None,
+            step_started_at: None,
+            last_message: None,
+            output_lines: VecDeque::new(),
+        })
+}
+
+fn maybe_spawn_live_action_refresh(
+    inner: Arc<Mutex<ActionOutputState>>,
+    stop: Arc<AtomicBool>,
+    mode: ActionOutputMode,
+) {
+    if mode != ActionOutputMode::Live || cfg!(test) {
+        return;
+    }
+
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+
+    handle.spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            interval.tick().await;
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let mut state = inner.lock().expect("action output lock should succeed");
+            if state.mode != ActionOutputMode::Live {
+                break;
+            }
+            if state.lanes.values().any(|lane| {
+                lane.status == ActionLaneStatus::Running && lane.step_started_at.is_some()
+            }) {
+                render_live_dashboard(&mut state);
+            }
+        }
+    });
+}
+
+fn inferred_lane_status(message: &str) -> ActionLaneStatus {
+    if message.starts_with("logic evaluation failed:") {
+        ActionLaneStatus::LogicError
+    } else if message.contains("no run steps matched") || message.contains("unsupported step kind")
+    {
+        ActionLaneStatus::Skipped
+    } else {
+        ActionLaneStatus::Notice
+    }
+}
+
+fn split_action_output_lines(message: &str) -> Vec<String> {
+    message
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn compact_action_output_line(message: &str) -> Option<String> {
+    split_action_output_lines(message).into_iter().next()
+}
+
+fn push_lane_output_message(lane: &mut ActionLaneState, message: &str) {
+    for line in split_action_output_lines(message) {
+        if lane.output_lines.len() == ACTION_LANE_OUTPUT_BUFFER_LIMIT {
+            lane.output_lines.pop_front();
+        }
+        lane.output_lines.push_back(line);
+    }
+}
+
+fn lane_step_label(lane: &ActionLaneState) -> String {
+    match lane.status {
+        ActionLaneStatus::Completed => "✓ done".to_string(),
+        ActionLaneStatus::Failed | ActionLaneStatus::LogicError => "✗ failed".to_string(),
+        ActionLaneStatus::Aborted => "! aborted".to_string(),
+        ActionLaneStatus::Skipped => "skipped".to_string(),
+        _ => lane.current_step.clone().unwrap_or_else(|| "-".to_string()),
+    }
+}
+
+fn lane_status_label(lane: &ActionLaneState) -> String {
+    if let Some(elapsed) = lane_elapsed_duration(lane) {
+        match lane.status {
+            ActionLaneStatus::Running => {
+                return format!("running · {}", format_elapsed_duration(elapsed));
+            }
+            ActionLaneStatus::Completed => {
+                return format!("completed · {}", format_elapsed_duration(elapsed));
+            }
+            ActionLaneStatus::Failed | ActionLaneStatus::LogicError => {
+                return format!("failed · {}", format_elapsed_duration(elapsed));
+            }
+            ActionLaneStatus::Aborted => {
+                return format!("aborted · {}", format_elapsed_duration(elapsed));
+            }
+            _ => {}
+        }
+    }
+
+    lane.status.display_name().to_string()
+}
+
+fn lane_elapsed_duration(lane: &ActionLaneState) -> Option<Duration> {
+    lane.lane_finished_after
+        .or_else(|| lane.lane_started_at.map(|started_at| started_at.elapsed()))
+}
+
+fn format_elapsed_duration(duration: Duration) -> String {
+    format!("{}s", duration.as_secs())
+}
+
+fn waiting_message_for_step_kind(step_kind: &str) -> &'static str {
+    if step_kind.eq_ignore_ascii_case("exec") {
+        "waiting for command to finish..."
+    } else if step_kind.eq_ignore_ascii_case("agent") {
+        "waiting for child agent to finish..."
+    } else if step_kind.eq_ignore_ascii_case("generate_image") {
+        "waiting for provider response..."
+    } else if step_kind.eq_ignore_ascii_case("email_me") {
+        "waiting for mail response..."
+    } else {
+        "waiting for step to finish..."
+    }
+}
+
+fn render_live_dashboard(state: &mut ActionOutputState) {
+    if cfg!(test) {
+        state.rendered_lines = state.snapshot_lines().len();
+        return;
+    }
+
+    let snapshot = state.snapshot_lines();
+    let mut stdout = io::stdout();
+
+    if state.rendered_lines > 0 {
+        let _ = write!(stdout, "\r");
+        if state.rendered_lines > 1 {
+            let _ = write!(stdout, "\x1b[{}A", state.rendered_lines - 1);
+        }
+        let _ = write!(stdout, "\x1b[J");
+    }
+
+    let _ = write!(stdout, "{}", snapshot.join("\n"));
+    let _ = stdout.flush();
+    state.rendered_lines = snapshot.len();
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct InvocationRuntimeBudget {
@@ -27,6 +571,7 @@ pub(crate) struct InvocationRuntimeBudget {
 #[derive(Debug, Clone)]
 pub(crate) struct ActionProviderContext {
     pub(crate) provider: crate::providers::ProviderKind,
+    pub(crate) model: String,
     pub(crate) url: String,
     pub(crate) token: String,
     pub(crate) inference_timeout_in_sec: u64,
@@ -37,6 +582,69 @@ enum StepExecutionOutcome {
     Completed,
     SoftFailureLogged,
     SuccessAlreadyPrinted,
+}
+
+#[derive(Debug)]
+enum ActionExecutionResult {
+    Completed(Vec<StepExecutionOutcome>),
+    Failed(String),
+    Aborted(String),
+    StoppedByAbort,
+}
+
+#[derive(Debug, Clone)]
+struct InvocationAbortSignal {
+    inner: Arc<Mutex<InvocationAbortState>>,
+}
+
+#[derive(Debug, Clone)]
+struct InvocationAbortRecord {
+    action_index: usize,
+    action_name: String,
+    error: String,
+}
+
+#[derive(Debug, Default)]
+struct InvocationAbortState {
+    record: Option<InvocationAbortRecord>,
+}
+
+impl InvocationAbortSignal {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(InvocationAbortState::default())),
+        }
+    }
+
+    fn is_triggered(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("abort signal lock should succeed")
+            .record
+            .is_some()
+    }
+
+    fn trigger(&self, action_index: usize, action_name: &str, error: &str) -> bool {
+        let mut state = self.inner.lock().expect("abort signal lock should succeed");
+        if state.record.is_none() {
+            state.record = Some(InvocationAbortRecord {
+                action_index,
+                action_name: action_name.to_string(),
+                error: error.to_string(),
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    fn record(&self) -> Option<InvocationAbortRecord> {
+        self.inner
+            .lock()
+            .expect("abort signal lock should succeed")
+            .record
+            .clone()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -57,154 +665,412 @@ pub(crate) async fn apply_actions(
     output: &crate::Output,
     actions: &[crate::Action],
     runtime_vars: &serde_json::Map<String, serde_json::Value>,
+    action_execution: crate::ActionExecutionMode,
+    action_execution_override: Option<crate::ActionExecutionMode>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<(), String> {
-    // println!("DEBUG: Applying actions -> {:?}", actions);
+    ACTION_OUTPUT
+        .scope(ActionOutput::new(action_execution), async move {
+            let abort_signal = InvocationAbortSignal::new();
+            let invocation_started_at = Instant::now();
+            let data = match action_data_from_output(output, runtime_vars) {
+                Ok(data) => data,
+                Err(error) => {
+                    eprintln!("❌ Failed to serialize output for action evaluation: {error}");
+                    return Err(format!(
+                        "Failed to serialize output for action evaluation: {error}"
+                    ));
+                }
+            };
+            let current_platform = current_action_platform();
+            print_action_execution_header(action_execution);
+            let top_level_failures = match action_execution {
+                crate::ActionExecutionMode::Sequential => {
+                    apply_actions_sequential(
+                        actions,
+                        &data,
+                        current_platform,
+                        action_execution_override,
+                        provider_context,
+                        max_agent_depth,
+                        runtime_budget,
+                        &abort_signal,
+                    )
+                    .await?
+                }
+                crate::ActionExecutionMode::Parallel => {
+                    apply_actions_parallel(
+                        actions,
+                        &data,
+                        current_platform,
+                        action_execution_override,
+                        provider_context,
+                        max_agent_depth,
+                        runtime_budget,
+                        &abort_signal,
+                    )
+                    .await?
+                }
+            };
 
-    let data = match action_data_from_output(output, runtime_vars) {
-        Ok(data) => data,
-        Err(error) => {
-            eprintln!("❌ Failed to serialize output for action evaluation: {error}");
-            return Err(format!(
-                "Failed to serialize output for action evaluation: {error}"
-            ));
+            finish_action_output();
+
+            if let Some(abort) = abort_signal.record() {
+                return Err(format!(
+                    "{}\n{}",
+                    format_abort_summary(&abort),
+                    root_run_abort_message(invocation_started_at.elapsed())
+                ));
+            }
+
+            if let Some(message) = root_run_completion_message(invocation_started_at.elapsed()) {
+                if top_level_failures.is_empty() {
+                    println!("{message}");
+                }
+            }
+
+            if top_level_failures.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{}\n{}",
+                    format_top_level_action_failures(&top_level_failures),
+                    root_run_failure_message(invocation_started_at.elapsed())
+                ))
+            }
+        })
+        .await
+}
+
+async fn apply_actions_sequential(
+    actions: &[crate::Action],
+    data: &serde_json::Value,
+    current_platform: Option<&'static str>,
+    action_execution_override: Option<crate::ActionExecutionMode>,
+    provider_context: &ActionProviderContext,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+    abort_signal: &InvocationAbortSignal,
+) -> Result<Vec<String>, String> {
+    let mut top_level_failures = Vec::new();
+
+    for (action_index, action) in actions.iter().enumerate() {
+        if abort_signal.is_triggered() {
+            break;
         }
-    };
-    let current_platform = current_action_platform();
 
-    for action in actions {
-        match apply(&action.logic, &data) {
-            Ok(result) => {
-                // println!("Action Loop: {:?}", action);
-                if result.as_bool() == Some(true) {
-                    let matching_steps = matching_run_steps(&action.run, current_platform);
-                    if matching_steps.is_empty() {
-                        eprintln!(
-                            "⚠️ No run steps matched the current platform for action '{}' (current platform: {}).",
-                            action.name,
-                            current_platform.unwrap_or("unsupported")
-                        );
-                        continue;
+        if !action_logic_matches(action_index, action, data) {
+            continue;
+        }
+
+        let should_abort = collect_action_execution_result(
+            action_index,
+            action,
+            run_matching_action_steps(
+                action_index,
+                action,
+                data,
+                current_platform,
+                action_execution_override,
+                provider_context,
+                max_agent_depth,
+                runtime_budget,
+                abort_signal,
+            )
+            .await?,
+            &mut top_level_failures,
+        );
+
+        if should_abort {
+            break;
+        }
+    }
+
+    Ok(top_level_failures)
+}
+
+async fn apply_actions_parallel(
+    actions: &[crate::Action],
+    data: &serde_json::Value,
+    current_platform: Option<&'static str>,
+    action_execution_override: Option<crate::ActionExecutionMode>,
+    provider_context: &ActionProviderContext,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+    abort_signal: &InvocationAbortSignal,
+) -> Result<Vec<String>, String> {
+    let mut matched_actions = Vec::new();
+    let mut lane_tasks = Vec::new();
+    let action_output = current_action_output();
+
+    for (action_index, action) in actions.iter().enumerate() {
+        if abort_signal.is_triggered() {
+            break;
+        }
+
+        if !action_logic_matches(action_index, action, data) {
+            continue;
+        }
+
+        matched_actions.push((action_index, action.clone()));
+
+        let action_clone = action.clone();
+        let data_clone = data.clone();
+        let provider_context_clone = provider_context.clone();
+        let abort_signal_clone = abort_signal.clone();
+        let action_output_clone = action_output.clone();
+
+        lane_tasks.push(tokio::spawn(async move {
+            let lane_future = async move {
+                run_matching_action_steps(
+                    action_index,
+                    &action_clone,
+                    &data_clone,
+                    current_platform,
+                    action_execution_override,
+                    &provider_context_clone,
+                    max_agent_depth,
+                    runtime_budget,
+                    &abort_signal_clone,
+                )
+                .await
+            };
+
+            if let Some(output) = action_output_clone {
+                ACTION_OUTPUT.scope(output, lane_future).await
+            } else {
+                lane_future.await
+            }
+        }));
+
+        tokio::task::yield_now().await;
+    }
+
+    let mut top_level_failures = Vec::new();
+    for ((action_index, action), task) in matched_actions.into_iter().zip(lane_tasks.into_iter()) {
+        let result = task
+            .await
+            .map_err(|error| format!("parallel action task failed: {error}"))??;
+        collect_action_execution_result(action_index, &action, result, &mut top_level_failures);
+    }
+
+    Ok(top_level_failures)
+}
+
+fn action_logic_matches(
+    action_index: usize,
+    action: &crate::Action,
+    data: &serde_json::Value,
+) -> bool {
+    match apply(&action.logic, data) {
+        Ok(result) => result.as_bool() == Some(true),
+        Err(error) => {
+            print_action_line(
+                action_index,
+                action.name.as_str(),
+                format!("logic evaluation failed: {}", error).as_str(),
+            );
+            false
+        }
+    }
+}
+
+fn collect_action_execution_result(
+    action_index: usize,
+    action: &crate::Action,
+    result: ActionExecutionResult,
+    top_level_failures: &mut Vec<String>,
+) -> bool {
+    match result {
+        ActionExecutionResult::Completed(outcomes) => {
+            if let Some(summary) = action_completion_summary(&outcomes) {
+                print_action_success(action_index, &action.name, summary);
+            }
+            false
+        }
+        ActionExecutionResult::Failed(error) => {
+            note_action_failure(action_index, &action.name, &error);
+            top_level_failures.push(format_action_failure(action_index, &action.name, &error));
+            false
+        }
+        ActionExecutionResult::Aborted(error) => {
+            note_action_abort(action_index, &action.name, &error);
+            top_level_failures.push(format_action_failure(
+                action_index,
+                &action.name,
+                format!("abort requested: {}", error).as_str(),
+            ));
+            true
+        }
+        ActionExecutionResult::StoppedByAbort => {
+            note_action_stopped_by_abort(action_index, &action.name);
+            false
+        }
+    }
+}
+
+async fn run_matching_action_steps(
+    action_index: usize,
+    action: &crate::Action,
+    data: &serde_json::Value,
+    current_platform: Option<&'static str>,
+    action_execution_override: Option<crate::ActionExecutionMode>,
+    provider_context: &ActionProviderContext,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+    abort_signal: &InvocationAbortSignal,
+) -> Result<ActionExecutionResult, String> {
+    if abort_signal.is_triggered() {
+        return Ok(ActionExecutionResult::StoppedByAbort);
+    }
+
+    let matching_steps = matching_run_steps(&action.run, current_platform);
+    if matching_steps.is_empty() {
+        print_action_line(
+            action_index,
+            action.name.as_str(),
+            format!(
+                "no run steps matched the current platform (current platform: {}).",
+                current_platform.unwrap_or("unsupported")
+            )
+            .as_str(),
+        );
+        return Ok(ActionExecutionResult::Completed(Vec::new()));
+    }
+
+    print_action_start(action_index, &action.name);
+    let single_step_action = matching_steps.len() == 1;
+    let mut outcomes = Vec::with_capacity(matching_steps.len());
+    let mut action_data = data.clone();
+
+    let matching_step_count = matching_steps.len();
+    for (step_index, step) in matching_steps.into_iter().enumerate() {
+        if abort_signal.is_triggered() {
+            return Ok(ActionExecutionResult::StoppedByAbort);
+        }
+
+        if !should_run_step(step, &action_data, &action.name)? {
+            continue;
+        }
+
+        if abort_signal.is_triggered() {
+            return Ok(ActionExecutionResult::StoppedByAbort);
+        }
+
+        note_action_step_started(
+            action_index,
+            action.name.as_str(),
+            step.kind.as_str(),
+            step_index + 1,
+            matching_step_count,
+        );
+
+        let step_result = if step.kind.eq_ignore_ascii_case("exec") {
+            run_exec_step(
+                step,
+                &action_data,
+                action_index,
+                &action.name,
+                runtime_budget,
+            )
+            .await
+            .map(|captured_output| (StepExecutionOutcome::Completed, captured_output))
+        } else if step.kind.eq_ignore_ascii_case("email_me") {
+            run_email_me_step(
+                step,
+                &action_data,
+                action_index,
+                &action.name,
+                runtime_budget,
+                single_step_action,
+            )
+            .await
+            .map(|outcome| (outcome, None))
+        } else if step.kind.eq_ignore_ascii_case("agent") {
+            run_agent_step(
+                step,
+                &action_data,
+                action_index,
+                &action.name,
+                action_execution_override,
+                max_agent_depth,
+                runtime_budget,
+            )
+            .await
+            .map(|outcome| (outcome, None))
+        } else if step.kind.eq_ignore_ascii_case("generate_image") {
+            run_generate_image_step(
+                step,
+                &action_data,
+                action_index,
+                &action.name,
+                provider_context,
+                runtime_budget,
+            )
+            .await
+            .map(|outcome| (outcome, None))
+        } else {
+            print_action_line(
+                action_index,
+                action.name.as_str(),
+                format!("unsupported step kind '{}'; skipping step.", step.kind).as_str(),
+            );
+            outcomes.push(StepExecutionOutcome::SoftFailureLogged);
+            continue;
+        };
+
+        match step_result {
+            Ok((outcome, captured_output)) => {
+                if let Some((name, value)) = captured_output {
+                    insert_action_output_variable(
+                        &mut action_data,
+                        name.as_str(),
+                        value,
+                        action.name.as_str(),
+                    )?;
+                }
+                insert_step_status_variable(
+                    &mut action_data,
+                    step,
+                    "succeeded",
+                    action.name.as_str(),
+                )?;
+                outcomes.push(outcome);
+            }
+            Err(error) => {
+                insert_step_status_variable(
+                    &mut action_data,
+                    step,
+                    "failed",
+                    action.name.as_str(),
+                )?;
+                insert_step_error_variable(
+                    &mut action_data,
+                    step,
+                    error.as_str(),
+                    action.name.as_str(),
+                )?;
+
+                match step_failure_mode(step) {
+                    crate::FailureMode::Continue => {
+                        print_action_line(action_index, action.name.as_str(), error.as_str());
+                        outcomes.push(StepExecutionOutcome::SoftFailureLogged);
                     }
-
-                    print_action_start(&action.name);
-                    let single_step_action = matching_steps.len() == 1;
-                    let mut outcomes = Vec::with_capacity(matching_steps.len());
-                    let mut action_data = data.clone();
-
-                    for step in matching_steps {
-                        if !should_run_step(step, &action_data, &action.name)? {
-                            continue;
-                        }
-
-                        let step_result = if step.kind.eq_ignore_ascii_case("exec") {
-                            run_exec_step(step, &action_data, &action.name, runtime_budget)
-                                .await
-                                .map(|captured_output| {
-                                    (StepExecutionOutcome::Completed, captured_output)
-                                })
-                        } else if step.kind.eq_ignore_ascii_case("email_me") {
-                            run_email_me_step(
-                                step,
-                                &action_data,
-                                &action.name,
-                                runtime_budget,
-                                single_step_action,
-                            )
-                            .await
-                            .map(|outcome| (outcome, None))
-                        } else if step.kind.eq_ignore_ascii_case("agent") {
-                            run_agent_step(
-                                step,
-                                &action_data,
-                                &action.name,
-                                max_agent_depth,
-                                runtime_budget,
-                            )
-                            .await
-                            .map(|outcome| (outcome, None))
-                        } else if step.kind.eq_ignore_ascii_case("generate_image") {
-                            run_generate_image_step(
-                                step,
-                                &action_data,
-                                &action.name,
-                                provider_context,
-                                runtime_budget,
-                            )
-                            .await
-                            .map(|outcome| (outcome, None))
-                        } else {
-                            eprintln!(
-                                "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
-                                action.name, step.kind
-                            );
-                            outcomes.push(StepExecutionOutcome::SoftFailureLogged);
-                            continue;
-                        };
-
-                        match step_result {
-                            Ok((outcome, captured_output)) => {
-                                if let Some((name, value)) = captured_output {
-                                    insert_action_output_variable(
-                                        &mut action_data,
-                                        name.as_str(),
-                                        value,
-                                        action.name.as_str(),
-                                    )?;
-                                }
-                                insert_step_status_variable(
-                                    &mut action_data,
-                                    step,
-                                    "succeeded",
-                                    action.name.as_str(),
-                                )?;
-                                outcomes.push(outcome);
-                            }
-                            Err(error) => {
-                                insert_step_status_variable(
-                                    &mut action_data,
-                                    step,
-                                    "failed",
-                                    action.name.as_str(),
-                                )?;
-                                insert_step_error_variable(
-                                    &mut action_data,
-                                    step,
-                                    error.as_str(),
-                                    action.name.as_str(),
-                                )?;
-
-                                if matches!(step_failure_mode(step), crate::FailureMode::Continue) {
-                                    println!("{error}");
-                                    outcomes.push(StepExecutionOutcome::SoftFailureLogged);
-                                } else {
-                                    return Err(error);
-                                }
-                            }
-                        }
+                    crate::FailureMode::Stop => {
+                        return Ok(ActionExecutionResult::Failed(error));
                     }
-
-                    if let Some(summary) = action_completion_summary(&outcomes) {
-                        print_action_success(&action.name, summary);
+                    crate::FailureMode::Abort => {
+                        abort_signal.trigger(action_index, action.name.as_str(), error.as_str());
+                        return Ok(ActionExecutionResult::Aborted(error));
                     }
                 }
             }
-            Err(error) => {
-                println!(
-                    "Failed to evaluate logic for action '{}': {}",
-                    action.name, error
-                );
-            }
         }
     }
 
-    if let Some(message) = root_run_completion_message() {
-        println!("{message}");
-    }
-
-    Ok(())
+    Ok(ActionExecutionResult::Completed(outcomes))
 }
 
 fn action_data_from_output(
@@ -224,6 +1090,7 @@ fn action_data_from_output(
 async fn run_exec_step(
     step: &crate::RunStep,
     data: &serde_json::Value,
+    action_index: usize,
     action_name: &str,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<Option<(String, String)>, String> {
@@ -249,25 +1116,42 @@ async fn run_exec_step(
         let child = tokio::process::Command::new(program)
             .args(&resolved_args)
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
 
         match tokio::time::timeout(remaining, child.wait_with_output()).await {
             Ok(Ok(output)) if output.status.success() => {
+                emit_exec_output_lines(
+                    action_index,
+                    action_name,
+                    &output.stdout,
+                    &output.stderr,
+                    false,
+                );
                 let captured_output = String::from_utf8_lossy(&output.stdout)
                     .trim_end_matches(['\r', '\n'])
                     .to_string();
-                println!(
-                    "ℹ️ Action '{}' stored exec output in variable '{}'.",
-                    action_name, output_variable
+                print_action_line(
+                    action_index,
+                    action_name,
+                    format!("stored exec output in variable '{}'.", output_variable).as_str(),
                 );
                 Ok(Some((output_variable.to_string(), captured_output)))
             }
-            Ok(Ok(output)) => Err(format!(
-                "Action '{}' exec step command '{}' exited with status {}.",
-                action_name, program, output.status
-            )),
+            Ok(Ok(output)) => {
+                emit_exec_output_lines(
+                    action_index,
+                    action_name,
+                    &output.stdout,
+                    &output.stderr,
+                    true,
+                );
+                Err(format!(
+                    "Action '{}' exec step command '{}' exited with status {}.",
+                    action_name, program, output.status
+                ))
+            }
             Ok(Err(error)) => Err(format!(
                 "Action '{}' exec step failed while waiting for command '{}': {}",
                 action_name, program, error
@@ -279,30 +1163,67 @@ async fn run_exec_step(
             )),
         }
     } else {
-        let mut child = tokio::process::Command::new(program)
+        let child = tokio::process::Command::new(program)
             .args(&resolved_args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
 
-        match tokio::time::timeout(remaining, child.wait()).await {
-            Ok(Ok(status)) if status.success() => Ok(None),
-            Ok(Ok(status)) => Err(format!(
-                "Action '{}' exec step command '{}' exited with status {}.",
-                action_name, program, status
-            )),
+        match tokio::time::timeout(remaining, child.wait_with_output()).await {
+            Ok(Ok(output)) if output.status.success() => {
+                emit_exec_output_lines(
+                    action_index,
+                    action_name,
+                    &output.stdout,
+                    &output.stderr,
+                    true,
+                );
+                Ok(None)
+            }
+            Ok(Ok(output)) => {
+                emit_exec_output_lines(
+                    action_index,
+                    action_name,
+                    &output.stdout,
+                    &output.stderr,
+                    true,
+                );
+                Err(format!(
+                    "Action '{}' exec step command '{}' exited with status {}.",
+                    action_name, program, output.status
+                ))
+            }
             Ok(Err(error)) => Err(format!(
                 "Action '{}' exec step failed while waiting for command '{}': {}",
                 action_name, program, error
             )),
-            Err(_) => {
-                let _ = child.kill().await;
-                Err(action_runtime_timeout_message(
-                    action_name,
-                    runtime_budget,
-                    &format!("while waiting for command '{}'", program),
-                ))
-            }
+            Err(_) => Err(action_runtime_timeout_message(
+                action_name,
+                runtime_budget,
+                &format!("while waiting for command '{}'", program),
+            )),
         }
+    }
+}
+
+fn emit_exec_output_lines(
+    action_index: usize,
+    action_name: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+    include_stdout: bool,
+) {
+    if include_stdout {
+        emit_action_output_bytes(action_index, action_name, stdout);
+    }
+    emit_action_output_bytes(action_index, action_name, stderr);
+}
+
+fn emit_action_output_bytes(action_index: usize, action_name: &str, bytes: &[u8]) {
+    let rendered = String::from_utf8_lossy(bytes);
+    for line in split_action_output_lines(rendered.as_ref()) {
+        print_action_line(action_index, action_name, line.as_str());
     }
 }
 
@@ -386,6 +1307,7 @@ fn should_run_step(
 async fn run_email_me_step(
     step: &crate::RunStep,
     data: &serde_json::Value,
+    action_index: usize,
     action_name: &str,
     runtime_budget: InvocationRuntimeBudget,
     single_step_action: bool,
@@ -509,9 +1431,11 @@ async fn run_email_me_step(
     };
 
     if single_step_action {
-        print_action_success(action_name, "email sent");
+        print_action_success(action_index, action_name, "email sent");
     }
-    render_backend_ui_or_json(&response);
+    for line in render_backend_ui_or_json_lines(&response) {
+        print_action_line(action_index, action_name, line.as_str());
+    }
     Ok(if single_step_action {
         StepExecutionOutcome::SuccessAlreadyPrinted
     } else {
@@ -522,27 +1446,33 @@ async fn run_email_me_step(
 async fn run_generate_image_step(
     step: &crate::RunStep,
     data: &serde_json::Value,
+    action_index: usize,
     action_name: &str,
     provider_context: &ActionProviderContext,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
-    if provider_context.provider != crate::providers::ProviderKind::OpenAi {
+    let step_profile_context =
+        resolve_generate_image_step_profile_context(step.profile.as_ref(), data, action_name)
+            .await?;
+    let effective_provider_context = step_profile_context.as_ref().unwrap_or(provider_context);
+
+    if effective_provider_context.provider != crate::providers::ProviderKind::OpenAi {
         return Err(format!(
             "Action '{}' generate_image step requires `--server openai`; current server is {}.",
             action_name,
-            provider_context.provider.display_name()
+            effective_provider_context.provider.display_name()
         ));
     }
 
-    let model_arg = step.model.as_ref().ok_or_else(|| {
-        format!(
-            "Action '{}' generate_image step is missing required `model`.",
-            action_name
-        )
-    })?;
-    let model = resolve_generate_image_model(model_arg, data, action_name)?;
+    let model = resolve_generate_image_model(
+        step.model.as_ref(),
+        data,
+        action_name,
+        step_profile_context.as_ref(),
+        provider_context,
+    )?;
 
-    if provider_context
+    if effective_provider_context
         .url
         .contains("chatgpt.com/backend-api/codex")
         && model.starts_with("gpt-image")
@@ -582,11 +1512,11 @@ async fn run_generate_image_step(
     let image_bytes = match tokio::time::timeout(
         remaining,
         crate::providers::send_openai_image_request(
-            &provider_context.url,
+            &effective_provider_context.url,
             &model,
             prompt.as_str(),
-            provider_context.inference_timeout_in_sec,
-            &provider_context.token,
+            effective_provider_context.inference_timeout_in_sec,
+            &effective_provider_context.token,
             output_format,
         ),
     )
@@ -634,19 +1564,209 @@ async fn run_generate_image_step(
         )
     })?;
 
-    println!(
-        "ℹ️ Action '{}' wrote generated image to '{}'.",
+    print_action_line(
+        action_index,
         action_name,
-        output_path_ref.display()
+        format!("wrote generated image to '{}'.", output_path_ref.display()).as_str(),
     );
     Ok(StepExecutionOutcome::Completed)
 }
 
-fn resolve_generate_image_model(
-    model: &crate::RunArg,
+fn resolve_step_profile_name(
+    profile: Option<&crate::RunArg>,
     data: &serde_json::Value,
     action_name: &str,
+    step_kind: &str,
+) -> Result<Option<String>, String> {
+    let Some(profile) = profile else {
+        return Ok(None);
+    };
+
+    let profile_name = match profile {
+        crate::RunArg::Literal(literal) => literal.clone(),
+        crate::RunArg::Variable(variable) => {
+            let Some(value) = lookup_action_variable(data, variable) else {
+                return Err(format!(
+                    "Action '{}' {} `profile` references missing variable '{}'.",
+                    action_name, step_kind, variable
+                ));
+            };
+
+            match value {
+                serde_json::Value::String(text) => text.clone(),
+                serde_json::Value::Bool(_) => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found boolean for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+                serde_json::Value::Number(_) => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found number for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+                serde_json::Value::Array(_) => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found array for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+                serde_json::Value::Object(_) => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found object for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+                serde_json::Value::Null => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found null for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+            }
+        }
+    };
+
+    if profile_name.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' {} `profile` must resolve to a non-empty string.",
+            action_name, step_kind
+        ));
+    }
+
+    Ok(Some(profile_name))
+}
+
+fn resolve_profile_api_token_for_action_step(
+    profile: &crate::config::schema::Profile,
 ) -> Result<String, String> {
+    match store::load_profile_token(&profile.name) {
+        Ok(Some(token)) if !token.trim().is_empty() => Ok(token),
+        Ok(Some(_)) | Ok(None) => profile
+            .token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                format!(
+                    "Missing API token for profile '{}'. Use `cargo ai profile set {} --token <TOKEN> --auth api_key`.",
+                    profile.name, profile.name
+                )
+            }),
+        Err(error) => Err(format!(
+            "Failed to load profile token for '{}': {error}",
+            profile.name
+        )),
+    }
+}
+
+async fn resolve_generate_image_step_profile_context(
+    profile: Option<&crate::RunArg>,
+    data: &serde_json::Value,
+    action_name: &str,
+) -> Result<Option<ActionProviderContext>, String> {
+    let Some(profile_name) =
+        resolve_step_profile_name(profile, data, action_name, "generate_image")?
+    else {
+        return Ok(None);
+    };
+
+    let config_file = config_path();
+    let Some(config) = load_config() else {
+        return Err(format!(
+            "Action '{}' generate_image step references profile '{}', but no Cargo AI config was found at '{}'.",
+            action_name,
+            profile_name,
+            config_file.display()
+        ));
+    };
+
+    let Some(profile) = find_profile(&config, &profile_name) else {
+        return Err(format!(
+            "Action '{}' generate_image step references unknown profile '{}'.",
+            action_name, profile_name
+        ));
+    };
+
+    let provider = crate::providers::ProviderKind::from_server_value(profile.server.as_str())
+        .ok_or_else(|| {
+            format!(
+                "Action '{}' generate_image step profile '{}' uses unsupported server '{}'.",
+                action_name, profile.name, profile.server
+            )
+        })?;
+
+    if provider != crate::providers::ProviderKind::OpenAi {
+        return Err(format!(
+            "Action '{}' generate_image step profile '{}' uses server '{}', but generate_image requires openai.",
+            action_name, profile.name, profile.server
+        ));
+    }
+
+    let mut url = profile.url.clone().unwrap_or_default();
+    let token = match profile.auth_mode {
+        ProfileAuthMode::ApiKey => resolve_profile_api_token_for_action_step(profile)?,
+        ProfileAuthMode::OpenaiAccount => {
+            url = openai_oauth::OPENAI_ACCOUNT_RESPONSES_URL.to_string();
+            openai_oauth::resolve_session_for_runtime()
+                .await
+                .map(|session| session.access_token)?
+        }
+        ProfileAuthMode::None => {
+            return Err(format!(
+                "Action '{}' generate_image step profile '{}' auth mode is '{}'. Set it to '{}' or '{}' before using it here.",
+                action_name,
+                profile.name,
+                ProfileAuthMode::None.as_str(),
+                ProfileAuthMode::ApiKey.as_str(),
+                ProfileAuthMode::OpenaiAccount.as_str()
+            ));
+        }
+    };
+
+    if url.trim().is_empty() {
+        url = provider.default_url().to_string();
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(format!(
+            "Action '{}' generate_image step profile '{}' produced invalid URL '{}'. Use an absolute URL beginning with `http://` or `https://`.",
+            action_name, profile.name, url
+        ));
+    }
+
+    Ok(Some(ActionProviderContext {
+        provider,
+        model: profile.model.clone(),
+        url,
+        token,
+        inference_timeout_in_sec: profile.timeout_in_sec,
+    }))
+}
+
+fn resolve_generate_image_model(
+    model: Option<&crate::RunArg>,
+    data: &serde_json::Value,
+    action_name: &str,
+    step_profile_context: Option<&ActionProviderContext>,
+    provider_context: &ActionProviderContext,
+) -> Result<String, String> {
+    let Some(model) = model else {
+        if let Some(step_profile_context) = step_profile_context {
+            if !step_profile_context.model.trim().is_empty() {
+                return Ok(step_profile_context.model.clone());
+            }
+        }
+        if provider_context.model.trim().is_empty() {
+            return Err(format!(
+                "Action '{}' generate_image step omitted `model`, and no effective invocation model is configured. Set `generate_image.model`, pass `--model`, or configure a profile model.",
+                action_name
+            ));
+        }
+        return Ok(provider_context.model.clone());
+    };
+
     match model {
         crate::RunArg::Literal(literal) => {
             if literal.trim().is_empty() {
@@ -699,7 +1819,9 @@ fn resolve_generate_image_model(
 async fn run_agent_step(
     step: &crate::RunStep,
     data: &serde_json::Value,
+    action_index: usize,
     action_name: &str,
+    action_execution_override: Option<crate::ActionExecutionMode>,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
@@ -723,10 +1845,38 @@ async fn run_agent_step(
     }
 
     let mut command = tokio::process::Command::new(agent_path);
+    if let Some(action_execution_override) = action_execution_override {
+        command.arg("--action-execution");
+        command.arg(match action_execution_override {
+            crate::ActionExecutionMode::Sequential => "sequential",
+            crate::ActionExecutionMode::Parallel => "parallel",
+        });
+    }
+    if let Some(profile_name) =
+        resolve_step_profile_name(step.profile.as_ref(), data, action_name, "agent")?
+    {
+        let config_file = config_path();
+        let Some(config) = load_config() else {
+            return Err(format!(
+                "Action '{}' agent step references profile '{}', but no Cargo AI config was found at '{}'.",
+                action_name,
+                profile_name,
+                config_file.display()
+            ));
+        };
+        if find_profile(&config, &profile_name).is_none() {
+            return Err(format!(
+                "Action '{}' agent step references unknown profile '{}'.",
+                action_name, profile_name
+            ));
+        }
+        command.arg("--profile");
+        command.arg(profile_name);
+    }
     let (child_args, resolution_notes) =
         child_input_args(step.input_mode, step.inputs.as_deref(), data, action_name)?;
     for note in resolution_notes {
-        println!("ℹ️ {note}");
+        print_action_line(action_index, action_name, note.as_str());
     }
     for argument in child_args {
         command.arg(argument);
@@ -745,6 +1895,8 @@ async fn run_agent_step(
         AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV,
         runtime_budget.deadline_ms.to_string(),
     );
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
 
     let remaining = remaining_runtime_duration(
         runtime_budget,
@@ -754,22 +1906,38 @@ async fn run_agent_step(
         action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
     })?;
 
-    let mut child = command.spawn().map_err(|error| {
+    let child = command.spawn().map_err(|error| {
         format!(
             "Action '{}' failed to start child agent '{}': {}",
             action_name, agent, error
         )
     })?;
+    let mut child = child;
+    print_action_line(
+        action_index,
+        action_name,
+        format!("child: started {}", agent).as_str(),
+    );
 
-    match tokio::time::timeout(remaining, child.wait()).await {
-        Ok(Ok(status)) if status.success() => Ok(StepExecutionOutcome::Completed),
-        Ok(Ok(status)) => Err(format!(
-            "Action '{}' child agent '{}' exited with status {} at depth {}.",
-            action_name,
-            agent,
-            status,
-            current_depth + 1
-        )),
+    let result = match tokio::time::timeout(remaining, child.wait()).await {
+        Ok(Ok(status)) if status.success() => {
+            print_action_line(action_index, action_name, "child: completed successfully");
+            Ok(StepExecutionOutcome::Completed)
+        }
+        Ok(Ok(status)) => {
+            print_action_line(
+                action_index,
+                action_name,
+                format!("child: exited with status {}", status).as_str(),
+            );
+            Err(format!(
+                "Action '{}' child agent '{}' exited with status {} at depth {}.",
+                action_name,
+                agent,
+                status,
+                current_depth + 1
+            ))
+        }
         Ok(Err(error)) => Err(format!(
             "Action '{}' failed while waiting for child agent '{}' at depth {}: {}",
             action_name,
@@ -779,6 +1947,11 @@ async fn run_agent_step(
         )),
         Err(_) => {
             let _ = child.kill().await;
+            print_action_line(
+                action_index,
+                action_name,
+                format!("child: timed out {}", agent).as_str(),
+            );
             Err(action_runtime_timeout_message(
                 action_name,
                 runtime_budget,
@@ -789,7 +1962,8 @@ async fn run_agent_step(
                 ),
             ))
         }
-    }
+    };
+    result
 }
 
 fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'static str> {
@@ -808,31 +1982,162 @@ fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'stat
     }
 }
 
-fn run_completion_message_for_depth(depth: u32) -> Option<&'static str> {
+fn format_top_level_action_failures(failures: &[String]) -> String {
+    if failures.len() == 1 {
+        failures
+            .first()
+            .expect("single failure should exist")
+            .clone()
+    } else {
+        format!(
+            "{} top-level actions failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        )
+    }
+}
+
+fn format_abort_summary(abort: &InvocationAbortRecord) -> String {
+    format!(
+        "Run aborted by {}: {}",
+        action_lane_prefix(abort.action_index, abort.action_name.as_str()),
+        abort.error
+    )
+}
+
+fn run_completion_message_for_depth(depth: u32, elapsed: Duration) -> Option<String> {
     if depth == 0 {
-        Some("✅ Run complete.")
+        Some(format!(
+            "✅ Run complete in {}.",
+            format_elapsed_duration(elapsed)
+        ))
     } else {
         None
     }
 }
 
-fn root_run_completion_message() -> Option<&'static str> {
-    run_completion_message_for_depth(current_agent_action_depth())
+fn root_run_completion_message(elapsed: Duration) -> Option<String> {
+    run_completion_message_for_depth(current_agent_action_depth(), elapsed)
 }
 
-fn print_action_start(action_name: &str) {
-    println!("Running action: {}", action_name);
+fn root_run_failure_message(elapsed: Duration) -> String {
+    format!("❌ Run failed in {}.", format_elapsed_duration(elapsed))
 }
 
-fn print_action_success(action_name: &str, summary: &str) {
-    println!("{action_name}: {summary}.");
+fn root_run_abort_message(elapsed: Duration) -> String {
+    format!("❌ Run aborted in {}.", format_elapsed_duration(elapsed))
 }
 
-fn render_backend_ui_or_json(response: &serde_json::Value) {
-    if let Some(message) = format_backend_ui_message(response, true) {
-        println!("{message}");
+fn current_action_output() -> Option<ActionOutput> {
+    ACTION_OUTPUT.try_with(Clone::clone).ok()
+}
+
+fn finish_action_output() {
+    if let Some(output) = current_action_output() {
+        output.finish();
+    }
+}
+
+fn note_action_step_started(
+    action_index: usize,
+    action_name: &str,
+    step_kind: &str,
+    step_number: usize,
+    step_count: usize,
+) {
+    if let Some(output) = current_action_output() {
+        output.action_step_started(
+            action_index,
+            action_name,
+            step_kind,
+            step_number,
+            step_count,
+        );
+    }
+}
+
+fn note_action_failure(action_index: usize, action_name: &str, error: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_failed(action_index, action_name, error);
+    }
+}
+
+fn note_action_abort(action_index: usize, action_name: &str, error: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_aborted(action_index, action_name, error);
+    }
+}
+
+fn note_action_stopped_by_abort(action_index: usize, action_name: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_stopped_by_abort(action_index, action_name);
+    }
+}
+
+fn action_execution_header(action_execution: crate::ActionExecutionMode) -> &'static str {
+    match action_execution {
+        crate::ActionExecutionMode::Sequential => "Action execution: sequential",
+        crate::ActionExecutionMode::Parallel => "Action execution: parallel",
+    }
+}
+
+fn print_action_execution_header(action_execution: crate::ActionExecutionMode) {
+    if let Some(output) = current_action_output() {
+        output.print_execution_header();
     } else {
-        println!("{}", pretty_backend_json(response));
+        println!("{}", action_execution_header(action_execution));
+    }
+}
+
+fn action_lane_prefix(action_index: usize, action_name: &str) -> String {
+    format!("[A{} {}]", action_index + 1, action_name)
+}
+
+fn format_action_line(action_index: usize, action_name: &str, message: &str) -> String {
+    format!(
+        "{} {}",
+        action_lane_prefix(action_index, action_name),
+        message
+    )
+}
+
+fn format_action_failure(action_index: usize, action_name: &str, error: &str) -> String {
+    format_action_line(
+        action_index,
+        action_name,
+        format!("failed: {}", error).as_str(),
+    )
+}
+
+fn print_action_line(action_index: usize, action_name: &str, message: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_line(action_index, action_name, message);
+    } else {
+        println!("{}", format_action_line(action_index, action_name, message));
+    }
+}
+
+fn print_action_start(action_index: usize, action_name: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_started(action_index, action_name);
+    } else {
+        print_action_line(action_index, action_name, "started");
+    }
+}
+
+fn print_action_success(action_index: usize, action_name: &str, summary: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_success(action_index, action_name, summary);
+    } else {
+        print_action_line(action_index, action_name, format!("{}.", summary).as_str());
+    }
+}
+
+fn render_backend_ui_or_json_lines(response: &serde_json::Value) -> Vec<String> {
+    if let Some(message) = format_backend_ui_message(response, true) {
+        split_action_output_lines(message.as_str())
+    } else {
+        split_action_output_lines(pretty_backend_json(response).as_str())
     }
 }
 
@@ -1620,15 +2925,77 @@ fn lookup_action_variable<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        action_completion_summary, apply_actions, child_input_args,
-        configured_agent_action_runtime_budget, format_backend_error_message,
+        action_completion_summary, action_execution_header, action_lane_prefix, apply_actions,
+        child_input_args, configured_agent_action_runtime_budget, format_backend_error_message,
         format_backend_ui_message, insert_action_output_variable, matching_run_steps,
         resolve_run_args, resolve_string_parts, run_agent_step, run_completion_message_for_depth,
         run_exec_step, run_generate_image_step, step_matches_platform, validate_agent_action_depth,
-        ActionProviderContext, StepExecutionOutcome,
+        ActionOutput, ActionOutputMode, ActionProviderContext, StepExecutionOutcome, ACTION_OUTPUT,
     };
     use crate::providers::ProviderKind;
     use serde_json::json;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TestCargoHome {
+        _guard: MutexGuard<'static, ()>,
+        original_cargo_home: Option<OsString>,
+        original_disable_keychain: Option<OsString>,
+        root: PathBuf,
+    }
+
+    impl TestCargoHome {
+        fn new(config_toml: &str) -> Self {
+            let guard = ENV_LOCK
+                .lock()
+                .expect("environment lock should not be poisoned");
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be valid")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("cargo-ai-preflight-actions-{unique}"));
+            let config_path = root.join(".cargo-ai").join("config.toml");
+            fs::create_dir_all(
+                config_path
+                    .parent()
+                    .expect("config path should have a parent directory"),
+            )
+            .expect("temp config dir should be created");
+            fs::write(&config_path, config_toml).expect("temp config should be written");
+
+            let original_cargo_home = std::env::var_os("CARGO_HOME");
+            let original_disable_keychain = std::env::var_os("CARGO_AI_DISABLE_KEYCHAIN");
+            std::env::set_var("CARGO_HOME", &root);
+            std::env::set_var("CARGO_AI_DISABLE_KEYCHAIN", "1");
+
+            Self {
+                _guard: guard,
+                original_cargo_home,
+                original_disable_keychain,
+                root,
+            }
+        }
+    }
+
+    impl Drop for TestCargoHome {
+        fn drop(&mut self) {
+            match &self.original_cargo_home {
+                Some(value) => std::env::set_var("CARGO_HOME", value),
+                None => std::env::remove_var("CARGO_HOME"),
+            }
+            match &self.original_disable_keychain {
+                Some(value) => std::env::set_var("CARGO_AI_DISABLE_KEYCHAIN", value),
+                None => std::env::remove_var("CARGO_AI_DISABLE_KEYCHAIN"),
+            }
+
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
 
     fn run_step(
         program: &str,
@@ -1639,6 +3006,7 @@ mod tests {
             kind: "exec".to_string(),
             program: Some(program.to_string()),
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -1664,10 +3032,26 @@ mod tests {
     fn provider_context() -> ActionProviderContext {
         ActionProviderContext {
             provider: ProviderKind::OpenAi,
+            model: "gpt-5.2".to_string(),
             url: "https://api.openai.com/v1/chat/completions".to_string(),
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
         }
+    }
+
+    fn profile_config(profile_name: &str, server_url: &str, model: &str) -> String {
+        format!(
+            r#"
+[[profile]]
+name = "{profile_name}"
+server = "openai"
+model = "{model}"
+url = "{server_url}"
+token = "profile-token"
+timeout_in_sec = 42
+auth_mode = "api_key"
+"#
+        )
     }
 
     fn action(run: Vec<crate::RunStep>) -> crate::Action {
@@ -2018,10 +3402,130 @@ mod tests {
     #[test]
     fn run_completion_message_for_depth_prints_for_root_runs_only() {
         assert_eq!(
-            run_completion_message_for_depth(0),
-            Some("✅ Run complete.")
+            run_completion_message_for_depth(0, std::time::Duration::from_secs(32)),
+            Some("✅ Run complete in 32s.".to_string())
         );
-        assert_eq!(run_completion_message_for_depth(1), None);
+        assert_eq!(
+            run_completion_message_for_depth(1, std::time::Duration::from_secs(32)),
+            None
+        );
+    }
+
+    #[test]
+    fn action_execution_header_uses_effective_mode() {
+        assert_eq!(
+            action_execution_header(crate::ActionExecutionMode::Sequential),
+            "Action execution: sequential"
+        );
+        assert_eq!(
+            action_execution_header(crate::ActionExecutionMode::Parallel),
+            "Action execution: parallel"
+        );
+    }
+
+    #[test]
+    fn action_lane_prefix_uses_json_order_and_name() {
+        assert_eq!(
+            action_lane_prefix(0, "generate_images"),
+            "[A1 generate_images]"
+        );
+        assert_eq!(action_lane_prefix(2, "child_summary"), "[A3 child_summary]");
+    }
+
+    #[test]
+    fn live_dashboard_snapshot_shows_lane_state() {
+        let output = ActionOutput::new_for_mode(
+            crate::ActionExecutionMode::Parallel,
+            ActionOutputMode::Live,
+        );
+
+        output.action_started(0, "generate_images");
+        output.action_step_started(0, "generate_images", "generate_image", 1, 2);
+        output.action_line(
+            0,
+            "generate_images",
+            "wrote generated image to './artifacts/hero.png'.",
+        );
+
+        let snapshot = output.snapshot_lines_for_test();
+        assert_eq!(snapshot[0], "Action execution: parallel");
+        assert!(snapshot
+            .iter()
+            .any(|line| line.starts_with("[A1 generate_images] running · ")));
+        assert!(snapshot
+            .iter()
+            .any(|line| line == "  step: 1/2 generate_image"));
+        assert!(snapshot
+            .iter()
+            .any(|line| line == "  last: wrote generated image to './artifacts/hero.png'."));
+        assert!(snapshot.iter().any(|line| line == "  output:"));
+        assert!(snapshot
+            .iter()
+            .any(|line| line == "    wrote generated image to './artifacts/hero.png'."));
+    }
+
+    #[test]
+    fn live_dashboard_snapshot_shows_waiting_message_for_long_running_step() {
+        let output = ActionOutput::new_for_mode(
+            crate::ActionExecutionMode::Parallel,
+            ActionOutputMode::Live,
+        );
+
+        output.action_started(0, "generate_images");
+        output.action_step_started(0, "generate_images", "generate_image", 2, 2);
+
+        let snapshot = output.snapshot_lines_for_test();
+        assert!(snapshot
+            .iter()
+            .any(|line| line.starts_with("[A1 generate_images] running · ")));
+        assert!(snapshot
+            .iter()
+            .any(|line| line == "  step: 2/2 generate_image"));
+        assert!(snapshot
+            .iter()
+            .any(|line| line == "  last: waiting for provider response..."));
+    }
+
+    #[test]
+    fn live_dashboard_snapshot_marks_lane_completion_with_elapsed_time() {
+        let output = ActionOutput::new_for_mode(
+            crate::ActionExecutionMode::Sequential,
+            ActionOutputMode::Live,
+        );
+
+        output.action_started(0, "generate_images");
+        output.action_success(0, "generate_images", "completed");
+
+        let snapshot = output.snapshot_lines_for_test();
+        assert!(snapshot
+            .iter()
+            .any(|line| line.starts_with("[A1 generate_images] completed · ")));
+        assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
+        assert!(snapshot.iter().any(|line| line == "  last: completed."));
+    }
+
+    #[test]
+    fn live_dashboard_snapshot_marks_lane_failures() {
+        let output = ActionOutput::new_for_mode(
+            crate::ActionExecutionMode::Sequential,
+            ActionOutputMode::Live,
+        );
+
+        output.action_started(1, "child_summary");
+        output.action_failed(1, "child_summary", "child exited with status 1");
+
+        let snapshot = output.snapshot_lines_for_test();
+        assert!(snapshot
+            .iter()
+            .any(|line| line.starts_with("[A2 child_summary] failed · ")));
+        assert!(snapshot.iter().any(|line| line == "  step: ✗ failed"));
+        assert!(snapshot
+            .iter()
+            .any(|line| line == "  last: failed: child exited with status 1"));
+        assert!(snapshot.iter().any(|line| line == "  output:"));
+        assert!(snapshot
+            .iter()
+            .any(|line| line == "    child exited with status 1"));
     }
 
     #[cfg(unix)]
@@ -2031,6 +3535,7 @@ mod tests {
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
+            profile: None,
             output_variable: Some("report_listing".to_string()),
             status_variable: None,
             error_variable: None,
@@ -2051,7 +3556,7 @@ mod tests {
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let captured_output = run_exec_step(&step, &json!({}), "capture_exec", runtime_budget)
+        let captured_output = run_exec_step(&step, &json!({}), 0, "capture_exec", runtime_budget)
             .await
             .expect("exec capture should succeed");
 
@@ -2059,6 +3564,58 @@ mod tests {
             captured_output,
             Some(("report_listing".to_string(), "alpha\nbeta".to_string()))
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_step_buckets_raw_output_into_live_lane() {
+        let step = crate::RunStep {
+            kind: "exec".to_string(),
+            program: Some("/bin/sh".to_string()),
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: vec![
+                crate::RunArg::Literal("-lc".to_string()),
+                crate::RunArg::Literal("printf 'alpha\\n'; printf 'beta\\n' >&2".to_string()),
+            ],
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+        let output = ActionOutput::new_for_mode(
+            crate::ActionExecutionMode::Parallel,
+            ActionOutputMode::Live,
+        );
+        output.action_started(0, "raw_exec");
+        output.action_step_started(0, "raw_exec", "exec", 1, 1);
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = ACTION_OUTPUT
+            .scope(output.clone(), async {
+                run_exec_step(&step, &json!({}), 0, "raw_exec", runtime_budget).await
+            })
+            .await;
+
+        assert!(result.is_ok(), "raw exec step should succeed: {result:?}");
+        output.action_success(0, "raw_exec", "completed");
+
+        let snapshot = output.snapshot_lines_for_test();
+        assert!(snapshot
+            .iter()
+            .any(|line| line == "[A1 raw_exec] completed"));
+        assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
+        assert!(snapshot.iter().any(|line| line == "    alpha"));
+        assert!(snapshot.iter().any(|line| line == "    beta"));
     }
 
     #[tokio::test]
@@ -2084,6 +3641,7 @@ mod tests {
             kind: "generate_image".to_string(),
             program: None,
             model: Some(crate::RunArg::Literal("gpt-image-1".to_string())),
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -2104,6 +3662,7 @@ mod tests {
         };
         let provider_context = ActionProviderContext {
             provider: ProviderKind::OpenAi,
+            model: "gpt-5.2".to_string(),
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
@@ -2113,6 +3672,7 @@ mod tests {
         let result = run_generate_image_step(
             &step,
             &json!({ "customer": "Acme" }),
+            0,
             "generate_art",
             &provider_context,
             runtime_budget,
@@ -2159,6 +3719,7 @@ mod tests {
             kind: "generate_image".to_string(),
             program: None,
             model: Some(crate::RunArg::Variable("runtime.image_model".to_string())),
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -2178,6 +3739,7 @@ mod tests {
         };
         let provider_context = ActionProviderContext {
             provider: ProviderKind::OpenAi,
+            model: "gpt-5.2".to_string(),
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
@@ -2191,6 +3753,7 @@ mod tests {
                     "image_model": "gpt-image-1"
                 }
             }),
+            0,
             "generate_art",
             &provider_context,
             runtime_budget,
@@ -2206,6 +3769,333 @@ mod tests {
             std::fs::read(&output_name).expect("generated image file should be written");
         let _ = std::fs::remove_file(&output_name);
         assert_eq!(written_bytes, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_falls_back_to_effective_invocation_model() {
+        use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+
+        let mut server = mockito::Server::new_async().await;
+        let expected_bytes = b"fake-png-fallback";
+        let encoded_image = BASE64_STANDARD.encode(expected_bytes);
+        let _mock = server
+            .mock("POST", "/v1/images/generations")
+            .match_body(mockito::Matcher::PartialJson(
+                json!({ "model": "gpt-image-1.5" }),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"data":[{{"b64_json":"{}"}}]}}"#,
+                encoded_image
+            ))
+            .create_async()
+            .await;
+
+        let output_name = format!(
+            ".tmp-cai2067-generated-image-fallback-{}.png",
+            std::process::id()
+        );
+        let step = crate::RunStep {
+            kind: "generate_image".to_string(),
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![crate::RunArg::Literal(
+                "Create an image for Acme".to_string(),
+            )]),
+            path: Some(vec![crate::RunArg::Literal(output_name.clone())]),
+            subject: None,
+            text: None,
+            agent: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+        let provider_context = ActionProviderContext {
+            provider: ProviderKind::OpenAi,
+            model: "gpt-image-1.5".to_string(),
+            url: format!("{}/v1/chat/completions", server.url()),
+            token: "test-token".to_string(),
+            inference_timeout_in_sec: 60,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_generate_image_step(
+            &step,
+            &json!({}),
+            0,
+            "generate_art",
+            &provider_context,
+            runtime_budget,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "fallback-image generation should succeed: {result:?}"
+        );
+
+        let written_bytes =
+            std::fs::read(&output_name).expect("generated image file should be written");
+        let _ = std::fs::remove_file(&output_name);
+        assert_eq!(written_bytes, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_requires_model_when_step_and_invocation_omit_it() {
+        let step = crate::RunStep {
+            kind: "generate_image".to_string(),
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![crate::RunArg::Literal(
+                "Create an image for Acme".to_string(),
+            )]),
+            path: Some(vec![crate::RunArg::Literal(
+                "./artifacts/missing-model.png".to_string(),
+            )]),
+            subject: None,
+            text: None,
+            agent: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+        let provider_context = ActionProviderContext {
+            provider: ProviderKind::OpenAi,
+            model: String::new(),
+            url: "https://api.openai.com/v1/chat/completions".to_string(),
+            token: "test-token".to_string(),
+            inference_timeout_in_sec: 60,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = run_generate_image_step(
+            &step,
+            &json!({}),
+            0,
+            "generate_art",
+            &provider_context,
+            runtime_budget,
+        )
+        .await
+        .expect_err("missing step and invocation model should fail");
+
+        assert!(error.contains("omitted `model`"));
+        assert!(error.contains("pass `--model`"));
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_uses_step_profile_model_when_explicit_model_omitted() {
+        use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+
+        let mut server = mockito::Server::new_async().await;
+        let expected_bytes = b"fake-png-step-profile";
+        let encoded_image = BASE64_STANDARD.encode(expected_bytes);
+        let _mock = server
+            .mock("POST", "/v1/images/generations")
+            .match_body(mockito::Matcher::PartialJson(
+                json!({ "model": "gpt-image-step-profile" }),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"data":[{{"b64_json":"{}"}}]}}"#,
+                encoded_image
+            ))
+            .create_async()
+            .await;
+
+        let config = profile_config(
+            "image_profile",
+            format!("{}/v1/chat/completions", server.url()).as_str(),
+            "gpt-image-step-profile",
+        );
+        let _test_env = TestCargoHome::new(&config);
+
+        let output_name = format!(
+            ".tmp-cai2067-generated-image-step-profile-{}.png",
+            std::process::id()
+        );
+        let step = crate::RunStep {
+            kind: "generate_image".to_string(),
+            program: None,
+            model: None,
+            profile: Some(crate::RunArg::Literal("image_profile".to_string())),
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![crate::RunArg::Literal(
+                "Create an image for Acme".to_string(),
+            )]),
+            path: Some(vec![crate::RunArg::Literal(output_name.clone())]),
+            subject: None,
+            text: None,
+            agent: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_generate_image_step(
+            &step,
+            &json!({}),
+            0,
+            "generate_art",
+            &provider_context(),
+            runtime_budget,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "profile-backed image generation should succeed: {result:?}"
+        );
+
+        let written_bytes =
+            std::fs::read(&output_name).expect("generated image file should be written");
+        let _ = std::fs::remove_file(&output_name);
+        assert_eq!(written_bytes, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_explicit_model_overrides_step_profile_model() {
+        use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+
+        let mut server = mockito::Server::new_async().await;
+        let expected_bytes = b"fake-png-explicit-step-model";
+        let encoded_image = BASE64_STANDARD.encode(expected_bytes);
+        let _mock = server
+            .mock("POST", "/v1/images/generations")
+            .match_body(mockito::Matcher::PartialJson(
+                json!({ "model": "gpt-image-explicit" }),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"data":[{{"b64_json":"{}"}}]}}"#,
+                encoded_image
+            ))
+            .create_async()
+            .await;
+
+        let config = profile_config(
+            "image_profile",
+            format!("{}/v1/chat/completions", server.url()).as_str(),
+            "gpt-image-step-profile",
+        );
+        let _test_env = TestCargoHome::new(&config);
+
+        let output_name = format!(
+            ".tmp-cai2067-generated-image-step-explicit-{}.png",
+            std::process::id()
+        );
+        let step = crate::RunStep {
+            kind: "generate_image".to_string(),
+            program: None,
+            model: Some(crate::RunArg::Literal("gpt-image-explicit".to_string())),
+            profile: Some(crate::RunArg::Literal("image_profile".to_string())),
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![crate::RunArg::Literal(
+                "Create an image for Acme".to_string(),
+            )]),
+            path: Some(vec![crate::RunArg::Literal(output_name.clone())]),
+            subject: None,
+            text: None,
+            agent: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_generate_image_step(
+            &step,
+            &json!({}),
+            0,
+            "generate_art",
+            &provider_context(),
+            runtime_budget,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "explicit-model image generation should succeed: {result:?}"
+        );
+
+        let written_bytes =
+            std::fs::read(&output_name).expect("generated image file should be written");
+        let _ = std::fs::remove_file(&output_name);
+        assert_eq!(written_bytes, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_rejects_unknown_step_profile() {
+        let config = profile_config(
+            "other_profile",
+            "https://api.openai.com/v1/chat/completions",
+            "gpt-image-step-profile",
+        );
+        let _test_env = TestCargoHome::new(&config);
+
+        let step = crate::RunStep {
+            kind: "generate_image".to_string(),
+            program: None,
+            model: Some(crate::RunArg::Literal("gpt-image-explicit".to_string())),
+            profile: Some(crate::RunArg::Literal("missing_profile".to_string())),
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![crate::RunArg::Literal(
+                "Create an image for Acme".to_string(),
+            )]),
+            path: Some(vec![crate::RunArg::Literal(
+                "./artifacts/missing-profile.png".to_string(),
+            )]),
+            subject: None,
+            text: None,
+            agent: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = run_generate_image_step(
+            &step,
+            &json!({}),
+            0,
+            "generate_art",
+            &provider_context(),
+            runtime_budget,
+        )
+        .await
+        .expect_err("missing profile should fail");
+
+        assert!(error.contains("unknown profile 'missing_profile'"));
     }
 
     #[cfg(unix)]
@@ -2238,6 +4128,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -2280,7 +4171,9 @@ mod tests {
                 "customer": "world",
                 "report_filename": "report.pdf"
             }),
+            0,
             "invoke_child",
+            None,
             5,
             runtime_budget,
         )
@@ -2315,6 +4208,270 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn agent_step_summarizes_child_output_without_inlining_child_transcript() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2067-child-summary-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+        let marker_path = std::env::temp_dir().join(format!(
+            "cai2067-child-summary-marker-{}.txt",
+            std::process::id()
+        ));
+
+        let script_body = format!(
+            "#!/bin/sh\nprintf 'child detail\\n'\nprintf 'ran' > \"{}\"\n",
+            marker_path.display()
+        );
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", script_name)),
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+
+        let output = ActionOutput::new_for_mode(
+            crate::ActionExecutionMode::Parallel,
+            ActionOutputMode::Live,
+        );
+        output.action_started(0, "child_summary");
+        output.action_step_started(0, "child_summary", "agent", 1, 1);
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = ACTION_OUTPUT
+            .scope(output.clone(), async {
+                run_agent_step(
+                    &step,
+                    &json!({}),
+                    0,
+                    "child_summary",
+                    None,
+                    5,
+                    runtime_budget,
+                )
+                .await
+            })
+            .await;
+
+        let _ = fs::remove_file(&script_path);
+        let marker =
+            fs::read_to_string(&marker_path).expect("child script should still execute normally");
+        let _ = fs::remove_file(&marker_path);
+        assert_eq!(marker, "ran");
+
+        assert!(
+            result.is_ok(),
+            "child summary step should succeed without passthrough: {result:?}"
+        );
+        output.action_success(0, "child_summary", "completed");
+
+        let snapshot = output.snapshot_lines_for_test();
+        assert!(snapshot
+            .iter()
+            .any(|line| line == "[A1 child_summary] completed"));
+        assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
+        assert!(snapshot
+            .iter()
+            .any(|line| line == &format!("    child: started ./{}", script_name)));
+        assert!(snapshot
+            .iter()
+            .any(|line| line == "    child: completed successfully"));
+        assert!(!snapshot.iter().any(|line| line.contains("child detail")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_step_forwards_action_execution_override_to_child() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(
+            ".tmp-cai2067-action-execution-child-{}.sh",
+            std::process::id()
+        );
+        let script_path = current_dir.join(&script_name);
+        let output_path = std::env::temp_dir().join(format!(
+            "cai2067-action-execution-child-args-{}.txt",
+            std::process::id()
+        ));
+
+        let script_body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+            output_path.display()
+        );
+
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", script_name)),
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_agent_step(
+            &step,
+            &json!({}),
+            0,
+            "invoke_child",
+            Some(crate::ActionExecutionMode::Sequential),
+            5,
+            runtime_budget,
+        )
+        .await;
+
+        let _ = fs::remove_file(&script_path);
+
+        assert!(
+            result.is_ok(),
+            "child agent invocation should succeed: {result:?}"
+        );
+
+        let args = fs::read_to_string(&output_path).expect("child output should be captured");
+        let _ = fs::remove_file(&output_path);
+
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec!["--action-execution", "sequential"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_step_forwards_step_profile_to_child() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let config = profile_config(
+            "child_profile",
+            "https://api.openai.com/v1/chat/completions",
+            "gpt-5.2",
+        );
+        let _test_env = TestCargoHome::new(&config);
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2067-child-profile-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+        let output_path = std::env::temp_dir().join(format!(
+            "cai2067-child-profile-args-{}.txt",
+            std::process::id()
+        ));
+
+        let script_body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+            output_path.display()
+        );
+
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            model: None,
+            profile: Some(crate::RunArg::Variable("runtime.child_profile".to_string())),
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", script_name)),
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_agent_step(
+            &step,
+            &json!({
+                "runtime": {
+                    "child_profile": "child_profile"
+                }
+            }),
+            0,
+            "invoke_child",
+            Some(crate::ActionExecutionMode::Sequential),
+            5,
+            runtime_budget,
+        )
+        .await;
+
+        let _ = fs::remove_file(&script_path);
+
+        assert!(
+            result.is_ok(),
+            "child agent invocation should succeed: {result:?}"
+        );
+
+        let args = fs::read_to_string(&output_path).expect("child output should be captured");
+        let _ = fs::remove_file(&output_path);
+
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec![
+                "--action-execution",
+                "sequential",
+                "--profile",
+                "child_profile",
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn captured_exec_output_can_flow_into_later_agent_step() {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
@@ -2343,6 +4500,7 @@ mod tests {
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
+            profile: None,
             output_variable: Some("report_listing".to_string()),
             status_variable: None,
             error_variable: None,
@@ -2365,6 +4523,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -2391,6 +4550,7 @@ mod tests {
         let captured_output = run_exec_step(
             &exec_step,
             &action_data,
+            0,
             "capture_then_agent",
             runtime_budget,
         )
@@ -2403,7 +4563,9 @@ mod tests {
         let result = run_agent_step(
             &agent_step,
             &action_data,
+            0,
             "capture_then_agent",
+            None,
             5,
             runtime_budget,
         )
@@ -2453,6 +4615,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -2470,7 +4633,16 @@ mod tests {
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let result = run_agent_step(&step, &json!({}), "invoke_child", 7, runtime_budget).await;
+        let result = run_agent_step(
+            &step,
+            &json!({}),
+            0,
+            "invoke_child",
+            None,
+            7,
+            runtime_budget,
+        )
+        .await;
 
         let _ = fs::remove_file(&script_path);
 
@@ -2495,6 +4667,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -2512,9 +4685,17 @@ mod tests {
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let error = run_agent_step(&step, &json!({}), "invoke_child", 5, runtime_budget)
-            .await
-            .expect_err("bare child agent names should be rejected");
+        let error = run_agent_step(
+            &step,
+            &json!({}),
+            0,
+            "invoke_child",
+            None,
+            5,
+            runtime_budget,
+        )
+        .await
+        .expect_err("bare child agent names should be rejected");
 
         assert!(error.contains("bare child-agent names are not allowed"));
     }
@@ -2525,6 +4706,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -2542,9 +4724,17 @@ mod tests {
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let error = run_agent_step(&step, &json!({}), "invoke_child", 5, runtime_budget)
-            .await
-            .expect_err("parent traversal should be rejected");
+        let error = run_agent_step(
+            &step,
+            &json!({}),
+            0,
+            "invoke_child",
+            None,
+            5,
+            runtime_budget,
+        )
+        .await
+        .expect_err("parent traversal should be rejected");
 
         assert!(error.contains("parent traversal"));
     }
@@ -2555,6 +4745,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -2572,9 +4763,17 @@ mod tests {
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let error = run_agent_step(&step, &json!({}), "invoke_child", 5, runtime_budget)
-            .await
-            .expect_err("nested child agent paths should be rejected");
+        let error = run_agent_step(
+            &step,
+            &json!({}),
+            0,
+            "invoke_child",
+            None,
+            5,
+            runtime_budget,
+        )
+        .await
+        .expect_err("nested child agent paths should be rejected");
 
         assert!(error.contains("nested child-agent paths"));
     }
@@ -2602,6 +4801,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -2619,9 +4819,17 @@ mod tests {
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(1));
-        let error = run_agent_step(&step, &json!({}), "invoke_child", 5, runtime_budget)
-            .await
-            .expect_err("runtime budget should time out the child");
+        let error = run_agent_step(
+            &step,
+            &json!({}),
+            0,
+            "invoke_child",
+            None,
+            5,
+            runtime_budget,
+        )
+        .await
+        .expect_err("runtime budget should time out the child");
 
         let _ = fs::remove_file(&script_path);
 
@@ -2653,6 +4861,7 @@ mod tests {
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: Some("step_status".to_string()),
             error_variable: Some("step_error".to_string()),
@@ -2675,6 +4884,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -2696,6 +4906,8 @@ mod tests {
             &crate::Output { answer: 4 },
             &[action(vec![failing_step, second_step])],
             &serde_json::Map::new(),
+            crate::ActionExecutionMode::Sequential,
+            None,
             &provider_context(),
             5,
             runtime_budget,
@@ -2710,6 +4922,572 @@ mod tests {
         assert!(
             !output_path.exists(),
             "later step should not run after default stop"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_actions_continues_to_later_top_level_actions_after_hard_failure() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2067-later-action-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+        let output_path =
+            std::env::temp_dir().join(format!("cai2067-later-action-{}.txt", std::process::id()));
+
+        let script_body = format!("#!/bin/sh\nprintf 'ran' > \"{}\"\n", output_path.display());
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let first_action = crate::Action {
+            name: "first_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![crate::RunStep {
+                kind: "exec".to_string(),
+                program: Some("/bin/sh".to_string()),
+                model: None,
+                profile: None,
+                output_variable: None,
+                status_variable: None,
+                error_variable: None,
+                failure_mode: None,
+                when: None,
+                args: vec![
+                    crate::RunArg::Literal("-lc".to_string()),
+                    crate::RunArg::Literal("exit 11".to_string()),
+                ],
+                prompt: None,
+                path: None,
+                subject: None,
+                text: None,
+                agent: None,
+                inputs: None,
+                input_mode: None,
+                platforms: None,
+            }],
+        };
+        let second_action = crate::Action {
+            name: "second_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![crate::RunStep {
+                kind: "agent".to_string(),
+                program: None,
+                model: None,
+                profile: None,
+                output_variable: None,
+                status_variable: None,
+                error_variable: None,
+                failure_mode: None,
+                when: None,
+                args: Vec::new(),
+                prompt: None,
+                path: None,
+                subject: None,
+                text: None,
+                agent: Some(format!("./{}", script_name)),
+                inputs: None,
+                input_mode: None,
+                platforms: None,
+            }],
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = apply_actions(
+            &crate::Output { answer: 4 },
+            &[first_action, second_action],
+            &serde_json::Map::new(),
+            crate::ActionExecutionMode::Sequential,
+            None,
+            &provider_context(),
+            5,
+            runtime_budget,
+        )
+        .await;
+
+        let _ = fs::remove_file(&script_path);
+
+        let error = result.expect_err("one failed action should still fail overall");
+        assert!(error.contains("first_action"));
+        assert!(error.contains("exited with status"));
+
+        let file_contents =
+            fs::read_to_string(&output_path).expect("later top-level action should have executed");
+        let _ = fs::remove_file(&output_path);
+        assert_eq!(file_contents, "ran");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_actions_parallel_starts_matching_actions_without_waiting() {
+        use std::fs;
+
+        let first_output_path =
+            std::env::temp_dir().join(format!("cai2067-parallel-first-{}.txt", std::process::id()));
+        let second_output_path = std::env::temp_dir().join(format!(
+            "cai2067-parallel-second-{}.txt",
+            std::process::id()
+        ));
+
+        let first_action = crate::Action {
+            name: "first_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![crate::RunStep {
+                kind: "exec".to_string(),
+                program: Some("/bin/sh".to_string()),
+                model: None,
+                profile: None,
+                output_variable: None,
+                status_variable: None,
+                error_variable: None,
+                failure_mode: None,
+                when: None,
+                args: vec![
+                    crate::RunArg::Literal("-lc".to_string()),
+                    crate::RunArg::Literal(format!(
+                        "sleep 1; printf 'first' > \"{}\"",
+                        first_output_path.display()
+                    )),
+                ],
+                prompt: None,
+                path: None,
+                subject: None,
+                text: None,
+                agent: None,
+                inputs: None,
+                input_mode: None,
+                platforms: None,
+            }],
+        };
+        let second_action = crate::Action {
+            name: "second_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![crate::RunStep {
+                kind: "exec".to_string(),
+                program: Some("/bin/sh".to_string()),
+                model: None,
+                profile: None,
+                output_variable: None,
+                status_variable: None,
+                error_variable: None,
+                failure_mode: None,
+                when: None,
+                args: vec![
+                    crate::RunArg::Literal("-lc".to_string()),
+                    crate::RunArg::Literal(format!(
+                        "printf 'second' > \"{}\"",
+                        second_output_path.display()
+                    )),
+                ],
+                prompt: None,
+                path: None,
+                subject: None,
+                text: None,
+                agent: None,
+                inputs: None,
+                input_mode: None,
+                platforms: None,
+            }],
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let output = crate::Output { answer: 4 };
+        let actions = vec![first_action, second_action];
+        let runtime_vars = serde_json::Map::new();
+        let provider_context = provider_context();
+        let mut future = std::pin::pin!(apply_actions(
+            &output,
+            &actions,
+            &runtime_vars,
+            crate::ActionExecutionMode::Parallel,
+            None,
+            &provider_context,
+            5,
+            runtime_budget,
+        ));
+
+        tokio::select! {
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(300)) => {}
+            result = &mut future => panic!("parallel actions finished too early: {result:?}"),
+        }
+
+        assert!(
+            second_output_path.exists(),
+            "second action should run before the delayed first action completes"
+        );
+        assert!(
+            !first_output_path.exists(),
+            "first action should still be sleeping when the second action has already completed"
+        );
+
+        let result = future.await;
+
+        let first_contents =
+            fs::read_to_string(&first_output_path).expect("first action should eventually finish");
+        let second_contents = fs::read_to_string(&second_output_path)
+            .expect("second action should have already completed");
+        let _ = fs::remove_file(&first_output_path);
+        let _ = fs::remove_file(&second_output_path);
+
+        assert!(
+            result.is_ok(),
+            "parallel actions should succeed: {result:?}"
+        );
+        assert_eq!(first_contents, "first");
+        assert_eq!(second_contents, "second");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_actions_parallel_reports_failures_in_lane_order() {
+        let first_action = crate::Action {
+            name: "first_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![crate::RunStep {
+                kind: "exec".to_string(),
+                program: Some("/bin/sh".to_string()),
+                model: None,
+                profile: None,
+                output_variable: None,
+                status_variable: None,
+                error_variable: None,
+                failure_mode: None,
+                when: None,
+                args: vec![
+                    crate::RunArg::Literal("-lc".to_string()),
+                    crate::RunArg::Literal("sleep 1; exit 11".to_string()),
+                ],
+                prompt: None,
+                path: None,
+                subject: None,
+                text: None,
+                agent: None,
+                inputs: None,
+                input_mode: None,
+                platforms: None,
+            }],
+        };
+        let second_action = crate::Action {
+            name: "second_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![crate::RunStep {
+                kind: "exec".to_string(),
+                program: Some("/bin/sh".to_string()),
+                model: None,
+                profile: None,
+                output_variable: None,
+                status_variable: None,
+                error_variable: None,
+                failure_mode: None,
+                when: None,
+                args: vec![
+                    crate::RunArg::Literal("-lc".to_string()),
+                    crate::RunArg::Literal("exit 12".to_string()),
+                ],
+                prompt: None,
+                path: None,
+                subject: None,
+                text: None,
+                agent: None,
+                inputs: None,
+                input_mode: None,
+                platforms: None,
+            }],
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let actions = vec![first_action, second_action];
+        let error = apply_actions(
+            &crate::Output { answer: 4 },
+            &actions,
+            &serde_json::Map::new(),
+            crate::ActionExecutionMode::Parallel,
+            None,
+            &provider_context(),
+            5,
+            runtime_budget,
+        )
+        .await
+        .expect_err("parallel hard failures should fail overall");
+
+        let first_idx = error
+            .find("first_action")
+            .expect("aggregated error should mention first lane");
+        let second_idx = error
+            .find("second_action")
+            .expect("aggregated error should mention second lane");
+
+        assert!(
+            first_idx < second_idx,
+            "parallel failure reporting should remain in JSON/lane order: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_actions_abort_stops_current_and_later_top_level_work() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2067-abort-child-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+        let output_path =
+            std::env::temp_dir().join(format!("cai2067-abort-output-{}.txt", std::process::id()));
+
+        let script_body = format!("#!/bin/sh\nprintf 'ran' > \"{}\"\n", output_path.display());
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let first_action = crate::Action {
+            name: "first_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![
+                crate::RunStep {
+                    kind: "exec".to_string(),
+                    program: Some("/bin/sh".to_string()),
+                    model: None,
+                    profile: None,
+                    output_variable: None,
+                    status_variable: Some("abort_status".to_string()),
+                    error_variable: Some("abort_error".to_string()),
+                    failure_mode: Some(crate::FailureMode::Abort),
+                    when: None,
+                    args: vec![
+                        crate::RunArg::Literal("-lc".to_string()),
+                        crate::RunArg::Literal("exit 17".to_string()),
+                    ],
+                    prompt: None,
+                    path: None,
+                    subject: None,
+                    text: None,
+                    agent: None,
+                    inputs: None,
+                    input_mode: None,
+                    platforms: None,
+                },
+                crate::RunStep {
+                    kind: "agent".to_string(),
+                    program: None,
+                    model: None,
+                    profile: None,
+                    output_variable: None,
+                    status_variable: None,
+                    error_variable: None,
+                    failure_mode: None,
+                    when: None,
+                    args: Vec::new(),
+                    prompt: None,
+                    path: None,
+                    subject: None,
+                    text: None,
+                    agent: Some(format!("./{}", script_name)),
+                    inputs: None,
+                    input_mode: None,
+                    platforms: None,
+                },
+            ],
+        };
+        let second_action = crate::Action {
+            name: "second_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![crate::RunStep {
+                kind: "agent".to_string(),
+                program: None,
+                model: None,
+                profile: None,
+                output_variable: None,
+                status_variable: None,
+                error_variable: None,
+                failure_mode: None,
+                when: None,
+                args: Vec::new(),
+                prompt: None,
+                path: None,
+                subject: None,
+                text: None,
+                agent: Some(format!("./{}", script_name)),
+                inputs: None,
+                input_mode: None,
+                platforms: None,
+            }],
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = apply_actions(
+            &crate::Output { answer: 4 },
+            &[first_action, second_action],
+            &serde_json::Map::new(),
+            crate::ActionExecutionMode::Sequential,
+            None,
+            &provider_context(),
+            5,
+            runtime_budget,
+        )
+        .await
+        .expect_err("abort should fail the invocation");
+
+        let output_exists = output_path.exists();
+        let _ = fs::remove_file(&script_path);
+        let _ = fs::remove_file(&output_path);
+
+        assert!(error.contains("Run aborted by [A1 first_action]"));
+        assert!(error.contains("exit status: 17"));
+        assert!(
+            !output_exists,
+            "abort should stop later steps in the lane and later top-level actions"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_actions_parallel_abort_stops_other_lanes_before_next_step() {
+        use std::fs;
+
+        let later_output_path = std::env::temp_dir().join(format!(
+            "cai2067-parallel-abort-output-{}.txt",
+            std::process::id()
+        ));
+
+        let first_action = crate::Action {
+            name: "first_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![
+                crate::RunStep {
+                    kind: "exec".to_string(),
+                    program: Some("/bin/sh".to_string()),
+                    model: None,
+                    profile: None,
+                    output_variable: None,
+                    status_variable: None,
+                    error_variable: None,
+                    failure_mode: None,
+                    when: None,
+                    args: vec![
+                        crate::RunArg::Literal("-lc".to_string()),
+                        crate::RunArg::Literal("sleep 0.1".to_string()),
+                    ],
+                    prompt: None,
+                    path: None,
+                    subject: None,
+                    text: None,
+                    agent: None,
+                    inputs: None,
+                    input_mode: None,
+                    platforms: None,
+                },
+                crate::RunStep {
+                    kind: "exec".to_string(),
+                    program: Some("/bin/sh".to_string()),
+                    model: None,
+                    profile: None,
+                    output_variable: None,
+                    status_variable: None,
+                    error_variable: None,
+                    failure_mode: Some(crate::FailureMode::Abort),
+                    when: None,
+                    args: vec![
+                        crate::RunArg::Literal("-lc".to_string()),
+                        crate::RunArg::Literal("exit 19".to_string()),
+                    ],
+                    prompt: None,
+                    path: None,
+                    subject: None,
+                    text: None,
+                    agent: None,
+                    inputs: None,
+                    input_mode: None,
+                    platforms: None,
+                },
+            ],
+        };
+        let second_action = crate::Action {
+            name: "second_action".to_string(),
+            logic: json!({ "==": [{ "var": "answer" }, 4] }),
+            run: vec![
+                crate::RunStep {
+                    kind: "exec".to_string(),
+                    program: Some("/bin/sh".to_string()),
+                    model: None,
+                    profile: None,
+                    output_variable: None,
+                    status_variable: None,
+                    error_variable: None,
+                    failure_mode: None,
+                    when: None,
+                    args: vec![
+                        crate::RunArg::Literal("-lc".to_string()),
+                        crate::RunArg::Literal("sleep 0.2".to_string()),
+                    ],
+                    prompt: None,
+                    path: None,
+                    subject: None,
+                    text: None,
+                    agent: None,
+                    inputs: None,
+                    input_mode: None,
+                    platforms: None,
+                },
+                crate::RunStep {
+                    kind: "exec".to_string(),
+                    program: Some("/bin/sh".to_string()),
+                    model: None,
+                    profile: None,
+                    output_variable: None,
+                    status_variable: None,
+                    error_variable: None,
+                    failure_mode: None,
+                    when: None,
+                    args: vec![
+                        crate::RunArg::Literal("-lc".to_string()),
+                        crate::RunArg::Literal(format!(
+                            "printf 'late' > \"{}\"",
+                            later_output_path.display()
+                        )),
+                    ],
+                    prompt: None,
+                    path: None,
+                    subject: None,
+                    text: None,
+                    agent: None,
+                    inputs: None,
+                    input_mode: None,
+                    platforms: None,
+                },
+            ],
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = apply_actions(
+            &crate::Output { answer: 4 },
+            &[first_action, second_action],
+            &serde_json::Map::new(),
+            crate::ActionExecutionMode::Parallel,
+            None,
+            &provider_context(),
+            5,
+            runtime_budget,
+        )
+        .await
+        .expect_err("abort should fail the parallel invocation");
+
+        let later_output_exists = later_output_path.exists();
+        let _ = fs::remove_file(&later_output_path);
+
+        assert!(error.contains("Run aborted by [A1 first_action]"));
+        assert!(error.contains("exit status: 19"));
+        assert!(
+            !later_output_exists,
+            "other lanes should not start later steps after a peer lane aborts"
         );
     }
 
@@ -2739,6 +5517,7 @@ mod tests {
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: Some("step_status".to_string()),
             error_variable: Some("step_error".to_string()),
@@ -2761,6 +5540,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -2782,6 +5562,8 @@ mod tests {
             &crate::Output { answer: 4 },
             &[action(vec![failing_step, second_step])],
             &serde_json::Map::new(),
+            crate::ActionExecutionMode::Sequential,
+            None,
             &provider_context(),
             5,
             runtime_budget,
@@ -2826,6 +5608,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -2852,6 +5635,8 @@ mod tests {
             &crate::Output { answer: 4 },
             &[action],
             &runtime_vars(&[("generate_images", json!(true))]),
+            crate::ActionExecutionMode::Sequential,
+            None,
             &provider_context(),
             5,
             runtime_budget,
@@ -2894,6 +5679,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -2915,6 +5701,8 @@ mod tests {
             &crate::Output { answer: 4 },
             &[action(vec![step])],
             &runtime_vars(&[("generate_images", json!(true))]),
+            crate::ActionExecutionMode::Sequential,
+            None,
             &provider_context(),
             5,
             runtime_budget,

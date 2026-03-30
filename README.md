@@ -455,6 +455,7 @@ Then expand into richer constraints and exact output choices:
 `actions` define what the agent is allowed to do after it produces the top-level structured output.
 Action `logic` uses [JSON Logic](https://jsonlogic.com/).
 Within an action, run steps execute in order after the action's JSON Logic condition evaluates true. That logic can read both top-level model output fields and declared `runtime.*` values.
+By default, a failed step stops the rest of that action's `run` list unless you set `failure_mode: "continue"`, but later eligible top-level actions still run and Cargo AI aggregates top-level failures at the end. If a step is truly fatal for the whole invocation, use `failure_mode: "abort"` to stop scheduling new work, let already-running work settle, and fail the run with an explicit abort summary.
 
 Start with one simple local action:
 
@@ -555,6 +556,20 @@ Then expand into multiple action types:
 
 You can keep actions simple or mix local executables, email alerts, child-agent handoffs, and generated image artifacts in the same agent definition. The next section shows how to sequence multiple run steps and control them with `when`.
 
+Top-level actions run `sequential`ly by default. If you want matching top-level actions to overlap, add:
+
+```json
+{
+  "action_execution": "parallel"
+}
+```
+
+That only changes scheduling across top-level actions. Each individual action still keeps its own `run` list in order, and a hard failure in one top-level action no longer prevents later eligible top-level actions from running. Cargo AI aggregates those top-level hard failures after all eligible actions finish.
+
+Cargo AI prints one run-level mode header before actions start. When output is redirected, piped, or running in simpler terminals, it prefixes parent-visible action output with deterministic lane labels such as `[A1 first_action]`, long-running steps emit a step-start liveness line such as `step 2/2 generate_image started; waiting for provider response...`, and terminal lane summaries plus the root run footer include wall-clock durations such as `completed in 31s.` and `✅ Run complete in 32s.`. When attached directly to an interactive terminal, it switches to a compact live lane dashboard that groups each action lane by label, running or terminal status with elapsed time, terminal step marker/current step, last lifecycle message, and a compact buffered `output` section. Parent-run `exec` and `email_me` output is bucketed into that lane, while child-agent steps stay minimal in the parent view with start/completion or exit summaries instead of recursively inlining the child transcript.
+
+If you need a safety/testing pass, invoke a parallel-capable agent with `--action-execution sequential`. That runtime override forces the whole invocation tree down to sequential scheduling for that run, including child-agent handoffs.
+
 ### `run`
 
 `run` is the ordered step list inside an action.
@@ -624,13 +639,16 @@ Then expand into a multi-step workflow:
 
 Use `run` to sequence multiple side effects in order. `exec` steps can capture output, status, or errors for later steps, `generate_image` can write a single local image artifact, and `when` lets later steps react to success or failure without leaving the agent definition.
 
-`generate_image.model` may be a literal string or a single variable reference. Prefer a runtime-backed string such as `{ "var": "runtime.hero_image_model" }` when the operator should choose the image model at invocation time. Top-level string schema fields may also drive `generate_image.model`, but captured step variables may not.
+`generate_image.model` is optional. If omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override. If neither the step nor the invocation provides a model, the run fails clearly instead of guessing. When the image step should use a different model from the main invocation, set `generate_image.model` explicitly as either a literal string or a single variable reference. Prefer a runtime-backed string such as `{ "var": "runtime.hero_image_model" }` when the operator should choose the image model at invocation time. Top-level string schema fields may also drive `generate_image.model`, but captured step variables may not.
+
+`generate_image` and child `agent` steps also accept an optional step-level `profile`. Use it when one step should resolve its provider/model/url/token context differently from the parent invocation. For `generate_image`, explicit `model` still wins, then the step-profile model, then the parent invocation model. For child `agent` steps, the resolved profile is forwarded to the child as `--profile <name>`.
 
 For the default OpenAI account transport, use a tool-capable mainline model such as `gpt-5.2`. For a direct OpenAI API token and URL, prefer GPT Image models such as `gpt-image-1.5` or `gpt-image-1-mini`. Official OpenAI docs list `gpt-image-1.5` as the latest GPT Image model, and the image-generation guide lists `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini` for direct image generation. Verified: 2026-03-28.
 
 ```json
 {
   "kind": "generate_image",
+  "profile": { "var": "runtime.image_profile" },
   "model": { "var": "runtime.hero_image_model" },
   "prompt": ["Create a product render for ", { "var": "reason" }],
   "path": "./artifacts/product_render.png"
@@ -666,6 +684,7 @@ Example:
 {
   "kind": "agent",
   "agent": "./child_reporter",
+  "profile": { "var": "runtime.child_profile" },
   "input_mode": "append",
   "status_variable": "child_status",
   "error_variable": "child_error",

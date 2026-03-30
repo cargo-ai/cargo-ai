@@ -6,13 +6,16 @@ mod providers;
 
 use jsonlogic::apply;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use config::loader::{find_profile, load_config};
+use config::loader::{config_path, find_profile, load_config};
 use config::schema::{Profile, ProfileAuthMode, SecretStoreMode};
 use providers::{
     provider_error_messages, validate_provider_content_parts, validate_provider_request,
@@ -36,6 +39,534 @@ const DEFAULT_AGENT_ACTION_MAX_DEPTH: u32 = 5;
 const DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS: u64 = 600;
 const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str =
     "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
+const ACTION_LANE_OUTPUT_BUFFER_LIMIT: usize = 6;
+
+tokio::task_local! {
+    static ACTION_OUTPUT: ActionOutput;
+}
+
+#[derive(Clone)]
+struct ActionOutput {
+    inner: Arc<Mutex<ActionOutputState>>,
+    live_refresh_stop: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActionOutputMode {
+    AppendOnly,
+    Live,
+}
+
+struct ActionOutputState {
+    mode: ActionOutputMode,
+    action_execution: ActionExecutionMode,
+    rendered_lines: usize,
+    lanes: BTreeMap<usize, ActionLaneState>,
+}
+
+#[derive(Clone)]
+struct ActionLaneState {
+    action_name: String,
+    status: ActionLaneStatus,
+    lane_started_at: Option<Instant>,
+    lane_finished_after: Option<Duration>,
+    current_step: Option<String>,
+    step_started_at: Option<Instant>,
+    last_message: Option<String>,
+    output_lines: VecDeque<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActionLaneStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Aborted,
+    Notice,
+    LogicError,
+    Skipped,
+}
+
+impl ActionOutput {
+    fn new(action_execution: ActionExecutionMode) -> Self {
+        Self::new_for_mode(
+            action_execution,
+            if should_use_live_action_dashboard() {
+                ActionOutputMode::Live
+            } else {
+                ActionOutputMode::AppendOnly
+            },
+        )
+    }
+
+    fn new_for_mode(action_execution: ActionExecutionMode, mode: ActionOutputMode) -> Self {
+        let inner = Arc::new(Mutex::new(ActionOutputState {
+            mode,
+            action_execution,
+            rendered_lines: 0,
+            lanes: BTreeMap::new(),
+        }));
+        let live_refresh_stop = Arc::new(AtomicBool::new(false));
+        maybe_spawn_live_action_refresh(inner.clone(), live_refresh_stop.clone(), mode);
+        Self {
+            inner,
+            live_refresh_stop,
+        }
+    }
+
+    fn print_execution_header(&self) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::AppendOnly {
+                println!("{}", action_execution_header(state.action_execution));
+            } else {
+                render_live_dashboard(state);
+            }
+        });
+    }
+
+    fn action_started(&self, action_index: usize, action_name: &str) {
+        self.with_state(|state| {
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.status = ActionLaneStatus::Running;
+            lane.lane_started_at = Some(Instant::now());
+            lane.lane_finished_after = None;
+            lane.last_message = Some("started".to_string());
+            if state.mode == ActionOutputMode::AppendOnly {
+                println!("{}", format_action_line(action_index, action_name, "started"));
+            } else {
+                render_live_dashboard(state);
+            }
+        });
+    }
+
+    fn action_step_started(
+        &self,
+        action_index: usize,
+        action_name: &str,
+        step_kind: &str,
+        step_number: usize,
+        step_count: usize,
+    ) {
+        self.with_state(|state| {
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.status = ActionLaneStatus::Running;
+            lane.current_step = Some(format!("{}/{} {}", step_number, step_count, step_kind));
+            lane.step_started_at = Some(Instant::now());
+            lane.last_message = Some(waiting_message_for_step_kind(step_kind).to_string());
+            if state.mode == ActionOutputMode::AppendOnly {
+                println!(
+                    "{}",
+                    format_action_line(
+                        action_index,
+                        action_name,
+                        format!(
+                            "step {}/{} {} started; {}",
+                            step_number,
+                            step_count,
+                            step_kind,
+                            waiting_message_for_step_kind(step_kind)
+                        )
+                        .as_str(),
+                    )
+                );
+            } else {
+                render_live_dashboard(state);
+            }
+        });
+    }
+
+    fn action_line(&self, action_index: usize, action_name: &str, message: &str) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::AppendOnly {
+                for line in split_action_output_lines(message) {
+                    println!("{}", format_action_line(action_index, action_name, line.as_str()));
+                }
+                return;
+            }
+
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.last_message = compact_action_output_line(message);
+            push_lane_output_message(lane, message);
+            if lane.status == ActionLaneStatus::Pending {
+                lane.status = inferred_lane_status(message);
+            } else if lane.status == ActionLaneStatus::Running {
+                lane.status = match inferred_lane_status(message) {
+                    ActionLaneStatus::Notice => ActionLaneStatus::Running,
+                    other => other,
+                };
+            }
+            render_live_dashboard(state);
+        });
+    }
+
+    fn action_success(&self, action_index: usize, action_name: &str, summary: &str) {
+        self.with_state(|state| {
+            let append_only = state.mode == ActionOutputMode::AppendOnly;
+            let append_message = {
+                let lane = ensure_lane_state(state, action_index, action_name);
+                lane.status = ActionLaneStatus::Completed;
+                lane.current_step = None;
+                lane.step_started_at = None;
+                lane.lane_finished_after = lane
+                    .lane_started_at
+                    .map(|started_at| started_at.elapsed());
+                lane.last_message = Some(format!("{}.", summary));
+                if append_only {
+                    Some(format!(
+                        "{} in {}.",
+                        summary,
+                        format_elapsed_duration(
+                            lane.lane_finished_after.unwrap_or_else(|| Duration::from_secs(0))
+                        )
+                    ))
+                } else {
+                    None
+                }
+            };
+            if let Some(message) = append_message {
+                println!(
+                    "{}",
+                    format_action_line(action_index, action_name, message.as_str())
+                );
+            } else {
+                render_live_dashboard(state);
+            }
+        });
+    }
+
+    fn action_failed(&self, action_index: usize, action_name: &str, error: &str) {
+        self.with_state(|state| {
+            let append_only = state.mode == ActionOutputMode::AppendOnly;
+            let append_message = {
+                let lane = ensure_lane_state(state, action_index, action_name);
+                lane.status = ActionLaneStatus::Failed;
+                lane.current_step = None;
+                lane.step_started_at = None;
+                lane.lane_finished_after = lane
+                    .lane_started_at
+                    .map(|started_at| started_at.elapsed());
+                lane.last_message = compact_action_output_line(error)
+                    .map(|line| format!("failed: {}", line))
+                    .or_else(|| Some("failed".to_string()));
+                push_lane_output_message(lane, error);
+                if append_only {
+                    Some(format!(
+                        "failed in {}.",
+                        format_elapsed_duration(
+                            lane.lane_finished_after.unwrap_or_else(|| Duration::from_secs(0))
+                        )
+                    ))
+                } else {
+                    None
+                }
+            };
+            if let Some(message) = append_message {
+                println!(
+                    "{}",
+                    format_action_line(action_index, action_name, message.as_str())
+                );
+            } else {
+                render_live_dashboard(state);
+            }
+        });
+    }
+
+    fn action_aborted(&self, action_index: usize, action_name: &str, error: &str) {
+        self.with_state(|state| {
+            let append_only = state.mode == ActionOutputMode::AppendOnly;
+            let append_message = {
+                let lane = ensure_lane_state(state, action_index, action_name);
+                lane.status = ActionLaneStatus::Aborted;
+                lane.current_step = None;
+                lane.step_started_at = None;
+                lane.lane_finished_after = lane
+                    .lane_started_at
+                    .map(|started_at| started_at.elapsed());
+                lane.last_message = compact_action_output_line(error)
+                    .map(|line| format!("abort requested: {}", line))
+                    .or_else(|| Some("abort requested".to_string()));
+                push_lane_output_message(lane, error);
+                if append_only {
+                    Some(format!(
+                        "abort requested in {}: {}",
+                        format_elapsed_duration(
+                            lane.lane_finished_after.unwrap_or_else(|| Duration::from_secs(0))
+                        ),
+                        error
+                    ))
+                } else {
+                    None
+                }
+            };
+            if let Some(message) = append_message {
+                println!(
+                    "{}",
+                    format_action_line(action_index, action_name, message.as_str())
+                );
+            } else {
+                render_live_dashboard(state);
+            }
+        });
+    }
+
+    fn action_stopped_by_abort(&self, action_index: usize, action_name: &str) {
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::AppendOnly {
+                return;
+            }
+
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.status = ActionLaneStatus::Aborted;
+            lane.current_step = None;
+            lane.step_started_at = None;
+            lane.lane_finished_after = lane
+                .lane_started_at
+                .map(|started_at| started_at.elapsed());
+            lane.last_message = Some("stopped after invocation abort.".to_string());
+            render_live_dashboard(state);
+        });
+    }
+
+    fn finish(&self) {
+        self.live_refresh_stop.store(true, Ordering::Relaxed);
+        self.with_state(|state| {
+            if state.mode == ActionOutputMode::Live {
+                render_live_dashboard(state);
+                let _ = writeln!(io::stdout());
+                let _ = io::stdout().flush();
+                state.rendered_lines = 0;
+            }
+        });
+    }
+
+    fn with_state(&self, update: impl FnOnce(&mut ActionOutputState)) {
+        let mut state = self
+            .inner
+            .lock()
+            .expect("action output lock should succeed");
+        update(&mut state);
+    }
+}
+
+impl ActionOutputState {
+    fn snapshot_lines(&self) -> Vec<String> {
+        let mut lines = vec![action_execution_header(self.action_execution).to_string()];
+
+        for (lane_index, lane) in &self.lanes {
+            lines.push(String::new());
+            lines.push(format!(
+                "{} {}",
+                action_lane_prefix(*lane_index, lane.action_name.as_str()),
+                lane_status_label(lane)
+            ));
+            lines.push(format!("  step: {}", lane_step_label(lane)));
+            lines.push(format!(
+                "  last: {}",
+                lane.last_message.as_deref().unwrap_or("-")
+            ));
+            if !lane.output_lines.is_empty() {
+                lines.push("  output:".to_string());
+                for line in &lane.output_lines {
+                    lines.push(format!("    {}", line));
+                }
+            }
+        }
+
+        lines
+    }
+}
+
+impl ActionLaneStatus {
+    fn display_name(self) -> &'static str {
+        match self {
+            ActionLaneStatus::Pending => "pending",
+            ActionLaneStatus::Running => "running",
+            ActionLaneStatus::Completed => "completed",
+            ActionLaneStatus::Failed => "failed",
+            ActionLaneStatus::Aborted => "aborted",
+            ActionLaneStatus::Notice => "notice",
+            ActionLaneStatus::LogicError => "logic error",
+            ActionLaneStatus::Skipped => "skipped",
+        }
+    }
+}
+
+fn should_use_live_action_dashboard() -> bool {
+    io::stdout().is_terminal()
+        && std::env::var("TERM").map(|term| term != "dumb").unwrap_or(true)
+        && std::env::var_os("CI").is_none()
+}
+
+fn ensure_lane_state<'a>(
+    state: &'a mut ActionOutputState,
+    action_index: usize,
+    action_name: &str,
+) -> &'a mut ActionLaneState {
+    state
+        .lanes
+        .entry(action_index)
+        .or_insert_with(|| ActionLaneState {
+            action_name: action_name.to_string(),
+            status: ActionLaneStatus::Pending,
+            lane_started_at: None,
+            lane_finished_after: None,
+            current_step: None,
+            step_started_at: None,
+            last_message: None,
+            output_lines: VecDeque::new(),
+        })
+}
+
+fn maybe_spawn_live_action_refresh(
+    inner: Arc<Mutex<ActionOutputState>>,
+    stop: Arc<AtomicBool>,
+    mode: ActionOutputMode,
+) {
+    if mode != ActionOutputMode::Live || cfg!(test) {
+        return;
+    }
+
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+
+    handle.spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            interval.tick().await;
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let mut state = inner.lock().expect("action output lock should succeed");
+            if state.mode != ActionOutputMode::Live {
+                break;
+            }
+            if state.lanes.values().any(|lane| {
+                lane.status == ActionLaneStatus::Running && lane.step_started_at.is_some()
+            }) {
+                render_live_dashboard(&mut state);
+            }
+        }
+    });
+}
+
+fn inferred_lane_status(message: &str) -> ActionLaneStatus {
+    if message.starts_with("logic evaluation failed:") {
+        ActionLaneStatus::LogicError
+    } else if message.contains("no run steps matched")
+        || message.contains("unsupported step kind")
+    {
+        ActionLaneStatus::Skipped
+    } else {
+        ActionLaneStatus::Notice
+    }
+}
+
+fn split_action_output_lines(message: &str) -> Vec<String> {
+    message
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn compact_action_output_line(message: &str) -> Option<String> {
+    split_action_output_lines(message).into_iter().next()
+}
+
+fn push_lane_output_message(lane: &mut ActionLaneState, message: &str) {
+    for line in split_action_output_lines(message) {
+        if lane.output_lines.len() == ACTION_LANE_OUTPUT_BUFFER_LIMIT {
+            lane.output_lines.pop_front();
+        }
+        lane.output_lines.push_back(line);
+    }
+}
+
+fn lane_step_label(lane: &ActionLaneState) -> String {
+    match lane.status {
+        ActionLaneStatus::Completed => "✓ done".to_string(),
+        ActionLaneStatus::Failed | ActionLaneStatus::LogicError => "✗ failed".to_string(),
+        ActionLaneStatus::Aborted => "! aborted".to_string(),
+        ActionLaneStatus::Skipped => "skipped".to_string(),
+        _ => lane
+            .current_step
+            .clone()
+            .unwrap_or_else(|| "-".to_string()),
+    }
+}
+
+fn lane_status_label(lane: &ActionLaneState) -> String {
+    if let Some(elapsed) = lane_elapsed_duration(lane) {
+        match lane.status {
+            ActionLaneStatus::Running => {
+                return format!("running · {}", format_elapsed_duration(elapsed));
+            }
+            ActionLaneStatus::Completed => {
+                return format!("completed · {}", format_elapsed_duration(elapsed));
+            }
+            ActionLaneStatus::Failed | ActionLaneStatus::LogicError => {
+                return format!("failed · {}", format_elapsed_duration(elapsed));
+            }
+            ActionLaneStatus::Aborted => {
+                return format!("aborted · {}", format_elapsed_duration(elapsed));
+            }
+            _ => {}
+        }
+    }
+
+    lane.status.display_name().to_string()
+}
+
+fn lane_elapsed_duration(lane: &ActionLaneState) -> Option<Duration> {
+    lane.lane_finished_after
+        .or_else(|| lane.lane_started_at.map(|started_at| started_at.elapsed()))
+}
+
+fn format_elapsed_duration(duration: Duration) -> String {
+    format!("{}s", duration.as_secs())
+}
+
+fn waiting_message_for_step_kind(step_kind: &str) -> &'static str {
+    if step_kind.eq_ignore_ascii_case("exec") {
+        "waiting for command to finish..."
+    } else if step_kind.eq_ignore_ascii_case("agent") {
+        "waiting for child agent to finish..."
+    } else if step_kind.eq_ignore_ascii_case("generate_image") {
+        "waiting for provider response..."
+    } else if step_kind.eq_ignore_ascii_case("email_me") {
+        "waiting for mail response..."
+    } else {
+        "waiting for step to finish..."
+    }
+}
+
+fn render_live_dashboard(state: &mut ActionOutputState) {
+    if cfg!(test) {
+        state.rendered_lines = state.snapshot_lines().len();
+        return;
+    }
+
+    let snapshot = state.snapshot_lines();
+    let mut stdout = io::stdout();
+
+    if state.rendered_lines > 0 {
+        let _ = write!(stdout, "\r");
+        if state.rendered_lines > 1 {
+            let _ = write!(stdout, "\x1b[{}A", state.rendered_lines - 1);
+        }
+        let _ = write!(stdout, "\x1b[J");
+    }
+
+    let _ = write!(stdout, "{}", snapshot.join("\n"));
+    let _ = stdout.flush();
+    state.rendered_lines = snapshot.len();
+}
 
 fn unknown_server_messages(server: &str) -> Vec<String> {
     let display_server = if server.trim().is_empty() {
@@ -77,6 +608,7 @@ struct InvocationRuntimeBudget {
 #[derive(Debug, Clone)]
 struct ActionProviderContext {
     provider: ProviderKind,
+    model: String,
     url: String,
     token: String,
     inference_timeout_in_sec: u64,
@@ -87,6 +619,72 @@ enum StepExecutionOutcome {
     Completed,
     SoftFailureLogged,
     SuccessAlreadyPrinted,
+}
+
+#[derive(Debug)]
+enum ActionExecutionResult {
+    Completed(Vec<StepExecutionOutcome>),
+    Failed(String),
+    Aborted(String),
+    StoppedByAbort,
+}
+
+#[derive(Debug, Clone)]
+struct InvocationAbortSignal {
+    inner: Arc<Mutex<InvocationAbortState>>,
+}
+
+#[derive(Debug, Clone)]
+struct InvocationAbortRecord {
+    action_index: usize,
+    action_name: String,
+    error: String,
+}
+
+#[derive(Debug, Default)]
+struct InvocationAbortState {
+    record: Option<InvocationAbortRecord>,
+}
+
+impl InvocationAbortSignal {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(InvocationAbortState::default())),
+        }
+    }
+
+    fn is_triggered(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("abort signal lock should succeed")
+            .record
+            .is_some()
+    }
+
+    fn trigger(&self, action_index: usize, action_name: &str, error: &str) -> bool {
+        let mut state = self
+            .inner
+            .lock()
+            .expect("abort signal lock should succeed");
+        if state.record.is_none() {
+            state.record = Some(InvocationAbortRecord {
+                action_index,
+                action_name: action_name.to_string(),
+                error: error.to_string(),
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    fn record(&self) -> Option<InvocationAbortRecord> {
+        self.inner
+            .lock()
+            .expect("abort signal lock should succeed")
+            .record
+            .clone()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +774,10 @@ fn cli_override_descriptions(
 
     if let Some(max_runtime) = matches.get_one::<u64>("max_runtime_in_sec") {
         overrides.push(format!("max_runtime_in_sec={max_runtime}"));
+    }
+
+    if let Some(action_execution) = matches.get_one::<String>("action_execution") {
+        overrides.push(format!("action_execution={action_execution}"));
     }
 
     if include_token_override {
@@ -565,9 +1167,9 @@ fn persist_account_tokens_to_keychain(
 fn persist_refreshed_account_tokens(
     access_token: &str,
     refresh_token: Option<&str>,
-    config: Option<&config::schema::Config>,
+    secret_store_mode: Option<SecretStoreMode>,
 ) -> Result<(), String> {
-    match config.and_then(|cfg| cfg.secret_store) {
+    match secret_store_mode {
         Some(SecretStoreMode::File) => persist_account_tokens_to_file(access_token, refresh_token),
         Some(SecretStoreMode::Keychain) => {
             persist_account_tokens_to_keychain(access_token, refresh_token)
@@ -579,11 +1181,10 @@ fn persist_refreshed_account_tokens(
     }
 }
 
-fn load_account_auth(config: Option<&config::schema::Config>) -> Result<AccountAuth, String> {
-    let configured_mode = config.and_then(|cfg| cfg.secret_store);
-    let auth = match configured_mode {
-        Some(config::schema::SecretStoreMode::File) => load_account_tokens_from_file()?,
-        Some(config::schema::SecretStoreMode::Keychain) => load_account_tokens_from_keychain()?,
+fn load_account_auth(secret_store_mode: Option<SecretStoreMode>) -> Result<AccountAuth, String> {
+    let auth = match secret_store_mode {
+        Some(SecretStoreMode::File) => load_account_tokens_from_file()?,
+        Some(SecretStoreMode::Keychain) => load_account_tokens_from_keychain()?,
         None => match load_account_tokens_from_keychain() {
             Ok(Some(tokens)) => Some(tokens),
             Ok(None) | Err(_) => load_account_tokens_from_file()?,
@@ -664,9 +1265,9 @@ async fn send_account_mail_request(
 async fn run_email_me_action(
     subject: &str,
     text: &str,
-    config: Option<&config::schema::Config>,
-) -> Result<(), String> {
-    let auth = load_account_auth(config)?;
+    secret_store_mode: Option<SecretStoreMode>,
+) -> Result<serde_json::Value, String> {
+    let auth = load_account_auth(secret_store_mode)?;
     let access_token = auth.access_token;
     let refresh_token = auth.refresh_token;
 
@@ -702,7 +1303,7 @@ async fn run_email_me_action(
         if let Err(error) = persist_refreshed_account_tokens(
             refreshed_access_token.as_str(),
             Some(refresh_token),
-            config,
+            secret_store_mode,
         ) {
             eprintln!("⚠️ Failed to update account tokens in credential store: {error}");
         }
@@ -718,8 +1319,7 @@ async fn run_email_me_action(
         .unwrap_or(false);
 
     if succeeded {
-        render_account_response(&response);
-        Ok(())
+        Ok(response)
     } else {
         Err(format_backend_error_message(&response)
             .unwrap_or_else(|| format!("email_me request failed.\n{}", pretty_backend_json(&response))))
@@ -863,6 +1463,24 @@ fn resolved_inputs_for_run(cmd_args: &clap::ArgMatches) -> Result<Vec<Input>, St
             selected_inputs
         }
     })
+}
+
+fn resolved_action_execution_override_for_run(
+    cmd_args: &clap::ArgMatches,
+) -> Result<Option<ActionExecutionMode>, String> {
+    match cmd_args.get_one::<String>("action_execution").map(String::as_str) {
+        None => Ok(None),
+        Some("sequential") => Ok(Some(ActionExecutionMode::Sequential)),
+        Some(other) => Err(format!(
+            "Unsupported --action-execution '{other}'. Expected sequential."
+        )),
+    }
+}
+
+fn effective_action_execution_for_run(
+    action_execution_override: Option<ActionExecutionMode>,
+) -> ActionExecutionMode {
+    action_execution_override.unwrap_or_else(action_execution)
 }
 
 fn validate_structural_action_only_inputs(
@@ -1155,6 +1773,14 @@ async fn main() {
             return;
         }
     };
+    let action_execution_override = match resolved_action_execution_override_for_run(&cmd_args) {
+        Ok(action_execution_override) => action_execution_override,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            return;
+        }
+    };
+    let effective_action_execution = effective_action_execution_for_run(action_execution_override);
     let has_output_schema_properties = has_output_schema_properties();
 
     if let Err(error) =
@@ -1175,6 +1801,7 @@ async fn main() {
         let actions = actions();
         let action_provider_context = ActionProviderContext {
             provider,
+            model: model.clone(),
             url: url.clone(),
             token: token.clone(),
             inference_timeout_in_sec,
@@ -1184,6 +1811,8 @@ async fn main() {
                 &output,
                 &actions,
                 &runtime_vars,
+                effective_action_execution,
+                action_execution_override,
                 config.as_ref(),
                 &action_provider_context,
                 max_agent_depth,
@@ -1349,6 +1978,7 @@ async fn main() {
     let actions = actions();
     let action_provider_context = ActionProviderContext {
         provider,
+        model: model.clone(),
         url: url.clone(),
         token: token.clone(),
         inference_timeout_in_sec,
@@ -1358,6 +1988,8 @@ async fn main() {
             &output,
             &actions,
             &runtime_vars,
+            effective_action_execution,
+            action_execution_override,
             config.as_ref(),
             &action_provider_context,
             max_agent_depth,
@@ -1374,140 +2006,406 @@ async fn apply_actions(
     output: &Output,
     actions: &[Action],
     runtime_vars: &serde_json::Map<String, serde_json::Value>,
+    action_execution: ActionExecutionMode,
+    action_execution_override: Option<ActionExecutionMode>,
     config: Option<&config::schema::Config>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<(), String> {
-    let data = action_data_from_output(output, runtime_vars)
-        .map_err(|error| format!("Failed to serialize output for action evaluation: {error}"))?;
-    let current_platform = current_action_platform();
-
-    for action in actions {
-        if let Ok(result) = apply(&action.logic, &data) {
-            if result.as_bool() == Some(true) {
-                let matching_steps = matching_run_steps(&action.run, current_platform);
-                if matching_steps.is_empty() {
-                    println!(
-                        "⚠️ No run steps matched the current platform for action '{}' (current platform: {}).",
-                        action.name,
-                        current_platform.unwrap_or("unsupported")
-                        );
-                    continue;
+    ACTION_OUTPUT
+        .scope(ActionOutput::new(action_execution), async move {
+            let abort_signal = InvocationAbortSignal::new();
+            let action_secret_store_mode = config.and_then(|cfg| cfg.secret_store);
+            let data = action_data_from_output(output, runtime_vars).map_err(|error| {
+                format!("Failed to serialize output for action evaluation: {error}")
+            })?;
+            let current_platform = current_action_platform();
+            let invocation_started_at = Instant::now();
+            print_action_execution_header(action_execution);
+            let top_level_failures = match action_execution {
+                ActionExecutionMode::Sequential => {
+                    apply_actions_sequential(
+                        actions,
+                        &data,
+                        current_platform,
+                        action_execution_override,
+                        action_secret_store_mode,
+                        provider_context,
+                        max_agent_depth,
+                        runtime_budget,
+                        &abort_signal,
+                    )
+                    .await?
                 }
-
-                print_action_start(&action.name);
-                let single_step_action = matching_steps.len() == 1;
-                let mut outcomes = Vec::with_capacity(matching_steps.len());
-                let mut action_data = data.clone();
-
-                for step in matching_steps {
-                    if !should_run_step(step, &action_data, &action.name)? {
-                        continue;
-                    }
-
-                    let step_result = if step.kind.eq_ignore_ascii_case("exec") {
-                        run_exec_step(step, &action_data, &action.name, runtime_budget)
-                            .await
-                            .map(|captured_output| {
-                                (StepExecutionOutcome::Completed, captured_output)
-                            })
-                    } else if step.kind.eq_ignore_ascii_case("email_me") {
-                        run_email_me_step(
-                            step,
-                            &action_data,
-                            &action.name,
-                            config,
-                            runtime_budget,
-                            single_step_action,
-                        )
-                        .await
-                        .map(|outcome| (outcome, None))
-                    } else if step.kind.eq_ignore_ascii_case("agent") {
-                        run_agent_step(
-                            step,
-                            &action_data,
-                            &action.name,
-                            max_agent_depth,
-                            runtime_budget,
-                        )
-                        .await
-                        .map(|outcome| (outcome, None))
-                    } else if step.kind.eq_ignore_ascii_case("generate_image") {
-                        run_generate_image_step(
-                            step,
-                            &action_data,
-                            &action.name,
-                            provider_context,
-                            runtime_budget,
-                        )
-                        .await
-                        .map(|outcome| (outcome, None))
-                    } else {
-                        println!(
-                            "⚠️ Skipping action '{}' with unsupported step kind '{}'.",
-                            action.name, step.kind
-                        );
-                        outcomes.push(StepExecutionOutcome::SoftFailureLogged);
-                        continue;
-                    };
-
-                    match step_result {
-                        Ok((outcome, captured_output)) => {
-                            if let Some((name, value)) = captured_output {
-                                insert_action_output_variable(
-                                    &mut action_data,
-                                    name.as_str(),
-                                    value,
-                                    action.name.as_str(),
-                                )?;
-                            }
-                            insert_step_status_variable(
-                                &mut action_data,
-                                step,
-                                "succeeded",
-                                action.name.as_str(),
-                            )?;
-                            outcomes.push(outcome);
-                        }
-                        Err(error) => {
-                            insert_step_status_variable(
-                                &mut action_data,
-                                step,
-                                "failed",
-                                action.name.as_str(),
-                            )?;
-                            insert_step_error_variable(
-                                &mut action_data,
-                                step,
-                                error.as_str(),
-                                action.name.as_str(),
-                            )?;
-
-                            if matches!(step_failure_mode(step), FailureMode::Continue) {
-                                println!("{error}");
-                                outcomes.push(StepExecutionOutcome::SoftFailureLogged);
-                            } else {
-                                return Err(error);
-                            }
-                        }
-                    }
+                ActionExecutionMode::Parallel => {
+                    apply_actions_parallel(
+                        actions,
+                        &data,
+                        current_platform,
+                        action_execution_override,
+                        action_secret_store_mode,
+                        provider_context,
+                        max_agent_depth,
+                        runtime_budget,
+                        &abort_signal,
+                    )
+                    .await?
                 }
+            };
 
-                if let Some(summary) = action_completion_summary(&outcomes) {
-                    print_action_success(&action.name, summary);
+            finish_action_output();
+
+            if let Some(abort) = abort_signal.record() {
+                return Err(format!(
+                    "{}\n{}",
+                    format_abort_summary(&abort),
+                    root_run_abort_message(invocation_started_at.elapsed())
+                ));
+            }
+
+            if let Some(message) = root_run_completion_message(invocation_started_at.elapsed()) {
+                if top_level_failures.is_empty() {
+                    println!("{message}");
                 }
             }
-        } else {
-            println!("Failed to evaluate logic for action: {}", action.name);
+
+            if top_level_failures.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{}\n{}",
+                    format_top_level_action_failures(&top_level_failures),
+                    root_run_failure_message(invocation_started_at.elapsed())
+                ))
+            }
+        })
+        .await
+}
+
+async fn apply_actions_sequential(
+    actions: &[Action],
+    data: &serde_json::Value,
+    current_platform: Option<&'static str>,
+    action_execution_override: Option<ActionExecutionMode>,
+    action_secret_store_mode: Option<SecretStoreMode>,
+    provider_context: &ActionProviderContext,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+    abort_signal: &InvocationAbortSignal,
+) -> Result<Vec<String>, String> {
+    let mut top_level_failures = Vec::new();
+
+    for (action_index, action) in actions.iter().enumerate() {
+        if abort_signal.is_triggered() {
+            break;
+        }
+
+        if !action_logic_matches(action_index, action, data) {
+            continue;
+        }
+
+        let should_abort = collect_action_execution_result(
+            action_index,
+            action,
+            run_matching_action_steps(
+                action_index,
+                action,
+                data,
+                current_platform,
+                action_execution_override,
+                action_secret_store_mode,
+                provider_context,
+                max_agent_depth,
+                runtime_budget,
+                abort_signal,
+            )
+            .await?,
+            &mut top_level_failures,
+        );
+
+        if should_abort {
+            break;
         }
     }
 
-    if let Some(message) = root_run_completion_message() {
-        println!("{message}");
+    Ok(top_level_failures)
+}
+
+async fn apply_actions_parallel(
+    actions: &[Action],
+    data: &serde_json::Value,
+    current_platform: Option<&'static str>,
+    action_execution_override: Option<ActionExecutionMode>,
+    action_secret_store_mode: Option<SecretStoreMode>,
+    provider_context: &ActionProviderContext,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+    abort_signal: &InvocationAbortSignal,
+) -> Result<Vec<String>, String> {
+    let mut matched_actions = Vec::new();
+    let mut lane_tasks = Vec::new();
+    let action_output = current_action_output();
+
+    for (action_index, action) in actions.iter().enumerate() {
+        if abort_signal.is_triggered() {
+            break;
+        }
+
+        if !action_logic_matches(action_index, action, data) {
+            continue;
+        }
+
+        matched_actions.push((action_index, action.clone()));
+
+        let action_clone = action.clone();
+        let data_clone = data.clone();
+        let provider_context_clone = provider_context.clone();
+        let abort_signal_clone = abort_signal.clone();
+        let action_output_clone = action_output.clone();
+
+        lane_tasks.push(tokio::spawn(async move {
+            let lane_future = async move {
+                run_matching_action_steps(
+                    action_index,
+                    &action_clone,
+                    &data_clone,
+                    current_platform,
+                    action_execution_override,
+                    action_secret_store_mode,
+                    &provider_context_clone,
+                    max_agent_depth,
+                    runtime_budget,
+                    &abort_signal_clone,
+                )
+                .await
+            };
+
+            if let Some(output) = action_output_clone {
+                ACTION_OUTPUT.scope(output, lane_future).await
+            } else {
+                lane_future.await
+            }
+        }));
+
+        tokio::task::yield_now().await;
     }
 
-    Ok(())
+    let mut top_level_failures = Vec::new();
+    for ((action_index, action), task) in matched_actions.into_iter().zip(lane_tasks.into_iter()) {
+        let result = task
+            .await
+            .map_err(|error| format!("parallel action task failed: {error}"))??;
+        collect_action_execution_result(action_index, &action, result, &mut top_level_failures);
+    }
+
+    Ok(top_level_failures)
+}
+
+fn action_logic_matches(action_index: usize, action: &Action, data: &serde_json::Value) -> bool {
+    match apply(&action.logic, data) {
+        Ok(result) => result.as_bool() == Some(true),
+        Err(error) => {
+            print_action_line(
+                action_index,
+                action.name.as_str(),
+                format!("logic evaluation failed: {}", error).as_str(),
+            );
+            false
+        }
+    }
+}
+
+fn collect_action_execution_result(
+    action_index: usize,
+    action: &Action,
+    result: ActionExecutionResult,
+    top_level_failures: &mut Vec<String>,
+) -> bool {
+    match result {
+        ActionExecutionResult::Completed(outcomes) => {
+            if let Some(summary) = action_completion_summary(&outcomes) {
+                print_action_success(action_index, &action.name, summary);
+            }
+            false
+        }
+        ActionExecutionResult::Failed(error) => {
+            note_action_failure(action_index, &action.name, &error);
+            top_level_failures.push(format_action_failure(action_index, &action.name, &error));
+            false
+        }
+        ActionExecutionResult::Aborted(error) => {
+            note_action_abort(action_index, &action.name, &error);
+            top_level_failures.push(format_action_failure(
+                action_index,
+                &action.name,
+                format!("abort requested: {}", error).as_str(),
+            ));
+            true
+        }
+        ActionExecutionResult::StoppedByAbort => {
+            note_action_stopped_by_abort(action_index, &action.name);
+            false
+        }
+    }
+}
+
+async fn run_matching_action_steps(
+    action_index: usize,
+    action: &Action,
+    data: &serde_json::Value,
+    current_platform: Option<&'static str>,
+    action_execution_override: Option<ActionExecutionMode>,
+    action_secret_store_mode: Option<SecretStoreMode>,
+    provider_context: &ActionProviderContext,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+    abort_signal: &InvocationAbortSignal,
+) -> Result<ActionExecutionResult, String> {
+    if abort_signal.is_triggered() {
+        return Ok(ActionExecutionResult::StoppedByAbort);
+    }
+
+    let matching_steps = matching_run_steps(&action.run, current_platform);
+    if matching_steps.is_empty() {
+        print_action_line(
+            action_index,
+            action.name.as_str(),
+            format!(
+                "no run steps matched the current platform (current platform: {}).",
+                current_platform.unwrap_or("unsupported")
+            )
+            .as_str(),
+        );
+        return Ok(ActionExecutionResult::Completed(Vec::new()));
+    }
+
+    print_action_start(action_index, &action.name);
+    let single_step_action = matching_steps.len() == 1;
+    let mut outcomes = Vec::with_capacity(matching_steps.len());
+    let mut action_data = data.clone();
+
+    let matching_step_count = matching_steps.len();
+    for (step_index, step) in matching_steps.into_iter().enumerate() {
+        if abort_signal.is_triggered() {
+            return Ok(ActionExecutionResult::StoppedByAbort);
+        }
+
+        if !should_run_step(step, &action_data, &action.name)? {
+            continue;
+        }
+
+        if abort_signal.is_triggered() {
+            return Ok(ActionExecutionResult::StoppedByAbort);
+        }
+
+        note_action_step_started(
+            action_index,
+            action.name.as_str(),
+            step.kind.as_str(),
+            step_index + 1,
+            matching_step_count,
+        );
+
+        let step_result = if step.kind.eq_ignore_ascii_case("exec") {
+            run_exec_step(step, &action_data, action_index, &action.name, runtime_budget)
+                .await
+                .map(|captured_output| (StepExecutionOutcome::Completed, captured_output))
+        } else if step.kind.eq_ignore_ascii_case("email_me") {
+            run_email_me_step(
+                step,
+                &action_data,
+                action_index,
+                &action.name,
+                action_secret_store_mode,
+                runtime_budget,
+                single_step_action,
+            )
+            .await
+            .map(|outcome| (outcome, None))
+        } else if step.kind.eq_ignore_ascii_case("agent") {
+            run_agent_step(
+                step,
+                &action_data,
+                action_index,
+                &action.name,
+                action_execution_override,
+                max_agent_depth,
+                runtime_budget,
+            )
+            .await
+            .map(|outcome| (outcome, None))
+        } else if step.kind.eq_ignore_ascii_case("generate_image") {
+            run_generate_image_step(
+                step,
+                &action_data,
+                action_index,
+                &action.name,
+                provider_context,
+                runtime_budget,
+            )
+            .await
+            .map(|outcome| (outcome, None))
+        } else {
+            print_action_line(
+                action_index,
+                action.name.as_str(),
+                format!("unsupported step kind '{}'; skipping step.", step.kind).as_str(),
+            );
+            outcomes.push(StepExecutionOutcome::SoftFailureLogged);
+            continue;
+        };
+
+        match step_result {
+            Ok((outcome, captured_output)) => {
+                if let Some((name, value)) = captured_output {
+                    insert_action_output_variable(
+                        &mut action_data,
+                        name.as_str(),
+                        value,
+                        action.name.as_str(),
+                    )?;
+                }
+                insert_step_status_variable(
+                    &mut action_data,
+                    step,
+                    "succeeded",
+                    action.name.as_str(),
+                )?;
+                outcomes.push(outcome);
+            }
+            Err(error) => {
+                insert_step_status_variable(
+                    &mut action_data,
+                    step,
+                    "failed",
+                    action.name.as_str(),
+                )?;
+                insert_step_error_variable(
+                    &mut action_data,
+                    step,
+                    error.as_str(),
+                    action.name.as_str(),
+                )?;
+
+                match step_failure_mode(step) {
+                    FailureMode::Continue => {
+                        print_action_line(action_index, action.name.as_str(), error.as_str());
+                        outcomes.push(StepExecutionOutcome::SoftFailureLogged);
+                    }
+                    FailureMode::Stop => {
+                        return Ok(ActionExecutionResult::Failed(error));
+                    }
+                    FailureMode::Abort => {
+                        abort_signal.trigger(action_index, action.name.as_str(), error.as_str());
+                        return Ok(ActionExecutionResult::Aborted(error));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(ActionExecutionResult::Completed(outcomes))
 }
 
 fn action_data_from_output(
@@ -1527,6 +2425,7 @@ fn action_data_from_output(
 async fn run_exec_step(
     step: &RunStep,
     data: &serde_json::Value,
+    action_index: usize,
     action_name: &str,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<Option<(String, String)>, String> {
@@ -1552,25 +2451,42 @@ async fn run_exec_step(
         let child = tokio::process::Command::new(program)
             .args(&resolved_args)
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
 
         match tokio::time::timeout(remaining, child.wait_with_output()).await {
             Ok(Ok(output)) if output.status.success() => {
+                emit_exec_output_lines(
+                    action_index,
+                    action_name,
+                    &output.stdout,
+                    &output.stderr,
+                    false,
+                );
                 let captured_output = String::from_utf8_lossy(&output.stdout)
                     .trim_end_matches(['\r', '\n'])
                     .to_string();
-                println!(
-                    "ℹ️ Action '{}' stored exec output in variable '{}'.",
-                    action_name, output_variable
+                print_action_line(
+                    action_index,
+                    action_name,
+                    format!("stored exec output in variable '{}'.", output_variable).as_str(),
                 );
                 Ok(Some((output_variable.to_string(), captured_output)))
             }
-            Ok(Ok(output)) => Err(format!(
-                "Action '{}' exec step command '{}' exited with status {}.",
-                action_name, program, output.status
-            )),
+            Ok(Ok(output)) => {
+                emit_exec_output_lines(
+                    action_index,
+                    action_name,
+                    &output.stdout,
+                    &output.stderr,
+                    true,
+                );
+                Err(format!(
+                    "Action '{}' exec step command '{}' exited with status {}.",
+                    action_name, program, output.status
+                ))
+            }
             Ok(Err(error)) => Err(format!(
                 "Action '{}' exec step failed while waiting for command '{}': {}",
                 action_name, program, error
@@ -1582,23 +2498,42 @@ async fn run_exec_step(
             )),
         }
     } else {
-        let mut child = tokio::process::Command::new(program)
+        let child = tokio::process::Command::new(program)
             .args(&resolved_args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
 
-        match tokio::time::timeout(remaining, child.wait()).await {
-            Ok(Ok(status)) if status.success() => Ok(None),
-            Ok(Ok(status)) => Err(format!(
-                "Action '{}' exec step command '{}' exited with status {}.",
-                action_name, program, status
-            )),
+        match tokio::time::timeout(remaining, child.wait_with_output()).await {
+            Ok(Ok(output)) if output.status.success() => {
+                emit_exec_output_lines(
+                    action_index,
+                    action_name,
+                    &output.stdout,
+                    &output.stderr,
+                    true,
+                );
+                Ok(None)
+            }
+            Ok(Ok(output)) => {
+                emit_exec_output_lines(
+                    action_index,
+                    action_name,
+                    &output.stdout,
+                    &output.stderr,
+                    true,
+                );
+                Err(format!(
+                    "Action '{}' exec step command '{}' exited with status {}.",
+                    action_name, program, output.status
+                ))
+            }
             Ok(Err(error)) => Err(format!(
                 "Action '{}' exec step failed while waiting for command '{}': {}",
                 action_name, program, error
             )),
             Err(_) => {
-                let _ = child.kill().await;
                 Err(action_runtime_timeout_message(
                     action_name,
                     runtime_budget,
@@ -1606,6 +2541,26 @@ async fn run_exec_step(
                 ))
             }
         }
+    }
+}
+
+fn emit_exec_output_lines(
+    action_index: usize,
+    action_name: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+    include_stdout: bool,
+) {
+    if include_stdout {
+        emit_action_output_bytes(action_index, action_name, stdout);
+    }
+    emit_action_output_bytes(action_index, action_name, stderr);
+}
+
+fn emit_action_output_bytes(action_index: usize, action_name: &str, bytes: &[u8]) {
+    let rendered = String::from_utf8_lossy(bytes);
+    for line in split_action_output_lines(rendered.as_ref()) {
+        print_action_line(action_index, action_name, line.as_str());
     }
 }
 
@@ -1687,8 +2642,9 @@ fn should_run_step(
 async fn run_email_me_step(
     step: &RunStep,
     data: &serde_json::Value,
+    action_index: usize,
     action_name: &str,
-    config: Option<&config::schema::Config>,
+    secret_store_mode: Option<SecretStoreMode>,
     runtime_budget: InvocationRuntimeBudget,
     single_step_action: bool,
 ) -> Result<StepExecutionOutcome, String> {
@@ -1713,13 +2669,13 @@ async fn run_email_me_step(
             action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
         })?;
 
-    match tokio::time::timeout(
+    let response = match tokio::time::timeout(
         remaining,
-        run_email_me_action(subject.as_str(), text.as_str(), config),
+        run_email_me_action(subject.as_str(), text.as_str(), secret_store_mode),
     )
     .await
     {
-        Ok(Ok(())) => {}
+        Ok(Ok(response)) => response,
         Ok(Err(error)) => return Err(format!("Action '{}': {error}", action_name)),
         Err(_) => {
             return Err(action_runtime_timeout_message(
@@ -1728,10 +2684,13 @@ async fn run_email_me_step(
                 "while sending email",
             ));
         }
-    }
+    };
 
     if single_step_action {
-        print_action_success(action_name, "email sent");
+        print_action_success(action_index, action_name, "email sent");
+    }
+    for line in render_account_response_lines(&response) {
+        print_action_line(action_index, action_name, line.as_str());
     }
     Ok(if single_step_action {
         StepExecutionOutcome::SuccessAlreadyPrinted
@@ -1743,27 +2702,35 @@ async fn run_email_me_step(
 async fn run_generate_image_step(
     step: &RunStep,
     data: &serde_json::Value,
+    action_index: usize,
     action_name: &str,
     provider_context: &ActionProviderContext,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
-    if provider_context.provider != ProviderKind::OpenAi {
+    let step_profile_context =
+        resolve_generate_image_step_profile_context(step.profile.as_ref(), data, action_name)
+            .await?;
+    let effective_provider_context = step_profile_context.as_ref().unwrap_or(provider_context);
+
+    if effective_provider_context.provider != ProviderKind::OpenAi {
         return Err(format!(
             "Action '{}' generate_image step requires `--server openai`; current server is {}.",
             action_name,
-            provider_context.provider.display_name()
+            effective_provider_context.provider.display_name()
         ));
     }
 
-    let model_arg = step.model.as_ref().ok_or_else(|| {
-        format!(
-            "Action '{}' generate_image step is missing required `model`.",
-            action_name
-        )
-    })?;
-    let model = resolve_generate_image_model(model_arg, data, action_name)?;
+    let model = resolve_generate_image_model(
+        step.model.as_ref(),
+        data,
+        action_name,
+        step_profile_context.as_ref(),
+        provider_context,
+    )?;
 
-    if provider_context.url.contains("chatgpt.com/backend-api/codex")
+    if effective_provider_context
+        .url
+        .contains("chatgpt.com/backend-api/codex")
         && model.starts_with("gpt-image")
     {
         return Err(format!(
@@ -1805,11 +2772,11 @@ async fn run_generate_image_step(
     let image_bytes = match tokio::time::timeout(
         remaining,
         crate::providers::send_openai_image_request(
-            &provider_context.url,
+            &effective_provider_context.url,
             &model,
             prompt.as_str(),
-            provider_context.inference_timeout_in_sec,
-            &provider_context.token,
+            effective_provider_context.inference_timeout_in_sec,
+            &effective_provider_context.token,
             output_format,
         ),
     )
@@ -1855,19 +2822,180 @@ async fn run_generate_image_step(
         )
     })?;
 
-    println!(
-        "ℹ️ Action '{}' wrote generated image to '{}'.",
+    print_action_line(
+        action_index,
         action_name,
-        output_path_ref.display()
+        format!("wrote generated image to '{}'.", output_path_ref.display()).as_str(),
     );
     Ok(StepExecutionOutcome::Completed)
 }
 
-fn resolve_generate_image_model(
-    model: &RunArg,
+fn resolve_step_profile_name(
+    profile: Option<&RunArg>,
     data: &serde_json::Value,
     action_name: &str,
+    step_kind: &str,
+) -> Result<Option<String>, String> {
+    let Some(profile) = profile else {
+        return Ok(None);
+    };
+
+    let profile_name = match profile {
+        RunArg::Literal(literal) => literal.clone(),
+        RunArg::Variable(variable) => {
+            let Some(value) = lookup_action_variable(data, variable) else {
+                return Err(format!(
+                    "Action '{}' {} `profile` references missing variable '{}'.",
+                    action_name, step_kind, variable
+                ));
+            };
+
+            match value {
+                serde_json::Value::String(text) => text.clone(),
+                serde_json::Value::Bool(_) => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found boolean for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+                serde_json::Value::Number(_) => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found number for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+                serde_json::Value::Array(_) => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found array for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+                serde_json::Value::Object(_) => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found object for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+                serde_json::Value::Null => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found null for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+            }
+        }
+    };
+
+    if profile_name.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' {} `profile` must resolve to a non-empty string.",
+            action_name, step_kind
+        ));
+    }
+
+    Ok(Some(profile_name))
+}
+
+async fn resolve_generate_image_step_profile_context(
+    profile: Option<&RunArg>,
+    data: &serde_json::Value,
+    action_name: &str,
+) -> Result<Option<ActionProviderContext>, String> {
+    let Some(profile_name) =
+        resolve_step_profile_name(profile, data, action_name, "generate_image")?
+    else {
+        return Ok(None);
+    };
+
+    let config_file = config_path();
+    let Some(config) = load_config() else {
+        return Err(format!(
+            "Action '{}' generate_image step references profile '{}', but no Cargo AI config was found at '{}'.",
+            action_name,
+            profile_name,
+            config_file.display()
+        ));
+    };
+
+    let Some(profile) = find_profile(&config, &profile_name) else {
+        return Err(format!(
+            "Action '{}' generate_image step references unknown profile '{}'.",
+            action_name, profile_name
+        ));
+    };
+
+    let provider = ProviderKind::from_server_value(profile.server.as_str()).ok_or_else(|| {
+        format!(
+            "Action '{}' generate_image step profile '{}' uses unsupported server '{}'.",
+            action_name, profile.name, profile.server
+        )
+    })?;
+
+    if provider != ProviderKind::OpenAi {
+        return Err(format!(
+            "Action '{}' generate_image step profile '{}' uses server '{}', but generate_image requires openai.",
+            action_name, profile.name, profile.server
+        ));
+    }
+
+    let mut server = String::new();
+    let mut model = String::new();
+    let mut timeout_in_sec = 60;
+    let mut url = String::new();
+    let selected_profile = apply_profile(
+        profile,
+        &mut server,
+        &mut model,
+        &mut timeout_in_sec,
+        &mut url,
+    );
+
+    let resolved_token = resolve_openai_token_for_request(Some(&selected_profile), Some(&config)).await?;
+    if url.is_empty() {
+        if resolved_token.uses_account_session {
+            url = OPENAI_ACCOUNT_RESPONSES_URL.to_string();
+        } else {
+            url = provider.default_url().to_string();
+        }
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(format!(
+            "Action '{}' generate_image step profile '{}' produced invalid URL '{}'. Use an absolute URL beginning with `http://` or `https://`.",
+            action_name, profile.name, url
+        ));
+    }
+
+    Ok(Some(ActionProviderContext {
+        provider,
+        model,
+        url,
+        token: resolved_token.token,
+        inference_timeout_in_sec: timeout_in_sec,
+    }))
+}
+
+fn resolve_generate_image_model(
+    model: Option<&RunArg>,
+    data: &serde_json::Value,
+    action_name: &str,
+    step_profile_context: Option<&ActionProviderContext>,
+    provider_context: &ActionProviderContext,
 ) -> Result<String, String> {
+    let Some(model) = model else {
+        if let Some(step_profile_context) = step_profile_context {
+            if !step_profile_context.model.trim().is_empty() {
+                return Ok(step_profile_context.model.clone());
+            }
+        }
+        if provider_context.model.trim().is_empty() {
+            return Err(format!(
+                "Action '{}' generate_image step omitted `model`, and no effective invocation model is configured. Set `generate_image.model`, pass `--model`, or configure a profile model.",
+                action_name
+            ));
+        }
+        return Ok(provider_context.model.clone());
+    };
+
     match model {
         RunArg::Literal(literal) => {
             if literal.trim().is_empty() {
@@ -1920,7 +3048,9 @@ fn resolve_generate_image_model(
 async fn run_agent_step(
     step: &RunStep,
     data: &serde_json::Value,
+    action_index: usize,
     action_name: &str,
+    action_execution_override: Option<ActionExecutionMode>,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
@@ -1944,10 +3074,36 @@ async fn run_agent_step(
     }
 
     let mut command = tokio::process::Command::new(agent_path);
+    if let Some(action_execution_override) = action_execution_override {
+        command.arg("--action-execution");
+        command.arg(match action_execution_override {
+            ActionExecutionMode::Sequential => "sequential",
+            ActionExecutionMode::Parallel => "parallel",
+        });
+    }
+    if let Some(profile_name) = resolve_step_profile_name(step.profile.as_ref(), data, action_name, "agent")? {
+        let config_file = config_path();
+        let Some(config) = load_config() else {
+            return Err(format!(
+                "Action '{}' agent step references profile '{}', but no Cargo AI config was found at '{}'.",
+                action_name,
+                profile_name,
+                config_file.display()
+            ));
+        };
+        if find_profile(&config, &profile_name).is_none() {
+            return Err(format!(
+                "Action '{}' agent step references unknown profile '{}'.",
+                action_name, profile_name
+            ));
+        }
+        command.arg("--profile");
+        command.arg(profile_name);
+    }
     let (child_args, resolution_notes) =
         child_input_args(step.input_mode, step.inputs.as_deref(), data, action_name)?;
     for note in resolution_notes {
-        println!("ℹ️ {note}");
+        print_action_line(action_index, action_name, note.as_str());
     }
     for argument in child_args {
         command.arg(argument);
@@ -1966,6 +3122,8 @@ async fn run_agent_step(
         AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV,
         runtime_budget.deadline_ms.to_string(),
     );
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
 
     let remaining = remaining_runtime_duration(
         runtime_budget,
@@ -1979,22 +3137,38 @@ async fn run_agent_step(
         )
     })?;
 
-    let mut child = command.spawn().map_err(|error| {
+    let child = command.spawn().map_err(|error| {
         format!(
             "Action '{}' failed to start child agent '{}': {}",
             action_name, agent, error
         )
     })?;
+    let mut child = child;
+    print_action_line(
+        action_index,
+        action_name,
+        format!("child: started {}", agent).as_str(),
+    );
 
-    match tokio::time::timeout(remaining, child.wait()).await {
-        Ok(Ok(status)) if status.success() => Ok(StepExecutionOutcome::Completed),
-        Ok(Ok(status)) => Err(format!(
-            "Action '{}' child agent '{}' exited with status {} at depth {}.",
-            action_name,
-            agent,
-            status,
-            current_depth + 1
-        )),
+    let result = match tokio::time::timeout(remaining, child.wait()).await {
+        Ok(Ok(status)) if status.success() => {
+            print_action_line(action_index, action_name, "child: completed successfully");
+            Ok(StepExecutionOutcome::Completed)
+        }
+        Ok(Ok(status)) => {
+            print_action_line(
+                action_index,
+                action_name,
+                format!("child: exited with status {}", status).as_str(),
+            );
+            Err(format!(
+                "Action '{}' child agent '{}' exited with status {} at depth {}.",
+                action_name,
+                agent,
+                status,
+                current_depth + 1
+            ))
+        }
         Ok(Err(error)) => Err(format!(
             "Action '{}' failed while waiting for child agent '{}' at depth {}: {}",
             action_name,
@@ -2004,13 +3178,19 @@ async fn run_agent_step(
         )),
         Err(_) => {
             let _ = child.kill().await;
+            print_action_line(
+                action_index,
+                action_name,
+                format!("child: timed out {}", agent).as_str(),
+            );
             Err(action_runtime_timeout_message(
                 action_name,
                 runtime_budget,
                 &format!("while waiting for child agent '{}' at depth {}", agent, current_depth + 1),
             ))
         }
-    }
+    };
+    result
 }
 
 fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'static str> {
@@ -2028,31 +3208,148 @@ fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'stat
     }
 }
 
-fn run_completion_message_for_depth(depth: u32) -> Option<&'static str> {
+fn format_top_level_action_failures(failures: &[String]) -> String {
+    if failures.len() == 1 {
+        failures
+            .first()
+            .expect("single failure should exist")
+            .clone()
+    } else {
+        format!(
+            "{} top-level actions failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        )
+    }
+}
+
+fn format_abort_summary(abort: &InvocationAbortRecord) -> String {
+    format!(
+        "Run aborted by {}: {}",
+        action_lane_prefix(abort.action_index, abort.action_name.as_str()),
+        abort.error
+    )
+}
+
+fn run_completion_message_for_depth(depth: u32, elapsed: Duration) -> Option<String> {
     if depth == 0 {
-        Some("✅ Run complete.")
+        Some(format!(
+            "✅ Run complete in {}.",
+            format_elapsed_duration(elapsed)
+        ))
     } else {
         None
     }
 }
 
-fn root_run_completion_message() -> Option<&'static str> {
-    run_completion_message_for_depth(current_agent_action_depth())
+fn root_run_completion_message(elapsed: Duration) -> Option<String> {
+    run_completion_message_for_depth(current_agent_action_depth(), elapsed)
 }
 
-fn print_action_start(action_name: &str) {
-    println!("Running action: {}", action_name);
+fn root_run_failure_message(elapsed: Duration) -> String {
+    format!("❌ Run failed in {}.", format_elapsed_duration(elapsed))
 }
 
-fn print_action_success(action_name: &str, summary: &str) {
-    println!("{action_name}: {summary}.");
+fn root_run_abort_message(elapsed: Duration) -> String {
+    format!("❌ Run aborted in {}.", format_elapsed_duration(elapsed))
 }
 
-fn render_account_response(response: &serde_json::Value) {
-    if let Some(message) = format_backend_ui_message(response, true) {
-        println!("{message}");
+fn current_action_output() -> Option<ActionOutput> {
+    ACTION_OUTPUT.try_with(Clone::clone).ok()
+}
+
+fn finish_action_output() {
+    if let Some(output) = current_action_output() {
+        output.finish();
+    }
+}
+
+fn note_action_step_started(
+    action_index: usize,
+    action_name: &str,
+    step_kind: &str,
+    step_number: usize,
+    step_count: usize,
+) {
+    if let Some(output) = current_action_output() {
+        output.action_step_started(action_index, action_name, step_kind, step_number, step_count);
+    }
+}
+
+fn note_action_failure(action_index: usize, action_name: &str, error: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_failed(action_index, action_name, error);
+    }
+}
+
+fn note_action_abort(action_index: usize, action_name: &str, error: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_aborted(action_index, action_name, error);
+    }
+}
+
+fn note_action_stopped_by_abort(action_index: usize, action_name: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_stopped_by_abort(action_index, action_name);
+    }
+}
+
+fn action_execution_header(action_execution: ActionExecutionMode) -> &'static str {
+    match action_execution {
+        ActionExecutionMode::Sequential => "Action execution: sequential",
+        ActionExecutionMode::Parallel => "Action execution: parallel",
+    }
+}
+
+fn print_action_execution_header(action_execution: ActionExecutionMode) {
+    if let Some(output) = current_action_output() {
+        output.print_execution_header();
     } else {
-        println!("{}", pretty_backend_json(response));
+        println!("{}", action_execution_header(action_execution));
+    }
+}
+
+fn action_lane_prefix(action_index: usize, action_name: &str) -> String {
+    format!("[A{} {}]", action_index + 1, action_name)
+}
+
+fn format_action_line(action_index: usize, action_name: &str, message: &str) -> String {
+    format!("{} {}", action_lane_prefix(action_index, action_name), message)
+}
+
+fn format_action_failure(action_index: usize, action_name: &str, error: &str) -> String {
+    format_action_line(action_index, action_name, format!("failed: {}", error).as_str())
+}
+
+fn print_action_line(action_index: usize, action_name: &str, message: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_line(action_index, action_name, message);
+    } else {
+        println!("{}", format_action_line(action_index, action_name, message));
+    }
+}
+
+fn print_action_start(action_index: usize, action_name: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_started(action_index, action_name);
+    } else {
+        print_action_line(action_index, action_name, "started");
+    }
+}
+
+fn print_action_success(action_index: usize, action_name: &str, summary: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_success(action_index, action_name, summary);
+    } else {
+        print_action_line(action_index, action_name, format!("{}.", summary).as_str());
+    }
+}
+
+fn render_account_response_lines(response: &serde_json::Value) -> Vec<String> {
+    if let Some(message) = format_backend_ui_message(response, true) {
+        split_action_output_lines(message.as_str())
+    } else {
+        split_action_output_lines(pretty_backend_json(response).as_str())
     }
 }
 
