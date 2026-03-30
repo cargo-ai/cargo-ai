@@ -28,10 +28,11 @@ For broader shape and validation rules, also read:
 - Cargo AI aggregates top-level hard failures after all eligible actions finish.
 - Cargo AI prints one run-level header, `Action execution: sequential` or `Action execution: parallel`, before action work begins.
 - In redirected, piped, CI, or simpler terminal output, Cargo AI prefixes parent-visible action output with deterministic lane labels such as `[A1 generate_images]`.
+- In append-only output, long-running steps also emit a step-start liveness line such as `step 2/2 generate_image started; waiting for provider response...`.
 - When attached directly to an interactive terminal, Cargo AI switches to a compact live lane dashboard instead of append-only lifecycle lines.
 - The first live dashboard slice keeps each lane block compact:
   - lane label
-  - lane status
+  - lane status with elapsed running time when active
   - terminal step marker or current step when known
   - last lifecycle message
   - compact buffered `output` section for parent-visible action output

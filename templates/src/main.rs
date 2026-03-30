@@ -11,8 +11,9 @@ use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use config::loader::{find_profile, load_config};
 use config::schema::{Profile, ProfileAuthMode, SecretStoreMode};
@@ -47,6 +48,7 @@ tokio::task_local! {
 #[derive(Clone)]
 struct ActionOutput {
     inner: Arc<Mutex<ActionOutputState>>,
+    live_refresh_stop: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -67,6 +69,7 @@ struct ActionLaneState {
     action_name: String,
     status: ActionLaneStatus,
     current_step: Option<String>,
+    step_started_at: Option<Instant>,
     last_message: Option<String>,
     output_lines: VecDeque<String>,
 }
@@ -96,13 +99,17 @@ impl ActionOutput {
     }
 
     fn new_for_mode(action_execution: ActionExecutionMode, mode: ActionOutputMode) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(ActionOutputState {
+        let inner = Arc::new(Mutex::new(ActionOutputState {
                 mode,
                 action_execution,
                 rendered_lines: 0,
                 lanes: BTreeMap::new(),
-            })),
+            }));
+        let live_refresh_stop = Arc::new(AtomicBool::new(false));
+        maybe_spawn_live_action_refresh(inner.clone(), live_refresh_stop.clone(), mode);
+        Self {
+            inner,
+            live_refresh_stop,
         }
     }
 
@@ -140,12 +147,29 @@ impl ActionOutput {
     ) {
         self.with_state(|state| {
             if state.mode == ActionOutputMode::AppendOnly {
+                println!(
+                    "{}",
+                    format_action_line(
+                        action_index,
+                        action_name,
+                        format!(
+                            "step {}/{} {} started; {}",
+                            step_number,
+                            step_count,
+                            step_kind,
+                            waiting_message_for_step_kind(step_kind)
+                        )
+                        .as_str(),
+                    )
+                );
                 return;
             }
 
             let lane = ensure_lane_state(state, action_index, action_name);
             lane.status = ActionLaneStatus::Running;
             lane.current_step = Some(format!("{}/{} {}", step_number, step_count, step_kind));
+            lane.step_started_at = Some(Instant::now());
+            lane.last_message = Some(waiting_message_for_step_kind(step_kind).to_string());
             render_live_dashboard(state);
         });
     }
@@ -187,6 +211,7 @@ impl ActionOutput {
             let lane = ensure_lane_state(state, action_index, action_name);
             lane.status = ActionLaneStatus::Completed;
             lane.current_step = None;
+            lane.step_started_at = None;
             lane.last_message = Some(format!("{}.", summary));
             render_live_dashboard(state);
         });
@@ -201,6 +226,7 @@ impl ActionOutput {
             let lane = ensure_lane_state(state, action_index, action_name);
             lane.status = ActionLaneStatus::Failed;
             lane.current_step = None;
+            lane.step_started_at = None;
             lane.last_message = compact_action_output_line(error)
                 .map(|line| format!("failed: {}", line))
                 .or_else(|| Some("failed".to_string()));
@@ -226,6 +252,7 @@ impl ActionOutput {
             let lane = ensure_lane_state(state, action_index, action_name);
             lane.status = ActionLaneStatus::Aborted;
             lane.current_step = None;
+            lane.step_started_at = None;
             lane.last_message = compact_action_output_line(error)
                 .map(|line| format!("abort requested: {}", line))
                 .or_else(|| Some("abort requested".to_string()));
@@ -243,12 +270,14 @@ impl ActionOutput {
             let lane = ensure_lane_state(state, action_index, action_name);
             lane.status = ActionLaneStatus::Aborted;
             lane.current_step = None;
+            lane.step_started_at = None;
             lane.last_message = Some("stopped after invocation abort.".to_string());
             render_live_dashboard(state);
         });
     }
 
     fn finish(&self) {
+        self.live_refresh_stop.store(true, Ordering::Relaxed);
         self.with_state(|state| {
             if state.mode == ActionOutputMode::Live {
                 render_live_dashboard(state);
@@ -277,7 +306,7 @@ impl ActionOutputState {
             lines.push(format!(
                 "{} {}",
                 action_lane_prefix(*lane_index, lane.action_name.as_str()),
-                lane.status.display_name()
+                lane_status_label(lane)
             ));
             lines.push(format!("  step: {}", lane_step_label(lane)));
             lines.push(format!(
@@ -329,9 +358,46 @@ fn ensure_lane_state<'a>(
             action_name: action_name.to_string(),
             status: ActionLaneStatus::Pending,
             current_step: None,
+            step_started_at: None,
             last_message: None,
             output_lines: VecDeque::new(),
         })
+}
+
+fn maybe_spawn_live_action_refresh(
+    inner: Arc<Mutex<ActionOutputState>>,
+    stop: Arc<AtomicBool>,
+    mode: ActionOutputMode,
+) {
+    if mode != ActionOutputMode::Live || cfg!(test) {
+        return;
+    }
+
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+
+    handle.spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            interval.tick().await;
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let mut state = inner.lock().expect("action output lock should succeed");
+            if state.mode != ActionOutputMode::Live {
+                break;
+            }
+            if state.lanes.values().any(|lane| {
+                lane.status == ActionLaneStatus::Running && lane.step_started_at.is_some()
+            }) {
+                render_live_dashboard(&mut state);
+            }
+        }
+    });
 }
 
 fn inferred_lane_status(message: &str) -> ActionLaneStatus {
@@ -378,6 +444,30 @@ fn lane_step_label(lane: &ActionLaneState) -> String {
             .current_step
             .clone()
             .unwrap_or_else(|| "-".to_string()),
+    }
+}
+
+fn lane_status_label(lane: &ActionLaneState) -> String {
+    if lane.status == ActionLaneStatus::Running {
+        if let Some(started_at) = lane.step_started_at {
+            return format!("running · {}s", started_at.elapsed().as_secs());
+        }
+    }
+
+    lane.status.display_name().to_string()
+}
+
+fn waiting_message_for_step_kind(step_kind: &str) -> &'static str {
+    if step_kind.eq_ignore_ascii_case("exec") {
+        "waiting for command to finish..."
+    } else if step_kind.eq_ignore_ascii_case("agent") {
+        "waiting for child agent to finish..."
+    } else if step_kind.eq_ignore_ascii_case("generate_image") {
+        "waiting for provider response..."
+    } else if step_kind.eq_ignore_ascii_case("email_me") {
+        "waiting for mail response..."
+    } else {
+        "waiting for step to finish..."
     }
 }
 
