@@ -20,6 +20,8 @@ jobs:
   test:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     strategy:
       # Prevents one OS job failure (e.g., Ubuntu) from canceling all matrix jobs
@@ -46,29 +48,33 @@ jobs:
       - name: Note live OpenAI smoke policy
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.run_live_openai_smoke }}" == "true" ]]; then
-            echo "Live OpenAI smoke is enabled for this manual run."
+            if [[ -n "$OPENAI_API_KEY" ]]; then
+              echo "Live OpenAI smoke is enabled for this manual run."
+            else
+              echo "Live OpenAI smoke was requested, but OPENAI_API_KEY is not configured; skipping provider-backed checks."
+            fi
           else
             echo "Skipping live OpenAI smoke on the default push matrix; build, install, and hatch smoke remain required."
           fi
         shell: bash
 
       - name: Run agent_adder with OpenAI token
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_openai_smoke == true && secrets.OPENAI_API_KEY != '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_openai_smoke == true && env.OPENAI_API_KEY != '' }}
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            ./adder_test.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }}
+            ./adder_test.exe -s openai -m gpt-4o --token "$OPENAI_API_KEY"
           else
-            ./adder_test -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }}
+            ./adder_test -s openai -m gpt-4o --token "$OPENAI_API_KEY"
           fi
         shell: bash
 
       - name: Validate agent_adder output with default prompt
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_openai_smoke == true && secrets.OPENAI_API_KEY != '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_openai_smoke == true && env.OPENAI_API_KEY != '' }}
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            OUTPUT=$(./adder_test.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }})
+            OUTPUT=$(./adder_test.exe -s openai -m gpt-4o --token "$OPENAI_API_KEY")
           else
-            OUTPUT=$(./adder_test -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }})
+            OUTPUT=$(./adder_test -s openai -m gpt-4o --token "$OPENAI_API_KEY")
           fi
 
           echo "$OUTPUT"
@@ -80,12 +86,12 @@ jobs:
         shell: bash
 
       - name: Validate agent_adder output with overridden text input
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_openai_smoke == true && secrets.OPENAI_API_KEY != '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_openai_smoke == true && env.OPENAI_API_KEY != '' }}
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            OUTPUT=$(./adder_test.exe -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --input-text "What is 2 + 3? Return the answer as a number.")
+            OUTPUT=$(./adder_test.exe -s openai -m gpt-4o --token "$OPENAI_API_KEY" --input-text "What is 2 + 3? Return the answer as a number.")
           else
-            OUTPUT=$(./adder_test -s openai -m gpt-4o --token ${{ secrets.OPENAI_API_KEY }} --input-text "What is 2 + 3? Return the answer as a number.")
+            OUTPUT=$(./adder_test -s openai -m gpt-4o --token "$OPENAI_API_KEY" --input-text "What is 2 + 3? Return the answer as a number.")
           fi
 
           echo "$OUTPUT"
