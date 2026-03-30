@@ -68,6 +68,8 @@ struct ActionOutputState {
 struct ActionLaneState {
     action_name: String,
     status: ActionLaneStatus,
+    lane_started_at: Option<Instant>,
+    lane_finished_after: Option<Duration>,
     current_step: Option<String>,
     step_started_at: Option<Instant>,
     last_message: Option<String>,
@@ -100,11 +102,11 @@ impl ActionOutput {
 
     fn new_for_mode(action_execution: ActionExecutionMode, mode: ActionOutputMode) -> Self {
         let inner = Arc::new(Mutex::new(ActionOutputState {
-                mode,
-                action_execution,
-                rendered_lines: 0,
-                lanes: BTreeMap::new(),
-            }));
+            mode,
+            action_execution,
+            rendered_lines: 0,
+            lanes: BTreeMap::new(),
+        }));
         let live_refresh_stop = Arc::new(AtomicBool::new(false));
         maybe_spawn_live_action_refresh(inner.clone(), live_refresh_stop.clone(), mode);
         Self {
@@ -125,15 +127,16 @@ impl ActionOutput {
 
     fn action_started(&self, action_index: usize, action_name: &str) {
         self.with_state(|state| {
-            if state.mode == ActionOutputMode::AppendOnly {
-                println!("{}", format_action_line(action_index, action_name, "started"));
-                return;
-            }
-
             let lane = ensure_lane_state(state, action_index, action_name);
             lane.status = ActionLaneStatus::Running;
+            lane.lane_started_at = Some(Instant::now());
+            lane.lane_finished_after = None;
             lane.last_message = Some("started".to_string());
-            render_live_dashboard(state);
+            if state.mode == ActionOutputMode::AppendOnly {
+                println!("{}", format_action_line(action_index, action_name, "started"));
+            } else {
+                render_live_dashboard(state);
+            }
         });
     }
 
@@ -146,6 +149,11 @@ impl ActionOutput {
         step_count: usize,
     ) {
         self.with_state(|state| {
+            let lane = ensure_lane_state(state, action_index, action_name);
+            lane.status = ActionLaneStatus::Running;
+            lane.current_step = Some(format!("{}/{} {}", step_number, step_count, step_kind));
+            lane.step_started_at = Some(Instant::now());
+            lane.last_message = Some(waiting_message_for_step_kind(step_kind).to_string());
             if state.mode == ActionOutputMode::AppendOnly {
                 println!(
                     "{}",
@@ -162,15 +170,9 @@ impl ActionOutput {
                         .as_str(),
                     )
                 );
-                return;
+            } else {
+                render_live_dashboard(state);
             }
-
-            let lane = ensure_lane_state(state, action_index, action_name);
-            lane.status = ActionLaneStatus::Running;
-            lane.current_step = Some(format!("{}/{} {}", step_number, step_count, step_kind));
-            lane.step_started_at = Some(Instant::now());
-            lane.last_message = Some(waiting_message_for_step_kind(step_kind).to_string());
-            render_live_dashboard(state);
         });
     }
 
@@ -200,64 +202,111 @@ impl ActionOutput {
 
     fn action_success(&self, action_index: usize, action_name: &str, summary: &str) {
         self.with_state(|state| {
-            if state.mode == ActionOutputMode::AppendOnly {
+            let append_only = state.mode == ActionOutputMode::AppendOnly;
+            let append_message = {
+                let lane = ensure_lane_state(state, action_index, action_name);
+                lane.status = ActionLaneStatus::Completed;
+                lane.current_step = None;
+                lane.step_started_at = None;
+                lane.lane_finished_after = lane
+                    .lane_started_at
+                    .map(|started_at| started_at.elapsed());
+                lane.last_message = Some(format!("{}.", summary));
+                if append_only {
+                    Some(format!(
+                        "{} in {}.",
+                        summary,
+                        format_elapsed_duration(
+                            lane.lane_finished_after.unwrap_or_else(|| Duration::from_secs(0))
+                        )
+                    ))
+                } else {
+                    None
+                }
+            };
+            if let Some(message) = append_message {
                 println!(
                     "{}",
-                    format_action_line(action_index, action_name, format!("{}.", summary).as_str())
+                    format_action_line(action_index, action_name, message.as_str())
                 );
-                return;
+            } else {
+                render_live_dashboard(state);
             }
-
-            let lane = ensure_lane_state(state, action_index, action_name);
-            lane.status = ActionLaneStatus::Completed;
-            lane.current_step = None;
-            lane.step_started_at = None;
-            lane.last_message = Some(format!("{}.", summary));
-            render_live_dashboard(state);
         });
     }
 
     fn action_failed(&self, action_index: usize, action_name: &str, error: &str) {
         self.with_state(|state| {
-            if state.mode == ActionOutputMode::AppendOnly {
-                return;
+            let append_only = state.mode == ActionOutputMode::AppendOnly;
+            let append_message = {
+                let lane = ensure_lane_state(state, action_index, action_name);
+                lane.status = ActionLaneStatus::Failed;
+                lane.current_step = None;
+                lane.step_started_at = None;
+                lane.lane_finished_after = lane
+                    .lane_started_at
+                    .map(|started_at| started_at.elapsed());
+                lane.last_message = compact_action_output_line(error)
+                    .map(|line| format!("failed: {}", line))
+                    .or_else(|| Some("failed".to_string()));
+                push_lane_output_message(lane, error);
+                if append_only {
+                    Some(format!(
+                        "failed in {}.",
+                        format_elapsed_duration(
+                            lane.lane_finished_after.unwrap_or_else(|| Duration::from_secs(0))
+                        )
+                    ))
+                } else {
+                    None
+                }
+            };
+            if let Some(message) = append_message {
+                println!(
+                    "{}",
+                    format_action_line(action_index, action_name, message.as_str())
+                );
+            } else {
+                render_live_dashboard(state);
             }
-
-            let lane = ensure_lane_state(state, action_index, action_name);
-            lane.status = ActionLaneStatus::Failed;
-            lane.current_step = None;
-            lane.step_started_at = None;
-            lane.last_message = compact_action_output_line(error)
-                .map(|line| format!("failed: {}", line))
-                .or_else(|| Some("failed".to_string()));
-            push_lane_output_message(lane, error);
-            render_live_dashboard(state);
         });
     }
 
     fn action_aborted(&self, action_index: usize, action_name: &str, error: &str) {
         self.with_state(|state| {
-            if state.mode == ActionOutputMode::AppendOnly {
+            let append_only = state.mode == ActionOutputMode::AppendOnly;
+            let append_message = {
+                let lane = ensure_lane_state(state, action_index, action_name);
+                lane.status = ActionLaneStatus::Aborted;
+                lane.current_step = None;
+                lane.step_started_at = None;
+                lane.lane_finished_after = lane
+                    .lane_started_at
+                    .map(|started_at| started_at.elapsed());
+                lane.last_message = compact_action_output_line(error)
+                    .map(|line| format!("abort requested: {}", line))
+                    .or_else(|| Some("abort requested".to_string()));
+                push_lane_output_message(lane, error);
+                if append_only {
+                    Some(format!(
+                        "abort requested in {}: {}",
+                        format_elapsed_duration(
+                            lane.lane_finished_after.unwrap_or_else(|| Duration::from_secs(0))
+                        ),
+                        error
+                    ))
+                } else {
+                    None
+                }
+            };
+            if let Some(message) = append_message {
                 println!(
                     "{}",
-                    format_action_line(
-                        action_index,
-                        action_name,
-                        format!("abort requested: {}", error).as_str(),
-                    )
+                    format_action_line(action_index, action_name, message.as_str())
                 );
-                return;
+            } else {
+                render_live_dashboard(state);
             }
-
-            let lane = ensure_lane_state(state, action_index, action_name);
-            lane.status = ActionLaneStatus::Aborted;
-            lane.current_step = None;
-            lane.step_started_at = None;
-            lane.last_message = compact_action_output_line(error)
-                .map(|line| format!("abort requested: {}", line))
-                .or_else(|| Some("abort requested".to_string()));
-            push_lane_output_message(lane, error);
-            render_live_dashboard(state);
         });
     }
 
@@ -271,6 +320,9 @@ impl ActionOutput {
             lane.status = ActionLaneStatus::Aborted;
             lane.current_step = None;
             lane.step_started_at = None;
+            lane.lane_finished_after = lane
+                .lane_started_at
+                .map(|started_at| started_at.elapsed());
             lane.last_message = Some("stopped after invocation abort.".to_string());
             render_live_dashboard(state);
         });
@@ -357,6 +409,8 @@ fn ensure_lane_state<'a>(
         .or_insert_with(|| ActionLaneState {
             action_name: action_name.to_string(),
             status: ActionLaneStatus::Pending,
+            lane_started_at: None,
+            lane_finished_after: None,
             current_step: None,
             step_started_at: None,
             last_message: None,
@@ -448,13 +502,34 @@ fn lane_step_label(lane: &ActionLaneState) -> String {
 }
 
 fn lane_status_label(lane: &ActionLaneState) -> String {
-    if lane.status == ActionLaneStatus::Running {
-        if let Some(started_at) = lane.step_started_at {
-            return format!("running · {}s", started_at.elapsed().as_secs());
+    if let Some(elapsed) = lane_elapsed_duration(lane) {
+        match lane.status {
+            ActionLaneStatus::Running => {
+                return format!("running · {}", format_elapsed_duration(elapsed));
+            }
+            ActionLaneStatus::Completed => {
+                return format!("completed · {}", format_elapsed_duration(elapsed));
+            }
+            ActionLaneStatus::Failed | ActionLaneStatus::LogicError => {
+                return format!("failed · {}", format_elapsed_duration(elapsed));
+            }
+            ActionLaneStatus::Aborted => {
+                return format!("aborted · {}", format_elapsed_duration(elapsed));
+            }
+            _ => {}
         }
     }
 
     lane.status.display_name().to_string()
+}
+
+fn lane_elapsed_duration(lane: &ActionLaneState) -> Option<Duration> {
+    lane.lane_finished_after
+        .or_else(|| lane.lane_started_at.map(|started_at| started_at.elapsed()))
+}
+
+fn format_elapsed_duration(duration: Duration) -> String {
+    format!("{}s", duration.as_secs())
 }
 
 fn waiting_message_for_step_kind(step_kind: &str) -> &'static str {
@@ -1943,6 +2018,7 @@ async fn apply_actions(
                 format!("Failed to serialize output for action evaluation: {error}")
             })?;
             let current_platform = current_action_platform();
+            let invocation_started_at = Instant::now();
             print_action_execution_header(action_execution);
             let top_level_failures = match action_execution {
                 ActionExecutionMode::Sequential => {
@@ -1978,10 +2054,14 @@ async fn apply_actions(
             finish_action_output();
 
             if let Some(abort) = abort_signal.record() {
-                return Err(format_abort_summary(&abort));
+                return Err(format!(
+                    "{}\n{}",
+                    format_abort_summary(&abort),
+                    root_run_abort_message(invocation_started_at.elapsed())
+                ));
             }
 
-            if let Some(message) = root_run_completion_message() {
+            if let Some(message) = root_run_completion_message(invocation_started_at.elapsed()) {
                 if top_level_failures.is_empty() {
                     println!("{message}");
                 }
@@ -1990,7 +2070,11 @@ async fn apply_actions(
             if top_level_failures.is_empty() {
                 Ok(())
             } else {
-                Err(format_top_level_action_failures(&top_level_failures))
+                Err(format!(
+                    "{}\n{}",
+                    format_top_level_action_failures(&top_level_failures),
+                    root_run_failure_message(invocation_started_at.elapsed())
+                ))
             }
         })
         .await
@@ -2957,16 +3041,27 @@ fn format_abort_summary(abort: &InvocationAbortRecord) -> String {
     )
 }
 
-fn run_completion_message_for_depth(depth: u32) -> Option<&'static str> {
+fn run_completion_message_for_depth(depth: u32, elapsed: Duration) -> Option<String> {
     if depth == 0 {
-        Some("✅ Run complete.")
+        Some(format!(
+            "✅ Run complete in {}.",
+            format_elapsed_duration(elapsed)
+        ))
     } else {
         None
     }
 }
 
-fn root_run_completion_message() -> Option<&'static str> {
-    run_completion_message_for_depth(current_agent_action_depth())
+fn root_run_completion_message(elapsed: Duration) -> Option<String> {
+    run_completion_message_for_depth(current_agent_action_depth(), elapsed)
+}
+
+fn root_run_failure_message(elapsed: Duration) -> String {
+    format!("❌ Run failed in {}.", format_elapsed_duration(elapsed))
+}
+
+fn root_run_abort_message(elapsed: Duration) -> String {
+    format!("❌ Run aborted in {}.", format_elapsed_duration(elapsed))
 }
 
 fn current_action_output() -> Option<ActionOutput> {

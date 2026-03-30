@@ -177,8 +177,9 @@ If `logic` evaluates true, the action's `run` steps execute in order.
 - Cargo AI prints one run-level execution header before actions start: `Action execution: sequential` or `Action execution: parallel`.
 - In redirected, piped, CI, or simpler terminal output, Cargo AI prefixes parent-visible action output with deterministic lane labels such as `[A1 generate_images]`.
 - In append-only output, long-running steps also emit a step-start liveness line such as `step 2/2 generate_image started; waiting for provider response...`.
+- Terminal lane summaries and the final run footer also include wall-clock durations, for example `completed in 31s.` and `✅ Run complete in 32s.`.
 - When attached directly to an interactive terminal, Cargo AI switches to a compact live lane dashboard.
-- The first live dashboard slice shows lane label, lane status with elapsed running time when active, terminal step marker or current step when known, the last lifecycle message, and a compact buffered `output` section for parent-visible action output.
+- The first live dashboard slice shows lane label, lane status with elapsed time while running and after terminal completion/failure, terminal step marker or current step when known, the last lifecycle message, and a compact buffered `output` section for parent-visible action output.
 - Parent-run `exec` and `email_me` output is bucketed into the originating lane.
 - Child-agent steps stay minimal in the parent lane with start/completion or exit-summary lines instead of recursively inlining the child transcript.
 
