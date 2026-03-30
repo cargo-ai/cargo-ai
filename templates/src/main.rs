@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use config::loader::{find_profile, load_config};
+use config::loader::{config_path, find_profile, load_config};
 use config::schema::{Profile, ProfileAuthMode, SecretStoreMode};
 use providers::{
     provider_error_messages, validate_provider_content_parts, validate_provider_request,
@@ -2707,18 +2707,30 @@ async fn run_generate_image_step(
     provider_context: &ActionProviderContext,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
-    if provider_context.provider != ProviderKind::OpenAi {
+    let step_profile_context =
+        resolve_generate_image_step_profile_context(step.profile.as_ref(), data, action_name)
+            .await?;
+    let effective_provider_context = step_profile_context.as_ref().unwrap_or(provider_context);
+
+    if effective_provider_context.provider != ProviderKind::OpenAi {
         return Err(format!(
             "Action '{}' generate_image step requires `--server openai`; current server is {}.",
             action_name,
-            provider_context.provider.display_name()
+            effective_provider_context.provider.display_name()
         ));
     }
 
-    let model =
-        resolve_generate_image_model(step.model.as_ref(), data, action_name, provider_context)?;
+    let model = resolve_generate_image_model(
+        step.model.as_ref(),
+        data,
+        action_name,
+        step_profile_context.as_ref(),
+        provider_context,
+    )?;
 
-    if provider_context.url.contains("chatgpt.com/backend-api/codex")
+    if effective_provider_context
+        .url
+        .contains("chatgpt.com/backend-api/codex")
         && model.starts_with("gpt-image")
     {
         return Err(format!(
@@ -2760,11 +2772,11 @@ async fn run_generate_image_step(
     let image_bytes = match tokio::time::timeout(
         remaining,
         crate::providers::send_openai_image_request(
-            &provider_context.url,
+            &effective_provider_context.url,
             &model,
             prompt.as_str(),
-            provider_context.inference_timeout_in_sec,
-            &provider_context.token,
+            effective_provider_context.inference_timeout_in_sec,
+            &effective_provider_context.token,
             output_format,
         ),
     )
@@ -2818,13 +2830,163 @@ async fn run_generate_image_step(
     Ok(StepExecutionOutcome::Completed)
 }
 
+fn resolve_step_profile_name(
+    profile: Option<&RunArg>,
+    data: &serde_json::Value,
+    action_name: &str,
+    step_kind: &str,
+) -> Result<Option<String>, String> {
+    let Some(profile) = profile else {
+        return Ok(None);
+    };
+
+    let profile_name = match profile {
+        RunArg::Literal(literal) => literal.clone(),
+        RunArg::Variable(variable) => {
+            let Some(value) = lookup_action_variable(data, variable) else {
+                return Err(format!(
+                    "Action '{}' {} `profile` references missing variable '{}'.",
+                    action_name, step_kind, variable
+                ));
+            };
+
+            match value {
+                serde_json::Value::String(text) => text.clone(),
+                serde_json::Value::Bool(_) => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found boolean for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+                serde_json::Value::Number(_) => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found number for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+                serde_json::Value::Array(_) => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found array for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+                serde_json::Value::Object(_) => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found object for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+                serde_json::Value::Null => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found null for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+            }
+        }
+    };
+
+    if profile_name.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' {} `profile` must resolve to a non-empty string.",
+            action_name, step_kind
+        ));
+    }
+
+    Ok(Some(profile_name))
+}
+
+async fn resolve_generate_image_step_profile_context(
+    profile: Option<&RunArg>,
+    data: &serde_json::Value,
+    action_name: &str,
+) -> Result<Option<ActionProviderContext>, String> {
+    let Some(profile_name) =
+        resolve_step_profile_name(profile, data, action_name, "generate_image")?
+    else {
+        return Ok(None);
+    };
+
+    let config_file = config_path();
+    let Some(config) = load_config() else {
+        return Err(format!(
+            "Action '{}' generate_image step references profile '{}', but no Cargo AI config was found at '{}'.",
+            action_name,
+            profile_name,
+            config_file.display()
+        ));
+    };
+
+    let Some(profile) = find_profile(&config, &profile_name) else {
+        return Err(format!(
+            "Action '{}' generate_image step references unknown profile '{}'.",
+            action_name, profile_name
+        ));
+    };
+
+    let provider = ProviderKind::from_server_value(profile.server.as_str()).ok_or_else(|| {
+        format!(
+            "Action '{}' generate_image step profile '{}' uses unsupported server '{}'.",
+            action_name, profile.name, profile.server
+        )
+    })?;
+
+    if provider != ProviderKind::OpenAi {
+        return Err(format!(
+            "Action '{}' generate_image step profile '{}' uses server '{}', but generate_image requires openai.",
+            action_name, profile.name, profile.server
+        ));
+    }
+
+    let mut server = String::new();
+    let mut model = String::new();
+    let mut timeout_in_sec = 60;
+    let mut url = String::new();
+    let selected_profile = apply_profile(
+        profile,
+        &mut server,
+        &mut model,
+        &mut timeout_in_sec,
+        &mut url,
+    );
+
+    let resolved_token = resolve_openai_token_for_request(Some(&selected_profile), Some(&config)).await?;
+    if url.is_empty() {
+        if resolved_token.uses_account_session {
+            url = OPENAI_ACCOUNT_RESPONSES_URL.to_string();
+        } else {
+            url = provider.default_url().to_string();
+        }
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(format!(
+            "Action '{}' generate_image step profile '{}' produced invalid URL '{}'. Use an absolute URL beginning with `http://` or `https://`.",
+            action_name, profile.name, url
+        ));
+    }
+
+    Ok(Some(ActionProviderContext {
+        provider,
+        model,
+        url,
+        token: resolved_token.token,
+        inference_timeout_in_sec: timeout_in_sec,
+    }))
+}
+
 fn resolve_generate_image_model(
     model: Option<&RunArg>,
     data: &serde_json::Value,
     action_name: &str,
+    step_profile_context: Option<&ActionProviderContext>,
     provider_context: &ActionProviderContext,
 ) -> Result<String, String> {
     let Some(model) = model else {
+        if let Some(step_profile_context) = step_profile_context {
+            if !step_profile_context.model.trim().is_empty() {
+                return Ok(step_profile_context.model.clone());
+            }
+        }
         if provider_context.model.trim().is_empty() {
             return Err(format!(
                 "Action '{}' generate_image step omitted `model`, and no effective invocation model is configured. Set `generate_image.model`, pass `--model`, or configure a profile model.",
@@ -2918,6 +3080,25 @@ async fn run_agent_step(
             ActionExecutionMode::Sequential => "sequential",
             ActionExecutionMode::Parallel => "parallel",
         });
+    }
+    if let Some(profile_name) = resolve_step_profile_name(step.profile.as_ref(), data, action_name, "agent")? {
+        let config_file = config_path();
+        let Some(config) = load_config() else {
+            return Err(format!(
+                "Action '{}' agent step references profile '{}', but no Cargo AI config was found at '{}'.",
+                action_name,
+                profile_name,
+                config_file.display()
+            ));
+        };
+        if find_profile(&config, &profile_name).is_none() {
+            return Err(format!(
+                "Action '{}' agent step references unknown profile '{}'.",
+                action_name, profile_name
+            ));
+        }
+        command.arg("--profile");
+        command.arg(profile_name);
     }
     let (child_args, resolution_notes) =
         child_input_args(step.input_mode, step.inputs.as_deref(), data, action_name)?;

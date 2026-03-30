@@ -641,11 +641,14 @@ Use `run` to sequence multiple side effects in order. `exec` steps can capture o
 
 `generate_image.model` is optional. If omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override. If neither the step nor the invocation provides a model, the run fails clearly instead of guessing. When the image step should use a different model from the main invocation, set `generate_image.model` explicitly as either a literal string or a single variable reference. Prefer a runtime-backed string such as `{ "var": "runtime.hero_image_model" }` when the operator should choose the image model at invocation time. Top-level string schema fields may also drive `generate_image.model`, but captured step variables may not.
 
+`generate_image` and child `agent` steps also accept an optional step-level `profile`. Use it when one step should resolve its provider/model/url/token context differently from the parent invocation. For `generate_image`, explicit `model` still wins, then the step-profile model, then the parent invocation model. For child `agent` steps, the resolved profile is forwarded to the child as `--profile <name>`.
+
 For the default OpenAI account transport, use a tool-capable mainline model such as `gpt-5.2`. For a direct OpenAI API token and URL, prefer GPT Image models such as `gpt-image-1.5` or `gpt-image-1-mini`. Official OpenAI docs list `gpt-image-1.5` as the latest GPT Image model, and the image-generation guide lists `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini` for direct image generation. Verified: 2026-03-28.
 
 ```json
 {
   "kind": "generate_image",
+  "profile": { "var": "runtime.image_profile" },
   "model": { "var": "runtime.hero_image_model" },
   "prompt": ["Create a product render for ", { "var": "reason" }],
   "path": "./artifacts/product_render.png"
@@ -681,6 +684,7 @@ Example:
 {
   "kind": "agent",
   "agent": "./child_reporter",
+  "profile": { "var": "runtime.child_profile" },
   "input_mode": "append",
   "status_variable": "child_status",
   "error_variable": "child_error",

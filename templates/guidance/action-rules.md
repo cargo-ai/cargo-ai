@@ -48,13 +48,16 @@ These documented step kinds and helper fields are exhaustive for the current MVP
   - Required: `kind`, `program`, `args`
 - `agent`
   - Required: `kind`, `agent`
+  - Optional: `profile`
 - `email_me`
   - Required: `kind`, `subject`, `text`
 - `generate_image`
   - Required: `kind`, `prompt`, `path`
-  - Optional: `model`
+  - Optional: `model`, `profile`
   - First slice: OpenAI-backed single-image output only
   - If `model` is omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override.
+  - If `profile` is present, Cargo AI resolves that profile at step runtime and uses it for the image step's provider/url/token context.
+  - With `generate_image.profile`, explicit `model` still wins, then the step-profile model, then the parent invocation model.
   - If neither the step nor the invocation provides a model, the step fails clearly at runtime.
   - `model` may be:
     - a literal non-empty string
@@ -134,6 +137,7 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - Parent actions may pass child-agent `inputs`, including dynamic string parts resolved from current action-local data.
 - Those child `inputs` may resolve declared `runtime.*` values alongside top-level model output fields and prior captured step variables.
 - Parent `agent` steps may set child `input_mode` to `replace`, `append`, or `prepend` when they also provide child `inputs`.
+- Parent `agent` steps may also set a step-level `profile` as a literal string or single variable reference; Cargo AI resolves it at step runtime and forwards `--profile <name>` to the child.
 - Omitted child `input_mode` keeps the current replace behavior for child inputs.
 - Parent actions may capture child-agent success/failure with `status_variable` and `error_variable`.
 - Parent actions cannot directly capture the child agent's top-level returned output fields into the parent action-local namespace.

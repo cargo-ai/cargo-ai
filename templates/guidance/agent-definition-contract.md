@@ -200,6 +200,9 @@ Required fields:
 - `kind`
 - `agent`
 
+Optional fields:
+- `profile`
+
 ### `email_me`
 
 Required fields:
@@ -215,8 +218,11 @@ Required fields:
 - `path`
 - Optional:
   - `model`
+  - `profile`
 - First slice writes one local image file.
 - If `model` is omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override.
+- If `profile` is present, Cargo AI resolves that profile at step runtime and uses it for the image step's provider/url/token context.
+- With `generate_image.profile`, explicit `model` still wins, then the step-profile model, then the parent invocation model.
 - If neither the step nor the invocation provides a model, the step fails clearly at runtime.
 - `model` may be:
   - a literal non-empty string
@@ -319,6 +325,7 @@ For `kind: "agent"`:
 ## Child-Agent Data Flow
 
 - A parent action may pass child-agent `inputs`.
+- A `kind: "agent"` run step may also set `profile` as a literal string or single variable reference; Cargo AI resolves it at step runtime and forwards `--profile <name>` to the child.
 - A `kind: "agent"` run step may also set `input_mode` to `replace`, `append`, or `prepend` when child `inputs` are present.
 - If child `input_mode` is omitted, the child step keeps the current default behavior: child `inputs` replace the child agent's baked `inputs`.
 - Child `append` keeps the child agent's baked inputs first, then appends the action-supplied child inputs in declared order.

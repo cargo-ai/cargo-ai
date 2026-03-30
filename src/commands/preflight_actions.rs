@@ -1,6 +1,8 @@
 //! Action execution helpers for preflight/test flows.
 use crate::config::adder::set_account_tokens;
-use crate::config::loader::{config_path, load_config};
+use crate::config::loader::{config_path, find_profile, load_config};
+use crate::config::schema::ProfileAuthMode;
+use crate::credentials::openai_oauth;
 use crate::credentials::store;
 use crate::infra_api;
 use jsonlogic::apply;
@@ -1449,18 +1451,28 @@ async fn run_generate_image_step(
     provider_context: &ActionProviderContext,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
-    if provider_context.provider != crate::providers::ProviderKind::OpenAi {
+    let step_profile_context =
+        resolve_generate_image_step_profile_context(step.profile.as_ref(), data, action_name)
+            .await?;
+    let effective_provider_context = step_profile_context.as_ref().unwrap_or(provider_context);
+
+    if effective_provider_context.provider != crate::providers::ProviderKind::OpenAi {
         return Err(format!(
             "Action '{}' generate_image step requires `--server openai`; current server is {}.",
             action_name,
-            provider_context.provider.display_name()
+            effective_provider_context.provider.display_name()
         ));
     }
 
-    let model =
-        resolve_generate_image_model(step.model.as_ref(), data, action_name, provider_context)?;
+    let model = resolve_generate_image_model(
+        step.model.as_ref(),
+        data,
+        action_name,
+        step_profile_context.as_ref(),
+        provider_context,
+    )?;
 
-    if provider_context
+    if effective_provider_context
         .url
         .contains("chatgpt.com/backend-api/codex")
         && model.starts_with("gpt-image")
@@ -1500,11 +1512,11 @@ async fn run_generate_image_step(
     let image_bytes = match tokio::time::timeout(
         remaining,
         crate::providers::send_openai_image_request(
-            &provider_context.url,
+            &effective_provider_context.url,
             &model,
             prompt.as_str(),
-            provider_context.inference_timeout_in_sec,
-            &provider_context.token,
+            effective_provider_context.inference_timeout_in_sec,
+            &effective_provider_context.token,
             output_format,
         ),
     )
@@ -1560,13 +1572,192 @@ async fn run_generate_image_step(
     Ok(StepExecutionOutcome::Completed)
 }
 
+fn resolve_step_profile_name(
+    profile: Option<&crate::RunArg>,
+    data: &serde_json::Value,
+    action_name: &str,
+    step_kind: &str,
+) -> Result<Option<String>, String> {
+    let Some(profile) = profile else {
+        return Ok(None);
+    };
+
+    let profile_name = match profile {
+        crate::RunArg::Literal(literal) => literal.clone(),
+        crate::RunArg::Variable(variable) => {
+            let Some(value) = lookup_action_variable(data, variable) else {
+                return Err(format!(
+                    "Action '{}' {} `profile` references missing variable '{}'.",
+                    action_name, step_kind, variable
+                ));
+            };
+
+            match value {
+                serde_json::Value::String(text) => text.clone(),
+                serde_json::Value::Bool(_) => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found boolean for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+                serde_json::Value::Number(_) => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found number for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+                serde_json::Value::Array(_) => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found array for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+                serde_json::Value::Object(_) => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found object for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+                serde_json::Value::Null => {
+                    return Err(format!(
+                        "Action '{}' {} `profile` must resolve to a string, found null for variable '{}'.",
+                        action_name, step_kind, variable
+                    ));
+                }
+            }
+        }
+    };
+
+    if profile_name.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' {} `profile` must resolve to a non-empty string.",
+            action_name, step_kind
+        ));
+    }
+
+    Ok(Some(profile_name))
+}
+
+fn resolve_profile_api_token_for_action_step(
+    profile: &crate::config::schema::Profile,
+) -> Result<String, String> {
+    match store::load_profile_token(&profile.name) {
+        Ok(Some(token)) if !token.trim().is_empty() => Ok(token),
+        Ok(Some(_)) | Ok(None) => profile
+            .token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                format!(
+                    "Missing API token for profile '{}'. Use `cargo ai profile set {} --token <TOKEN> --auth api_key`.",
+                    profile.name, profile.name
+                )
+            }),
+        Err(error) => Err(format!(
+            "Failed to load profile token for '{}': {error}",
+            profile.name
+        )),
+    }
+}
+
+async fn resolve_generate_image_step_profile_context(
+    profile: Option<&crate::RunArg>,
+    data: &serde_json::Value,
+    action_name: &str,
+) -> Result<Option<ActionProviderContext>, String> {
+    let Some(profile_name) =
+        resolve_step_profile_name(profile, data, action_name, "generate_image")?
+    else {
+        return Ok(None);
+    };
+
+    let config_file = config_path();
+    let Some(config) = load_config() else {
+        return Err(format!(
+            "Action '{}' generate_image step references profile '{}', but no Cargo AI config was found at '{}'.",
+            action_name,
+            profile_name,
+            config_file.display()
+        ));
+    };
+
+    let Some(profile) = find_profile(&config, &profile_name) else {
+        return Err(format!(
+            "Action '{}' generate_image step references unknown profile '{}'.",
+            action_name, profile_name
+        ));
+    };
+
+    let provider = crate::providers::ProviderKind::from_server_value(profile.server.as_str())
+        .ok_or_else(|| {
+            format!(
+                "Action '{}' generate_image step profile '{}' uses unsupported server '{}'.",
+                action_name, profile.name, profile.server
+            )
+        })?;
+
+    if provider != crate::providers::ProviderKind::OpenAi {
+        return Err(format!(
+            "Action '{}' generate_image step profile '{}' uses server '{}', but generate_image requires openai.",
+            action_name, profile.name, profile.server
+        ));
+    }
+
+    let mut url = profile.url.clone().unwrap_or_default();
+    let token = match profile.auth_mode {
+        ProfileAuthMode::ApiKey => resolve_profile_api_token_for_action_step(profile)?,
+        ProfileAuthMode::OpenaiAccount => {
+            url = openai_oauth::OPENAI_ACCOUNT_RESPONSES_URL.to_string();
+            openai_oauth::resolve_session_for_runtime()
+                .await
+                .map(|session| session.access_token)?
+        }
+        ProfileAuthMode::None => {
+            return Err(format!(
+                "Action '{}' generate_image step profile '{}' auth mode is '{}'. Set it to '{}' or '{}' before using it here.",
+                action_name,
+                profile.name,
+                ProfileAuthMode::None.as_str(),
+                ProfileAuthMode::ApiKey.as_str(),
+                ProfileAuthMode::OpenaiAccount.as_str()
+            ));
+        }
+    };
+
+    if url.trim().is_empty() {
+        url = provider.default_url().to_string();
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(format!(
+            "Action '{}' generate_image step profile '{}' produced invalid URL '{}'. Use an absolute URL beginning with `http://` or `https://`.",
+            action_name, profile.name, url
+        ));
+    }
+
+    Ok(Some(ActionProviderContext {
+        provider,
+        model: profile.model.clone(),
+        url,
+        token,
+        inference_timeout_in_sec: profile.timeout_in_sec,
+    }))
+}
+
 fn resolve_generate_image_model(
     model: Option<&crate::RunArg>,
     data: &serde_json::Value,
     action_name: &str,
+    step_profile_context: Option<&ActionProviderContext>,
     provider_context: &ActionProviderContext,
 ) -> Result<String, String> {
     let Some(model) = model else {
+        if let Some(step_profile_context) = step_profile_context {
+            if !step_profile_context.model.trim().is_empty() {
+                return Ok(step_profile_context.model.clone());
+            }
+        }
         if provider_context.model.trim().is_empty() {
             return Err(format!(
                 "Action '{}' generate_image step omitted `model`, and no effective invocation model is configured. Set `generate_image.model`, pass `--model`, or configure a profile model.",
@@ -1660,6 +1851,27 @@ async fn run_agent_step(
             crate::ActionExecutionMode::Sequential => "sequential",
             crate::ActionExecutionMode::Parallel => "parallel",
         });
+    }
+    if let Some(profile_name) =
+        resolve_step_profile_name(step.profile.as_ref(), data, action_name, "agent")?
+    {
+        let config_file = config_path();
+        let Some(config) = load_config() else {
+            return Err(format!(
+                "Action '{}' agent step references profile '{}', but no Cargo AI config was found at '{}'.",
+                action_name,
+                profile_name,
+                config_file.display()
+            ));
+        };
+        if find_profile(&config, &profile_name).is_none() {
+            return Err(format!(
+                "Action '{}' agent step references unknown profile '{}'.",
+                action_name, profile_name
+            ));
+        }
+        command.arg("--profile");
+        command.arg(profile_name);
     }
     let (child_args, resolution_notes) =
         child_input_args(step.input_mode, step.inputs.as_deref(), data, action_name)?;
@@ -2722,6 +2934,68 @@ mod tests {
     };
     use crate::providers::ProviderKind;
     use serde_json::json;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TestCargoHome {
+        _guard: MutexGuard<'static, ()>,
+        original_cargo_home: Option<OsString>,
+        original_disable_keychain: Option<OsString>,
+        root: PathBuf,
+    }
+
+    impl TestCargoHome {
+        fn new(config_toml: &str) -> Self {
+            let guard = ENV_LOCK
+                .lock()
+                .expect("environment lock should not be poisoned");
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be valid")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("cargo-ai-preflight-actions-{unique}"));
+            let config_path = root.join(".cargo-ai").join("config.toml");
+            fs::create_dir_all(
+                config_path
+                    .parent()
+                    .expect("config path should have a parent directory"),
+            )
+            .expect("temp config dir should be created");
+            fs::write(&config_path, config_toml).expect("temp config should be written");
+
+            let original_cargo_home = std::env::var_os("CARGO_HOME");
+            let original_disable_keychain = std::env::var_os("CARGO_AI_DISABLE_KEYCHAIN");
+            std::env::set_var("CARGO_HOME", &root);
+            std::env::set_var("CARGO_AI_DISABLE_KEYCHAIN", "1");
+
+            Self {
+                _guard: guard,
+                original_cargo_home,
+                original_disable_keychain,
+                root,
+            }
+        }
+    }
+
+    impl Drop for TestCargoHome {
+        fn drop(&mut self) {
+            match &self.original_cargo_home {
+                Some(value) => std::env::set_var("CARGO_HOME", value),
+                None => std::env::remove_var("CARGO_HOME"),
+            }
+            match &self.original_disable_keychain {
+                Some(value) => std::env::set_var("CARGO_AI_DISABLE_KEYCHAIN", value),
+                None => std::env::remove_var("CARGO_AI_DISABLE_KEYCHAIN"),
+            }
+
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
 
     fn run_step(
         program: &str,
@@ -2732,6 +3006,7 @@ mod tests {
             kind: "exec".to_string(),
             program: Some(program.to_string()),
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -2762,6 +3037,21 @@ mod tests {
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
         }
+    }
+
+    fn profile_config(profile_name: &str, server_url: &str, model: &str) -> String {
+        format!(
+            r#"
+[[profile]]
+name = "{profile_name}"
+server = "openai"
+model = "{model}"
+url = "{server_url}"
+token = "profile-token"
+timeout_in_sec = 42
+auth_mode = "api_key"
+"#
+        )
     }
 
     fn action(run: Vec<crate::RunStep>) -> crate::Action {
@@ -3245,6 +3535,7 @@ mod tests {
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
+            profile: None,
             output_variable: Some("report_listing".to_string()),
             status_variable: None,
             error_variable: None,
@@ -3282,6 +3573,7 @@ mod tests {
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -3349,6 +3641,7 @@ mod tests {
             kind: "generate_image".to_string(),
             program: None,
             model: Some(crate::RunArg::Literal("gpt-image-1".to_string())),
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -3426,6 +3719,7 @@ mod tests {
             kind: "generate_image".to_string(),
             program: None,
             model: Some(crate::RunArg::Variable("runtime.image_model".to_string())),
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -3506,6 +3800,7 @@ mod tests {
             kind: "generate_image".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -3559,6 +3854,7 @@ mod tests {
             kind: "generate_image".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -3602,6 +3898,206 @@ mod tests {
         assert!(error.contains("pass `--model`"));
     }
 
+    #[tokio::test]
+    async fn generate_image_step_uses_step_profile_model_when_explicit_model_omitted() {
+        use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+
+        let mut server = mockito::Server::new_async().await;
+        let expected_bytes = b"fake-png-step-profile";
+        let encoded_image = BASE64_STANDARD.encode(expected_bytes);
+        let _mock = server
+            .mock("POST", "/v1/images/generations")
+            .match_body(mockito::Matcher::PartialJson(
+                json!({ "model": "gpt-image-step-profile" }),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"data":[{{"b64_json":"{}"}}]}}"#,
+                encoded_image
+            ))
+            .create_async()
+            .await;
+
+        let config = profile_config(
+            "image_profile",
+            format!("{}/v1/chat/completions", server.url()).as_str(),
+            "gpt-image-step-profile",
+        );
+        let _test_env = TestCargoHome::new(&config);
+
+        let output_name = format!(
+            ".tmp-cai2067-generated-image-step-profile-{}.png",
+            std::process::id()
+        );
+        let step = crate::RunStep {
+            kind: "generate_image".to_string(),
+            program: None,
+            model: None,
+            profile: Some(crate::RunArg::Literal("image_profile".to_string())),
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![crate::RunArg::Literal(
+                "Create an image for Acme".to_string(),
+            )]),
+            path: Some(vec![crate::RunArg::Literal(output_name.clone())]),
+            subject: None,
+            text: None,
+            agent: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_generate_image_step(
+            &step,
+            &json!({}),
+            0,
+            "generate_art",
+            &provider_context(),
+            runtime_budget,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "profile-backed image generation should succeed: {result:?}"
+        );
+
+        let written_bytes =
+            std::fs::read(&output_name).expect("generated image file should be written");
+        let _ = std::fs::remove_file(&output_name);
+        assert_eq!(written_bytes, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_explicit_model_overrides_step_profile_model() {
+        use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+
+        let mut server = mockito::Server::new_async().await;
+        let expected_bytes = b"fake-png-explicit-step-model";
+        let encoded_image = BASE64_STANDARD.encode(expected_bytes);
+        let _mock = server
+            .mock("POST", "/v1/images/generations")
+            .match_body(mockito::Matcher::PartialJson(
+                json!({ "model": "gpt-image-explicit" }),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"data":[{{"b64_json":"{}"}}]}}"#,
+                encoded_image
+            ))
+            .create_async()
+            .await;
+
+        let config = profile_config(
+            "image_profile",
+            format!("{}/v1/chat/completions", server.url()).as_str(),
+            "gpt-image-step-profile",
+        );
+        let _test_env = TestCargoHome::new(&config);
+
+        let output_name = format!(
+            ".tmp-cai2067-generated-image-step-explicit-{}.png",
+            std::process::id()
+        );
+        let step = crate::RunStep {
+            kind: "generate_image".to_string(),
+            program: None,
+            model: Some(crate::RunArg::Literal("gpt-image-explicit".to_string())),
+            profile: Some(crate::RunArg::Literal("image_profile".to_string())),
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![crate::RunArg::Literal(
+                "Create an image for Acme".to_string(),
+            )]),
+            path: Some(vec![crate::RunArg::Literal(output_name.clone())]),
+            subject: None,
+            text: None,
+            agent: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_generate_image_step(
+            &step,
+            &json!({}),
+            0,
+            "generate_art",
+            &provider_context(),
+            runtime_budget,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "explicit-model image generation should succeed: {result:?}"
+        );
+
+        let written_bytes =
+            std::fs::read(&output_name).expect("generated image file should be written");
+        let _ = std::fs::remove_file(&output_name);
+        assert_eq!(written_bytes, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_rejects_unknown_step_profile() {
+        let config = profile_config(
+            "other_profile",
+            "https://api.openai.com/v1/chat/completions",
+            "gpt-image-step-profile",
+        );
+        let _test_env = TestCargoHome::new(&config);
+
+        let step = crate::RunStep {
+            kind: "generate_image".to_string(),
+            program: None,
+            model: Some(crate::RunArg::Literal("gpt-image-explicit".to_string())),
+            profile: Some(crate::RunArg::Literal("missing_profile".to_string())),
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![crate::RunArg::Literal(
+                "Create an image for Acme".to_string(),
+            )]),
+            path: Some(vec![crate::RunArg::Literal(
+                "./artifacts/missing-profile.png".to_string(),
+            )]),
+            subject: None,
+            text: None,
+            agent: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = run_generate_image_step(
+            &step,
+            &json!({}),
+            0,
+            "generate_art",
+            &provider_context(),
+            runtime_budget,
+        )
+        .await
+        .expect_err("missing profile should fail");
+
+        assert!(error.contains("unknown profile 'missing_profile'"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn agent_step_invokes_child_with_forwarded_inputs() {
@@ -3632,6 +4128,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -3738,6 +4235,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -3836,6 +4334,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -3882,6 +4381,97 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn agent_step_forwards_step_profile_to_child() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let config = profile_config(
+            "child_profile",
+            "https://api.openai.com/v1/chat/completions",
+            "gpt-5.2",
+        );
+        let _test_env = TestCargoHome::new(&config);
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let script_name = format!(".tmp-cai2067-child-profile-{}.sh", std::process::id());
+        let script_path = current_dir.join(&script_name);
+        let output_path = std::env::temp_dir().join(format!(
+            "cai2067-child-profile-args-{}.txt",
+            std::process::id()
+        ));
+
+        let script_body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+            output_path.display()
+        );
+
+        fs::write(&script_path, script_body).expect("script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            model: None,
+            profile: Some(crate::RunArg::Variable("runtime.child_profile".to_string())),
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", script_name)),
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_agent_step(
+            &step,
+            &json!({
+                "runtime": {
+                    "child_profile": "child_profile"
+                }
+            }),
+            0,
+            "invoke_child",
+            Some(crate::ActionExecutionMode::Sequential),
+            5,
+            runtime_budget,
+        )
+        .await;
+
+        let _ = fs::remove_file(&script_path);
+
+        assert!(
+            result.is_ok(),
+            "child agent invocation should succeed: {result:?}"
+        );
+
+        let args = fs::read_to_string(&output_path).expect("child output should be captured");
+        let _ = fs::remove_file(&output_path);
+
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec![
+                "--action-execution",
+                "sequential",
+                "--profile",
+                "child_profile",
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn captured_exec_output_can_flow_into_later_agent_step() {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
@@ -3910,6 +4500,7 @@ mod tests {
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
+            profile: None,
             output_variable: Some("report_listing".to_string()),
             status_variable: None,
             error_variable: None,
@@ -3932,6 +4523,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -4023,6 +4615,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -4074,6 +4667,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -4112,6 +4706,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -4150,6 +4745,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -4205,6 +4801,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -4264,6 +4861,7 @@ mod tests {
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: Some("step_status".to_string()),
             error_variable: Some("step_error".to_string()),
@@ -4286,6 +4884,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -4353,6 +4952,7 @@ mod tests {
                 kind: "exec".to_string(),
                 program: Some("/bin/sh".to_string()),
                 model: None,
+                profile: None,
                 output_variable: None,
                 status_variable: None,
                 error_variable: None,
@@ -4379,6 +4979,7 @@ mod tests {
                 kind: "agent".to_string(),
                 program: None,
                 model: None,
+                profile: None,
                 output_variable: None,
                 status_variable: None,
                 error_variable: None,
@@ -4440,6 +5041,7 @@ mod tests {
                 kind: "exec".to_string(),
                 program: Some("/bin/sh".to_string()),
                 model: None,
+                profile: None,
                 output_variable: None,
                 status_variable: None,
                 error_variable: None,
@@ -4469,6 +5071,7 @@ mod tests {
                 kind: "exec".to_string(),
                 program: Some("/bin/sh".to_string()),
                 model: None,
+                profile: None,
                 output_variable: None,
                 status_variable: None,
                 error_variable: None,
@@ -4549,6 +5152,7 @@ mod tests {
                 kind: "exec".to_string(),
                 program: Some("/bin/sh".to_string()),
                 model: None,
+                profile: None,
                 output_variable: None,
                 status_variable: None,
                 error_variable: None,
@@ -4575,6 +5179,7 @@ mod tests {
                 kind: "exec".to_string(),
                 program: Some("/bin/sh".to_string()),
                 model: None,
+                profile: None,
                 output_variable: None,
                 status_variable: None,
                 error_variable: None,
@@ -4651,6 +5256,7 @@ mod tests {
                     kind: "exec".to_string(),
                     program: Some("/bin/sh".to_string()),
                     model: None,
+                    profile: None,
                     output_variable: None,
                     status_variable: Some("abort_status".to_string()),
                     error_variable: Some("abort_error".to_string()),
@@ -4673,6 +5279,7 @@ mod tests {
                     kind: "agent".to_string(),
                     program: None,
                     model: None,
+                    profile: None,
                     output_variable: None,
                     status_variable: None,
                     error_variable: None,
@@ -4697,6 +5304,7 @@ mod tests {
                 kind: "agent".to_string(),
                 program: None,
                 model: None,
+                profile: None,
                 output_variable: None,
                 status_variable: None,
                 error_variable: None,
@@ -4758,6 +5366,7 @@ mod tests {
                     kind: "exec".to_string(),
                     program: Some("/bin/sh".to_string()),
                     model: None,
+                    profile: None,
                     output_variable: None,
                     status_variable: None,
                     error_variable: None,
@@ -4780,6 +5389,7 @@ mod tests {
                     kind: "exec".to_string(),
                     program: Some("/bin/sh".to_string()),
                     model: None,
+                    profile: None,
                     output_variable: None,
                     status_variable: None,
                     error_variable: None,
@@ -4808,6 +5418,7 @@ mod tests {
                     kind: "exec".to_string(),
                     program: Some("/bin/sh".to_string()),
                     model: None,
+                    profile: None,
                     output_variable: None,
                     status_variable: None,
                     error_variable: None,
@@ -4830,6 +5441,7 @@ mod tests {
                     kind: "exec".to_string(),
                     program: Some("/bin/sh".to_string()),
                     model: None,
+                    profile: None,
                     output_variable: None,
                     status_variable: None,
                     error_variable: None,
@@ -4905,6 +5517,7 @@ mod tests {
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: Some("step_status".to_string()),
             error_variable: Some("step_error".to_string()),
@@ -4927,6 +5540,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -4994,6 +5608,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
@@ -5064,6 +5679,7 @@ mod tests {
             kind: "agent".to_string(),
             program: None,
             model: None,
+            profile: None,
             output_variable: None,
             status_variable: None,
             error_variable: None,
