@@ -1890,7 +1890,7 @@ async fn main() {
             for line in unknown_server_messages(&server) {
                 eprintln!("{line}");
             }
-            return;
+            std::process::exit(1);
         }
     };
 
@@ -1921,7 +1921,7 @@ async fn main() {
             }
             Err(error) => {
                 eprintln!("❌ {error}");
-                return;
+                std::process::exit(1);
             }
         };
     }
@@ -1938,28 +1938,28 @@ async fn main() {
         Ok(named_inputs) => named_inputs,
         Err(error) => {
             eprintln!("❌ {error}");
-            return;
+            std::process::exit(1);
         }
     };
     let selected_inputs = match resolved_inputs_for_run(&cmd_args, &named_inputs) {
         Ok(selected_inputs) => selected_inputs,
         Err(error) => {
             eprintln!("❌ {error}");
-            return;
+            std::process::exit(1);
         }
     };
     let runtime_vars = match resolved_runtime_vars_for_run(&cmd_args) {
         Ok(runtime_vars) => runtime_vars,
         Err(error) => {
             eprintln!("❌ {error}");
-            return;
+            std::process::exit(1);
         }
     };
     let action_execution_override = match resolved_action_execution_override_for_run(&cmd_args) {
         Ok(action_execution_override) => action_execution_override,
         Err(error) => {
             eprintln!("❌ {error}");
-            return;
+            std::process::exit(1);
         }
     };
     let effective_action_execution = effective_action_execution_for_run(action_execution_override);
@@ -1973,7 +1973,7 @@ async fn main() {
         )
     {
         eprintln!("❌ {error}");
-        return;
+        std::process::exit(1);
     }
 
     if !has_output_schema_properties {
@@ -1981,7 +1981,7 @@ async fn main() {
             Ok(output) => output,
             Err(error) => {
                 eprintln!("❌ {error}");
-                return;
+                std::process::exit(1);
             }
         };
         let actions = actions();
@@ -2017,7 +2017,7 @@ async fn main() {
         for issue in validation_issues {
             eprintln!("{issue}");
         }
-        return;
+        std::process::exit(1);
     }
 
     let resolved_inputs = match crate::providers::resolve_provider_inputs(&selected_inputs).await {
@@ -2025,7 +2025,7 @@ async fn main() {
         Err(error) => {
             eprintln!("❌ Failed to resolve runtime inputs.");
             eprintln!("Reason: {error}");
-            return;
+            std::process::exit(1);
         }
     };
 
@@ -2035,7 +2035,7 @@ async fn main() {
         for issue in validation_issues {
             eprintln!("{issue}");
         }
-        return;
+        std::process::exit(1);
     }
 
     let static_context =
@@ -2054,7 +2054,7 @@ async fn main() {
                     "❌ {}",
                     current_agent_runtime_timeout_message(runtime_budget, error.as_str())
                 );
-                return;
+                std::process::exit(1);
             }
         };
 
@@ -2075,7 +2075,7 @@ async fn main() {
                 for line in provider_error_messages(&error) {
                     eprintln!("{line}");
                 }
-                return;
+                std::process::exit(1);
             }
             Err(_) => {
                 eprintln!(
@@ -2085,7 +2085,7 @@ async fn main() {
                         "while waiting for the model response"
                     )
                 );
-                return;
+                std::process::exit(1);
             }
         }
     } else if provider == ProviderKind::OpenAi {
@@ -2110,7 +2110,7 @@ async fn main() {
                     "❌ {}",
                     current_agent_runtime_timeout_message(runtime_budget, error.as_str())
                 );
-                return;
+                std::process::exit(1);
             }
         };
 
@@ -2132,7 +2132,7 @@ async fn main() {
                 for line in provider_error_messages(&error) {
                     eprintln!("{line}");
                 }
-                return;
+                std::process::exit(1);
             }
             Err(_) => {
                 eprintln!(
@@ -2142,7 +2142,7 @@ async fn main() {
                         "while waiting for the model response"
                     )
                 );
-                return;
+                std::process::exit(1);
             }
         };
     }
@@ -2150,7 +2150,7 @@ async fn main() {
     if !ai_cargo.set_response(response.clone()) {
         eprintln!("❌ LLM output did NOT conform to the required JSON schema.");
         eprintln!("Raw output received from server:\n{}\n", response);
-        return;
+        std::process::exit(1);
     }
 
     let output = match ai_cargo.get_response() {
@@ -2158,7 +2158,7 @@ async fn main() {
         None => {
             eprintln!("❌ Internal error: response was expected but missing.");
             eprintln!("Raw output received from server:\n{}\n", response);
-            return;
+            std::process::exit(1);
         }
     };
 
