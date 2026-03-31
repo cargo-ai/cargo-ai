@@ -41,6 +41,15 @@ Check for:
 - expecting runtime input flags to append to JSON `inputs` without also setting `--input-mode append` or `--input-mode prepend`
 - using a JSON `file.path` when the caller should really choose the file at invocation time
 
+### Named input confusion
+
+Check for:
+- declaring a named input slot with `name` plus `type` but no baked value, then never satisfying it before use
+- expecting anonymous runtime `--input-*` flags to satisfy a named input slot; use `--input-override NAME=VALUE` for that
+- using anonymous runtime `--input-*` on a structural action-only agent, where the model call is skipped and only named top-level inputs remain valid
+- referencing `{ "input": "<name>" }` from a child step when the parent did not declare that named top-level input
+- expecting a child to forward a named input onward without declaring the same named input locally first
+
 ### Runtime variable confusion
 
 Check for:

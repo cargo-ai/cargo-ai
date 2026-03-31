@@ -86,6 +86,9 @@ If these conflict with the local `.cargo-ai/guidance/` bundle, follow the local 
 - Prefer the most minimal portable steps that satisfy the user's goal.
 - Use platform-specific commands only when the user explicitly wants local-machine behavior or the task cannot be met portably.
 - Remember that runtime input flags replace the full baked `inputs` array by default; use `--input-mode append` or `--input-mode prepend` when the caller should keep baked inputs too.
+- Use named top-level `inputs` when one declared value should also be reusable by child-agent steps or overrideable by name at runtime.
+- Reuse a declared named top-level input inside child `agent.inputs` with `{ "input": "<name>" }`.
+- If `agent_schema.properties` is empty, Cargo AI uses the structural action-only shape: named top-level inputs are still allowed there, but anonymous runtime `--input-*` flags remain invalid and invocation-time changes should go through `--input-override NAME=VALUE`.
 - Use top-level `runtime_vars` when the caller should control action behavior or step-local settings at invocation time without editing the JSON.
 - Reference declared runtime vars as `runtime.<name>` and pass them with repeatable `--run-var name=value` flags.
 - If a `--run-var` value contains spaces or shell-sensitive characters, quote it normally for the caller's shell.

@@ -13,6 +13,7 @@ Each example is meant to be validated and hatched into a CLI executable.
   - Shows a returned summary field, a definition-owned placeholder file input, and a macOS-only local echo step using `/bin/echo`.
 - `child-agent.json`
   - Minimal child agent that can be called from a parent.
+  - Good starting point when you need a parent to forward one named top-level input with `{ "input": "<name>" }`.
 - `stop-by-default.json`
   - Shows default stop behavior when a later step should not continue after failure.
 - `continue-on-failure.json`
@@ -37,6 +38,7 @@ Each example is meant to be validated and hatched into a CLI executable.
 - Keep using the action-flow examples for `when`, `failure_mode`, and captured-variable behavior. Use `schema-features.json` when the main question is how to express the supported output fields and constraints.
 - Use `runtime-file-local-exec.json` when the main question is how file summarization, returned output, and a platform-specific local exec step fit together.
 - Use `runtime-vars-image-gating.json` when the main question is how caller-supplied typed runtime vars control action behavior or image-model selection.
+- For named reusable parent inputs and child forwarding, start from `child-agent.json` plus the named-input examples in the main README. Use top-level named `inputs` when one value should be reusable by child steps or overrideable with `--input-override NAME=VALUE`.
 - When converting a baked file example into a caller-supplied runtime file workflow, remember that `--input-file` replaces the full baked `inputs` array unless the caller also sets `--input-mode append` or `--input-mode prepend`. Supply `--input-text` too when the run stays in replace mode and still needs text instructions.
 - If the JSON becomes hard to scan, add a same-name sidecar Markdown file and an ASCII flow diagram.
 
@@ -47,3 +49,5 @@ After `cargo ai hatch <agent-name> --config <config.json> --check` passes, prefe
 1. Run one invocation that supplies `--run-var` values and proves the expected action `logic` branch executes.
 2. If the definition uses `when`, run one invocation where `when` should skip the step and one where it should pass.
 3. If the definition uses `generate_image.model`, run one invocation that sets the image model through `--run-var` and confirm the step resolves the expected model string.
+4. If the definition uses named top-level inputs, run one invocation with `--input-override NAME=VALUE` and confirm any child `{ "input": "<name>" }` forwarding resolves the overridden value.
+5. If the definition includes a required named input slot with no baked value, run one failure case too and confirm the unresolved-slot error is clear.
