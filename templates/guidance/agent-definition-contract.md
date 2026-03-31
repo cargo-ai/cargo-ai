@@ -88,7 +88,8 @@ These runtime inputs are separate from the JSON `inputs` array:
 
 Authoring guidance:
 - Use JSON `inputs` when the definition should own a fixed instruction or a fixed local file/image path.
-- Use named top-level inputs when a value should also be reusable by child-agent steps or overrideable by name.
+- Prefer named top-level inputs when a value is part of the workflow contract, reusable by child-agent steps, or overrideable by name.
+- Leave one-off root-model context unnamed when it does not need child reuse or targeted override behavior.
 - Use runtime flags when the caller should choose the content at invocation time.
 - If you use `--input-file` and still need a text instruction, either also pass `--input-text` in replace mode or choose `--input-mode append` / `--input-mode prepend` so the baked text instruction is still included.
 - `{"type":"file","path":"..."}` is for a definition-owned fixed file path, not for a caller-selected runtime file.

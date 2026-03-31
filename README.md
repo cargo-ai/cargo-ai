@@ -210,6 +210,7 @@ You can also override or inject runtime input without editing the JSON. Generate
 ```
 
 Top-level inputs may also declare optional `name`. Named inputs stay regular inputs for schema-backed agents, but they also become reusable bindings for child-agent steps and targeted runtime replacement with repeatable `--input-override NAME=VALUE`.
+As a rule of thumb, prefer `name` when an input is part of the workflow contract, reusable by child steps, or likely to be operator-overrideable. Leave one-off root-model context unnamed when it does not need that extra identity.
 
 ```json
 {

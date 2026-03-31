@@ -150,6 +150,8 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 ## Named Input Notes
 
 - Top-level inputs may declare optional `name`.
+- Prefer `name` when an input is part of the workflow contract, reusable by child steps, or intentionally operator-overrideable.
+- Keep one-off root-model context unnamed when it does not need child reuse or targeted override behavior.
 - Unnamed top-level inputs must keep a baked value.
 - Named top-level inputs may keep a baked value or act as required slots with no baked value.
 - Repeatable `--input-override NAME=VALUE` replaces declared named bindings for the current run.
