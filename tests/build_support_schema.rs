@@ -154,7 +154,48 @@ fn rejects_invalid_action_execution_values() {
 }
 
 #[test]
-fn rejects_baked_inputs_when_schema_properties_are_empty() {
+fn accepts_named_inputs_when_schema_properties_are_empty() {
+    let cfg = config_with_optional_inputs(
+        "",
+        "",
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [true, true] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./summary_agent",
+                "inputs": [
+                  { "input": "menu_image" },
+                  { "input": "menu_note" }
+                ]
+              }
+            ]
+          }
+        ]"#,
+        Some(
+            r#"[
+        { "name": "menu_image", "type": "image", "path": "./artifacts/menu.png" },
+        { "name": "menu_note", "type": "text" }
+    ]"#,
+        ),
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains(
+        "Input { name: Some(\"menu_image\".to_string()), kind: InputKind::Image, value: Some(\"./artifacts/menu.png\".to_string()) }"
+    ));
+    assert!(generated.contains(
+        "Input { name: Some(\"menu_note\".to_string()), kind: InputKind::Text, value: None }"
+    ));
+    assert!(generated.contains("ActionInput::Named { input: \"menu_image\".to_string() }"));
+    assert!(generated.contains("ActionInput::Named { input: \"menu_note\".to_string() }"));
+}
+
+#[test]
+fn rejects_unnamed_inputs_when_schema_properties_are_empty() {
     let cfg = config_with_optional_inputs(
         "",
         "",
@@ -170,8 +211,43 @@ fn rejects_baked_inputs_when_schema_properties_are_empty() {
         .unwrap_err()
         .to_string();
 
-    assert!(err.contains("$.inputs"));
-    assert!(err.contains("are not allowed when `agent_schema.properties` is empty"));
+    assert!(err.contains("$.inputs[0].name"));
+    assert!(err.contains("must declare `name`"));
+}
+
+#[test]
+fn rejects_unknown_named_child_input_reference() {
+    let cfg = config_with_optional_inputs(
+        "",
+        "",
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [true, true] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./summary_agent",
+                "inputs": [
+                  { "input": "missing_input" }
+                ]
+              }
+            ]
+          }
+        ]"#,
+        Some(
+            r#"[
+        { "name": "menu_image", "type": "image", "path": "./artifacts/menu.png" }
+    ]"#,
+        ),
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].inputs[0].input"));
+    assert!(err.contains("unknown named top-level input `missing_input`"));
 }
 
 #[test]
@@ -1330,7 +1406,9 @@ fn accepts_pdf_file_inputs() {
 
     let generated = build_support::generate_agent_model_from_str(cfg).unwrap();
 
-    assert!(generated.contains("Input::File { path: \"./reports/q1.pdf\".to_string() }"));
+    assert!(generated.contains(
+        "Input { name: None, kind: InputKind::File, value: Some(\"./reports/q1.pdf\".to_string()) }"
+    ));
 }
 
 #[test]
@@ -1351,7 +1429,9 @@ fn accepts_docx_file_inputs() {
 
     let generated = build_support::generate_agent_model_from_str(cfg).unwrap();
 
-    assert!(generated.contains("Input::File { path: \"./reports/q1.docx\".to_string() }"));
+    assert!(generated.contains(
+        "Input { name: None, kind: InputKind::File, value: Some(\"./reports/q1.docx\".to_string()) }"
+    ));
 }
 
 #[test]
@@ -1372,7 +1452,9 @@ fn accepts_csv_file_inputs() {
 
     let generated = build_support::generate_agent_model_from_str(cfg).unwrap();
 
-    assert!(generated.contains("Input::File { path: \"./reports/q1.csv\".to_string() }"));
+    assert!(generated.contains(
+        "Input { name: None, kind: InputKind::File, value: Some(\"./reports/q1.csv\".to_string()) }"
+    ));
 }
 
 #[test]
@@ -1404,7 +1486,7 @@ fn accepts_phase_three_file_inputs() {
 
         assert!(
             generated.contains(&format!(
-                "Input::File {{ path: \"./reports/q1.{extension}\".to_string() }}"
+                "Input {{ name: None, kind: InputKind::File, value: Some(\"./reports/q1.{extension}\".to_string()) }}"
             )),
             "generated code should preserve the {extension} path"
         );

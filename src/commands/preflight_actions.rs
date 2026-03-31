@@ -665,6 +665,7 @@ pub(crate) async fn apply_actions(
     output: &crate::Output,
     actions: &[crate::Action],
     runtime_vars: &serde_json::Map<String, serde_json::Value>,
+    named_inputs: &[crate::Input],
     action_execution: crate::ActionExecutionMode,
     action_execution_override: Option<crate::ActionExecutionMode>,
     provider_context: &ActionProviderContext,
@@ -685,12 +686,14 @@ pub(crate) async fn apply_actions(
                 }
             };
             let current_platform = current_action_platform();
+            let named_input_lookup = named_input_lookup(named_inputs);
             print_action_execution_header(action_execution);
             let top_level_failures = match action_execution {
                 crate::ActionExecutionMode::Sequential => {
                     apply_actions_sequential(
                         actions,
                         &data,
+                        &named_input_lookup,
                         current_platform,
                         action_execution_override,
                         provider_context,
@@ -704,6 +707,7 @@ pub(crate) async fn apply_actions(
                     apply_actions_parallel(
                         actions,
                         &data,
+                        &named_input_lookup,
                         current_platform,
                         action_execution_override,
                         provider_context,
@@ -747,6 +751,7 @@ pub(crate) async fn apply_actions(
 async fn apply_actions_sequential(
     actions: &[crate::Action],
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, crate::Input>,
     current_platform: Option<&'static str>,
     action_execution_override: Option<crate::ActionExecutionMode>,
     provider_context: &ActionProviderContext,
@@ -772,6 +777,7 @@ async fn apply_actions_sequential(
                 action_index,
                 action,
                 data,
+                named_inputs,
                 current_platform,
                 action_execution_override,
                 provider_context,
@@ -794,6 +800,7 @@ async fn apply_actions_sequential(
 async fn apply_actions_parallel(
     actions: &[crate::Action],
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, crate::Input>,
     current_platform: Option<&'static str>,
     action_execution_override: Option<crate::ActionExecutionMode>,
     provider_context: &ActionProviderContext,
@@ -818,6 +825,7 @@ async fn apply_actions_parallel(
 
         let action_clone = action.clone();
         let data_clone = data.clone();
+        let named_inputs_clone = named_inputs.clone();
         let provider_context_clone = provider_context.clone();
         let abort_signal_clone = abort_signal.clone();
         let action_output_clone = action_output.clone();
@@ -828,6 +836,7 @@ async fn apply_actions_parallel(
                     action_index,
                     &action_clone,
                     &data_clone,
+                    &named_inputs_clone,
                     current_platform,
                     action_execution_override,
                     &provider_context_clone,
@@ -857,6 +866,16 @@ async fn apply_actions_parallel(
     }
 
     Ok(top_level_failures)
+}
+
+fn named_input_lookup(inputs: &[crate::Input]) -> BTreeMap<String, crate::Input> {
+    let mut named = BTreeMap::new();
+    for input in inputs {
+        if let Some(name) = input.name.as_ref() {
+            named.insert(name.clone(), input.clone());
+        }
+    }
+    named
 }
 
 fn action_logic_matches(
@@ -915,6 +934,7 @@ async fn run_matching_action_steps(
     action_index: usize,
     action: &crate::Action,
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, crate::Input>,
     current_platform: Option<&'static str>,
     action_execution_override: Option<crate::ActionExecutionMode>,
     provider_context: &ActionProviderContext,
@@ -992,6 +1012,7 @@ async fn run_matching_action_steps(
             run_agent_step(
                 step,
                 &action_data,
+                named_inputs,
                 action_index,
                 &action.name,
                 action_execution_override,
@@ -1819,6 +1840,7 @@ fn resolve_generate_image_model(
 async fn run_agent_step(
     step: &crate::RunStep,
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, crate::Input>,
     action_index: usize,
     action_name: &str,
     action_execution_override: Option<crate::ActionExecutionMode>,
@@ -1873,8 +1895,13 @@ async fn run_agent_step(
         command.arg("--profile");
         command.arg(profile_name);
     }
-    let (child_args, resolution_notes) =
-        child_input_args(step.input_mode, step.inputs.as_deref(), data, action_name)?;
+    let (child_args, resolution_notes) = child_input_args(
+        step.input_mode,
+        step.inputs.as_deref(),
+        data,
+        action_name,
+        named_inputs,
+    )?;
     for note in resolution_notes {
         print_action_line(action_index, action_name, note.as_str());
     }
@@ -2585,6 +2612,7 @@ fn child_input_args(
     inputs: Option<&[crate::ActionInput]>,
     data: &serde_json::Value,
     action_name: &str,
+    named_inputs: &BTreeMap<String, crate::Input>,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut args = Vec::new();
     let mut notes = Vec::new();
@@ -2685,6 +2713,32 @@ fn child_input_args(
                             resolved
                         ));
                     }
+                }
+                crate::ActionInput::Named { input } => {
+                    let forwarded = named_inputs.get(input).ok_or_else(|| {
+                        format!(
+                            "Action '{}' child-agent named input '{}' is not available for forwarding.",
+                            action_name, input
+                        )
+                    })?;
+                    let value = forwarded.value.as_deref().ok_or_else(|| {
+                        format!(
+                            "Action '{}' child-agent named input '{}' is required but unresolved for this invocation.",
+                            action_name, input
+                        )
+                    })?;
+                    let payload = crate::Input {
+                        name: Some(input.clone()),
+                        kind: forwarded.kind,
+                        value: Some(value.to_string()),
+                    };
+                    args.push("--forwarded-input".to_string());
+                    args.push(serde_json::to_string(&payload).map_err(|error| {
+                        format!(
+                            "Action '{}' failed to serialize forwarded named input '{}': {}",
+                            action_name, input, error
+                        )
+                    })?);
                 }
             }
         }
@@ -3071,6 +3125,18 @@ auth_mode = "api_key"
             .collect()
     }
 
+    fn no_named_inputs() -> std::collections::BTreeMap<String, crate::Input> {
+        std::collections::BTreeMap::new()
+    }
+
+    fn named_input(name: &str, kind: crate::InputKind, value: Option<&str>) -> crate::Input {
+        crate::Input {
+            name: Some(name.to_string()),
+            kind,
+            value: value.map(str::to_string),
+        }
+    }
+
     #[test]
     fn platformless_steps_match_supported_platforms() {
         assert!(step_matches_platform(None, Some("macos")));
@@ -3233,6 +3299,7 @@ auth_mode = "api_key"
             ]),
             &json!({}),
             "demo",
+            &no_named_inputs(),
         )
         .expect("child input args should resolve");
 
@@ -3261,6 +3328,7 @@ auth_mode = "api_key"
             }]),
             &json!({}),
             "demo",
+            &no_named_inputs(),
         )
         .expect("child input args should resolve");
 
@@ -3278,6 +3346,7 @@ auth_mode = "api_key"
             None,
             &json!({}),
             "demo",
+            &no_named_inputs(),
         )
         .unwrap_err();
 
@@ -3307,6 +3376,7 @@ auth_mode = "api_key"
                 "report_filename": "q1.pdf"
             }),
             "demo",
+            &no_named_inputs(),
         )
         .expect("dynamic child input args should resolve");
 
@@ -3335,6 +3405,7 @@ auth_mode = "api_key"
                 "source_url": "ftp://example.com/report"
             }),
             "demo",
+            &no_named_inputs(),
         )
         .unwrap_err();
 
@@ -3355,6 +3426,7 @@ auth_mode = "api_key"
                 "report_filename": "q1.exe"
             }),
             "demo",
+            &no_named_inputs(),
         )
         .unwrap_err();
 
@@ -3372,10 +3444,60 @@ auth_mode = "api_key"
                 "image_path": "../diagram.png"
             }),
             "demo",
+            &no_named_inputs(),
         )
         .unwrap_err();
 
         assert!(error.contains("parent traversal"));
+    }
+
+    #[test]
+    fn child_input_args_forward_named_inputs_as_hidden_runtime_payloads() {
+        let (args, notes) = child_input_args(
+            None,
+            Some(&[crate::ActionInput::Named {
+                input: "menu_image".to_string(),
+            }]),
+            &json!({}),
+            "demo",
+            &std::collections::BTreeMap::from([(
+                "menu_image".to_string(),
+                named_input(
+                    "menu_image",
+                    crate::InputKind::Image,
+                    Some("./artifacts/menu.png"),
+                ),
+            )]),
+        )
+        .expect("named child input args should resolve");
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "--forwarded-input");
+        let payload: crate::Input =
+            serde_json::from_str(&args[1]).expect("forwarded input payload should deserialize");
+        assert_eq!(payload.name.as_deref(), Some("menu_image"));
+        assert_eq!(payload.kind, crate::InputKind::Image);
+        assert_eq!(payload.value.as_deref(), Some("./artifacts/menu.png"));
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn child_input_args_reject_unresolved_named_inputs() {
+        let error = child_input_args(
+            None,
+            Some(&[crate::ActionInput::Named {
+                input: "menu_image".to_string(),
+            }]),
+            &json!({}),
+            "demo",
+            &std::collections::BTreeMap::from([(
+                "menu_image".to_string(),
+                named_input("menu_image", crate::InputKind::Image, None),
+            )]),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("required but unresolved"));
     }
 
     #[test]
@@ -3612,7 +3734,7 @@ auth_mode = "api_key"
         let snapshot = output.snapshot_lines_for_test();
         assert!(snapshot
             .iter()
-            .any(|line| line == "[A1 raw_exec] completed"));
+            .any(|line| line.starts_with("[A1 raw_exec] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
         assert!(snapshot.iter().any(|line| line == "    alpha"));
         assert!(snapshot.iter().any(|line| line == "    beta"));
@@ -4171,6 +4293,7 @@ auth_mode = "api_key"
                 "customer": "world",
                 "report_filename": "report.pdf"
             }),
+            &no_named_inputs(),
             0,
             "invoke_child",
             None,
@@ -4265,6 +4388,7 @@ auth_mode = "api_key"
                 run_agent_step(
                     &step,
                     &json!({}),
+                    &no_named_inputs(),
                     0,
                     "child_summary",
                     None,
@@ -4290,7 +4414,7 @@ auth_mode = "api_key"
         let snapshot = output.snapshot_lines_for_test();
         assert!(snapshot
             .iter()
-            .any(|line| line == "[A1 child_summary] completed"));
+            .any(|line| line.starts_with("[A1 child_summary] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
         assert!(snapshot
             .iter()
@@ -4355,6 +4479,7 @@ auth_mode = "api_key"
         let result = run_agent_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "invoke_child",
             Some(crate::ActionExecutionMode::Sequential),
@@ -4441,6 +4566,7 @@ auth_mode = "api_key"
                     "child_profile": "child_profile"
                 }
             }),
+            &no_named_inputs(),
             0,
             "invoke_child",
             Some(crate::ActionExecutionMode::Sequential),
@@ -4563,6 +4689,7 @@ auth_mode = "api_key"
         let result = run_agent_step(
             &agent_step,
             &action_data,
+            &no_named_inputs(),
             0,
             "capture_then_agent",
             None,
@@ -4636,6 +4763,7 @@ auth_mode = "api_key"
         let result = run_agent_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "invoke_child",
             None,
@@ -4688,6 +4816,7 @@ auth_mode = "api_key"
         let error = run_agent_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "invoke_child",
             None,
@@ -4727,6 +4856,7 @@ auth_mode = "api_key"
         let error = run_agent_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "invoke_child",
             None,
@@ -4766,6 +4896,7 @@ auth_mode = "api_key"
         let error = run_agent_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "invoke_child",
             None,
@@ -4822,6 +4953,7 @@ auth_mode = "api_key"
         let error = run_agent_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "invoke_child",
             None,
@@ -4906,6 +5038,7 @@ auth_mode = "api_key"
             &crate::Output { answer: 4 },
             &[action(vec![failing_step, second_step])],
             &serde_json::Map::new(),
+            &[],
             crate::ActionExecutionMode::Sequential,
             None,
             &provider_context(),
@@ -5002,6 +5135,7 @@ auth_mode = "api_key"
             &crate::Output { answer: 4 },
             &[first_action, second_action],
             &serde_json::Map::new(),
+            &[],
             crate::ActionExecutionMode::Sequential,
             None,
             &provider_context(),
@@ -5104,6 +5238,7 @@ auth_mode = "api_key"
             &output,
             &actions,
             &runtime_vars,
+            &[],
             crate::ActionExecutionMode::Parallel,
             None,
             &provider_context,
@@ -5206,6 +5341,7 @@ auth_mode = "api_key"
             &crate::Output { answer: 4 },
             &actions,
             &serde_json::Map::new(),
+            &[],
             crate::ActionExecutionMode::Parallel,
             None,
             &provider_context(),
@@ -5327,6 +5463,7 @@ auth_mode = "api_key"
             &crate::Output { answer: 4 },
             &[first_action, second_action],
             &serde_json::Map::new(),
+            &[],
             crate::ActionExecutionMode::Sequential,
             None,
             &provider_context(),
@@ -5471,6 +5608,7 @@ auth_mode = "api_key"
             &crate::Output { answer: 4 },
             &[first_action, second_action],
             &serde_json::Map::new(),
+            &[],
             crate::ActionExecutionMode::Parallel,
             None,
             &provider_context(),
@@ -5562,6 +5700,7 @@ auth_mode = "api_key"
             &crate::Output { answer: 4 },
             &[action(vec![failing_step, second_step])],
             &serde_json::Map::new(),
+            &[],
             crate::ActionExecutionMode::Sequential,
             None,
             &provider_context(),
@@ -5635,6 +5774,7 @@ auth_mode = "api_key"
             &crate::Output { answer: 4 },
             &[action],
             &runtime_vars(&[("generate_images", json!(true))]),
+            &[],
             crate::ActionExecutionMode::Sequential,
             None,
             &provider_context(),
@@ -5701,6 +5841,7 @@ auth_mode = "api_key"
             &crate::Output { answer: 4 },
             &[action(vec![step])],
             &runtime_vars(&[("generate_images", json!(true))]),
+            &[],
             crate::ActionExecutionMode::Sequential,
             None,
             &provider_context(),

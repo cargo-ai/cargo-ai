@@ -91,12 +91,19 @@ impl Error for BuildError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputKind {
+    Text,
+    Url,
+    Image,
+    File,
+}
+
 #[derive(Debug, Clone)]
-enum InputSpec {
-    Text { text: String },
-    Url { url: String },
-    Image { path: String },
-    File { path: String },
+struct InputSpec {
+    name: Option<String>,
+    kind: InputKind,
+    value: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +112,7 @@ enum ActionInputSpec {
     Url { url: Vec<RunArg> },
     Image { path: Vec<RunArg> },
     File { path: Vec<RunArg> },
+    Named { input: String },
 }
 
 #[derive(Debug, Clone)]
@@ -442,16 +450,16 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
         parsed_properties.push(parsed_property);
     }
 
-    if parsed_properties.is_empty() && root_obj.contains_key("inputs") {
-        return Err(BuildError::config(
-            "$.inputs",
-            "top-level `inputs` are not allowed when `agent_schema.properties` is empty; remove `inputs` or declare at least one schema property",
-        ));
-    }
-
-    let inputs = parse_inputs(root_obj)?;
+    let has_output_schema_properties = !parsed_properties.is_empty();
+    let inputs = parse_inputs(root_obj, has_output_schema_properties)?;
+    let named_input_kinds = named_input_kinds(&inputs);
     let action_field_types = action_field_types(&schema_field_types, &runtime_vars);
-    let actions = parse_actions(root_obj, &schema_field_types, &action_field_types)?;
+    let actions = parse_actions(
+        root_obj,
+        &schema_field_types,
+        &action_field_types,
+        &named_input_kinds,
+    )?;
 
     Ok(AgentConfig {
         inputs,
@@ -562,17 +570,24 @@ fn is_leap_year(year: u32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
-fn parse_inputs(root_obj: &Map<String, Value>) -> Result<Vec<InputSpec>, BuildError> {
+fn parse_inputs(
+    root_obj: &Map<String, Value>,
+    has_output_schema_properties: bool,
+) -> Result<Vec<InputSpec>, BuildError> {
     let Some(inputs_value) = root_obj.get("inputs") else {
         return Ok(Vec::new());
     };
     let inputs = inputs_value
         .as_array()
         .ok_or_else(|| BuildError::config("$.inputs", "expected an array"))?;
-    parse_input_specs(inputs, "$.inputs")
+    parse_input_specs(inputs, "$.inputs", has_output_schema_properties)
 }
 
-fn parse_input_specs(inputs: &[Value], base_path: &str) -> Result<Vec<InputSpec>, BuildError> {
+fn parse_input_specs(
+    inputs: &[Value],
+    base_path: &str,
+    has_output_schema_properties: bool,
+) -> Result<Vec<InputSpec>, BuildError> {
     if inputs.is_empty() {
         return Err(BuildError::config(
             base_path,
@@ -581,50 +596,53 @@ fn parse_input_specs(inputs: &[Value], base_path: &str) -> Result<Vec<InputSpec>
     }
 
     let mut parsed = Vec::with_capacity(inputs.len());
+    let mut seen_names = BTreeSet::new();
     for (index, entry) in inputs.iter().enumerate() {
         let path = format!("{base_path}[{index}]");
         let entry_obj = expect_object(entry, &path)?;
+        let name = parse_optional_named_input_name(entry_obj, &path)?;
+        if !has_output_schema_properties && name.is_none() {
+            return Err(BuildError::config(
+                format!("{path}.name"),
+                "top-level `inputs` in the structural action-only shape must declare `name` because they are reusable parent-owned inputs only",
+            ));
+        }
+        if let Some(name) = name.as_ref() {
+            if !seen_names.insert(name.clone()) {
+                return Err(BuildError::config(
+                    format!("{path}.name"),
+                    format!("duplicate named input `{name}`"),
+                ));
+            }
+        }
         let input_type = get_required_string(entry_obj, "type", &path)?
             .trim()
             .to_ascii_lowercase();
 
         let input = match input_type.as_str() {
-            "text" => InputSpec::Text {
-                text: get_required_string(entry_obj, "text", &path)?.to_string(),
+            "text" => InputSpec {
+                name,
+                kind: InputKind::Text,
+                value: parse_optional_top_level_input_value(entry_obj, "text", &path)?,
             },
-            "url" => InputSpec::Url {
-                url: get_required_string(entry_obj, "url", &path)?.to_string(),
+            "url" => InputSpec {
+                name,
+                kind: InputKind::Url,
+                value: parse_optional_top_level_input_value(entry_obj, "url", &path)?,
             },
-            "image" => InputSpec::Image {
-                path: {
-                    let image_path = get_required_string(entry_obj, "path", &path)?
-                        .trim()
-                        .to_string();
-                    validate_definition_owned_local_path(
-                        &image_path,
-                        &format!("{path}.path"),
-                        "image input",
-                    )?;
-                    image_path
-                },
+            "image" => InputSpec {
+                name,
+                kind: InputKind::Image,
+                value: parse_optional_validated_definition_owned_input_path(
+                    entry_obj, "image", &path,
+                )?,
             },
-            "file" => InputSpec::File {
-                path: {
-                    let file_path = get_required_string(entry_obj, "path", &path)?
-                        .trim()
-                        .to_string();
-                    validate_definition_owned_local_path(
-                        &file_path,
-                        &format!("{path}.path"),
-                        "file input",
-                    )?;
-                    validate_supported_file_extension(
-                        &file_path,
-                        &format!("{path}.path"),
-                        "file input",
-                    )?;
-                    file_path
-                },
+            "file" => InputSpec {
+                name,
+                kind: InputKind::File,
+                value: parse_optional_validated_definition_owned_input_path(
+                    entry_obj, "file", &path,
+                )?,
             },
             _ => {
                 return Err(BuildError::config(
@@ -636,16 +654,90 @@ fn parse_input_specs(inputs: &[Value], base_path: &str) -> Result<Vec<InputSpec>
             }
         };
 
+        if input.value.is_none() && input.name.is_none() {
+            let value_path = match input.kind {
+                InputKind::Text => format!("{path}.text"),
+                InputKind::Url => format!("{path}.url"),
+                InputKind::Image | InputKind::File => format!("{path}.path"),
+            };
+            return Err(BuildError::config(
+                value_path,
+                "unnamed top-level inputs must include a baked value",
+            ));
+        }
+
         parsed.push(input);
     }
 
     Ok(parsed)
 }
 
+fn parse_optional_named_input_name(
+    entry_obj: &Map<String, Value>,
+    parent_path: &str,
+) -> Result<Option<String>, BuildError> {
+    let Some(value) = entry_obj.get("name") else {
+        return Ok(None);
+    };
+    let path = format!("{parent_path}.name");
+    let name = value
+        .as_str()
+        .ok_or_else(|| BuildError::config(&path, "expected a string"))?;
+    validate_named_input_name(name, &path)?;
+    Ok(Some(name.to_string()))
+}
+
+fn parse_optional_top_level_input_value(
+    entry_obj: &Map<String, Value>,
+    key: &str,
+    parent_path: &str,
+) -> Result<Option<String>, BuildError> {
+    let Some(value) = entry_obj.get(key) else {
+        return Ok(None);
+    };
+    let path = format!("{parent_path}.{key}");
+    let value = value
+        .as_str()
+        .ok_or_else(|| BuildError::config(&path, "expected a string"))?;
+    Ok(Some(value.to_string()))
+}
+
+fn parse_optional_validated_definition_owned_input_path(
+    entry_obj: &Map<String, Value>,
+    input_kind: &str,
+    parent_path: &str,
+) -> Result<Option<String>, BuildError> {
+    let Some(value) = entry_obj.get("path") else {
+        return Ok(None);
+    };
+    let path = format!("{parent_path}.path");
+    let raw_path = value
+        .as_str()
+        .ok_or_else(|| BuildError::config(&path, "expected a string"))?
+        .trim()
+        .to_string();
+    validate_definition_owned_local_path(&raw_path, &path, &format!("{input_kind} input"))?;
+    if input_kind == "file" {
+        validate_supported_file_extension(&raw_path, &path, "file input")?;
+    }
+    Ok(Some(raw_path))
+}
+
+fn named_input_kinds(inputs: &[InputSpec]) -> BTreeMap<String, InputKind> {
+    let mut kinds = BTreeMap::new();
+    for input in inputs {
+        if let Some(name) = input.name.as_ref() {
+            kinds.insert(name.clone(), input.kind);
+        }
+    }
+    kinds
+}
+
 fn parse_actions(
     root_obj: &Map<String, Value>,
     schema_field_types: &BTreeMap<String, FieldType>,
     action_field_types: &BTreeMap<String, FieldType>,
+    named_input_kinds: &BTreeMap<String, InputKind>,
 ) -> Result<Vec<Action>, BuildError> {
     let actions = get_required_array(root_obj, "actions", "$")?;
     let mut parsed = Vec::with_capacity(actions.len());
@@ -947,6 +1039,7 @@ fn parse_actions(
                                 input_array,
                                 &input_path,
                                 &available_field_types,
+                                named_input_kinds,
                             )?)
                         }
                         None => None,
@@ -1416,6 +1509,35 @@ fn validate_runtime_var_name(name: &str, path: &str) -> Result<(), BuildError> {
     validate_reserved_top_level_name(name, path)
 }
 
+fn validate_named_input_name(name: &str, path: &str) -> Result<(), BuildError> {
+    if name.trim().is_empty() {
+        return Err(BuildError::config(path, "named input name cannot be empty"));
+    }
+
+    if name != name.trim() {
+        return Err(BuildError::config(
+            path,
+            "named input names cannot start or end with whitespace",
+        ));
+    }
+
+    if name.chars().any(char::is_whitespace) {
+        return Err(BuildError::config(
+            path,
+            "named input names cannot contain whitespace",
+        ));
+    }
+
+    if name.contains('.') {
+        return Err(BuildError::config(
+            path,
+            "named input names must be flat; nested names with `.` are not supported",
+        ));
+    }
+
+    validate_reserved_top_level_name(name, path)
+}
+
 fn parse_runtime_var_type(spec: &Map<String, Value>, path: &str) -> Result<FieldType, BuildError> {
     let schema_type = get_schema_type(spec, path)?;
     match schema_type.as_str() {
@@ -1522,6 +1644,7 @@ fn parse_action_input_specs(
     inputs: &[Value],
     base_path: &str,
     schema_field_types: &BTreeMap<String, FieldType>,
+    named_input_kinds: &BTreeMap<String, InputKind>,
 ) -> Result<Vec<ActionInputSpec>, BuildError> {
     if inputs.is_empty() {
         return Err(BuildError::config(
@@ -1534,6 +1657,28 @@ fn parse_action_input_specs(
     for (index, entry) in inputs.iter().enumerate() {
         let path = format!("{base_path}[{index}]");
         let entry_obj = expect_object(entry, &path)?;
+        if let Some(named_input_value) = entry_obj.get("input") {
+            if entry_obj.len() != 1 {
+                return Err(BuildError::config(
+                    &path,
+                    "named child input references must use exactly `{ \"input\": \"<name>\" }`",
+                ));
+            }
+            let input_name = named_input_value
+                .as_str()
+                .ok_or_else(|| BuildError::config(format!("{path}.input"), "expected a string"))?;
+            validate_named_input_name(input_name, &format!("{path}.input"))?;
+            if !named_input_kinds.contains_key(input_name) {
+                return Err(BuildError::config(
+                    format!("{path}.input"),
+                    format!("unknown named top-level input `{input_name}`"),
+                ));
+            }
+            parsed.push(ActionInputSpec::Named {
+                input: input_name.to_string(),
+            });
+            continue;
+        }
         let input_type = get_required_string(entry_obj, "type", &path)?
             .trim()
             .to_ascii_lowercase();
@@ -1592,7 +1737,7 @@ fn parse_action_input_specs(
                 return Err(BuildError::config(
                     format!("{path}.type"),
                     format!(
-                        "unsupported input type `{input_type}` (supported: `text`, `url`, `image`, `file`)"
+                        "unsupported input type `{input_type}` (supported: `text`, `url`, `image`, `file`; or use `{{ \"input\": \"<name>\" }}`)"
                     ),
                 ));
             }
@@ -2788,24 +2933,26 @@ fn render_agent_model(config: &AgentConfig) -> String {
     }
 
     for input in &config.inputs {
-        let rendered = match input {
-            InputSpec::Text { text } => format!(
-                "        Input::Text {{ text: {}.to_string() }},\n",
-                rust_string_literal(text)
-            ),
-            InputSpec::Url { url } => format!(
-                "        Input::Url {{ url: {}.to_string() }},\n",
-                rust_string_literal(url)
-            ),
-            InputSpec::Image { path } => format!(
-                "        Input::Image {{ path: {}.to_string() }},\n",
-                rust_string_literal(path)
-            ),
-            InputSpec::File { path } => format!(
-                "        Input::File {{ path: {}.to_string() }},\n",
-                rust_string_literal(path)
-            ),
+        let kind = match input.kind {
+            InputKind::Text => "InputKind::Text",
+            InputKind::Url => "InputKind::Url",
+            InputKind::Image => "InputKind::Image",
+            InputKind::File => "InputKind::File",
         };
+        let name = input
+            .name
+            .as_ref()
+            .map(|value| format!("Some({}.to_string())", rust_string_literal(value)))
+            .unwrap_or_else(|| "None".to_string());
+        let value = input
+            .value
+            .as_ref()
+            .map(|value| format!("Some({}.to_string())", rust_string_literal(value)))
+            .unwrap_or_else(|| "None".to_string());
+        let rendered = format!(
+            "        Input {{ name: {}, kind: {}, value: {} }},\n",
+            name, kind, value
+        );
         input_list.push_str(&rendered);
     }
 
@@ -2908,6 +3055,10 @@ fn render_agent_model(config: &AgentConfig) -> String {
                                 ActionInputSpec::File { path } => format!(
                                     "ActionInput::File {{ path: vec![{}] }}",
                                     render_run_arg_parts(path)
+                                ),
+                                ActionInputSpec::Named { input } => format!(
+                                    "ActionInput::Named {{ input: {}.to_string() }}",
+                                    rust_string_literal(input)
                                 ),
                             })
                             .collect::<Vec<_>>()
@@ -3061,12 +3212,30 @@ impl crate::providers::ValidatedResponse for Output {{
 
 {validation_helpers}
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum InputKind {{
+    Text,
+    Url,
+    Image,
+    File,
+}}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum Input {{
-    Text {{ text: String }},
-    Url {{ url: String }},
-    Image {{ path: String }},
-    File {{ path: String }},
+pub struct Input {{
+    pub name: Option<String>,
+    pub kind: InputKind,
+    pub value: Option<String>,
+}}
+
+impl Input {{
+    pub fn kind_label(&self) -> &'static str {{
+        match self.kind {{
+            InputKind::Text => "text",
+            InputKind::Url => "url",
+            InputKind::Image => "image",
+            InputKind::File => "file",
+        }}
+    }}
 }}
 
 pub fn inputs() -> Vec<Input> {{
@@ -3138,6 +3307,7 @@ pub enum ActionInput {{
     Url {{ url: Vec<RunArg> }},
     Image {{ path: Vec<RunArg> }},
     File {{ path: Vec<RunArg> }},
+    Named {{ input: String }},
 }}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

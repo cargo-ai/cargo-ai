@@ -1395,24 +1395,69 @@ fn apply_profile(profile: &Profile, server: &mut String, model: &mut String, tim
     }
 }
 
-fn runtime_input_overrides(cmd_args: &clap::ArgMatches) -> Vec<Input> {
+fn runtime_input_overrides(cmd_args: &clap::ArgMatches) -> Result<Vec<Input>, String> {
     let mut ordered = Vec::new();
 
     collect_flagged_inputs(cmd_args, "input_text")
         .into_iter()
-        .for_each(|(index, value)| ordered.push((index, Input::Text { text: value })));
+        .for_each(|(index, value)| {
+            ordered.push((
+                index,
+                Input {
+                    name: None,
+                    kind: InputKind::Text,
+                    value: Some(value),
+                },
+            ))
+        });
     collect_flagged_inputs(cmd_args, "input_url")
         .into_iter()
-        .for_each(|(index, value)| ordered.push((index, Input::Url { url: value })));
+        .for_each(|(index, value)| {
+            ordered.push((
+                index,
+                Input {
+                    name: None,
+                    kind: InputKind::Url,
+                    value: Some(value),
+                },
+            ))
+        });
     collect_flagged_inputs(cmd_args, "input_image")
         .into_iter()
-        .for_each(|(index, value)| ordered.push((index, Input::Image { path: value })));
+        .for_each(|(index, value)| {
+            ordered.push((
+                index,
+                Input {
+                    name: None,
+                    kind: InputKind::Image,
+                    value: Some(value),
+                },
+            ))
+        });
     collect_flagged_inputs(cmd_args, "input_file")
         .into_iter()
-        .for_each(|(index, value)| ordered.push((index, Input::File { path: value })));
+        .for_each(|(index, value)| {
+            ordered.push((
+                index,
+                Input {
+                    name: None,
+                    kind: InputKind::File,
+                    value: Some(value),
+                },
+            ))
+        });
+    for (index, raw_value) in collect_flagged_inputs(cmd_args, "forwarded_input") {
+        let input = serde_json::from_str::<Input>(&raw_value).map_err(|error| {
+            format!(
+                "Internal error: invalid forwarded input payload '{}': {}",
+                raw_value, error
+            )
+        })?;
+        ordered.push((index, input));
+    }
 
     ordered.sort_by_key(|(index, _)| *index);
-    ordered.into_iter().map(|(_, input)| input).collect()
+    Ok(ordered.into_iter().map(|(_, input)| input).collect())
 }
 
 fn runtime_input_mode(cmd_args: &clap::ArgMatches) -> Result<RuntimeInputMode, String> {
@@ -1436,8 +1481,57 @@ fn collect_flagged_inputs(cmd_args: &clap::ArgMatches, id: &str) -> Vec<(usize, 
     }
 }
 
-fn resolved_inputs_for_run(cmd_args: &clap::ArgMatches) -> Result<Vec<Input>, String> {
-    let runtime_inputs = runtime_input_overrides(cmd_args);
+fn resolved_named_inputs_for_run(cmd_args: &clap::ArgMatches) -> Result<Vec<Input>, String> {
+    let mut named_inputs = inputs();
+
+    for raw_assignment in cmd_args
+        .get_many::<String>("input_override")
+        .into_iter()
+        .flatten()
+    {
+        let (name, raw_value) = parse_input_override_assignment(raw_assignment)?;
+        let input = named_inputs
+            .iter_mut()
+            .find(|input| input.name.as_deref() == Some(name.as_str()))
+            .ok_or_else(|| {
+                format!(
+                    "Named input override '{}' is not declared in top-level `inputs`.",
+                    name
+                )
+            })?;
+
+        input.value = Some(validate_input_override_value(input.kind, &raw_value, &name)?);
+    }
+
+    let forwarded_inputs = runtime_input_overrides(cmd_args)?;
+    for forwarded in &forwarded_inputs {
+        let Some(name) = forwarded.name.as_deref() else {
+            continue;
+        };
+        if let Some(local_named_input) = named_inputs
+            .iter_mut()
+            .find(|input| input.name.as_deref() == Some(name))
+        {
+            if local_named_input.kind != forwarded.kind {
+                return Err(format!(
+                    "Forwarded named input '{}' expected kind '{}' but received '{}'.",
+                    name,
+                    local_named_input.kind_label(),
+                    forwarded.kind_label()
+                ));
+            }
+            local_named_input.value = forwarded.value.clone();
+        }
+    }
+
+    Ok(named_inputs)
+}
+
+fn resolved_inputs_for_run(
+    cmd_args: &clap::ArgMatches,
+    named_inputs: &[Input],
+) -> Result<Vec<Input>, String> {
+    let runtime_inputs = runtime_input_overrides(cmd_args)?;
 
     if runtime_inputs.is_empty() {
         if cmd_args.get_one::<String>("input_mode").is_some() {
@@ -1446,23 +1540,91 @@ fn resolved_inputs_for_run(cmd_args: &clap::ArgMatches) -> Result<Vec<Input>, St
                     .to_string(),
             );
         }
-        return Ok(inputs());
+        return Ok(named_inputs.to_vec());
     }
 
     let input_mode = runtime_input_mode(cmd_args)?;
     Ok(match input_mode {
         RuntimeInputMode::Replace => runtime_inputs,
         RuntimeInputMode::Append => {
-            let mut selected_inputs = inputs();
+            let mut selected_inputs = named_inputs.to_vec();
             selected_inputs.extend(runtime_inputs);
             selected_inputs
         }
         RuntimeInputMode::Prepend => {
             let mut selected_inputs = runtime_inputs;
-            selected_inputs.extend(inputs());
+            selected_inputs.extend(named_inputs.to_vec());
             selected_inputs
         }
     })
+}
+
+fn parse_input_override_assignment(raw_assignment: &str) -> Result<(String, String), String> {
+    let Some((name, raw_value)) = raw_assignment.split_once('=') else {
+        return Err(format!(
+            "Invalid --input-override assignment '{}'. Expected NAME=VALUE.",
+            raw_assignment
+        ));
+    };
+
+    if name.trim().is_empty() {
+        return Err(format!(
+            "Invalid --input-override assignment '{}'. Input name cannot be empty.",
+            raw_assignment
+        ));
+    }
+    if name != name.trim() || name.chars().any(char::is_whitespace) || name.contains('.') {
+        return Err(format!(
+            "Invalid --input-override assignment '{}'. Input names must be flat and cannot contain whitespace.",
+            raw_assignment
+        ));
+    }
+
+    Ok((name.to_string(), raw_value.to_string()))
+}
+
+fn validate_input_override_value(
+    kind: InputKind,
+    raw_value: &str,
+    name: &str,
+) -> Result<String, String> {
+    match kind {
+        InputKind::Text => Ok(raw_value.to_string()),
+        InputKind::Url => {
+            if raw_value.starts_with("http://") || raw_value.starts_with("https://") {
+                Ok(raw_value.to_string())
+            } else {
+                Err(format!(
+                    "Named input override '{}' must be an absolute http(s) URL.",
+                    name
+                ))
+            }
+        }
+        InputKind::Image => Ok(raw_value.to_string()),
+        InputKind::File => {
+            validate_runtime_file_extension(raw_value, name)?;
+            Ok(raw_value.to_string())
+        }
+    }
+}
+
+fn validate_runtime_file_extension(path: &str, name: &str) -> Result<(), String> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    match extension.as_deref() {
+        Some(
+            "pdf" | "docx" | "csv" | "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlsx" | "xlt"
+            | "xlw" | "tsv" | "iif" | "doc" | "dot" | "odt" | "rtf" | "pot" | "ppa" | "pps"
+            | "ppt" | "pptx" | "pwz" | "wiz",
+        ) => Ok(()),
+        _ => Err(format!(
+            "Named input override '{}' must use a supported file extension: {}.",
+            name, SUPPORTED_FILE_EXTENSIONS_MESSAGE
+        )),
+    }
 }
 
 fn resolved_action_execution_override_for_run(
@@ -1485,14 +1647,27 @@ fn effective_action_execution_for_run(
 
 fn validate_structural_action_only_inputs(
     has_output_schema_properties: bool,
+    named_inputs: &[Input],
     selected_inputs: &[Input],
 ) -> Result<(), String> {
     if has_output_schema_properties || selected_inputs.is_empty() {
         return Ok(());
     }
 
+    let declared_named_inputs = named_inputs
+        .iter()
+        .filter_map(|input| input.name.as_deref())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    if selected_inputs
+        .iter()
+        .all(|input| input.name.as_deref().is_some_and(|name| declared_named_inputs.contains(name)))
+    {
+        return Ok(());
+    }
+
     Err(
-        "This agent declares empty `agent_schema.properties`; runtime model-facing input flags such as --input-text, --input-url, --input-image, and --input-file are not allowed because there is no model pass to consume them."
+        "This agent declares empty `agent_schema.properties`; anonymous runtime model-facing input flags such as --input-text, --input-url, --input-image, and --input-file are not allowed because there is no model pass to consume them. Use declared named top-level inputs and --input-override instead."
             .to_string(),
     )
 }
@@ -1759,7 +1934,14 @@ async fn main() {
         }
     }
 
-    let selected_inputs = match resolved_inputs_for_run(&cmd_args) {
+    let named_inputs = match resolved_named_inputs_for_run(&cmd_args) {
+        Ok(named_inputs) => named_inputs,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            return;
+        }
+    };
+    let selected_inputs = match resolved_inputs_for_run(&cmd_args, &named_inputs) {
         Ok(selected_inputs) => selected_inputs,
         Err(error) => {
             eprintln!("❌ {error}");
@@ -1784,7 +1966,11 @@ async fn main() {
     let has_output_schema_properties = has_output_schema_properties();
 
     if let Err(error) =
-        validate_structural_action_only_inputs(has_output_schema_properties, &selected_inputs)
+        validate_structural_action_only_inputs(
+            has_output_schema_properties,
+            &named_inputs,
+            &selected_inputs,
+        )
     {
         eprintln!("❌ {error}");
         return;
@@ -1811,6 +1997,7 @@ async fn main() {
                 &output,
                 &actions,
                 &runtime_vars,
+                &named_inputs,
                 effective_action_execution,
                 action_execution_override,
                 config.as_ref(),
@@ -1988,6 +2175,7 @@ async fn main() {
             &output,
             &actions,
             &runtime_vars,
+            &named_inputs,
             effective_action_execution,
             action_execution_override,
             config.as_ref(),
@@ -2006,6 +2194,7 @@ async fn apply_actions(
     output: &Output,
     actions: &[Action],
     runtime_vars: &serde_json::Map<String, serde_json::Value>,
+    named_inputs: &[Input],
     action_execution: ActionExecutionMode,
     action_execution_override: Option<ActionExecutionMode>,
     config: Option<&config::schema::Config>,
@@ -2021,6 +2210,7 @@ async fn apply_actions(
                 format!("Failed to serialize output for action evaluation: {error}")
             })?;
             let current_platform = current_action_platform();
+            let named_input_lookup = named_input_lookup(named_inputs);
             let invocation_started_at = Instant::now();
             print_action_execution_header(action_execution);
             let top_level_failures = match action_execution {
@@ -2028,6 +2218,7 @@ async fn apply_actions(
                     apply_actions_sequential(
                         actions,
                         &data,
+                        &named_input_lookup,
                         current_platform,
                         action_execution_override,
                         action_secret_store_mode,
@@ -2042,6 +2233,7 @@ async fn apply_actions(
                     apply_actions_parallel(
                         actions,
                         &data,
+                        &named_input_lookup,
                         current_platform,
                         action_execution_override,
                         action_secret_store_mode,
@@ -2086,6 +2278,7 @@ async fn apply_actions(
 async fn apply_actions_sequential(
     actions: &[Action],
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, Input>,
     current_platform: Option<&'static str>,
     action_execution_override: Option<ActionExecutionMode>,
     action_secret_store_mode: Option<SecretStoreMode>,
@@ -2112,6 +2305,7 @@ async fn apply_actions_sequential(
                 action_index,
                 action,
                 data,
+                named_inputs,
                 current_platform,
                 action_execution_override,
                 action_secret_store_mode,
@@ -2135,6 +2329,7 @@ async fn apply_actions_sequential(
 async fn apply_actions_parallel(
     actions: &[Action],
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, Input>,
     current_platform: Option<&'static str>,
     action_execution_override: Option<ActionExecutionMode>,
     action_secret_store_mode: Option<SecretStoreMode>,
@@ -2160,6 +2355,7 @@ async fn apply_actions_parallel(
 
         let action_clone = action.clone();
         let data_clone = data.clone();
+        let named_inputs_clone = named_inputs.clone();
         let provider_context_clone = provider_context.clone();
         let abort_signal_clone = abort_signal.clone();
         let action_output_clone = action_output.clone();
@@ -2170,6 +2366,7 @@ async fn apply_actions_parallel(
                     action_index,
                     &action_clone,
                     &data_clone,
+                    &named_inputs_clone,
                     current_platform,
                     action_execution_override,
                     action_secret_store_mode,
@@ -2200,6 +2397,16 @@ async fn apply_actions_parallel(
     }
 
     Ok(top_level_failures)
+}
+
+fn named_input_lookup(inputs: &[Input]) -> BTreeMap<String, Input> {
+    let mut named = BTreeMap::new();
+    for input in inputs {
+        if let Some(name) = input.name.as_ref() {
+            named.insert(name.clone(), input.clone());
+        }
+    }
+    named
 }
 
 fn action_logic_matches(action_index: usize, action: &Action, data: &serde_json::Value) -> bool {
@@ -2254,6 +2461,7 @@ async fn run_matching_action_steps(
     action_index: usize,
     action: &Action,
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, Input>,
     current_platform: Option<&'static str>,
     action_execution_override: Option<ActionExecutionMode>,
     action_secret_store_mode: Option<SecretStoreMode>,
@@ -2327,6 +2535,7 @@ async fn run_matching_action_steps(
             run_agent_step(
                 step,
                 &action_data,
+                named_inputs,
                 action_index,
                 &action.name,
                 action_execution_override,
@@ -3048,6 +3257,7 @@ fn resolve_generate_image_model(
 async fn run_agent_step(
     step: &RunStep,
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, Input>,
     action_index: usize,
     action_name: &str,
     action_execution_override: Option<ActionExecutionMode>,
@@ -3100,8 +3310,13 @@ async fn run_agent_step(
         command.arg("--profile");
         command.arg(profile_name);
     }
-    let (child_args, resolution_notes) =
-        child_input_args(step.input_mode, step.inputs.as_deref(), data, action_name)?;
+    let (child_args, resolution_notes) = child_input_args(
+        step.input_mode,
+        step.inputs.as_deref(),
+        data,
+        action_name,
+        named_inputs,
+    )?;
     for note in resolution_notes {
         print_action_line(action_index, action_name, note.as_str());
     }
@@ -3559,6 +3774,7 @@ fn child_input_args(
     inputs: Option<&[ActionInput]>,
     data: &serde_json::Value,
     action_name: &str,
+    named_inputs: &BTreeMap<String, Input>,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut args = Vec::new();
     let mut notes = Vec::new();
@@ -3659,6 +3875,34 @@ fn child_input_args(
                             resolved
                         ));
                     }
+                }
+                ActionInput::Named { input } => {
+                    let forwarded = named_inputs.get(input).ok_or_else(|| {
+                        format!(
+                            "Action '{}' child-agent named input '{}' is not available for forwarding.",
+                            action_name, input
+                        )
+                    })?;
+                    let value = forwarded.value.as_deref().ok_or_else(|| {
+                        format!(
+                            "Action '{}' child-agent named input '{}' is required but unresolved for this invocation.",
+                            action_name, input
+                        )
+                    })?;
+                    let payload = Input {
+                        name: Some(input.clone()),
+                        kind: forwarded.kind,
+                        value: Some(value.to_string()),
+                    };
+                    args.push("--forwarded-input".to_string());
+                    args.push(
+                        serde_json::to_string(&payload).map_err(|error| {
+                            format!(
+                                "Action '{}' failed to serialize forwarded named input '{}': {}",
+                                action_name, input, error
+                            )
+                        })?,
+                    );
                 }
             }
         }

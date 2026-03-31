@@ -209,6 +209,23 @@ You can also override or inject runtime input without editing the JSON. Generate
 ./my_agent --input-text "What is 3 + 3?"
 ```
 
+Top-level inputs may also declare optional `name`. Named inputs stay regular inputs for schema-backed agents, but they also become reusable bindings for child-agent steps and targeted runtime replacement with repeatable `--input-override NAME=VALUE`.
+
+```json
+{
+  "inputs": [
+    { "name": "menu_image", "type": "image" },
+    { "name": "menu_note", "type": "text", "text": "Use the attached menu image as the source of truth." }
+  ]
+}
+```
+
+```bash
+./my_agent \
+  --input-override menu_image=./artifacts/menu-spring.png \
+  --input-override menu_note="Use the spring menu."
+```
+
 You can also declare typed runtime variables for action control and step-local settings. Define them under top-level `runtime_vars`, pass values with repeatable `--run-var name=value`, and reference them in JSON as `runtime.<name>`.
 
 ```json
@@ -228,14 +245,16 @@ You can also declare typed runtime variables for action control and step-local s
 
 Quote `--run-var` values when your shell would otherwise split them, for example `--run-var subject="Quarterly Review"`.
 
-You can also author a structural action-only worker by leaving `agent_schema.properties` empty and omitting top-level `inputs`. In that shape, Cargo AI skips the initial model pass and starts directly at action `logic`, which can read declared `runtime.*` values.
+You can also author a structural action-only worker by leaving `agent_schema.properties` empty. In that shape, Cargo AI skips the initial model pass and starts directly at action `logic`, which can read declared `runtime.*` values. Top-level named `inputs` are still allowed there as reusable parent-owned inputs for child forwarding.
 
 ```json
 {
   "version": "2026-03-03.r1",
+  "inputs": [
+    { "name": "menu_image", "type": "image" }
+  ],
   "runtime_vars": {
-    "generate_images": { "type": "boolean", "default": true },
-    "hero_image_model": { "type": "string" }
+    "generate_images": { "type": "boolean", "default": true }
   },
   "agent_schema": {
     "type": "object",
@@ -247,15 +266,21 @@ You can also author a structural action-only worker by leaving `agent_schema.pro
       "logic": { "==": [{ "var": "runtime.generate_images" }, true] },
       "run": [
         {
-          "kind": "generate_image",
-          "model": { "var": "runtime.hero_image_model" },
-          "prompt": "Create the launch image.",
-          "path": "./artifacts/launch.png"
+          "kind": "agent",
+          "agent": "./child_renderer",
+          "inputs": [
+            { "input": "menu_image" },
+            { "type": "text", "text": "Create the launch image." }
+          ]
         }
       ]
     }
   ]
 }
+```
+
+```bash
+./launch_parent --input-override menu_image=./artifacts/menu-spring.png
 ```
 
 ## Start Simple, Then Expand
@@ -307,6 +332,17 @@ File input:
 }
 ```
 
+Named input:
+
+```json
+{
+  "inputs": [
+    { "name": "menu_image", "type": "image" },
+    { "name": "menu_note", "type": "text", "text": "Use the attached menu image." }
+  ]
+}
+```
+
 <details>
 <summary>Expanded example: multiple inputs with related scoring</summary>
 
@@ -346,7 +382,7 @@ Multiple inputs with related scoring:
 }
 ```
 
-You can override the baked inputs any time you run the generated agent. By default, runtime input flags replace the configured `inputs` for that execution, and the runtime input order is preserved exactly as you pass it on the command line. Use `--input-mode append` to keep baked inputs first, or `--input-mode prepend` to keep runtime inputs first.
+You can override the baked inputs any time you run the generated agent. By default, runtime input flags replace the configured `inputs` for that execution, and the runtime input order is preserved exactly as you pass it on the command line. Use `--input-mode append` to keep baked inputs first, or `--input-mode prepend` to keep runtime inputs first. When you need to target one declared named input specifically, use repeatable `--input-override NAME=VALUE`.
 
 ```bash
 ./agent_x \
@@ -675,8 +711,13 @@ Use child agents when one agent needs to hand work to another agent.
 - By default, an agent can call child agents up to `5` levels deep. Override that with `--max-agent-depth`.
 - By default, the parent plus any child agents share a total runtime budget of `600` seconds. Override that with `--max-runtime-in-sec`.
 - A parent can pass inputs to a child and record whether the child succeeded or failed.
+- A parent can also reuse one declared named top-level input explicitly inside child `inputs` with `{ "input": "<name>" }`.
 - Child `agent` steps may set `input_mode` to `replace`, `append`, or `prepend` when they also provide child `inputs`.
+- Named child-input reuse is explicit only. Cargo AI does not automatically inherit every named parent input into the child.
+- If a middle agent wants to pass the same named input to its own child, it should declare the same named top-level input locally first.
 - A parent cannot automatically pull the child's structured return fields back into its own output.
+
+Assume the parent definition also declares `{ "name": "menu_image", "type": "image" }` at top level.
 
 Example:
 
@@ -689,6 +730,7 @@ Example:
   "status_variable": "child_status",
   "error_variable": "child_error",
   "inputs": [
+    { "input": "menu_image" },
     {
       "type": "text",
       "text": ["Follow up on this review: ", { "var": "reason" }]
@@ -696,6 +738,16 @@ Example:
   ]
 }
 ```
+
+For schema-backed agents, `--input-override` and anonymous runtime inputs operate at different layers. This is valid:
+
+```bash
+./menu_agent \
+  --input-override menu_image=./artifacts/menu-spring.png \
+  --input-text "Ignore baked inputs and use this prompt"
+```
+
+In that case, the root model input list is replaced by the runtime text, but child steps that use `{ "input": "menu_image" }` still receive the named override.
 
 ## Build In Any Editor
 

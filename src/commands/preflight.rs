@@ -198,16 +198,52 @@ fn runtime_input_overrides(sub_m: &ArgMatches) -> Vec<crate::Input> {
 
     collect_flagged_inputs(sub_m, "input_text")
         .into_iter()
-        .for_each(|(index, value)| ordered.push((index, crate::Input::Text { text: value })));
+        .for_each(|(index, value)| {
+            ordered.push((
+                index,
+                crate::Input {
+                    name: None,
+                    kind: crate::InputKind::Text,
+                    value: Some(value),
+                },
+            ))
+        });
     collect_flagged_inputs(sub_m, "input_url")
         .into_iter()
-        .for_each(|(index, value)| ordered.push((index, crate::Input::Url { url: value })));
+        .for_each(|(index, value)| {
+            ordered.push((
+                index,
+                crate::Input {
+                    name: None,
+                    kind: crate::InputKind::Url,
+                    value: Some(value),
+                },
+            ))
+        });
     collect_flagged_inputs(sub_m, "input_image")
         .into_iter()
-        .for_each(|(index, value)| ordered.push((index, crate::Input::Image { path: value })));
+        .for_each(|(index, value)| {
+            ordered.push((
+                index,
+                crate::Input {
+                    name: None,
+                    kind: crate::InputKind::Image,
+                    value: Some(value),
+                },
+            ))
+        });
     collect_flagged_inputs(sub_m, "input_file")
         .into_iter()
-        .for_each(|(index, value)| ordered.push((index, crate::Input::File { path: value })));
+        .for_each(|(index, value)| {
+            ordered.push((
+                index,
+                crate::Input {
+                    name: None,
+                    kind: crate::InputKind::File,
+                    value: Some(value),
+                },
+            ))
+        });
 
     ordered.sort_by_key(|(index, _)| *index);
     ordered.into_iter().map(|(_, input)| input).collect()
@@ -234,7 +270,37 @@ fn collect_flagged_inputs(sub_m: &ArgMatches, id: &str) -> Vec<(usize, String)> 
     }
 }
 
-fn resolved_inputs_for_run(sub_m: &ArgMatches) -> Result<Vec<crate::Input>, String> {
+fn resolved_named_inputs_for_run(sub_m: &ArgMatches) -> Result<Vec<crate::Input>, String> {
+    let mut named_inputs = crate::inputs();
+
+    for raw_assignment in sub_m
+        .get_many::<String>("input_override")
+        .into_iter()
+        .flatten()
+    {
+        let (name, raw_value) = parse_input_override_assignment(raw_assignment)?;
+        let input = named_inputs
+            .iter_mut()
+            .find(|input| input.name.as_deref() == Some(name.as_str()))
+            .ok_or_else(|| {
+                format!(
+                    "Named input override '{}' is not declared in top-level `inputs`.",
+                    name
+                )
+            })?;
+
+        input.value = Some(validate_input_override_value(
+            input.kind, &raw_value, &name,
+        )?);
+    }
+
+    Ok(named_inputs)
+}
+
+fn resolved_inputs_for_run(
+    sub_m: &ArgMatches,
+    named_inputs: &[crate::Input],
+) -> Result<Vec<crate::Input>, String> {
     let runtime_inputs = runtime_input_overrides(sub_m);
 
     if runtime_inputs.is_empty() {
@@ -244,35 +310,118 @@ fn resolved_inputs_for_run(sub_m: &ArgMatches) -> Result<Vec<crate::Input>, Stri
                     .to_string(),
             );
         }
-        return Ok(crate::inputs());
+        return Ok(named_inputs.to_vec());
     }
 
     let input_mode = runtime_input_mode(sub_m)?;
     Ok(match input_mode {
         RuntimeInputMode::Replace => runtime_inputs,
         RuntimeInputMode::Append => {
-            let mut selected_inputs = crate::inputs();
+            let mut selected_inputs = named_inputs.to_vec();
             selected_inputs.extend(runtime_inputs);
             selected_inputs
         }
         RuntimeInputMode::Prepend => {
             let mut selected_inputs = runtime_inputs;
-            selected_inputs.extend(crate::inputs());
+            selected_inputs.extend(named_inputs.to_vec());
             selected_inputs
         }
     })
 }
 
+fn parse_input_override_assignment(raw_assignment: &str) -> Result<(String, String), String> {
+    let Some((name, raw_value)) = raw_assignment.split_once('=') else {
+        return Err(format!(
+            "Invalid --input-override assignment '{}'. Expected NAME=VALUE.",
+            raw_assignment
+        ));
+    };
+
+    if name.trim().is_empty() {
+        return Err(format!(
+            "Invalid --input-override assignment '{}'. Input name cannot be empty.",
+            raw_assignment
+        ));
+    }
+    if name != name.trim() || name.chars().any(char::is_whitespace) || name.contains('.') {
+        return Err(format!(
+            "Invalid --input-override assignment '{}'. Input names must be flat and cannot contain whitespace.",
+            raw_assignment
+        ));
+    }
+
+    Ok((name.to_string(), raw_value.to_string()))
+}
+
+fn validate_input_override_value(
+    kind: crate::InputKind,
+    raw_value: &str,
+    name: &str,
+) -> Result<String, String> {
+    match kind {
+        crate::InputKind::Text => Ok(raw_value.to_string()),
+        crate::InputKind::Url => {
+            if raw_value.starts_with("http://") || raw_value.starts_with("https://") {
+                Ok(raw_value.to_string())
+            } else {
+                Err(format!(
+                    "Named input override '{}' must be an absolute http(s) URL.",
+                    name
+                ))
+            }
+        }
+        crate::InputKind::Image => Ok(raw_value.to_string()),
+        crate::InputKind::File => {
+            validate_runtime_file_extension(raw_value, name)?;
+            Ok(raw_value.to_string())
+        }
+    }
+}
+
+fn validate_runtime_file_extension(path: &str, name: &str) -> Result<(), String> {
+    let extension = std::path::Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    match extension.as_deref() {
+        Some(
+            "pdf" | "docx" | "csv" | "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlsx" | "xlt"
+            | "xlw" | "tsv" | "iif" | "doc" | "dot" | "odt" | "rtf" | "pot" | "ppa" | "pps"
+            | "ppt" | "pptx" | "pwz" | "wiz",
+        ) => Ok(()),
+        _ => Err(format!(
+            "Named input override '{}' must use a supported file extension: pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz.",
+            name
+        )),
+    }
+}
+
 fn validate_structural_action_only_inputs(
     has_output_schema_properties: bool,
+    named_inputs: &[crate::Input],
     selected_inputs: &[crate::Input],
 ) -> Result<(), String> {
     if has_output_schema_properties || selected_inputs.is_empty() {
         return Ok(());
     }
 
+    let declared_named_inputs = named_inputs
+        .iter()
+        .filter_map(|input| input.name.as_deref())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    if selected_inputs.iter().all(|input| {
+        input
+            .name
+            .as_deref()
+            .is_some_and(|name| declared_named_inputs.contains(name))
+    }) {
+        return Ok(());
+    }
+
     Err(
-        "This agent declares empty `agent_schema.properties`; runtime model-facing input flags such as --input-text, --input-url, --input-image, and --input-file are not allowed because there is no model pass to consume them."
+        "This agent declares empty `agent_schema.properties`; anonymous runtime model-facing input flags such as --input-text, --input-url, --input-image, and --input-file are not allowed because there is no model pass to consume them. Use declared named top-level inputs and --input-override instead."
             .to_string(),
     )
 }
@@ -603,7 +752,14 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         }
     }
 
-    let selected_inputs = match resolved_inputs_for_run(sub_m) {
+    let named_inputs = match resolved_named_inputs_for_run(sub_m) {
+        Ok(named_inputs) => named_inputs,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            return false;
+        }
+    };
+    let selected_inputs = match resolved_inputs_for_run(sub_m, &named_inputs) {
         Ok(selected_inputs) => selected_inputs,
         Err(error) => {
             eprintln!("❌ {error}");
@@ -627,9 +783,11 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     let effective_action_execution = effective_action_execution_for_run(action_execution_override);
     let has_output_schema_properties = crate::has_output_schema_properties();
 
-    if let Err(error) =
-        validate_structural_action_only_inputs(has_output_schema_properties, &selected_inputs)
-    {
+    if let Err(error) = validate_structural_action_only_inputs(
+        has_output_schema_properties,
+        &named_inputs,
+        &selected_inputs,
+    ) {
         eprintln!("❌ {error}");
         return false;
     }
@@ -655,6 +813,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             &output,
             &actions,
             &runtime_vars,
+            &named_inputs,
             effective_action_execution,
             action_execution_override,
             &action_provider_context,
@@ -847,6 +1006,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         &output,
         &actions,
         &runtime_vars,
+        &named_inputs,
         effective_action_execution,
         action_execution_override,
         &action_provider_context,
@@ -875,6 +1035,10 @@ mod tests {
 
     fn input_debug_strings(inputs: &[crate::Input]) -> Vec<String> {
         inputs.iter().map(|input| format!("{input:?}")).collect()
+    }
+
+    fn resolved_named_inputs(preflight: &clap::ArgMatches) -> Vec<crate::Input> {
+        super::resolved_named_inputs_for_run(preflight).expect("named inputs should resolve")
     }
 
     fn matches(args: &[&str]) -> clap::ArgMatches {
@@ -1100,18 +1264,89 @@ mod tests {
 
         let overrides = super::runtime_input_overrides(preflight);
         assert_eq!(overrides.len(), 3);
-        assert!(matches!(
-            &overrides[0],
-            crate::Input::Text { text } if text == "hello"
-        ));
-        assert!(matches!(
-            &overrides[1],
-            crate::Input::File { path } if path == "./report.pdf"
-        ));
-        assert!(matches!(
-            &overrides[2],
-            crate::Input::Url { url } if url == "https://example.com"
-        ));
+        assert_eq!(overrides[0].kind, crate::InputKind::Text);
+        assert_eq!(overrides[0].value.as_deref(), Some("hello"));
+        assert_eq!(overrides[1].kind, crate::InputKind::File);
+        assert_eq!(overrides[1].value.as_deref(), Some("./report.pdf"));
+        assert_eq!(overrides[2].kind, crate::InputKind::Url);
+        assert_eq!(overrides[2].value.as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn parse_input_override_assignment_splits_on_first_equals() {
+        let (name, value) = super::parse_input_override_assignment("menu_note=a=b=c")
+            .expect("override assignment should parse");
+
+        assert_eq!(name, "menu_note");
+        assert_eq!(value, "a=b=c");
+    }
+
+    #[test]
+    fn parse_input_override_assignment_rejects_invalid_name() {
+        let error = super::parse_input_override_assignment("menu note=value")
+            .expect_err("whitespace in input names should fail");
+
+        assert!(error.contains("Input names must be flat"));
+    }
+
+    #[test]
+    fn validate_input_override_value_applies_kind_specific_rules() {
+        assert_eq!(
+            super::validate_input_override_value(crate::InputKind::Text, "", "menu_note")
+                .expect("empty text should be allowed"),
+            ""
+        );
+        assert_eq!(
+            super::validate_input_override_value(
+                crate::InputKind::Url,
+                "https://example.com/menu",
+                "source_url"
+            )
+            .expect("valid urls should pass"),
+            "https://example.com/menu"
+        );
+        assert_eq!(
+            super::validate_input_override_value(
+                crate::InputKind::Image,
+                "./artifacts/menu.png",
+                "menu_image"
+            )
+            .expect("valid image paths should pass"),
+            "./artifacts/menu.png"
+        );
+        assert_eq!(
+            super::validate_input_override_value(
+                crate::InputKind::File,
+                "./reports/menu.pdf",
+                "source_doc"
+            )
+            .expect("valid file paths should pass"),
+            "./reports/menu.pdf"
+        );
+    }
+
+    #[test]
+    fn validate_input_override_value_rejects_invalid_url() {
+        let error = super::validate_input_override_value(
+            crate::InputKind::Url,
+            "ftp://example.com",
+            "source_url",
+        )
+        .expect_err("non-http urls should fail");
+
+        assert!(error.contains("must be an absolute http(s) URL"));
+    }
+
+    #[test]
+    fn validate_input_override_value_rejects_unsupported_file_extension() {
+        let error = super::validate_input_override_value(
+            crate::InputKind::File,
+            "./reports/menu.exe",
+            "source_doc",
+        )
+        .expect_err("unsupported file extensions should fail");
+
+        assert!(error.contains("supported file extension"));
     }
 
     #[test]
@@ -1128,18 +1363,15 @@ mod tests {
             .subcommand_matches("preflight")
             .expect("preflight subcommand should parse");
 
-        let selected_inputs =
-            super::resolved_inputs_for_run(preflight).expect("replace mode should resolve");
+        let named_inputs = resolved_named_inputs(preflight);
+        let selected_inputs = super::resolved_inputs_for_run(preflight, &named_inputs)
+            .expect("replace mode should resolve");
 
         assert_eq!(selected_inputs.len(), 2);
-        assert!(matches!(
-            &selected_inputs[0],
-            crate::Input::Text { text } if text == "hello"
-        ));
-        assert!(matches!(
-            &selected_inputs[1],
-            crate::Input::File { path } if path == "./report.pdf"
-        ));
+        assert_eq!(selected_inputs[0].kind, crate::InputKind::Text);
+        assert_eq!(selected_inputs[0].value.as_deref(), Some("hello"));
+        assert_eq!(selected_inputs[1].kind, crate::InputKind::File);
+        assert_eq!(selected_inputs[1].value.as_deref(), Some("./report.pdf"));
     }
 
     #[test]
@@ -1160,22 +1392,31 @@ mod tests {
             .subcommand_matches("preflight")
             .expect("preflight subcommand should parse");
 
-        let selected_inputs =
-            super::resolved_inputs_for_run(preflight).expect("append mode should resolve");
+        let named_inputs = resolved_named_inputs(preflight);
+        let selected_inputs = super::resolved_inputs_for_run(preflight, &named_inputs)
+            .expect("append mode should resolve");
 
         assert_eq!(selected_inputs.len(), baked_inputs.len() + 2);
         assert_eq!(
             input_debug_strings(&selected_inputs[..baked_inputs.len()]),
             baked_debug
         );
-        assert!(matches!(
-            &selected_inputs[baked_inputs.len()],
-            crate::Input::File { path } if path == "./report.pdf"
-        ));
-        assert!(matches!(
-            &selected_inputs[baked_inputs.len() + 1],
-            crate::Input::Text { text } if text == "hello"
-        ));
+        assert_eq!(
+            selected_inputs[baked_inputs.len()].kind,
+            crate::InputKind::File
+        );
+        assert_eq!(
+            selected_inputs[baked_inputs.len()].value.as_deref(),
+            Some("./report.pdf")
+        );
+        assert_eq!(
+            selected_inputs[baked_inputs.len() + 1].kind,
+            crate::InputKind::Text
+        );
+        assert_eq!(
+            selected_inputs[baked_inputs.len() + 1].value.as_deref(),
+            Some("hello")
+        );
     }
 
     #[test]
@@ -1196,18 +1437,18 @@ mod tests {
             .subcommand_matches("preflight")
             .expect("preflight subcommand should parse");
 
-        let selected_inputs =
-            super::resolved_inputs_for_run(preflight).expect("prepend mode should resolve");
+        let named_inputs = resolved_named_inputs(preflight);
+        let selected_inputs = super::resolved_inputs_for_run(preflight, &named_inputs)
+            .expect("prepend mode should resolve");
 
         assert_eq!(selected_inputs.len(), baked_inputs.len() + 2);
-        assert!(matches!(
-            &selected_inputs[0],
-            crate::Input::Url { url } if url == "https://example.com"
-        ));
-        assert!(matches!(
-            &selected_inputs[1],
-            crate::Input::Image { path } if path == "./image.png"
-        ));
+        assert_eq!(selected_inputs[0].kind, crate::InputKind::Url);
+        assert_eq!(
+            selected_inputs[0].value.as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(selected_inputs[1].kind, crate::InputKind::Image);
+        assert_eq!(selected_inputs[1].value.as_deref(), Some("./image.png"));
         assert_eq!(input_debug_strings(&selected_inputs[2..]), baked_debug);
     }
 
@@ -1218,7 +1459,8 @@ mod tests {
             .subcommand_matches("preflight")
             .expect("preflight subcommand should parse");
 
-        let error = super::resolved_inputs_for_run(preflight)
+        let named_inputs = resolved_named_inputs(preflight);
+        let error = super::resolved_inputs_for_run(preflight, &named_inputs)
             .expect_err("missing runtime inputs should fail");
 
         assert!(error.contains("--input-mode requires at least one runtime input flag"));
@@ -1388,20 +1630,24 @@ mod tests {
 
     #[test]
     fn validate_structural_action_only_inputs_allows_empty_input_set() {
+        let named_inputs = Vec::new();
         let selected_inputs = Vec::new();
 
-        let result = validate_structural_action_only_inputs(false, &selected_inputs);
+        let result = validate_structural_action_only_inputs(false, &named_inputs, &selected_inputs);
 
         assert!(result.is_ok(), "empty input set should be allowed");
     }
 
     #[test]
     fn validate_structural_action_only_inputs_rejects_runtime_inputs() {
-        let selected_inputs = vec![crate::Input::Text {
-            text: "hello".to_string(),
+        let named_inputs = Vec::new();
+        let selected_inputs = vec![crate::Input {
+            name: None,
+            kind: crate::InputKind::Text,
+            value: Some("hello".to_string()),
         }];
 
-        let error = validate_structural_action_only_inputs(false, &selected_inputs)
+        let error = validate_structural_action_only_inputs(false, &named_inputs, &selected_inputs)
             .expect_err("runtime inputs should be rejected");
 
         assert!(error.contains("empty `agent_schema.properties`"));
@@ -1409,12 +1655,32 @@ mod tests {
     }
 
     #[test]
+    fn validate_structural_action_only_inputs_allows_declared_named_inputs() {
+        let named_inputs = vec![crate::Input {
+            name: Some("menu_image".to_string()),
+            kind: crate::InputKind::Image,
+            value: Some("./artifacts/menu.png".to_string()),
+        }];
+        let selected_inputs = named_inputs.clone();
+
+        let result = validate_structural_action_only_inputs(false, &named_inputs, &selected_inputs);
+
+        assert!(
+            result.is_ok(),
+            "declared named inputs should be allowed in structural action-only mode"
+        );
+    }
+
+    #[test]
     fn validate_structural_action_only_inputs_allows_schema_backed_agents() {
-        let selected_inputs = vec![crate::Input::Text {
-            text: "hello".to_string(),
+        let named_inputs = Vec::new();
+        let selected_inputs = vec![crate::Input {
+            name: None,
+            kind: crate::InputKind::Text,
+            value: Some("hello".to_string()),
         }];
 
-        let result = validate_structural_action_only_inputs(true, &selected_inputs);
+        let result = validate_structural_action_only_inputs(true, &named_inputs, &selected_inputs);
 
         assert!(
             result.is_ok(),

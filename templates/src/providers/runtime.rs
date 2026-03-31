@@ -80,9 +80,10 @@ pub(crate) async fn resolve_inputs(inputs: &[crate::Input]) -> Result<Vec<Conten
     let mut url_values = Vec::new();
 
     for (index, input) in inputs.iter().enumerate() {
-        if let crate::Input::Url { url } = input {
+        if input.kind == crate::InputKind::Url {
+            let url = require_input_value(input)?;
             url_positions.push(index);
-            url_values.push(url.as_str());
+            url_values.push(url);
         }
     }
 
@@ -99,9 +100,12 @@ pub(crate) async fn resolve_inputs(inputs: &[crate::Input]) -> Result<Vec<Conten
 
     let mut resolved = Vec::with_capacity(inputs.len());
     for (index, input) in inputs.iter().enumerate() {
-        match input {
-            crate::Input::Text { text } => resolved.push(ContentPart::Text(text.clone())),
-            crate::Input::Url { url } => {
+        match input.kind {
+            crate::InputKind::Text => {
+                resolved.push(ContentPart::Text(require_input_value(input)?.to_string()))
+            }
+            crate::InputKind::Url => {
+                let url = require_input_value(input)?;
                 let content = fetched_by_index.get(&index).ok_or_else(|| {
                     format!("Resolved URL input missing fetched content for '{}'.", url)
                 })?;
@@ -111,14 +115,33 @@ pub(crate) async fn resolve_inputs(inputs: &[crate::Input]) -> Result<Vec<Conten
                     content.trim()
                 )));
             }
-            crate::Input::Image { path } => resolved.push(ContentPart::Image {
-                data_url: load_image_data_url(path)?,
+            crate::InputKind::Image => resolved.push(ContentPart::Image {
+                data_url: load_image_data_url(require_input_value(input)?)?,
             }),
-            crate::Input::File { path } => resolved.push(load_supported_file_content(path)?),
+            crate::InputKind::File => {
+                resolved.push(load_supported_file_content(require_input_value(input)?)?)
+            }
         }
     }
 
     Ok(resolved)
+}
+
+fn require_input_value(input: &crate::Input) -> Result<&str, String> {
+    input.value.as_deref().ok_or_else(|| {
+        if let Some(name) = input.name.as_deref() {
+            format!(
+                "Named input '{}' ({}) is required for this invocation but has no value.",
+                name,
+                input.kind_label()
+            )
+        } else {
+            format!(
+                "{} input is required for this invocation but has no value.",
+                input.kind_label()
+            )
+        }
+    })
 }
 
 fn load_image_data_url(path: &str) -> Result<String, String> {

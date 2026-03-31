@@ -103,7 +103,9 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - Action steps are side effects or follow-up orchestration after that output exists.
 - `output_variable` captures step-local stdout only. It does not change the returned top-level output object.
 - If `agent_schema.properties` is empty, Cargo AI skips the initial model call and starts directly at the action layer.
-- In that structural action-only shape, top-level `inputs` and runtime `--input-*` flags are invalid.
+- In that structural action-only shape, top-level `inputs` are allowed only as named reusable parent-owned inputs.
+- In that structural action-only shape, anonymous runtime `--input-*` flags remain invalid.
+- Use `--input-override NAME=VALUE` to satisfy or replace declared named top-level inputs at invocation time.
 
 ## Variable Namespace Rules
 - Captured names are flat. Dotted names are invalid.
@@ -135,12 +137,23 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 ## Child-Agent Data Flow
 
 - Parent actions may pass child-agent `inputs`, including dynamic string parts resolved from current action-local data.
+- Child `inputs` may also reference declared named top-level inputs with the exact shape `{ "input": "<name>" }`.
+- Named child-input reuse is explicit only; parent inputs are not auto-inherited.
 - Those child `inputs` may resolve declared `runtime.*` values alongside top-level model output fields and prior captured step variables.
 - Parent `agent` steps may set child `input_mode` to `replace`, `append`, or `prepend` when they also provide child `inputs`.
 - Parent `agent` steps may also set a step-level `profile` as a literal string or single variable reference; Cargo AI resolves it at step runtime and forwards `--profile <name>` to the child.
 - Omitted child `input_mode` keeps the current replace behavior for child inputs.
+- If a child wants to forward the same named input to its own child, it should declare that named top-level input locally first.
 - Parent actions may capture child-agent success/failure with `status_variable` and `error_variable`.
 - Parent actions cannot directly capture the child agent's top-level returned output fields into the parent action-local namespace.
+
+## Named Input Notes
+
+- Top-level inputs may declare optional `name`.
+- Unnamed top-level inputs must keep a baked value.
+- Named top-level inputs may keep a baked value or act as required slots with no baked value.
+- Repeatable `--input-override NAME=VALUE` replaces declared named bindings for the current run.
+- Anonymous runtime `--input-*` flags still control only the root model input list for schema-backed agents; they do not bind named input identities.
 
 ## Check Loop
 1. Edit one JSON definition at a time.
