@@ -33,12 +33,6 @@ enum AgentSyncState {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WorkspaceSeedMode {
-    IncludeBuildArtifacts,
-    SkipBuildArtifacts,
-}
-
 #[cfg_attr(not(test), allow(dead_code))]
 fn determine_agent_sync_state(
     generated_by_version: &str,
@@ -143,10 +137,9 @@ pub fn create_new_agent_project(
     template_path: &Path,
     agent_name: &str,
     agentcfg: Result<String, Error>,
-    seed_mode: WorkspaceSeedMode,
 ) -> Result<(), Error> {
     create_agent_workspace(agent_name)?;
-    seed_agent_workspace(template_path, agent_name, seed_mode)?;
+    seed_agent_workspace(template_path, agent_name)?;
     rewrite_agent_generated_files(
         &super::agent_workspace_path(agent_name),
         agent_name,
@@ -182,23 +175,13 @@ pub(crate) fn create_template_project(
     )
 }
 
-fn seed_agent_workspace(
-    template_path: &Path,
-    agent_name: &str,
-    seed_mode: WorkspaceSeedMode,
-) -> Result<(), Error> {
+fn seed_agent_workspace(template_path: &Path, agent_name: &str) -> Result<(), Error> {
     let workspace_path = super::agent_workspace_path(agent_name);
-
-    match seed_mode {
-        WorkspaceSeedMode::IncludeBuildArtifacts => {
-            copy_directory_recursive(template_path, &workspace_path)
-        }
-        WorkspaceSeedMode::SkipBuildArtifacts => copy_directory_recursive_excluding_root_entries(
-            template_path,
-            &workspace_path,
-            ROOT_EXCLUDED_TEMPLATE_ENTRIES_FOR_CHECK,
-        ),
-    }
+    copy_directory_recursive_excluding_root_entries(
+        template_path,
+        &workspace_path,
+        ROOT_EXCLUDED_TEMPLATE_ENTRIES_FOR_CHECK,
+    )
 }
 
 /// Rewrites only the agent-generated scaffold files after template seeding.

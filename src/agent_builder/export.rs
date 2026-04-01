@@ -42,9 +42,11 @@ pub fn export_binary(
     force_overwrite: bool,
     build_target: &BuildTarget,
     output_dir: Option<&Path>,
+    source_project_path: Option<&Path>,
 ) -> io::Result<()> {
     let project_path = super::agent_workspace_path(agent_name);
-    let source_path = build_target.compiled_binary_path(&project_path, agent_name);
+    let source_root = source_project_path.unwrap_or(project_path.as_path());
+    let source_path = build_target.compiled_binary_path(source_root, agent_name);
     let dest_dir = match output_dir {
         Some(path) => path.to_path_buf(),
         None => std::env::current_dir()?,
@@ -139,6 +141,7 @@ mod tests {
             false,
             &build_target,
             Some(Path::new(&output_dir)),
+            None,
         )
         .expect("export should create missing output directory");
 
@@ -168,12 +171,45 @@ mod tests {
             false,
             &build_target,
             Some(Path::new(&file_path)),
+            None,
         )
         .expect_err("file output path should fail");
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
         assert!(err.to_string().contains("--output-dir"));
 
         let _ = fs::remove_file(file_path);
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn export_can_read_from_shared_build_root() {
+        let workspace = super::super::agent_workspace_path("export_shared_build_root");
+        let build_target = BuildTarget::from_cli(None).expect("default target should resolve");
+        let shared_root = temp_test_dir().join("template-root");
+        let source_path =
+            build_target.compiled_binary_path(&shared_root, "export_shared_build_root");
+        let source_parent = source_path
+            .parent()
+            .expect("compiled binary should have a parent directory");
+        fs::create_dir_all(source_parent).expect("shared source parent should be creatable");
+        fs::write(&source_path, b"binary").expect("shared source binary should be writable");
+        fs::create_dir_all(&workspace).expect("workspace should be creatable");
+
+        let output_dir = temp_test_dir().join("bin");
+        export_binary(
+            "export_shared_build_root",
+            false,
+            &build_target,
+            Some(Path::new(&output_dir)),
+            Some(Path::new(&shared_root)),
+        )
+        .expect("export should use the shared build root");
+
+        let exported = build_target.exported_binary_path(&output_dir, "export_shared_build_root");
+        assert!(exported.exists());
+
+        let _ = fs::remove_dir_all(output_dir.parent().unwrap());
+        let _ = fs::remove_dir_all(shared_root.parent().unwrap());
         let _ = fs::remove_dir_all(workspace);
     }
 }
