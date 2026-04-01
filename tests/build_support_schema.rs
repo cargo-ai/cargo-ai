@@ -850,6 +850,98 @@ fn accepts_agent_step_with_relative_path_and_inputs() {
 }
 
 #[test]
+fn accepts_agent_step_with_input_overrides() {
+    let cfg = config_with_optional_inputs(
+        r#""value": { "type": "integer" }"#,
+        "",
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./summary_agent",
+                "input_overrides": {
+                  "menu_image": { "input": "menu_image" },
+                  "menu_note": { "type": "text", "text": "Spring menu" }
+                }
+              }
+            ]
+          }
+        ]"#,
+        Some(
+            r#"[
+        { "name": "menu_image", "type": "image", "path": "./artifacts/menu.png" }
+    ]"#,
+        ),
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains(
+        "input_overrides: Some(vec![ActionInputOverride { name: \"menu_image\".to_string(), value: ActionInput::Named { input: \"menu_image\".to_string() } }, ActionInputOverride { name: \"menu_note\".to_string(), value: ActionInput::Text { text: vec![RunArg::Literal(\"Spring menu\".to_string())] } }])"
+    ));
+}
+
+#[test]
+fn rejects_non_object_input_overrides() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./summary_agent",
+                "input_overrides": []
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].input_overrides"));
+    assert!(err.contains("expected `input_overrides` to be an object"));
+}
+
+#[test]
+fn rejects_input_overrides_on_exec_steps() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "exec_with_overrides",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["hello"],
+                "input_overrides": {
+                  "menu_note": { "type": "text", "text": "Spring menu" }
+                }
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].input_overrides"));
+    assert!(err.contains("only supported for `agent` actions"));
+}
+
+#[test]
 fn rejects_agent_input_mode_without_inputs() {
     let cfg = config_with(
         r#""value": { "type": "integer" }"#,

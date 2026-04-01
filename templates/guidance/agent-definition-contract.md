@@ -351,14 +351,22 @@ For `kind: "agent"`:
 ## Child-Agent Data Flow
 
 - A parent action may pass child-agent `inputs`.
+- A parent action may also pass child-agent `input_overrides`.
 - A `kind: "agent"` run step may also set `profile` as a literal string or single variable reference; Cargo AI resolves it at step runtime and forwards `--profile <name>` to the child.
+- `input_overrides` is the child-step equivalent of repeatable `--input-override NAME=VALUE`.
 - A `kind: "agent"` run step may also set `input_mode` to `replace`, `append`, or `prepend` when child `inputs` are present.
+- Child `input_overrides`, child `inputs`, and child `input_mode` are all optional.
+- Child `input_overrides` must be an object keyed by the intended child named-input slot.
+- Child `input_overrides` values may use the same input-object shapes as child `inputs`, including `{ "input": "<name>" }` parent named-input references.
 - Child `inputs` may contain either literal input objects or a named parent-input reference in the exact shape `{ "input": "<name>" }`.
 - `{ "input": "<name>" }` may reference only declared named top-level inputs from the parent definition.
+- Cargo AI keeps parent and child agents atomic at hatch/check time; whether a child actually declares an `input_overrides` key and whether the value kind matches are checked when the child runs.
+- When a child run step provides both `input_overrides` and anonymous child `inputs`, Cargo AI applies the named overrides first and then merges child `inputs` with `input_mode`.
+- Child `input_mode` applies only to child `inputs`; it does not change whether `input_overrides` are sent.
 - If child `input_mode` is omitted, the child step keeps the current default behavior: child `inputs` replace the child agent's baked `inputs`.
 - Child `append` keeps the child agent's baked inputs first, then appends the action-supplied child inputs in declared order.
 - Child `prepend` keeps the action-supplied child inputs first in declared order, then places the child agent's baked inputs after them.
-- Those child inputs may use dynamic string parts resolved from the parent action-local variable bag.
+- Those child inputs and child input overrides may use dynamic string parts resolved from the parent action-local variable bag.
 - Named child-input reuse is explicit only; Cargo AI does not automatically inherit all named inputs into children.
 - If a child only consumes a forwarded named input, it does not need to declare the same name locally.
 - If a child wants to forward that same named input to its own child, it should declare the same named top-level input locally so the incoming value can bind there first.
@@ -377,6 +385,7 @@ Expect `cargo ai hatch <agent-name> --config <config.json> --check` to reject at
 - unsupported run-step kind
 - missing required fields for a step kind
 - invalid child-agent path shape
+- malformed child-agent `input_overrides`
 - invalid child-agent `input_mode`
 - duplicate named top-level inputs
 - unnamed top-level inputs in the structural action-only shape

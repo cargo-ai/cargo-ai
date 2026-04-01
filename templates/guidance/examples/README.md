@@ -39,6 +39,7 @@ Each example is meant to be validated and hatched into a CLI executable.
 - Use `runtime-file-local-exec.json` when the main question is how file summarization, returned output, and a platform-specific local exec step fit together.
 - Use `runtime-vars-image-gating.json` when the main question is how caller-supplied typed runtime vars control action behavior or image-model selection.
 - For named reusable parent inputs and child forwarding, start from `child-agent.json` plus the named-input examples in the main README. Use top-level named `inputs` when one value should be reusable by child steps or overrideable with `--input-override NAME=VALUE`.
+- When a parent is filling one declared named child slot directly, prefer child `input_overrides`. Keep child `inputs` for extra anonymous context and use child `input_mode` only for that anonymous child-input list.
 - When converting a baked file example into a caller-supplied runtime file workflow, remember that `--input-file` replaces the full baked `inputs` array unless the caller also sets `--input-mode append` or `--input-mode prepend`. Supply `--input-text` too when the run stays in replace mode and still needs text instructions.
 - If the JSON becomes hard to scan, add a same-name sidecar Markdown file and an ASCII flow diagram.
 
@@ -51,3 +52,4 @@ After `cargo ai hatch <agent-name> --config <config.json> --check` passes, prefe
 3. If the definition uses `generate_image.model`, run one invocation that sets the image model through `--run-var` and confirm the step resolves the expected model string.
 4. If the definition uses named top-level inputs, run one invocation with `--input-override NAME=VALUE` and confirm any child `{ "input": "<name>" }` forwarding resolves the overridden value.
 5. If the definition includes a required named input slot with no baked value, run one failure case too and confirm the unresolved-slot error is clear.
+6. If the definition calls a child agent with child `input_overrides`, run one invocation that proves the child receives the named override and one invocation that mixes child `input_overrides` with anonymous child `inputs`.

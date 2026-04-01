@@ -713,9 +713,16 @@ Use child agents when one agent needs to hand work to another agent.
 - By default, the parent plus any child agents share a total runtime budget of `600` seconds. Override that with `--max-runtime-in-sec`.
 - A parent can pass inputs to a child and record whether the child succeeded or failed.
 - A parent can also reuse one declared named top-level input explicitly inside child `inputs` with `{ "input": "<name>" }`.
+- Child `agent` steps may set `input_overrides` to target the child's declared named inputs directly.
+- Child `agent` steps may still provide anonymous child `inputs`.
 - Child `agent` steps may set `input_mode` to `replace`, `append`, or `prepend` when they also provide child `inputs`.
 - Named child-input reuse is explicit only. Cargo AI does not automatically inherit every named parent input into the child.
 - If a middle agent wants to pass the same named input to its own child, it should declare the same named top-level input locally first.
+- `input_overrides`, `inputs`, and `input_mode` mirror the CLI mental model:
+  - `input_overrides` is the child-step equivalent of `--input-override NAME=VALUE`
+  - `inputs` is the child-step equivalent of anonymous runtime `--input-*`
+  - `input_mode` applies only to child `inputs`, not to `input_overrides`
+- Prefer `input_overrides` when targeting declared named child inputs. Use child `inputs` for extra anonymous context.
 - A parent cannot automatically pull the child's structured return fields back into its own output.
 
 Assume the parent definition also declares `{ "name": "menu_image", "type": "image" }` at top level.
@@ -727,18 +734,31 @@ Example:
   "kind": "agent",
   "agent": "./child_reporter",
   "profile": { "var": "runtime.child_profile" },
+  "input_overrides": {
+    "menu_image": { "input": "menu_image" },
+    "review_reason": {
+      "type": "text",
+      "text": [{ "var": "reason" }]
+    }
+  },
   "input_mode": "append",
   "status_variable": "child_status",
   "error_variable": "child_error",
   "inputs": [
-    { "input": "menu_image" },
     {
       "type": "text",
-      "text": ["Follow up on this review: ", { "var": "reason" }]
+      "text": "Follow up on the latest review details."
     }
   ]
 }
 ```
+
+That child step behaves like a structured CLI invocation:
+
+- `input_overrides.menu_image` is equivalent to `--input-override menu_image=...`
+- `input_overrides.review_reason` is equivalent to `--input-override review_reason=...`
+- child `inputs` stays the anonymous extra-input list
+- child `input_mode` still controls only that anonymous `inputs` list
 
 For schema-backed agents, `--input-override` and anonymous runtime inputs operate at different layers. This is valid:
 

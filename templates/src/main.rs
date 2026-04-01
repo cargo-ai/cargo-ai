@@ -3311,6 +3311,7 @@ async fn run_agent_step(
         command.arg(profile_name);
     }
     let (child_args, resolution_notes) = child_input_args(
+        step.input_overrides.as_deref(),
         step.input_mode,
         step.inputs.as_deref(),
         data,
@@ -3770,6 +3771,7 @@ fn matching_run_steps<'a>(
 }
 
 fn child_input_args(
+    input_overrides: Option<&[ActionInputOverride]>,
     input_mode: Option<ActionInputMode>,
     inputs: Option<&[ActionInput]>,
     data: &serde_json::Value,
@@ -3778,6 +3780,23 @@ fn child_input_args(
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut args = Vec::new();
     let mut notes = Vec::new();
+
+    if let Some(input_overrides) = input_overrides {
+        for input_override in input_overrides {
+            let (resolved_value, resolution_note) = resolve_child_input_override_value(
+                &input_override.value,
+                data,
+                action_name,
+                &input_override.name,
+                named_inputs,
+            )?;
+            args.push("--input-override".to_string());
+            args.push(format!("{}={}", input_override.name, resolved_value));
+            if let Some(note) = resolution_note {
+                notes.push(note);
+            }
+        }
+    }
 
     if let Some(input_mode) = input_mode {
         if inputs.is_none() {
@@ -3911,6 +3930,94 @@ fn child_input_args(
     Ok((args, notes))
 }
 
+fn resolve_child_input_override_value(
+    input: &ActionInput,
+    data: &serde_json::Value,
+    action_name: &str,
+    override_name: &str,
+    named_inputs: &BTreeMap<String, Input>,
+) -> Result<(String, Option<String>), String> {
+    match input {
+        ActionInput::Text { text } => {
+            let resolved = resolve_string_parts(
+                text,
+                data,
+                action_name,
+                &format!("child-agent named input override '{}'", override_name),
+            )?;
+            let note = child_input_uses_dynamic_parts(text).then(|| {
+                format!(
+                    "Action '{}' resolved dynamic child-agent named text override '{}'.",
+                    action_name, override_name
+                )
+            });
+            Ok((resolved, note))
+        }
+        ActionInput::Url { url } => {
+            let resolved = resolve_string_parts(
+                url,
+                data,
+                action_name,
+                &format!("child-agent named url override '{}'", override_name),
+            )?;
+            validate_child_input_override_url(&resolved, action_name, override_name)?;
+            let note = child_input_uses_dynamic_parts(url).then(|| {
+                format!(
+                    "Action '{}' resolved dynamic child-agent named url override '{}' -> {}.",
+                    action_name, override_name, resolved
+                )
+            });
+            Ok((resolved, note))
+        }
+        ActionInput::Image { path } => {
+            let resolved = resolve_string_parts(
+                path,
+                data,
+                action_name,
+                &format!("child-agent named image override '{}'", override_name),
+            )?;
+            let note = child_input_uses_dynamic_parts(path).then(|| {
+                format!(
+                    "Action '{}' resolved dynamic child-agent named image override '{}' -> {}.",
+                    action_name, override_name, resolved
+                )
+            });
+            Ok((resolved, note))
+        }
+        ActionInput::File { path } => {
+            let resolved = resolve_string_parts(
+                path,
+                data,
+                action_name,
+                &format!("child-agent named file override '{}'", override_name),
+            )?;
+            validate_child_input_override_file_extension(&resolved, action_name, override_name)?;
+            let note = child_input_uses_dynamic_parts(path).then(|| {
+                format!(
+                    "Action '{}' resolved dynamic child-agent named file override '{}' -> {}.",
+                    action_name, override_name, resolved
+                )
+            });
+            Ok((resolved, note))
+        }
+        ActionInput::Named { input } => {
+            let forwarded = named_inputs.get(input).ok_or_else(|| {
+                format!(
+                    "Action '{}' child-agent named input '{}' is not available for forwarding.",
+                    action_name, input
+                )
+            })?;
+            let value = forwarded.value.as_deref().ok_or_else(|| {
+                format!(
+                    "Action '{}' child-agent named input '{}' is required but unresolved for this invocation.",
+                    action_name, input
+                )
+            })?;
+            Ok((value.to_string(), None))
+        }
+    }
+}
+
 fn child_input_uses_dynamic_parts(parts: &[RunArg]) -> bool {
     parts.iter().any(|part| matches!(part, RunArg::Variable(_)))
 }
@@ -3970,6 +4077,21 @@ fn validate_child_input_url(url: &str, action_name: &str, input_index: usize) ->
     }
 }
 
+fn validate_child_input_override_url(
+    url: &str,
+    action_name: &str,
+    override_name: &str,
+) -> Result<(), String> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(())
+    } else {
+        Err(format!(
+            "Action '{}' child-agent named input override '{}' must resolve to an absolute http(s) URL.",
+            action_name, override_name
+        ))
+    }
+}
+
 fn validate_child_input_path(
     path: &str,
     action_name: &str,
@@ -4002,6 +4124,29 @@ fn validate_child_input_path(
     }
 
     Ok(())
+}
+
+fn validate_child_input_override_file_extension(
+    path: &str,
+    action_name: &str,
+    override_name: &str,
+) -> Result<(), String> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    match extension.as_deref() {
+        Some(
+            "pdf" | "docx" | "csv" | "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlsx" | "xlt"
+            | "xlw" | "tsv" | "iif" | "doc" | "dot" | "odt" | "rtf" | "pot" | "ppa" | "pps"
+            | "ppt" | "pptx" | "pwz" | "wiz",
+        ) => Ok(()),
+        _ => Err(format!(
+            "Action '{}' child-agent named input override '{}' must use a supported file extension: {}.",
+            action_name, override_name, SUPPORTED_FILE_EXTENSIONS_MESSAGE
+        )),
+    }
 }
 
 fn validate_child_file_extension(

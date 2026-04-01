@@ -89,6 +89,7 @@ If these conflict with the local `.cargo-ai/guidance/` bundle, follow the local 
 - Prefer named top-level `inputs` when one declared value is part of the workflow contract, reusable by child-agent steps, or overrideable by name at runtime.
 - Keep one-off root-model context unnamed when it does not need that extra reusable identity.
 - Reuse a declared named top-level input inside child `agent.inputs` with `{ "input": "<name>" }`.
+- Prefer child `input_overrides` when the parent is targeting one declared named child input directly; keep child `inputs` for extra anonymous child context and use child `input_mode` exactly the same way the CLI uses `--input-mode`.
 - If `agent_schema.properties` is empty, Cargo AI uses the structural action-only shape: named top-level inputs are still allowed there, but anonymous runtime `--input-*` flags remain invalid and invocation-time changes should go through `--input-override NAME=VALUE`.
 - Use top-level `runtime_vars` when the caller should control action behavior or step-local settings at invocation time without editing the JSON.
 - Reference declared runtime vars as `runtime.<name>` and pass them with repeatable `--run-var name=value` flags.

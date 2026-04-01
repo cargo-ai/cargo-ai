@@ -49,6 +49,8 @@ Check for:
 - using anonymous runtime `--input-*` on a structural action-only agent, where the model call is skipped and only named top-level inputs remain valid
 - referencing `{ "input": "<name>" }` from a child step when the parent did not declare that named top-level input
 - expecting a child to forward a named input onward without declaring the same named input locally first
+- using child `inputs` when the intent was really to target one declared named child slot directly; prefer child `input_overrides` for that
+- expecting child `input_mode` to change child `input_overrides`; it only applies to anonymous child `inputs`
 
 ### Runtime variable confusion
 
