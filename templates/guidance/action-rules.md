@@ -150,6 +150,8 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - If a child wants to forward the same named input to its own child, it should declare that named top-level input locally first.
 - Parent actions may capture child-agent success/failure with `status_variable` and `error_variable`.
 - Parent actions cannot directly capture the child agent's top-level returned output fields into the parent action-local namespace.
+- Cargo AI prints one root `using:` line at run start and only emits another lane-level `using:` line when a child `agent` or `generate_image` step changes the effective `profile`, `auth`, `server`, or `model`.
+- Child-agent passthrough stays minimal: the parent surfaces the child's own `using:` line when it represents a changed context, but it does not inline the rest of the child transcript.
 
 ## Named Input Notes
 

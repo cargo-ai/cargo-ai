@@ -74,6 +74,14 @@ Check for:
 Check for:
 - expecting parent actions to read child top-level output fields directly
 - missing `status_variable` / `error_variable` when the parent needs to react to child success or failure
+- expecting the parent to inline the entire child transcript; Cargo AI only surfaces child start/completion summaries plus any changed child `using:` line by default
+
+### Runtime observability confusion
+
+Check for:
+- expecting a repeated `using:` line when the effective `profile`, `auth`, `server`, and `model` did not change from the last printed context
+- expecting `url=...` to appear for the standard OpenAI API or ChatGPT account transports; it only appears when the effective URL is custom or materially different
+- assuming a child inherited the same context just because the parent emitted `child: started ...`; if the child changed context, look for a later child `using:` line
 
 ### Portability drift
 

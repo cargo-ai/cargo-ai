@@ -14,6 +14,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use config::loader::{config_path, find_profile, load_config};
 use config::schema::{Profile, ProfileAuthMode, SecretStoreMode};
@@ -62,6 +63,7 @@ struct ActionOutputState {
     action_execution: ActionExecutionMode,
     rendered_lines: usize,
     lanes: BTreeMap<usize, ActionLaneState>,
+    last_using_line: Option<String>,
 }
 
 #[derive(Clone)]
@@ -106,6 +108,7 @@ impl ActionOutput {
             action_execution,
             rendered_lines: 0,
             lanes: BTreeMap::new(),
+            last_using_line: None,
         }));
         let live_refresh_stop = Arc::new(AtomicBool::new(false));
         maybe_spawn_live_action_refresh(inner.clone(), live_refresh_stop.clone(), mode);
@@ -122,6 +125,12 @@ impl ActionOutput {
             } else {
                 render_live_dashboard(state);
             }
+        });
+    }
+
+    fn seed_using_line(&self, using_line: &str) {
+        self.with_state(|state| {
+            state.last_using_line = Some(using_line.to_string());
         });
     }
 
@@ -178,25 +187,22 @@ impl ActionOutput {
 
     fn action_line(&self, action_index: usize, action_name: &str, message: &str) {
         self.with_state(|state| {
-            if state.mode == ActionOutputMode::AppendOnly {
-                for line in split_action_output_lines(message) {
-                    println!("{}", format_action_line(action_index, action_name, line.as_str()));
-                }
+            emit_action_line_locked(state, action_index, action_name, message);
+        });
+    }
+
+    fn action_using_line_if_changed(
+        &self,
+        action_index: usize,
+        action_name: &str,
+        using_line: &str,
+    ) {
+        self.with_state(|state| {
+            if state.last_using_line.as_deref() == Some(using_line) {
                 return;
             }
-
-            let lane = ensure_lane_state(state, action_index, action_name);
-            lane.last_message = compact_action_output_line(message);
-            push_lane_output_message(lane, message);
-            if lane.status == ActionLaneStatus::Pending {
-                lane.status = inferred_lane_status(message);
-            } else if lane.status == ActionLaneStatus::Running {
-                lane.status = match inferred_lane_status(message) {
-                    ActionLaneStatus::Notice => ActionLaneStatus::Running,
-                    other => other,
-                };
-            }
-            render_live_dashboard(state);
+            state.last_using_line = Some(using_line.to_string());
+            emit_action_line_locked(state, action_index, action_name, using_line);
         });
     }
 
@@ -418,6 +424,33 @@ fn ensure_lane_state<'a>(
         })
 }
 
+fn emit_action_line_locked(
+    state: &mut ActionOutputState,
+    action_index: usize,
+    action_name: &str,
+    message: &str,
+) {
+    if state.mode == ActionOutputMode::AppendOnly {
+        for line in split_action_output_lines(message) {
+            println!("{}", format_action_line(action_index, action_name, line.as_str()));
+        }
+        return;
+    }
+
+    let lane = ensure_lane_state(state, action_index, action_name);
+    lane.last_message = compact_action_output_line(message);
+    push_lane_output_message(lane, message);
+    if lane.status == ActionLaneStatus::Pending {
+        lane.status = inferred_lane_status(message);
+    } else if lane.status == ActionLaneStatus::Running {
+        lane.status = match inferred_lane_status(message) {
+            ActionLaneStatus::Notice => ActionLaneStatus::Running,
+            other => other,
+        };
+    }
+    render_live_dashboard(state);
+}
+
 fn maybe_spawn_live_action_refresh(
     inner: Arc<Mutex<ActionOutputState>>,
     stop: Arc<AtomicBool>,
@@ -608,10 +641,66 @@ struct InvocationRuntimeBudget {
 #[derive(Debug, Clone)]
 struct ActionProviderContext {
     provider: ProviderKind,
+    profile_name: Option<String>,
+    auth_mode: String,
     model: String,
     url: String,
     token: String,
     inference_timeout_in_sec: u64,
+}
+
+impl ActionProviderContext {
+    fn using_line(&self) -> String {
+        self.using_line_with_model(self.model.as_str())
+    }
+
+    fn using_line_with_model(&self, model: &str) -> String {
+        let mut line = format!(
+            "using: profile={} auth={} server={} model={}",
+            self.profile_name.as_deref().unwrap_or("none"),
+            self.auth_mode,
+            provider_server_name(self.provider),
+            using_line_model(model),
+        );
+
+        if let Some(url) = using_line_url(self.provider, self.url.as_str()) {
+            line.push_str(format!(" url={url}").as_str());
+        }
+
+        line
+    }
+}
+
+fn provider_server_name(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Ollama => "ollama",
+        ProviderKind::OpenAi => "openai",
+    }
+}
+
+fn using_line_model(model: &str) -> &str {
+    if model.trim().is_empty() {
+        "none"
+    } else {
+        model
+    }
+}
+
+fn using_line_url(provider: ProviderKind, url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed == provider.default_url() {
+        return None;
+    }
+
+    if provider == ProviderKind::OpenAi && trimmed == OPENAI_ACCOUNT_RESPONSES_URL {
+        return None;
+    }
+
+    Some(trimmed.to_string())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -806,6 +895,34 @@ fn resolve_profile_api_token(profile: &SelectedProfile) -> Result<String, String
             "Failed to load profile token for '{}': {error}",
             profile.name
         )),
+    }
+}
+
+fn resolved_invocation_auth_mode(
+    provider: ProviderKind,
+    selected_profile: Option<&SelectedProfile>,
+    explicit_token_override: bool,
+    use_openai_account_transport: bool,
+) -> &'static str {
+    match provider {
+        ProviderKind::Ollama => "none",
+        ProviderKind::OpenAi => {
+            if explicit_token_override {
+                return "api_key";
+            }
+            if let Some(profile) = selected_profile {
+                return match profile.auth_mode {
+                    ProfileAuthMode::None => "none",
+                    ProfileAuthMode::ApiKey => "api_key",
+                    ProfileAuthMode::OpenaiAccount => "chatgpt_account",
+                };
+            }
+            if use_openai_account_transport {
+                "chatgpt_account"
+            } else {
+                "none"
+            }
+        }
     }
 }
 
@@ -1895,13 +2012,14 @@ async fn main() {
     };
 
     let explicit_token_override = cmd_args.get_one::<String>("token").map(|token| token.to_string());
+    let has_explicit_token_override = explicit_token_override.is_some();
     if let Some((kind, profile_name)) = loaded_profile_message.as_ref() {
         for line in profile_selection_messages(
             *kind,
             profile_name,
             &cli_override_descriptions(
                 &cmd_args,
-                explicit_token_override.is_some() && provider == ProviderKind::OpenAi,
+                has_explicit_token_override && provider == ProviderKind::OpenAi,
             ),
         ) {
             println!("{line}");
@@ -1987,11 +2105,20 @@ async fn main() {
         let actions = actions();
         let action_provider_context = ActionProviderContext {
             provider,
+            profile_name: selected_profile.as_ref().map(|profile| profile.name.clone()),
+            auth_mode: resolved_invocation_auth_mode(
+                provider,
+                selected_profile.as_ref(),
+                has_explicit_token_override,
+                use_openai_account_transport,
+            )
+            .to_string(),
             model: model.clone(),
             url: url.clone(),
             token: token.clone(),
             inference_timeout_in_sec,
         };
+        println!("{}", action_provider_context.using_line());
         if let Err(error) =
             apply_actions(
                 &output,
@@ -2037,6 +2164,23 @@ async fn main() {
         }
         std::process::exit(1);
     }
+
+    let action_provider_context = ActionProviderContext {
+        provider,
+        profile_name: selected_profile.as_ref().map(|profile| profile.name.clone()),
+        auth_mode: resolved_invocation_auth_mode(
+            provider,
+            selected_profile.as_ref(),
+            has_explicit_token_override,
+            use_openai_account_transport,
+        )
+        .to_string(),
+        model: model.clone(),
+        url: url.clone(),
+        token: token.clone(),
+        inference_timeout_in_sec,
+    };
+    println!("{}", action_provider_context.using_line());
 
     let static_context =
         "A question will be asked and you will need to return the answer in the specified JSON format.";
@@ -2163,13 +2307,6 @@ async fn main() {
     };
 
     let actions = actions();
-    let action_provider_context = ActionProviderContext {
-        provider,
-        model: model.clone(),
-        url: url.clone(),
-        token: token.clone(),
-        inference_timeout_in_sec,
-    };
     if let Err(error) =
         apply_actions(
             &output,
@@ -2203,7 +2340,13 @@ async fn apply_actions(
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<(), String> {
     ACTION_OUTPUT
-        .scope(ActionOutput::new(action_execution), async move {
+        .scope(
+            {
+                let output = ActionOutput::new(action_execution);
+                output.seed_using_line(provider_context.using_line().as_str());
+                output
+            },
+            async move {
             let abort_signal = InvocationAbortSignal::new();
             let action_secret_store_mode = config.and_then(|cfg| cfg.secret_store);
             let data = action_data_from_output(output, runtime_vars).map_err(|error| {
@@ -2271,7 +2414,8 @@ async fn apply_actions(
                     root_run_failure_message(invocation_started_at.elapsed())
                 ))
             }
-        })
+            },
+        )
         .await
 }
 
@@ -2936,6 +3080,11 @@ async fn run_generate_image_step(
         step_profile_context.as_ref(),
         provider_context,
     )?;
+    print_action_using_line_if_changed(
+        action_index,
+        action_name,
+        effective_provider_context.using_line_with_model(model.as_str()).as_str(),
+    );
 
     if effective_provider_context
         .url
@@ -3176,6 +3325,8 @@ async fn resolve_generate_image_step_profile_context(
 
     Ok(Some(ActionProviderContext {
         provider,
+        profile_name: Some(profile.name.clone()),
+        auth_mode: profile_auth_mode_display(profile.auth_mode).to_string(),
         model,
         url,
         token: resolved_token.token,
@@ -3251,6 +3402,14 @@ fn resolve_generate_image_model(
                 )),
             }
         }
+    }
+}
+
+fn profile_auth_mode_display(mode: ProfileAuthMode) -> &'static str {
+    match mode {
+        ProfileAuthMode::None => "none",
+        ProfileAuthMode::ApiKey => "api_key",
+        ProfileAuthMode::OpenaiAccount => "chatgpt_account",
     }
 }
 
@@ -3338,7 +3497,7 @@ async fn run_agent_step(
         AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV,
         runtime_budget.deadline_ms.to_string(),
     );
-    command.stdout(Stdio::null());
+    command.stdout(Stdio::piped());
     command.stderr(Stdio::null());
 
     let remaining = remaining_runtime_duration(
@@ -3360,6 +3519,24 @@ async fn run_agent_step(
         )
     })?;
     let mut child = child;
+    let child_output = current_action_output();
+    let child_action_name = action_name.to_string();
+    let child_using_forwarder = child.stdout.take().map(|stdout| {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let trimmed = line.trim();
+                if trimmed.starts_with("using: ") {
+                    emit_using_line_with_output(
+                        child_output.as_ref(),
+                        action_index,
+                        child_action_name.as_str(),
+                        trimmed,
+                    );
+                }
+            }
+        })
+    });
     print_action_line(
         action_index,
         action_name,
@@ -3368,10 +3545,16 @@ async fn run_agent_step(
 
     let result = match tokio::time::timeout(remaining, child.wait()).await {
         Ok(Ok(status)) if status.success() => {
+            if let Some(task) = child_using_forwarder {
+                let _ = task.await;
+            }
             print_action_line(action_index, action_name, "child: completed successfully");
             Ok(StepExecutionOutcome::Completed)
         }
         Ok(Ok(status)) => {
+            if let Some(task) = child_using_forwarder {
+                let _ = task.await;
+            }
             print_action_line(
                 action_index,
                 action_name,
@@ -3394,6 +3577,9 @@ async fn run_agent_step(
         )),
         Err(_) => {
             let _ = child.kill().await;
+            if let Some(task) = child_using_forwarder {
+                let _ = task.await;
+            }
             print_action_line(
                 action_index,
                 action_name,
@@ -3525,6 +3711,14 @@ fn print_action_execution_header(action_execution: ActionExecutionMode) {
     }
 }
 
+fn print_action_using_line_if_changed(action_index: usize, action_name: &str, using_line: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_using_line_if_changed(action_index, action_name, using_line);
+    } else {
+        println!("{}", format_action_line(action_index, action_name, using_line));
+    }
+}
+
 fn action_lane_prefix(action_index: usize, action_name: &str) -> String {
     format!("[A{} {}]", action_index + 1, action_name)
 }
@@ -3542,6 +3736,19 @@ fn print_action_line(action_index: usize, action_name: &str, message: &str) {
         output.action_line(action_index, action_name, message);
     } else {
         println!("{}", format_action_line(action_index, action_name, message));
+    }
+}
+
+fn emit_using_line_with_output(
+    output: Option<&ActionOutput>,
+    action_index: usize,
+    action_name: &str,
+    using_line: &str,
+) {
+    if let Some(output) = output {
+        output.action_using_line_if_changed(action_index, action_name, using_line);
+    } else {
+        println!("{}", format_action_line(action_index, action_name, using_line));
     }
 }
 

@@ -193,6 +193,34 @@ async fn resolve_openai_token_for_request(
     }
 }
 
+fn resolved_invocation_auth_mode(
+    provider: ProviderKind,
+    selected_profile: Option<&SelectedProfile>,
+    explicit_token_override: bool,
+    use_openai_account_transport: bool,
+) -> &'static str {
+    match provider {
+        ProviderKind::Ollama => "none",
+        ProviderKind::OpenAi => {
+            if explicit_token_override {
+                return "api_key";
+            }
+            if let Some(profile) = selected_profile {
+                return match profile.auth_mode {
+                    ProfileAuthMode::None => "none",
+                    ProfileAuthMode::ApiKey => "api_key",
+                    ProfileAuthMode::OpenaiAccount => "chatgpt_account",
+                };
+            }
+            if use_openai_account_transport {
+                "chatgpt_account"
+            } else {
+                "none"
+            }
+        }
+    }
+}
+
 fn runtime_input_overrides(sub_m: &ArgMatches) -> Vec<crate::Input> {
     let mut ordered = Vec::new();
 
@@ -712,13 +740,14 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         }
     };
 
+    let has_explicit_token_override = explicit_token_override.is_some();
     if let Some((kind, profile_name)) = loaded_profile_message.as_ref() {
         for line in profile_selection_messages(
             *kind,
             profile_name,
             &cli_override_descriptions(
                 sub_m,
-                explicit_token_override.is_some() && provider == ProviderKind::OpenAi,
+                has_explicit_token_override && provider == ProviderKind::OpenAi,
             ),
         ) {
             println!("{line}");
@@ -803,11 +832,22 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         let actions = crate::actions();
         let action_provider_context = super::preflight_actions::ActionProviderContext {
             provider,
+            profile_name: selected_profile
+                .as_ref()
+                .map(|profile| profile.name.clone()),
+            auth_mode: resolved_invocation_auth_mode(
+                provider,
+                selected_profile.as_ref(),
+                has_explicit_token_override,
+                use_openai_account_transport,
+            )
+            .to_string(),
             model: model.clone(),
             url: url.clone(),
             token: token.clone(),
             inference_timeout_in_sec,
         };
+        println!("{}", action_provider_context.using_line());
 
         return match super::preflight_actions::apply_actions(
             &output,
@@ -856,6 +896,25 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         }
         return false;
     }
+
+    let action_provider_context = super::preflight_actions::ActionProviderContext {
+        provider,
+        profile_name: selected_profile
+            .as_ref()
+            .map(|profile| profile.name.clone()),
+        auth_mode: resolved_invocation_auth_mode(
+            provider,
+            selected_profile.as_ref(),
+            has_explicit_token_override,
+            use_openai_account_transport,
+        )
+        .to_string(),
+        model: model.clone(),
+        url: url.clone(),
+        token: token.clone(),
+        inference_timeout_in_sec,
+    };
+    println!("{}", action_provider_context.using_line());
 
     let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
 
@@ -994,14 +1053,6 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     // Get Actions
     let actions = crate::actions();
     // println!("Actions {:?}", actions);
-    let action_provider_context = super::preflight_actions::ActionProviderContext {
-        provider,
-        model: model.clone(),
-        url: url.clone(),
-        token: token.clone(),
-        inference_timeout_in_sec,
-    };
-
     match super::preflight_actions::apply_actions(
         &output,
         &actions,

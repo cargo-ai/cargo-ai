@@ -13,6 +13,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
 const AGENT_ACTION_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_DEPTH";
@@ -45,6 +46,7 @@ struct ActionOutputState {
     action_execution: crate::ActionExecutionMode,
     rendered_lines: usize,
     lanes: BTreeMap<usize, ActionLaneState>,
+    last_using_line: Option<String>,
 }
 
 #[derive(Clone)]
@@ -89,6 +91,7 @@ impl ActionOutput {
             action_execution,
             rendered_lines: 0,
             lanes: BTreeMap::new(),
+            last_using_line: None,
         }));
         let live_refresh_stop = Arc::new(AtomicBool::new(false));
         maybe_spawn_live_action_refresh(inner.clone(), live_refresh_stop.clone(), mode);
@@ -105,6 +108,12 @@ impl ActionOutput {
             } else {
                 render_live_dashboard(state);
             }
+        });
+    }
+
+    fn seed_using_line(&self, using_line: &str) {
+        self.with_state(|state| {
+            state.last_using_line = Some(using_line.to_string());
         });
     }
 
@@ -164,28 +173,22 @@ impl ActionOutput {
 
     fn action_line(&self, action_index: usize, action_name: &str, message: &str) {
         self.with_state(|state| {
-            if state.mode == ActionOutputMode::AppendOnly {
-                for line in split_action_output_lines(message) {
-                    println!(
-                        "{}",
-                        format_action_line(action_index, action_name, line.as_str())
-                    );
-                }
+            emit_action_line_locked(state, action_index, action_name, message);
+        });
+    }
+
+    fn action_using_line_if_changed(
+        &self,
+        action_index: usize,
+        action_name: &str,
+        using_line: &str,
+    ) {
+        self.with_state(|state| {
+            if state.last_using_line.as_deref() == Some(using_line) {
                 return;
             }
-
-            let lane = ensure_lane_state(state, action_index, action_name);
-            lane.last_message = compact_action_output_line(message);
-            push_lane_output_message(lane, message);
-            if lane.status == ActionLaneStatus::Pending {
-                lane.status = inferred_lane_status(message);
-            } else if lane.status == ActionLaneStatus::Running {
-                lane.status = match inferred_lane_status(message) {
-                    ActionLaneStatus::Notice => ActionLaneStatus::Running,
-                    other => other,
-                };
-            }
-            render_live_dashboard(state);
+            state.last_using_line = Some(using_line.to_string());
+            emit_action_line_locked(state, action_index, action_name, using_line);
         });
     }
 
@@ -415,6 +418,36 @@ fn ensure_lane_state<'a>(
         })
 }
 
+fn emit_action_line_locked(
+    state: &mut ActionOutputState,
+    action_index: usize,
+    action_name: &str,
+    message: &str,
+) {
+    if state.mode == ActionOutputMode::AppendOnly {
+        for line in split_action_output_lines(message) {
+            println!(
+                "{}",
+                format_action_line(action_index, action_name, line.as_str())
+            );
+        }
+        return;
+    }
+
+    let lane = ensure_lane_state(state, action_index, action_name);
+    lane.last_message = compact_action_output_line(message);
+    push_lane_output_message(lane, message);
+    if lane.status == ActionLaneStatus::Pending {
+        lane.status = inferred_lane_status(message);
+    } else if lane.status == ActionLaneStatus::Running {
+        lane.status = match inferred_lane_status(message) {
+            ActionLaneStatus::Notice => ActionLaneStatus::Running,
+            other => other,
+        };
+    }
+    render_live_dashboard(state);
+}
+
 fn maybe_spawn_live_action_refresh(
     inner: Arc<Mutex<ActionOutputState>>,
     stop: Arc<AtomicBool>,
@@ -571,10 +604,68 @@ pub(crate) struct InvocationRuntimeBudget {
 #[derive(Debug, Clone)]
 pub(crate) struct ActionProviderContext {
     pub(crate) provider: crate::providers::ProviderKind,
+    pub(crate) profile_name: Option<String>,
+    pub(crate) auth_mode: String,
     pub(crate) model: String,
     pub(crate) url: String,
     pub(crate) token: String,
     pub(crate) inference_timeout_in_sec: u64,
+}
+
+impl ActionProviderContext {
+    pub(crate) fn using_line(&self) -> String {
+        self.using_line_with_model(self.model.as_str())
+    }
+
+    pub(crate) fn using_line_with_model(&self, model: &str) -> String {
+        let mut line = format!(
+            "using: profile={} auth={} server={} model={}",
+            self.profile_name.as_deref().unwrap_or("none"),
+            self.auth_mode,
+            provider_server_name(self.provider),
+            using_line_model(model),
+        );
+
+        if let Some(url) = using_line_url(self.provider, self.url.as_str()) {
+            line.push_str(format!(" url={url}").as_str());
+        }
+
+        line
+    }
+}
+
+fn provider_server_name(provider: crate::providers::ProviderKind) -> &'static str {
+    match provider {
+        crate::providers::ProviderKind::Ollama => "ollama",
+        crate::providers::ProviderKind::OpenAi => "openai",
+    }
+}
+
+fn using_line_model(model: &str) -> &str {
+    if model.trim().is_empty() {
+        "none"
+    } else {
+        model
+    }
+}
+
+fn using_line_url(provider: crate::providers::ProviderKind, url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed == provider.default_url() {
+        return None;
+    }
+
+    if provider == crate::providers::ProviderKind::OpenAi
+        && trimmed == openai_oauth::OPENAI_ACCOUNT_RESPONSES_URL
+    {
+        return None;
+    }
+
+    Some(trimmed.to_string())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -673,78 +764,86 @@ pub(crate) async fn apply_actions(
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<(), String> {
     ACTION_OUTPUT
-        .scope(ActionOutput::new(action_execution), async move {
-            let abort_signal = InvocationAbortSignal::new();
-            let invocation_started_at = Instant::now();
-            let data = match action_data_from_output(output, runtime_vars) {
-                Ok(data) => data,
-                Err(error) => {
-                    eprintln!("❌ Failed to serialize output for action evaluation: {error}");
+        .scope(
+            {
+                let output = ActionOutput::new(action_execution);
+                output.seed_using_line(provider_context.using_line().as_str());
+                output
+            },
+            async move {
+                let abort_signal = InvocationAbortSignal::new();
+                let invocation_started_at = Instant::now();
+                let data = match action_data_from_output(output, runtime_vars) {
+                    Ok(data) => data,
+                    Err(error) => {
+                        eprintln!("❌ Failed to serialize output for action evaluation: {error}");
+                        return Err(format!(
+                            "Failed to serialize output for action evaluation: {error}"
+                        ));
+                    }
+                };
+                let current_platform = current_action_platform();
+                let named_input_lookup = named_input_lookup(named_inputs);
+                print_action_execution_header(action_execution);
+                let top_level_failures = match action_execution {
+                    crate::ActionExecutionMode::Sequential => {
+                        apply_actions_sequential(
+                            actions,
+                            &data,
+                            &named_input_lookup,
+                            current_platform,
+                            action_execution_override,
+                            provider_context,
+                            max_agent_depth,
+                            runtime_budget,
+                            &abort_signal,
+                        )
+                        .await?
+                    }
+                    crate::ActionExecutionMode::Parallel => {
+                        apply_actions_parallel(
+                            actions,
+                            &data,
+                            &named_input_lookup,
+                            current_platform,
+                            action_execution_override,
+                            provider_context,
+                            max_agent_depth,
+                            runtime_budget,
+                            &abort_signal,
+                        )
+                        .await?
+                    }
+                };
+
+                finish_action_output();
+
+                if let Some(abort) = abort_signal.record() {
                     return Err(format!(
-                        "Failed to serialize output for action evaluation: {error}"
+                        "{}\n{}",
+                        format_abort_summary(&abort),
+                        root_run_abort_message(invocation_started_at.elapsed())
                     ));
                 }
-            };
-            let current_platform = current_action_platform();
-            let named_input_lookup = named_input_lookup(named_inputs);
-            print_action_execution_header(action_execution);
-            let top_level_failures = match action_execution {
-                crate::ActionExecutionMode::Sequential => {
-                    apply_actions_sequential(
-                        actions,
-                        &data,
-                        &named_input_lookup,
-                        current_platform,
-                        action_execution_override,
-                        provider_context,
-                        max_agent_depth,
-                        runtime_budget,
-                        &abort_signal,
-                    )
-                    .await?
+
+                if let Some(message) = root_run_completion_message(invocation_started_at.elapsed())
+                {
+                    if top_level_failures.is_empty() {
+                        println!("{message}");
+                    }
                 }
-                crate::ActionExecutionMode::Parallel => {
-                    apply_actions_parallel(
-                        actions,
-                        &data,
-                        &named_input_lookup,
-                        current_platform,
-                        action_execution_override,
-                        provider_context,
-                        max_agent_depth,
-                        runtime_budget,
-                        &abort_signal,
-                    )
-                    .await?
-                }
-            };
 
-            finish_action_output();
-
-            if let Some(abort) = abort_signal.record() {
-                return Err(format!(
-                    "{}\n{}",
-                    format_abort_summary(&abort),
-                    root_run_abort_message(invocation_started_at.elapsed())
-                ));
-            }
-
-            if let Some(message) = root_run_completion_message(invocation_started_at.elapsed()) {
                 if top_level_failures.is_empty() {
-                    println!("{message}");
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{}\n{}",
+                        format_top_level_action_failures(&top_level_failures),
+                        root_run_failure_message(invocation_started_at.elapsed())
+                    ))
                 }
-            }
-
-            if top_level_failures.is_empty() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "{}\n{}",
-                    format_top_level_action_failures(&top_level_failures),
-                    root_run_failure_message(invocation_started_at.elapsed())
-                ))
-            }
-        })
+            },
+        )
         .await
 }
 
@@ -1492,6 +1591,13 @@ async fn run_generate_image_step(
         step_profile_context.as_ref(),
         provider_context,
     )?;
+    print_action_using_line_if_changed(
+        action_index,
+        action_name,
+        effective_provider_context
+            .using_line_with_model(model.as_str())
+            .as_str(),
+    );
 
     if effective_provider_context
         .url
@@ -1759,6 +1865,8 @@ async fn resolve_generate_image_step_profile_context(
 
     Ok(Some(ActionProviderContext {
         provider,
+        profile_name: Some(profile.name.clone()),
+        auth_mode: profile_auth_mode_display(profile.auth_mode).to_string(),
         model: profile.model.clone(),
         url,
         token,
@@ -1834,6 +1942,14 @@ fn resolve_generate_image_model(
                 )),
             }
         }
+    }
+}
+
+fn profile_auth_mode_display(mode: ProfileAuthMode) -> &'static str {
+    match mode {
+        ProfileAuthMode::None => "none",
+        ProfileAuthMode::ApiKey => "api_key",
+        ProfileAuthMode::OpenaiAccount => "chatgpt_account",
     }
 }
 
@@ -1923,7 +2039,7 @@ async fn run_agent_step(
         AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV,
         runtime_budget.deadline_ms.to_string(),
     );
-    command.stdout(Stdio::null());
+    command.stdout(Stdio::piped());
     command.stderr(Stdio::null());
 
     let remaining = remaining_runtime_duration(
@@ -1941,6 +2057,24 @@ async fn run_agent_step(
         )
     })?;
     let mut child = child;
+    let child_output = current_action_output();
+    let child_action_name = action_name.to_string();
+    let child_using_forwarder = child.stdout.take().map(|stdout| {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let trimmed = line.trim();
+                if trimmed.starts_with("using: ") {
+                    emit_using_line_with_output(
+                        child_output.as_ref(),
+                        action_index,
+                        child_action_name.as_str(),
+                        trimmed,
+                    );
+                }
+            }
+        })
+    });
     print_action_line(
         action_index,
         action_name,
@@ -1949,10 +2083,16 @@ async fn run_agent_step(
 
     let result = match tokio::time::timeout(remaining, child.wait()).await {
         Ok(Ok(status)) if status.success() => {
+            if let Some(task) = child_using_forwarder {
+                let _ = task.await;
+            }
             print_action_line(action_index, action_name, "child: completed successfully");
             Ok(StepExecutionOutcome::Completed)
         }
         Ok(Ok(status)) => {
+            if let Some(task) = child_using_forwarder {
+                let _ = task.await;
+            }
             print_action_line(
                 action_index,
                 action_name,
@@ -1975,6 +2115,9 @@ async fn run_agent_step(
         )),
         Err(_) => {
             let _ = child.kill().await;
+            if let Some(task) = child_using_forwarder {
+                let _ = task.await;
+            }
             print_action_line(
                 action_index,
                 action_name,
@@ -2117,6 +2260,17 @@ fn print_action_execution_header(action_execution: crate::ActionExecutionMode) {
     }
 }
 
+fn print_action_using_line_if_changed(action_index: usize, action_name: &str, using_line: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_using_line_if_changed(action_index, action_name, using_line);
+    } else {
+        println!(
+            "{}",
+            format_action_line(action_index, action_name, using_line)
+        );
+    }
+}
+
 fn action_lane_prefix(action_index: usize, action_name: &str) -> String {
     format!("[A{} {}]", action_index + 1, action_name)
 }
@@ -2142,6 +2296,22 @@ fn print_action_line(action_index: usize, action_name: &str, message: &str) {
         output.action_line(action_index, action_name, message);
     } else {
         println!("{}", format_action_line(action_index, action_name, message));
+    }
+}
+
+fn emit_using_line_with_output(
+    output: Option<&ActionOutput>,
+    action_index: usize,
+    action_name: &str,
+    using_line: &str,
+) {
+    if let Some(output) = output {
+        output.action_using_line_if_changed(action_index, action_name, using_line);
+    } else {
+        println!(
+            "{}",
+            format_action_line(action_index, action_name, using_line)
+        );
     }
 }
 
@@ -3131,6 +3301,7 @@ mod tests {
         run_exec_step, run_generate_image_step, step_matches_platform, validate_agent_action_depth,
         ActionOutput, ActionOutputMode, ActionProviderContext, StepExecutionOutcome, ACTION_OUTPUT,
     };
+    use crate::credentials::openai_oauth;
     use crate::providers::ProviderKind;
     use serde_json::json;
     use std::ffi::OsString;
@@ -3232,6 +3403,8 @@ mod tests {
     fn provider_context() -> ActionProviderContext {
         ActionProviderContext {
             provider: ProviderKind::OpenAi,
+            profile_name: Some("test_profile".to_string()),
+            auth_mode: "api_key".to_string(),
             model: "gpt-5.2".to_string(),
             url: "https://api.openai.com/v1/chat/completions".to_string(),
             token: "test-token".to_string(),
@@ -3978,6 +4151,81 @@ auth_mode = "api_key"
             .any(|line| line == "    child exited with status 1"));
     }
 
+    #[test]
+    fn using_line_hides_standard_openai_account_url() {
+        let provider_context = ActionProviderContext {
+            provider: ProviderKind::OpenAi,
+            profile_name: Some("codex_account".to_string()),
+            auth_mode: "chatgpt_account".to_string(),
+            model: "gpt-5.2".to_string(),
+            url: openai_oauth::OPENAI_ACCOUNT_RESPONSES_URL.to_string(),
+            token: "test-token".to_string(),
+            inference_timeout_in_sec: 60,
+        };
+
+        assert_eq!(
+            provider_context.using_line(),
+            "using: profile=codex_account auth=chatgpt_account server=openai model=gpt-5.2"
+        );
+    }
+
+    #[test]
+    fn using_line_includes_custom_url_when_material() {
+        let provider_context = ActionProviderContext {
+            provider: ProviderKind::OpenAi,
+            profile_name: None,
+            auth_mode: "api_key".to_string(),
+            model: "gpt-5.2".to_string(),
+            url: "https://custom.example.test/v1/chat/completions".to_string(),
+            token: "test-token".to_string(),
+            inference_timeout_in_sec: 60,
+        };
+
+        assert_eq!(
+            provider_context.using_line(),
+            "using: profile=none auth=api_key server=openai model=gpt-5.2 url=https://custom.example.test/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn live_dashboard_snapshot_suppresses_duplicate_using_lines() {
+        let output = ActionOutput::new_for_mode(
+            crate::ActionExecutionMode::Parallel,
+            ActionOutputMode::Live,
+        );
+        let root_using = "using: profile=parent auth=api_key server=openai model=gpt-5.2";
+
+        output.seed_using_line(root_using);
+        output.action_started(0, "child_summary");
+        output.action_step_started(0, "child_summary", "agent", 1, 1);
+        output.action_using_line_if_changed(0, "child_summary", root_using);
+
+        let snapshot = output.snapshot_lines_for_test();
+        assert!(!snapshot.iter().any(|line| line.contains(root_using)));
+    }
+
+    #[test]
+    fn live_dashboard_snapshot_records_changed_using_lines() {
+        let output = ActionOutput::new_for_mode(
+            crate::ActionExecutionMode::Parallel,
+            ActionOutputMode::Live,
+        );
+        let changed_using = "using: profile=child_profile auth=api_key server=openai model=gpt-5.2";
+
+        output.seed_using_line("using: profile=parent auth=api_key server=openai model=gpt-5.2");
+        output.action_started(0, "child_summary");
+        output.action_step_started(0, "child_summary", "agent", 1, 1);
+        output.action_using_line_if_changed(0, "child_summary", changed_using);
+
+        let snapshot = output.snapshot_lines_for_test();
+        assert!(snapshot
+            .iter()
+            .any(|line| line == &format!("  last: {changed_using}")));
+        assert!(snapshot
+            .iter()
+            .any(|line| line == &format!("    {changed_using}")));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn exec_step_captures_output_variable_on_success() {
@@ -4115,6 +4363,8 @@ auth_mode = "api_key"
         };
         let provider_context = ActionProviderContext {
             provider: ProviderKind::OpenAi,
+            profile_name: Some("test_profile".to_string()),
+            auth_mode: "api_key".to_string(),
             model: "gpt-5.2".to_string(),
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
@@ -4193,6 +4443,8 @@ auth_mode = "api_key"
         };
         let provider_context = ActionProviderContext {
             provider: ProviderKind::OpenAi,
+            profile_name: Some("test_profile".to_string()),
+            auth_mode: "api_key".to_string(),
             model: "gpt-5.2".to_string(),
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
@@ -4275,6 +4527,8 @@ auth_mode = "api_key"
         };
         let provider_context = ActionProviderContext {
             provider: ProviderKind::OpenAi,
+            profile_name: Some("test_profile".to_string()),
+            auth_mode: "api_key".to_string(),
             model: "gpt-image-1.5".to_string(),
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
@@ -4332,6 +4586,8 @@ auth_mode = "api_key"
         };
         let provider_context = ActionProviderContext {
             provider: ProviderKind::OpenAi,
+            profile_name: Some("test_profile".to_string()),
+            auth_mode: "api_key".to_string(),
             model: String::new(),
             url: "https://api.openai.com/v1/chat/completions".to_string(),
             token: "test-token".to_string(),
@@ -4410,15 +4666,24 @@ auth_mode = "api_key"
             platforms: None,
         };
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let result = run_generate_image_step(
-            &step,
-            &json!({}),
-            0,
-            "generate_art",
-            &provider_context(),
-            runtime_budget,
-        )
-        .await;
+        let output = ActionOutput::new_for_mode(
+            crate::ActionExecutionMode::Sequential,
+            ActionOutputMode::Live,
+        );
+        output.seed_using_line(provider_context().using_line_with_model("gpt-5.2").as_str());
+        let result = ACTION_OUTPUT
+            .scope(output.clone(), async {
+                run_generate_image_step(
+                    &step,
+                    &json!({}),
+                    0,
+                    "generate_art",
+                    &provider_context(),
+                    runtime_budget,
+                )
+                .await
+            })
+            .await;
 
         assert!(
             result.is_ok(),
@@ -4429,6 +4694,16 @@ auth_mode = "api_key"
             std::fs::read(&output_name).expect("generated image file should be written");
         let _ = std::fs::remove_file(&output_name);
         assert_eq!(written_bytes, expected_bytes);
+
+        let snapshot = output.snapshot_lines_for_test();
+        assert!(snapshot.iter().any(|line| {
+            line.contains(
+                "using: profile=image_profile auth=api_key server=openai model=gpt-image-step-profile"
+            )
+        }));
+        assert!(snapshot
+            .iter()
+            .any(|line| line.contains("url=http://127.0.0.1")));
     }
 
     #[tokio::test]
@@ -4682,7 +4957,7 @@ auth_mode = "api_key"
         ));
 
         let script_body = format!(
-            "#!/bin/sh\nprintf 'child detail\\n'\nprintf 'ran' > \"{}\"\n",
+            "#!/bin/sh\nprintf 'using: profile=child_profile auth=api_key server=openai model=gpt-5.2\\n'\nprintf 'child detail\\n'\nprintf 'ran' > \"{}\"\n",
             marker_path.display()
         );
         fs::write(&script_path, script_body).expect("script should be written");
@@ -4755,6 +5030,9 @@ auth_mode = "api_key"
             .iter()
             .any(|line| line.starts_with("[A1 child_summary] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
+        assert!(snapshot.iter().any(|line| {
+            line == "    using: profile=child_profile auth=api_key server=openai model=gpt-5.2"
+        }));
         assert!(snapshot
             .iter()
             .any(|line| line == &format!("    child: started ./{}", script_name)));
