@@ -30,6 +30,11 @@ Keep each run step in this order:
 6. `status_variable`
 7. `error_variable`
 
+Keep input objects easy to scan:
+
+- named input objects: `name`, then `type`, then the value field such as `text`, `url`, or `path`
+- unnamed literal inputs: `type`, then the value field
+
 ## Naming Patterns
 
 - Use short, behavior-based action names such as `send_summary` or `notify_on_failure`.
@@ -116,6 +121,11 @@ Prefer these in order:
 1. plain model output with minimal actions
 2. `email_me` or child-agent steps when they fit the task
 3. `exec` only when the task truly needs a local command
+
+If one Cargo AI agent needs to call another Cargo AI agent:
+- prefer a native `kind: "agent"` step
+- do not add Python or shell wrappers just to launch the child agent
+- use wrapper programs only when the task truly needs non-Cargo-AI behavior around that call
 
 When the user wants portability across macOS, Windows, and Linux:
 - avoid shell-specific scripts when possible

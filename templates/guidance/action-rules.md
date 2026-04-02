@@ -138,6 +138,8 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 
 - Parent actions may pass child-agent `inputs`, including dynamic string parts resolved from current action-local data.
 - Parent actions may also pass child-agent `input_overrides` keyed by the intended named child input.
+- If the target is another Cargo AI agent, prefer a native `kind: "agent"` step instead of an `exec` wrapper that launches Python, shell, or another helper just to call the child.
+- Use wrapper programs only when the task truly needs extra non-Cargo-AI behavior around that child call.
 - Child `inputs` may also reference declared named top-level inputs with the exact shape `{ "input": "<name>" }`.
 - Child `input_overrides` may also use `{ "input": "<name>" }` when the parent wants to bind one named parent input into one named child slot explicitly.
 - Named child-input reuse is explicit only; parent inputs are not auto-inherited.
@@ -152,11 +154,14 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - Parent actions cannot directly capture the child agent's top-level returned output fields into the parent action-local namespace.
 - Cargo AI prints one root `using:` line at run start and only emits another lane-level `using:` line when a child `agent` or `generate_image` step changes the effective `profile`, `auth`, `server`, or `model`.
 - Child-agent passthrough stays minimal: the parent surfaces the child's own `using:` line when it represents a changed context, but it does not inline the rest of the child transcript.
+- Native child-agent steps preserve child input forwarding, failure handling, depth limits, and runtime observability without inventing an extra scripting layer.
 
 ## Named Input Notes
 
 - Top-level inputs may declare optional `name`.
 - Prefer `name` when an input is part of the workflow contract, reusable by child steps, or intentionally operator-overrideable.
+- For named input objects, prefer field order `name`, then `type`, then the value-bearing field.
+- For unnamed literal inputs, keep `type` first and the value-bearing field second.
 - Keep one-off root-model context unnamed when it does not need child reuse or targeted override behavior.
 - Unnamed top-level inputs must keep a baked value.
 - Named top-level inputs may keep a baked value or act as required slots with no baked value.

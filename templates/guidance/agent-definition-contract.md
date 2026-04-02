@@ -28,6 +28,8 @@ Every agent definition must be a JSON object with these keys in this order:
 - Optional.
 - If present, must be an array with at least one item.
 - Each top-level input may also declare optional `name`.
+- For readability, prefer named input object field order as `name`, then `type`, then the value-bearing field (`text`, `url`, or `path`).
+- For unnamed literal inputs, keep `type` first and the value-bearing field second.
 - Supported input shapes:
   - `text`
     - required: `type`
@@ -357,6 +359,8 @@ For `kind: "agent"`:
 
 - A parent action may pass child-agent `inputs`.
 - A parent action may also pass child-agent `input_overrides`.
+- If the target is another Cargo AI agent, prefer a native `kind: "agent"` step instead of wrapping the child invocation in Python or shell just to launch it.
+- Wrapper scripts are exceptions for genuinely non-Cargo-AI behavior around the call, not the default way to invoke a child agent.
 - A `kind: "agent"` run step may also set `profile` as a literal string or single variable reference; Cargo AI resolves it at step runtime and forwards `--profile <name>` to the child.
 - `input_overrides` is the child-step equivalent of repeatable `--input-override NAME=VALUE`.
 - A `kind: "agent"` run step may also set `input_mode` to `replace`, `append`, or `prepend` when child `inputs` are present.
@@ -370,6 +374,7 @@ For `kind: "agent"`:
 - Child `input_mode` applies only to child `inputs`; it does not change whether `input_overrides` are sent.
 - If child `input_mode` is omitted, the child step keeps the current default behavior: child `inputs` replace the child agent's baked `inputs`.
 - Child `append` keeps the child agent's baked inputs first, then appends the action-supplied child inputs in declared order.
+- Native child-agent steps preserve Cargo AI semantics such as named input forwarding, child `input_overrides`, child `inputs`, `input_mode`, failure handling, depth limits, and step-level `using:` observability.
 - Child `prepend` keeps the action-supplied child inputs first in declared order, then places the child agent's baked inputs after them.
 - Those child inputs and child input overrides may use dynamic string parts resolved from the parent action-local variable bag.
 - Named child-input reuse is explicit only; Cargo AI does not automatically inherit all named inputs into children.

@@ -211,6 +211,7 @@ You can also override or inject runtime input without editing the JSON. Generate
 
 Top-level inputs may also declare optional `name`. Named inputs stay regular inputs for schema-backed agents, but they also become reusable bindings for child-agent steps and targeted runtime replacement with repeatable `--input-override NAME=VALUE`.
 As a rule of thumb, prefer `name` when an input is part of the workflow contract, reusable by child steps, or likely to be operator-overrideable. Leave one-off root-model context unnamed when it does not need that extra identity.
+For readability, prefer named input object field order as `name`, then `type`, then the value field. Keep unnamed literal inputs as `type`, then the value field.
 
 ```json
 {
@@ -725,6 +726,8 @@ Use child agents when one agent needs to hand work to another agent.
   - `inputs` is the child-step equivalent of anonymous runtime `--input-*`
   - `input_mode` applies only to child `inputs`, not to `input_overrides`
 - Prefer `input_overrides` when targeting declared named child inputs. Use child `inputs` for extra anonymous context.
+- If the target is another Cargo AI agent, prefer a native `kind: "agent"` step instead of a Python or shell wrapper that only launches the child.
+- Use wrapper programs only when the task truly needs extra non-Cargo-AI behavior around that child call.
 - A parent cannot automatically pull the child's structured return fields back into its own output.
 
 Assume the parent definition also declares `{ "name": "menu_image", "type": "image" }` at top level.
