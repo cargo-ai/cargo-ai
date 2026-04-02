@@ -92,6 +92,8 @@ If these conflict with the local `.cargo-ai/guidance/` bundle, follow the local 
 - Keep one-off root-model context unnamed when it does not need that extra reusable identity.
 - Reuse a declared named top-level input inside child `agent.inputs` with `{ "input": "<name>" }`.
 - Prefer child `input_overrides` when the parent is targeting one declared named child input directly; keep child `inputs` for extra anonymous child context and use child `input_mode` exactly the same way the CLI uses `--input-mode`.
+- Use child `run_vars` for the child's declared invocation-scoped settings and keep them CLI-shaped: string, number, boolean, or `{ "var": "..." }`.
+- Keep child `input_overrides` CLI-shaped too: direct string literals, `{ "var": "..." }`, or `{ "input": "<name>" }` when forwarding a named parent input.
 - If another Cargo AI agent should do the work, prefer a native `kind: "agent"` step. Do not create Python or shell wrappers just to launch the child agent.
 - Use wrapper programs only when the task genuinely needs extra non-Cargo-AI behavior around that child invocation.
 - Expect Cargo AI runtime output to print one root `using:` line at run start and another step-level `using:` line only when a child `agent` or `generate_image` step changes the effective `profile`, `auth`, `server`, or `model`.

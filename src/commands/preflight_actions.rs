@@ -2012,6 +2012,7 @@ async fn run_agent_step(
         command.arg(profile_name);
     }
     let (child_args, resolution_notes) = child_input_args(
+        step.run_vars.as_deref(),
         step.input_overrides.as_deref(),
         step.input_mode,
         step.inputs.as_deref(),
@@ -2779,6 +2780,7 @@ fn matching_run_steps<'a>(
 }
 
 fn child_input_args(
+    run_vars: Option<&[crate::ActionRunVar]>,
     input_overrides: Option<&[crate::ActionInputOverride]>,
     input_mode: Option<crate::ActionInputMode>,
     inputs: Option<&[crate::ActionInput]>,
@@ -2788,6 +2790,18 @@ fn child_input_args(
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut args = Vec::new();
     let mut notes = Vec::new();
+
+    if let Some(run_vars) = run_vars {
+        for run_var in run_vars {
+            let (resolved_value, resolution_note) =
+                resolve_child_run_var_value(&run_var.value, data, action_name, &run_var.name)?;
+            args.push("--run-var".to_string());
+            args.push(format!("{}={}", run_var.name, resolved_value));
+            if let Some(note) = resolution_note {
+                notes.push(note);
+            }
+        }
+    }
 
     if let Some(input_overrides) = input_overrides {
         for input_override in input_overrides {
@@ -2937,76 +2951,30 @@ fn child_input_args(
 }
 
 fn resolve_child_input_override_value(
-    input: &crate::ActionInput,
+    input: &crate::ActionInputOverrideValue,
     data: &serde_json::Value,
     action_name: &str,
     override_name: &str,
     named_inputs: &BTreeMap<String, crate::Input>,
 ) -> Result<(String, Option<String>), String> {
     match input {
-        crate::ActionInput::Text { text } => {
-            let resolved = resolve_string_parts(
-                text,
+        crate::ActionInputOverrideValue::Literal(literal) => Ok((literal.clone(), None)),
+        crate::ActionInputOverrideValue::Variable(variable) => {
+            let resolved = resolve_scalar_action_variable(
                 data,
+                variable,
                 action_name,
                 &format!("child-agent named input override '{}'", override_name),
             )?;
-            let note = child_input_uses_dynamic_parts(text).then(|| {
-                format!(
-                    "Action '{}' resolved dynamic child-agent named text override '{}'.",
-                    action_name, override_name
-                )
-            });
-            Ok((resolved, note))
-        }
-        crate::ActionInput::Url { url } => {
-            let resolved = resolve_string_parts(
-                url,
-                data,
-                action_name,
-                &format!("child-agent named url override '{}'", override_name),
-            )?;
-            validate_child_input_override_url(&resolved, action_name, override_name)?;
-            let note = child_input_uses_dynamic_parts(url).then(|| {
-                format!(
-                    "Action '{}' resolved dynamic child-agent named url override '{}' -> {}.",
+            Ok((
+                resolved.clone(),
+                Some(format!(
+                    "Action '{}' resolved dynamic child-agent named override '{}' -> {}.",
                     action_name, override_name, resolved
-                )
-            });
-            Ok((resolved, note))
+                )),
+            ))
         }
-        crate::ActionInput::Image { path } => {
-            let resolved = resolve_string_parts(
-                path,
-                data,
-                action_name,
-                &format!("child-agent named image override '{}'", override_name),
-            )?;
-            let note = child_input_uses_dynamic_parts(path).then(|| {
-                format!(
-                    "Action '{}' resolved dynamic child-agent named image override '{}' -> {}.",
-                    action_name, override_name, resolved
-                )
-            });
-            Ok((resolved, note))
-        }
-        crate::ActionInput::File { path } => {
-            let resolved = resolve_string_parts(
-                path,
-                data,
-                action_name,
-                &format!("child-agent named file override '{}'", override_name),
-            )?;
-            validate_child_input_override_file_extension(&resolved, action_name, override_name)?;
-            let note = child_input_uses_dynamic_parts(path).then(|| {
-                format!(
-                    "Action '{}' resolved dynamic child-agent named file override '{}' -> {}.",
-                    action_name, override_name, resolved
-                )
-            });
-            Ok((resolved, note))
-        }
-        crate::ActionInput::Named { input } => {
+        crate::ActionInputOverrideValue::NamedInput { input } => {
             let forwarded = named_inputs.get(input).ok_or_else(|| {
                 format!(
                     "Action '{}' child-agent named input '{}' is not available for forwarding.",
@@ -3021,6 +2989,95 @@ fn resolve_child_input_override_value(
             })?;
             Ok((value.to_string(), None))
         }
+    }
+}
+
+fn resolve_child_run_var_value(
+    value: &crate::ActionRunVarValue,
+    data: &serde_json::Value,
+    action_name: &str,
+    run_var_name: &str,
+) -> Result<(String, Option<String>), String> {
+    match value {
+        crate::ActionRunVarValue::Literal(literal) => Ok((
+            stringify_scalar_json_value(
+                literal,
+                action_name,
+                &format!("child-agent runtime var '{}'", run_var_name),
+            )?,
+            None,
+        )),
+        crate::ActionRunVarValue::Variable(variable) => {
+            let resolved = resolve_scalar_action_variable(
+                data,
+                variable,
+                action_name,
+                &format!("child-agent runtime var '{}'", run_var_name),
+            )?;
+            Ok((
+                resolved.clone(),
+                Some(format!(
+                    "Action '{}' resolved dynamic child-agent runtime var '{}' -> {}.",
+                    action_name, run_var_name, resolved
+                )),
+            ))
+        }
+    }
+}
+
+fn resolve_scalar_action_variable(
+    data: &serde_json::Value,
+    variable: &str,
+    action_name: &str,
+    field_name: &str,
+) -> Result<String, String> {
+    let Some(value) = lookup_action_variable(data, variable) else {
+        return Err(format!(
+            "Action '{}' {} references missing variable '{}'.",
+            action_name, field_name, variable
+        ));
+    };
+
+    match value {
+        serde_json::Value::String(text) => Ok(text.clone()),
+        serde_json::Value::Bool(boolean) => Ok(boolean.to_string()),
+        serde_json::Value::Number(number) => Ok(number.to_string()),
+        serde_json::Value::Array(_) => Err(format!(
+            "Action '{}' {} references array-valued variable '{}', which is unsupported for scalar substitution.",
+            action_name, field_name, variable
+        )),
+        serde_json::Value::Object(_) => Err(format!(
+            "Action '{}' {} references object-valued variable '{}', which is unsupported for scalar substitution.",
+            action_name, field_name, variable
+        )),
+        serde_json::Value::Null => Err(format!(
+            "Action '{}' {} references null variable '{}', which is unsupported for scalar substitution.",
+            action_name, field_name, variable
+        )),
+    }
+}
+
+fn stringify_scalar_json_value(
+    value: &serde_json::Value,
+    action_name: &str,
+    field_name: &str,
+) -> Result<String, String> {
+    match value {
+        serde_json::Value::String(text) => Ok(text.clone()),
+        serde_json::Value::Bool(boolean) => Ok(boolean.to_string()),
+        serde_json::Value::Number(number) => Ok(number.to_string()),
+        serde_json::Value::Array(_) => Err(format!(
+            "Action '{}' {} cannot use an array literal here.",
+            action_name, field_name
+        )),
+        serde_json::Value::Object(_) => Err(format!(
+            "Action '{}' {} cannot use an object literal here.",
+            action_name, field_name
+        )),
+        serde_json::Value::Null => Err(format!(
+            "Action '{}' {} cannot use null here.",
+            action_name, field_name
+        )),
     }
 }
 
@@ -3092,21 +3149,6 @@ fn validate_child_input_url(
     }
 }
 
-fn validate_child_input_override_url(
-    url: &str,
-    action_name: &str,
-    override_name: &str,
-) -> Result<(), String> {
-    if url.starts_with("http://") || url.starts_with("https://") {
-        Ok(())
-    } else {
-        Err(format!(
-            "Action '{}' child-agent named input override '{}' must resolve to an absolute http(s) URL.",
-            action_name, override_name
-        ))
-    }
-}
-
 fn validate_child_input_path(
     path: &str,
     action_name: &str,
@@ -3140,30 +3182,6 @@ fn validate_child_input_path(
 
     Ok(())
 }
-
-fn validate_child_input_override_file_extension(
-    path: &str,
-    action_name: &str,
-    override_name: &str,
-) -> Result<(), String> {
-    let extension = Path::new(path)
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|value| value.to_ascii_lowercase());
-
-    match extension.as_deref() {
-        Some(
-            "pdf" | "docx" | "csv" | "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlsx" | "xlt"
-                | "xlw" | "tsv" | "iif" | "doc" | "dot" | "odt" | "rtf" | "pot" | "ppa"
-                | "pps" | "ppt" | "pptx" | "pwz" | "wiz",
-        ) => Ok(()),
-        _ => Err(format!(
-            "Action '{}' child-agent named input override '{}' must use a supported file extension: {}.",
-            action_name, override_name, SUPPORTED_FILE_EXTENSIONS_MESSAGE
-        )),
-    }
-}
-
 fn validate_child_file_extension(
     path: &str,
     action_name: &str,
@@ -3388,6 +3406,7 @@ mod tests {
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -3603,6 +3622,7 @@ auth_mode = "api_key"
         let (args, notes) = child_input_args(
             None,
             None,
+            None,
             Some(&[
                 crate::ActionInput::Text {
                     text: vec![crate::RunArg::Literal("hello".to_string())],
@@ -3643,6 +3663,7 @@ auth_mode = "api_key"
     fn child_input_args_include_explicit_input_mode() {
         let (args, notes) = child_input_args(
             None,
+            None,
             Some(crate::ActionInputMode::Prepend),
             Some(&[crate::ActionInput::Text {
                 text: vec![crate::RunArg::Literal("hello".to_string())],
@@ -3664,6 +3685,7 @@ auth_mode = "api_key"
     fn child_input_args_reject_input_mode_without_inputs() {
         let error = child_input_args(
             None,
+            None,
             Some(crate::ActionInputMode::Append),
             None,
             &json!({}),
@@ -3678,6 +3700,7 @@ auth_mode = "api_key"
     #[test]
     fn child_input_args_resolve_dynamic_text_and_file_path() {
         let (args, notes) = child_input_args(
+            None,
             None,
             None,
             Some(&[
@@ -3722,6 +3745,7 @@ auth_mode = "api_key"
         let error = child_input_args(
             None,
             None,
+            None,
             Some(&[crate::ActionInput::Url {
                 url: vec![crate::RunArg::Variable("source_url".to_string())],
             }]),
@@ -3739,6 +3763,7 @@ auth_mode = "api_key"
     #[test]
     fn child_input_args_reject_invalid_dynamic_file_extension() {
         let error = child_input_args(
+            None,
             None,
             None,
             Some(&[crate::ActionInput::File {
@@ -3763,6 +3788,7 @@ auth_mode = "api_key"
         let error = child_input_args(
             None,
             None,
+            None,
             Some(&[crate::ActionInput::Image {
                 path: vec![crate::RunArg::Variable("image_path".to_string())],
             }]),
@@ -3780,6 +3806,7 @@ auth_mode = "api_key"
     #[test]
     fn child_input_args_forward_named_inputs_as_hidden_runtime_payloads() {
         let (args, notes) = child_input_args(
+            None,
             None,
             None,
             Some(&[crate::ActionInput::Named {
@@ -3813,6 +3840,7 @@ auth_mode = "api_key"
         let error = child_input_args(
             None,
             None,
+            None,
             Some(&[crate::ActionInput::Named {
                 input: "menu_image".to_string(),
             }]),
@@ -3831,20 +3859,17 @@ auth_mode = "api_key"
     #[test]
     fn child_input_args_emit_named_override_flags_before_runtime_inputs() {
         let (args, notes) = child_input_args(
+            None,
             Some(&[
                 crate::ActionInputOverride {
                     name: "menu_note".to_string(),
-                    value: crate::ActionInput::Text {
-                        text: vec![crate::RunArg::Literal("spring menu".to_string())],
-                    },
+                    value: crate::ActionInputOverrideValue::Literal("spring menu".to_string()),
                 },
                 crate::ActionInputOverride {
                     name: "source_url".to_string(),
-                    value: crate::ActionInput::Url {
-                        url: vec![crate::RunArg::Literal(
-                            "https://example.com/menu".to_string(),
-                        )],
-                    },
+                    value: crate::ActionInputOverrideValue::Literal(
+                        "https://example.com/menu".to_string(),
+                    ),
                 },
             ]),
             Some(crate::ActionInputMode::Append),
@@ -3876,9 +3901,10 @@ auth_mode = "api_key"
     #[test]
     fn child_input_args_support_parent_named_inputs_inside_input_overrides() {
         let (args, notes) = child_input_args(
+            None,
             Some(&[crate::ActionInputOverride {
                 name: "menu_image".to_string(),
-                value: crate::ActionInput::Named {
+                value: crate::ActionInputOverrideValue::NamedInput {
                     input: "menu_image".to_string(),
                 },
             }]),
@@ -3907,31 +3933,24 @@ auth_mode = "api_key"
     #[test]
     fn child_input_args_resolve_dynamic_named_override_values() {
         let (args, notes) = child_input_args(
+            None,
             Some(&[
                 crate::ActionInputOverride {
                     name: "menu_note".to_string(),
-                    value: crate::ActionInput::Text {
-                        text: vec![
-                            crate::RunArg::Literal("hello ".to_string()),
-                            crate::RunArg::Variable("customer".to_string()),
-                        ],
-                    },
+                    value: crate::ActionInputOverrideValue::Variable("menu_note_value".to_string()),
                 },
                 crate::ActionInputOverride {
                     name: "source_doc".to_string(),
-                    value: crate::ActionInput::File {
-                        path: vec![
-                            crate::RunArg::Literal("./reports/".to_string()),
-                            crate::RunArg::Variable("report_filename".to_string()),
-                        ],
-                    },
+                    value: crate::ActionInputOverrideValue::Variable(
+                        "source_doc_value".to_string(),
+                    ),
                 },
             ]),
             None,
             None,
             &json!({
-                "customer": "Acme",
-                "report_filename": "q1.pdf"
+                "menu_note_value": "hello Acme",
+                "source_doc_value": "./reports/q1.pdf"
             }),
             "demo",
             &no_named_inputs(),
@@ -3948,23 +3967,22 @@ auth_mode = "api_key"
             ]
         );
         assert_eq!(notes.len(), 2);
-        assert!(notes[0].contains("named text override 'menu_note'"));
+        assert!(notes[0].contains("named override 'menu_note'"));
         assert!(notes[1].contains("./reports/q1.pdf"));
     }
 
     #[test]
-    fn child_input_args_reject_invalid_dynamic_named_override_url() {
+    fn child_input_args_reject_object_valued_named_override_variable() {
         let error = child_input_args(
+            None,
             Some(&[crate::ActionInputOverride {
                 name: "source_url".to_string(),
-                value: crate::ActionInput::Url {
-                    url: vec![crate::RunArg::Variable("source_url".to_string())],
-                },
+                value: crate::ActionInputOverrideValue::Variable("source_url".to_string()),
             }]),
             None,
             None,
             &json!({
-                "source_url": "ftp://example.com/report"
+                "source_url": { "bad": true }
             }),
             "demo",
             &no_named_inputs(),
@@ -3972,33 +3990,118 @@ auth_mode = "api_key"
         .unwrap_err();
 
         assert!(error.contains("named input override 'source_url'"));
-        assert!(error.contains("absolute http(s) URL"));
+        assert!(error.contains("object-valued variable"));
     }
 
     #[test]
-    fn child_input_args_reject_invalid_dynamic_named_override_file_extension() {
-        let error = child_input_args(
-            Some(&[crate::ActionInputOverride {
-                name: "source_doc".to_string(),
-                value: crate::ActionInput::File {
-                    path: vec![
-                        crate::RunArg::Literal("./reports/".to_string()),
-                        crate::RunArg::Variable("report_filename".to_string()),
-                    ],
+    fn child_input_args_emit_run_var_flags_before_overrides() {
+        let (args, notes) = child_input_args(
+            Some(&[
+                crate::ActionRunVar {
+                    name: "year".to_string(),
+                    value: crate::ActionRunVarValue::Literal(json!(2026)),
                 },
+                crate::ActionRunVar {
+                    name: "month".to_string(),
+                    value: crate::ActionRunVarValue::Literal(json!("08")),
+                },
+            ]),
+            Some(&[crate::ActionInputOverride {
+                name: "menu_note".to_string(),
+                value: crate::ActionInputOverrideValue::Literal("spring menu".to_string()),
             }]),
+            None,
+            Some(&[crate::ActionInput::Text {
+                text: vec![crate::RunArg::Literal("extra context".to_string())],
+            }]),
+            &json!({}),
+            "demo",
+            &no_named_inputs(),
+        )
+        .expect("child run_vars should resolve");
+
+        assert_eq!(
+            args,
+            vec![
+                "--run-var",
+                "year=2026",
+                "--run-var",
+                "month=08",
+                "--input-override",
+                "menu_note=spring menu",
+                "--input-text",
+                "extra context",
+            ]
+        );
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn child_input_args_resolve_dynamic_run_var_values() {
+        let (args, notes) = child_input_args(
+            Some(&[
+                crate::ActionRunVar {
+                    name: "year".to_string(),
+                    value: crate::ActionRunVarValue::Variable("runtime.year".to_string()),
+                },
+                crate::ActionRunVar {
+                    name: "generate_images".to_string(),
+                    value: crate::ActionRunVarValue::Variable(
+                        "runtime.generate_images".to_string(),
+                    ),
+                },
+            ]),
+            None,
             None,
             None,
             &json!({
-                "report_filename": "q1.exe"
+                "runtime": {
+                    "year": 2026,
+                    "generate_images": true
+                }
+            }),
+            "demo",
+            &no_named_inputs(),
+        )
+        .expect("dynamic child run_vars should resolve");
+
+        assert_eq!(
+            args,
+            vec![
+                "--run-var",
+                "year=2026",
+                "--run-var",
+                "generate_images=true",
+            ]
+        );
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("runtime var 'year'"));
+        assert!(notes[1].contains("runtime var 'generate_images'"));
+        assert!(notes[1].contains("true"));
+    }
+
+    #[test]
+    fn child_input_args_reject_object_valued_run_var_variable() {
+        let error = child_input_args(
+            Some(&[crate::ActionRunVar {
+                name: "year".to_string(),
+                value: crate::ActionRunVarValue::Variable("runtime.year".to_string()),
+            }]),
+            None,
+            None,
+            None,
+            &json!({
+                "runtime": {
+                    "year": { "bad": true }
+                }
             }),
             "demo",
             &no_named_inputs(),
         )
         .unwrap_err();
 
-        assert!(error.contains("named input override 'source_doc'"));
-        assert!(error.contains("supported file extension"));
+        assert!(error.contains("runtime var 'year'"));
+        assert!(error.contains("object-valued variable"));
     }
 
     #[test]
@@ -4248,6 +4351,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -4287,6 +4391,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -4356,6 +4461,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -4436,6 +4542,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -4520,6 +4627,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -4579,6 +4687,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -4660,6 +4769,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -4756,6 +4866,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -4812,6 +4923,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -4874,6 +4986,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
             input_overrides: None,
             inputs: Some(vec![
                 crate::ActionInput::Text {
@@ -4983,6 +5096,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -5087,6 +5201,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -5171,6 +5286,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -5260,6 +5376,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -5281,6 +5398,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
             input_overrides: None,
             inputs: Some(vec![crate::ActionInput::Text {
                 text: vec![
@@ -5375,6 +5493,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -5429,6 +5548,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some("child_agent".to_string()),
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -5470,6 +5590,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some("./../child_agent".to_string()),
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -5511,6 +5632,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some("./agents/child_agent".to_string()),
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -5569,6 +5691,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -5634,6 +5757,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -5655,6 +5779,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -5728,6 +5853,7 @@ auth_mode = "api_key"
                 subject: None,
                 text: None,
                 agent: None,
+                run_vars: None,
                 input_overrides: None,
                 inputs: None,
                 input_mode: None,
@@ -5753,6 +5879,7 @@ auth_mode = "api_key"
                 subject: None,
                 text: None,
                 agent: Some(format!("./{}", script_name)),
+                run_vars: None,
                 input_overrides: None,
                 inputs: None,
                 input_mode: None,
@@ -5823,6 +5950,7 @@ auth_mode = "api_key"
                 subject: None,
                 text: None,
                 agent: None,
+                run_vars: None,
                 input_overrides: None,
                 inputs: None,
                 input_mode: None,
@@ -5854,6 +5982,7 @@ auth_mode = "api_key"
                 subject: None,
                 text: None,
                 agent: None,
+                run_vars: None,
                 input_overrides: None,
                 inputs: None,
                 input_mode: None,
@@ -5934,6 +6063,7 @@ auth_mode = "api_key"
                 subject: None,
                 text: None,
                 agent: None,
+                run_vars: None,
                 input_overrides: None,
                 inputs: None,
                 input_mode: None,
@@ -5962,6 +6092,7 @@ auth_mode = "api_key"
                 subject: None,
                 text: None,
                 agent: None,
+                run_vars: None,
                 input_overrides: None,
                 inputs: None,
                 input_mode: None,
@@ -6041,6 +6172,7 @@ auth_mode = "api_key"
                     subject: None,
                     text: None,
                     agent: None,
+                    run_vars: None,
                     input_overrides: None,
                     inputs: None,
                     input_mode: None,
@@ -6062,6 +6194,7 @@ auth_mode = "api_key"
                     subject: None,
                     text: None,
                     agent: Some(format!("./{}", script_name)),
+                    run_vars: None,
                     input_overrides: None,
                     inputs: None,
                     input_mode: None,
@@ -6088,6 +6221,7 @@ auth_mode = "api_key"
                 subject: None,
                 text: None,
                 agent: Some(format!("./{}", script_name)),
+                run_vars: None,
                 input_overrides: None,
                 inputs: None,
                 input_mode: None,
@@ -6155,6 +6289,7 @@ auth_mode = "api_key"
                     subject: None,
                     text: None,
                     agent: None,
+                    run_vars: None,
                     input_overrides: None,
                     inputs: None,
                     input_mode: None,
@@ -6179,6 +6314,7 @@ auth_mode = "api_key"
                     subject: None,
                     text: None,
                     agent: None,
+                    run_vars: None,
                     input_overrides: None,
                     inputs: None,
                     input_mode: None,
@@ -6209,6 +6345,7 @@ auth_mode = "api_key"
                     subject: None,
                     text: None,
                     agent: None,
+                    run_vars: None,
                     input_overrides: None,
                     inputs: None,
                     input_mode: None,
@@ -6236,6 +6373,7 @@ auth_mode = "api_key"
                     subject: None,
                     text: None,
                     agent: None,
+                    run_vars: None,
                     input_overrides: None,
                     inputs: None,
                     input_mode: None,
@@ -6311,6 +6449,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -6332,6 +6471,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -6402,6 +6542,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
@@ -6475,6 +6616,7 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,

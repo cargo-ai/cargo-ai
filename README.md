@@ -716,12 +716,14 @@ Use child agents when one agent needs to hand work to another agent.
 - By default, the parent plus any child agents share a total runtime budget of `600` seconds. Override that with `--max-runtime-in-sec`.
 - A parent can pass inputs to a child and record whether the child succeeded or failed.
 - A parent can also reuse one declared named top-level input explicitly inside child `inputs` with `{ "input": "<name>" }`.
+- Child `agent` steps may set `run_vars` to pass child runtime vars the same way the CLI uses repeatable `--run-var NAME=VALUE`.
 - Child `agent` steps may set `input_overrides` to target the child's declared named inputs directly.
 - Child `agent` steps may still provide anonymous child `inputs`.
 - Child `agent` steps may set `input_mode` to `replace`, `append`, or `prepend` when they also provide child `inputs`.
 - Named child-input reuse is explicit only. Cargo AI does not automatically inherit every named parent input into the child.
 - If a middle agent wants to pass the same named input to its own child, it should declare the same named top-level input locally first.
-- `input_overrides`, `inputs`, and `input_mode` mirror the CLI mental model:
+- `run_vars`, `input_overrides`, `inputs`, and `input_mode` mirror the CLI mental model:
+  - `run_vars` is the child-step equivalent of `--run-var NAME=VALUE`
   - `input_overrides` is the child-step equivalent of `--input-override NAME=VALUE`
   - `inputs` is the child-step equivalent of anonymous runtime `--input-*`
   - `input_mode` applies only to child `inputs`, not to `input_overrides`
@@ -739,12 +741,14 @@ Example:
   "kind": "agent",
   "agent": "./child_reporter",
   "profile": { "var": "runtime.child_profile" },
+  "run_vars": {
+    "year": { "var": "runtime.year" },
+    "month": "08",
+    "generate_images": true
+  },
   "input_overrides": {
     "menu_image": { "input": "menu_image" },
-    "review_reason": {
-      "type": "text",
-      "text": [{ "var": "reason" }]
-    }
+    "review_reason": { "var": "reason" }
   },
   "input_mode": "append",
   "status_variable": "child_status",
@@ -760,10 +764,18 @@ Example:
 
 That child step behaves like a structured CLI invocation:
 
+- `run_vars.year` is equivalent to `--run-var year=...`
+- `run_vars.month` is equivalent to `--run-var month=08`
+- `run_vars.generate_images` is equivalent to `--run-var generate_images=true`
 - `input_overrides.menu_image` is equivalent to `--input-override menu_image=...`
 - `input_overrides.review_reason` is equivalent to `--input-override review_reason=...`
 - child `inputs` stays the anonymous extra-input list
 - child `input_mode` still controls only that anonymous `inputs` list
+
+Use these child-step value shapes:
+
+- `run_vars.<name>`: string, number, boolean, or `{ "var": "..." }`
+- `input_overrides.<name>`: string, `{ "var": "..." }`, or `{ "input": "<name>" }`
 
 For schema-backed agents, `--input-override` and anonymous runtime inputs operate at different layers. This is valid:
 

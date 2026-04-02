@@ -137,14 +137,18 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 ## Child-Agent Data Flow
 
 - Parent actions may pass child-agent `inputs`, including dynamic string parts resolved from current action-local data.
+- Parent actions may also pass child-agent `run_vars` keyed by the intended child runtime var.
 - Parent actions may also pass child-agent `input_overrides` keyed by the intended named child input.
 - If the target is another Cargo AI agent, prefer a native `kind: "agent"` step instead of an `exec` wrapper that launches Python, shell, or another helper just to call the child.
 - Use wrapper programs only when the task truly needs extra non-Cargo-AI behavior around that child call.
 - Child `inputs` may also reference declared named top-level inputs with the exact shape `{ "input": "<name>" }`.
 - Child `input_overrides` may also use `{ "input": "<name>" }` when the parent wants to bind one named parent input into one named child slot explicitly.
 - Named child-input reuse is explicit only; parent inputs are not auto-inherited.
-- Those child `inputs` and child `input_overrides` may resolve declared `runtime.*` values alongside top-level model output fields and prior captured step variables.
+- Child `run_vars` values should stay CLI-shaped: string, number, boolean, or `{ "var": "<name>" }`.
+- Child `input_overrides` values should stay CLI-shaped too: string, `{ "var": "<name>" }`, or `{ "input": "<name>" }`.
+- Child `inputs` may still resolve declared `runtime.*` values alongside top-level model output fields and prior captured step variables.
 - Parent `agent` steps should prefer `input_overrides` when targeting declared named child inputs and use child `inputs` for extra anonymous context.
+- Parent `agent` steps should use child `run_vars` for invocation-scoped operational settings that the child already declares in top-level `runtime_vars`.
 - Parent `agent` steps may set child `input_mode` to `replace`, `append`, or `prepend` when they also provide child `inputs`.
 - Parent `agent` steps may also set a step-level `profile` as a literal string or single variable reference; Cargo AI resolves it at step runtime and forwards `--profile <name>` to the child.
 - Child `input_mode` applies only to child `inputs`; it does not suppress or merge child `input_overrides`.

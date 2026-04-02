@@ -118,7 +118,26 @@ enum ActionInputSpec {
 #[derive(Debug, Clone)]
 struct ActionInputOverrideSpec {
     name: String,
-    value: ActionInputSpec,
+    value: ActionInputOverrideValueSpec,
+}
+
+#[derive(Debug, Clone)]
+enum ActionInputOverrideValueSpec {
+    Literal(String),
+    Variable(String),
+    NamedInput(String),
+}
+
+#[derive(Debug, Clone)]
+struct ActionRunVarSpec {
+    name: String,
+    value: ActionRunVarValueSpec,
+}
+
+#[derive(Debug, Clone)]
+enum ActionRunVarValueSpec {
+    Literal(Value),
+    Variable(String),
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +157,7 @@ struct RunStep {
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
     agent: Option<String>,
+    run_vars: Option<Vec<ActionRunVarSpec>>,
     input_overrides: Option<Vec<ActionInputOverrideSpec>>,
     inputs: Option<Vec<ActionInputSpec>>,
     input_mode: Option<ActionInputMode>,
@@ -840,6 +860,12 @@ fn parse_actions(
                             "`input_overrides` is only supported for `agent` actions",
                         ));
                     }
+                    if run_obj.contains_key("run_vars") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.run_vars"),
+                            "`run_vars` is only supported for `agent` actions",
+                        ));
+                    }
                     if run_obj.contains_key("input_mode") {
                         return Err(BuildError::config(
                             format!("{run_path}.input_mode"),
@@ -879,6 +905,7 @@ fn parse_actions(
                         subject: None,
                         text: None,
                         agent: None,
+                        run_vars: None,
                         input_overrides: None,
                         inputs: None,
                         input_mode: None,
@@ -940,6 +967,12 @@ fn parse_actions(
                             "`input_overrides` is only supported for `agent` actions",
                         ));
                     }
+                    if run_obj.contains_key("run_vars") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.run_vars"),
+                            "`run_vars` is only supported for `agent` actions",
+                        ));
+                    }
                     if run_obj.contains_key("output_variable") {
                         return Err(BuildError::config(
                             format!("{run_path}.output_variable"),
@@ -982,6 +1015,7 @@ fn parse_actions(
                         subject: Some(subject),
                         text: Some(text),
                         agent: None,
+                        run_vars: None,
                         input_overrides: None,
                         inputs: None,
                         input_mode: None,
@@ -1045,6 +1079,8 @@ fn parse_actions(
                     validate_child_agent_target(&agent, &agent_path)?;
                     let profile =
                         parse_optional_profile_field(run_obj, &run_path, action_field_types)?;
+                    let run_vars =
+                        parse_optional_action_run_vars(run_obj, &run_path, &available_field_types)?;
                     let input_overrides = parse_optional_action_input_overrides(
                         run_obj,
                         &run_path,
@@ -1095,6 +1131,7 @@ fn parse_actions(
                         subject: None,
                         text: None,
                         agent: Some(agent),
+                        run_vars,
                         input_overrides,
                         inputs,
                         input_mode,
@@ -1142,6 +1179,12 @@ fn parse_actions(
                         return Err(BuildError::config(
                             format!("{run_path}.input_overrides"),
                             "`input_overrides` is only supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("run_vars") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.run_vars"),
+                            "`run_vars` is only supported for `agent` actions",
                         ));
                     }
                     if run_obj.contains_key("output_variable") {
@@ -1203,6 +1246,7 @@ fn parse_actions(
                         subject: None,
                         text: None,
                         agent: None,
+                        run_vars: None,
                         input_overrides: None,
                         inputs: None,
                         input_mode: None,
@@ -1369,7 +1413,7 @@ fn parse_optional_action_input_overrides(
     for (name, entry_value) in overrides_obj {
         let entry_path = format!("{input_overrides_path}.{}", name);
         validate_named_input_name(name, &entry_path)?;
-        let value = parse_action_input_spec(
+        let value = parse_action_input_override_value(
             entry_value,
             &entry_path,
             schema_field_types,
@@ -1382,6 +1426,186 @@ fn parse_optional_action_input_overrides(
     }
 
     Ok(Some(parsed))
+}
+
+fn parse_optional_action_run_vars(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<Option<Vec<ActionRunVarSpec>>, BuildError> {
+    let Some(value) = run_obj.get("run_vars") else {
+        return Ok(None);
+    };
+
+    let run_vars_path = format!("{run_path}.run_vars");
+    let run_vars_obj = value.as_object().ok_or_else(|| {
+        BuildError::config(
+            &run_vars_path,
+            "expected `run_vars` to be an object keyed by child runtime var",
+        )
+    })?;
+
+    if run_vars_obj.is_empty() {
+        return Err(BuildError::config(
+            &run_vars_path,
+            "must contain at least one child runtime var",
+        ));
+    }
+
+    let mut parsed = Vec::with_capacity(run_vars_obj.len());
+    for (name, entry_value) in run_vars_obj {
+        let entry_path = format!("{run_vars_path}.{}", name);
+        validate_runtime_var_name(name, &entry_path)?;
+        let value = parse_action_run_var_value(entry_value, &entry_path, schema_field_types)?;
+        parsed.push(ActionRunVarSpec {
+            name: name.to_string(),
+            value,
+        });
+    }
+
+    Ok(Some(parsed))
+}
+
+fn parse_action_input_override_value(
+    value: &Value,
+    path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+    named_input_kinds: &BTreeMap<String, InputKind>,
+) -> Result<ActionInputOverrideValueSpec, BuildError> {
+    match value {
+        Value::String(literal) => Ok(ActionInputOverrideValueSpec::Literal(literal.to_string())),
+        Value::Object(map) => {
+            if map.len() != 1 {
+                return Err(BuildError::config(
+                    path,
+                    "expected a string literal override or an object with exactly one key (`var` or `input`)",
+                ));
+            }
+
+            let Some((key, entry_value)) = map.iter().next() else {
+                return Err(BuildError::config(
+                    path,
+                    "expected a string literal override or an object with exactly one key (`var` or `input`)",
+                ));
+            };
+
+            match key.as_str() {
+                "var" => Ok(ActionInputOverrideValueSpec::Variable(
+                    parse_action_scalar_variable_reference(
+                        entry_value,
+                        &format!("{path}.var"),
+                        schema_field_types,
+                        "child `input_overrides`",
+                    )?,
+                )),
+                "input" => {
+                    let input_name = entry_value.as_str().ok_or_else(|| {
+                        BuildError::config(
+                            format!("{path}.input"),
+                            "expected `input` to be a string named parent input reference",
+                        )
+                    })?;
+                    validate_named_input_name(input_name, &format!("{path}.input"))?;
+                    if !named_input_kinds.contains_key(input_name) {
+                        return Err(BuildError::config(
+                            format!("{path}.input"),
+                            format!("unknown named top-level input `{input_name}`"),
+                        ));
+                    }
+                    Ok(ActionInputOverrideValueSpec::NamedInput(
+                        input_name.to_string(),
+                    ))
+                }
+                other => Err(BuildError::config(
+                    path,
+                    format!(
+                        "unsupported child `input_overrides` object key `{other}` (supported: `var`, `input`)"
+                    ),
+                )),
+            }
+        }
+        _ => Err(BuildError::config(
+            path,
+            "expected a string literal override or an object of the form `{ \"var\": \"field_name\" }` or `{ \"input\": \"name\" }`",
+        )),
+    }
+}
+
+fn parse_action_run_var_value(
+    value: &Value,
+    path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<ActionRunVarValueSpec, BuildError> {
+    match value {
+        Value::String(_) | Value::Bool(_) | Value::Number(_) => {
+            Ok(ActionRunVarValueSpec::Literal(value.clone()))
+        }
+        Value::Object(map) => {
+            if map.len() != 1 {
+                return Err(BuildError::config(
+                    path,
+                    "expected a scalar literal or an object with exactly one key (`var`)",
+                ));
+            }
+
+            let Some((key, entry_value)) = map.iter().next() else {
+                return Err(BuildError::config(
+                    path,
+                    "expected a scalar literal or an object with exactly one key (`var`)",
+                ));
+            };
+
+            if key != "var" {
+                return Err(BuildError::config(
+                    path,
+                    format!("unsupported child `run_vars` object key `{key}` (supported: `var`)"),
+                ));
+            }
+
+            Ok(ActionRunVarValueSpec::Variable(
+                parse_action_scalar_variable_reference(
+                    entry_value,
+                    &format!("{path}.var"),
+                    schema_field_types,
+                    "child `run_vars`",
+                )?,
+            ))
+        }
+        _ => Err(BuildError::config(
+            path,
+            "expected a string, boolean, or number literal, or an object of the form `{ \"var\": \"field_name\" }`",
+        )),
+    }
+}
+
+fn parse_action_scalar_variable_reference(
+    value: &Value,
+    path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+    field_description: &str,
+) -> Result<String, BuildError> {
+    let variable_name = value
+        .as_str()
+        .ok_or_else(|| BuildError::config(path, "expected `var` to be a string field name"))?;
+    let normalized_name = variable_name.trim();
+    validate_variable_lookup_name(normalized_name, path)?;
+    let field_type = resolve_var_field_type(
+        &Value::String(normalized_name.to_string()),
+        schema_field_types,
+        path,
+    )?;
+
+    if field_type == FieldType::Array {
+        return Err(BuildError::config(
+            path,
+            format!(
+                "{field_description} variables must resolve from scalar fields; `{normalized_name}` is {}",
+                type_name(&field_type)
+            ),
+        ));
+    }
+
+    Ok(normalized_name.to_string())
 }
 
 fn parse_optional_when(
@@ -2946,6 +3170,36 @@ fn render_action_input_spec(input: &ActionInputSpec) -> String {
     }
 }
 
+fn render_action_input_override_value(value: &ActionInputOverrideValueSpec) -> String {
+    match value {
+        ActionInputOverrideValueSpec::Literal(literal) => format!(
+            "ActionInputOverrideValue::Literal({}.to_string())",
+            rust_string_literal(literal)
+        ),
+        ActionInputOverrideValueSpec::Variable(variable) => format!(
+            "ActionInputOverrideValue::Variable({}.to_string())",
+            rust_string_literal(variable)
+        ),
+        ActionInputOverrideValueSpec::NamedInput(input) => format!(
+            "ActionInputOverrideValue::NamedInput {{ input: {}.to_string() }}",
+            rust_string_literal(input)
+        ),
+    }
+}
+
+fn render_action_run_var_value(value: &ActionRunVarValueSpec) -> String {
+    match value {
+        ActionRunVarValueSpec::Literal(literal) => format!(
+            "ActionRunVarValue::Literal(serde_json::from_str({}).expect(\"generated child run_var literal must be valid JSON\"))",
+            rust_string_literal(&literal.to_string())
+        ),
+        ActionRunVarValueSpec::Variable(variable) => format!(
+            "ActionRunVarValue::Variable({}.to_string())",
+            rust_string_literal(variable)
+        ),
+    }
+}
+
 fn render_agent_model(config: &AgentConfig) -> String {
     let mut struct_fields = String::new();
     let mut validation_calls = String::new();
@@ -3147,6 +3401,24 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     .as_ref()
                     .map(|agent| format!("Some({}.to_string())", rust_string_literal(agent)))
                     .unwrap_or_else(|| "None".to_string());
+                let run_vars = run_step
+                    .run_vars
+                    .as_ref()
+                    .map(|run_vars| {
+                        let rendered = run_vars
+                            .iter()
+                            .map(|run_var| {
+                                format!(
+                                    "ActionRunVar {{ name: {}.to_string(), value: {} }}",
+                                    rust_string_literal(&run_var.name),
+                                    render_action_run_var_value(&run_var.value)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("Some(vec![{}])", rendered)
+                    })
+                    .unwrap_or_else(|| "None".to_string());
                 let inputs = run_step
                     .inputs
                     .as_ref()
@@ -3169,7 +3441,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                                 format!(
                                     "ActionInputOverride {{ name: {}.to_string(), value: {} }}",
                                     rust_string_literal(&input_override.name),
-                                    render_action_input_spec(&input_override.value)
+                                    render_action_input_override_value(&input_override.value)
                                 )
                             })
                             .collect::<Vec<_>>()
@@ -3218,6 +3490,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         subject: {},
                         text: {},
                         agent: {},
+                        run_vars: {},
                         input_overrides: {},
                         inputs: {},
                         input_mode: {},
@@ -3244,6 +3517,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     subject,
                     text,
                     agent,
+                    run_vars,
                     input_overrides,
                     inputs,
                     input_mode,
@@ -3424,9 +3698,28 @@ pub enum ActionInput {{
 }}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum ActionInputOverrideValue {{
+    Literal(String),
+    Variable(String),
+    NamedInput {{ input: String }},
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ActionInputOverride {{
     name: String,
-    value: ActionInput,
+    value: ActionInputOverrideValue,
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum ActionRunVarValue {{
+    Literal(serde_json::Value),
+    Variable(String),
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ActionRunVar {{
+    name: String,
+    value: ActionRunVarValue,
 }}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3460,6 +3753,7 @@ pub struct RunStep {{
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
     agent: Option<String>,
+    run_vars: Option<Vec<ActionRunVar>>,
     input_overrides: Option<Vec<ActionInputOverride>>,
     inputs: Option<Vec<ActionInput>>,
     input_mode: Option<ActionInputMode>,

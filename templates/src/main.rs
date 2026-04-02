@@ -3470,6 +3470,7 @@ async fn run_agent_step(
         command.arg(profile_name);
     }
     let (child_args, resolution_notes) = child_input_args(
+        step.run_vars.as_deref(),
         step.input_overrides.as_deref(),
         step.input_mode,
         step.inputs.as_deref(),
@@ -3978,6 +3979,7 @@ fn matching_run_steps<'a>(
 }
 
 fn child_input_args(
+    run_vars: Option<&[ActionRunVar]>,
     input_overrides: Option<&[ActionInputOverride]>,
     input_mode: Option<ActionInputMode>,
     inputs: Option<&[ActionInput]>,
@@ -3987,6 +3989,18 @@ fn child_input_args(
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut args = Vec::new();
     let mut notes = Vec::new();
+
+    if let Some(run_vars) = run_vars {
+        for run_var in run_vars {
+            let (resolved_value, resolution_note) =
+                resolve_child_run_var_value(&run_var.value, data, action_name, &run_var.name)?;
+            args.push("--run-var".to_string());
+            args.push(format!("{}={}", run_var.name, resolved_value));
+            if let Some(note) = resolution_note {
+                notes.push(note);
+            }
+        }
+    }
 
     if let Some(input_overrides) = input_overrides {
         for input_override in input_overrides {
@@ -4138,76 +4152,30 @@ fn child_input_args(
 }
 
 fn resolve_child_input_override_value(
-    input: &ActionInput,
+    input: &ActionInputOverrideValue,
     data: &serde_json::Value,
     action_name: &str,
     override_name: &str,
     named_inputs: &BTreeMap<String, Input>,
 ) -> Result<(String, Option<String>), String> {
     match input {
-        ActionInput::Text { text } => {
-            let resolved = resolve_string_parts(
-                text,
+        ActionInputOverrideValue::Literal(literal) => Ok((literal.clone(), None)),
+        ActionInputOverrideValue::Variable(variable) => {
+            let resolved = resolve_scalar_action_variable(
                 data,
+                variable,
                 action_name,
                 &format!("child-agent named input override '{}'", override_name),
             )?;
-            let note = child_input_uses_dynamic_parts(text).then(|| {
-                format!(
-                    "Action '{}' resolved dynamic child-agent named text override '{}'.",
-                    action_name, override_name
-                )
-            });
-            Ok((resolved, note))
-        }
-        ActionInput::Url { url } => {
-            let resolved = resolve_string_parts(
-                url,
-                data,
-                action_name,
-                &format!("child-agent named url override '{}'", override_name),
-            )?;
-            validate_child_input_override_url(&resolved, action_name, override_name)?;
-            let note = child_input_uses_dynamic_parts(url).then(|| {
-                format!(
-                    "Action '{}' resolved dynamic child-agent named url override '{}' -> {}.",
+            Ok((
+                resolved.clone(),
+                Some(format!(
+                    "Action '{}' resolved dynamic child-agent named override '{}' -> {}.",
                     action_name, override_name, resolved
-                )
-            });
-            Ok((resolved, note))
+                )),
+            ))
         }
-        ActionInput::Image { path } => {
-            let resolved = resolve_string_parts(
-                path,
-                data,
-                action_name,
-                &format!("child-agent named image override '{}'", override_name),
-            )?;
-            let note = child_input_uses_dynamic_parts(path).then(|| {
-                format!(
-                    "Action '{}' resolved dynamic child-agent named image override '{}' -> {}.",
-                    action_name, override_name, resolved
-                )
-            });
-            Ok((resolved, note))
-        }
-        ActionInput::File { path } => {
-            let resolved = resolve_string_parts(
-                path,
-                data,
-                action_name,
-                &format!("child-agent named file override '{}'", override_name),
-            )?;
-            validate_child_input_override_file_extension(&resolved, action_name, override_name)?;
-            let note = child_input_uses_dynamic_parts(path).then(|| {
-                format!(
-                    "Action '{}' resolved dynamic child-agent named file override '{}' -> {}.",
-                    action_name, override_name, resolved
-                )
-            });
-            Ok((resolved, note))
-        }
-        ActionInput::Named { input } => {
+        ActionInputOverrideValue::NamedInput { input } => {
             let forwarded = named_inputs.get(input).ok_or_else(|| {
                 format!(
                     "Action '{}' child-agent named input '{}' is not available for forwarding.",
@@ -4222,6 +4190,88 @@ fn resolve_child_input_override_value(
             })?;
             Ok((value.to_string(), None))
         }
+    }
+}
+
+fn resolve_child_run_var_value(
+    value: &ActionRunVarValue,
+    data: &serde_json::Value,
+    action_name: &str,
+    run_var_name: &str,
+) -> Result<(String, Option<String>), String> {
+    match value {
+        ActionRunVarValue::Literal(literal) => Ok((stringify_scalar_json_value(literal, action_name, &format!("child-agent runtime var '{}'", run_var_name))?, None)),
+        ActionRunVarValue::Variable(variable) => {
+            let resolved = resolve_scalar_action_variable(
+                data,
+                variable,
+                action_name,
+                &format!("child-agent runtime var '{}'", run_var_name),
+            )?;
+            Ok((
+                resolved.clone(),
+                Some(format!(
+                    "Action '{}' resolved dynamic child-agent runtime var '{}' -> {}.",
+                    action_name, run_var_name, resolved
+                )),
+            ))
+        }
+    }
+}
+
+fn resolve_scalar_action_variable(
+    data: &serde_json::Value,
+    variable: &str,
+    action_name: &str,
+    field_name: &str,
+) -> Result<String, String> {
+    let Some(value) = lookup_action_variable(data, variable) else {
+        return Err(format!(
+            "Action '{}' {} references missing variable '{}'.",
+            action_name, field_name, variable
+        ));
+    };
+
+    match value {
+        serde_json::Value::String(text) => Ok(text.clone()),
+        serde_json::Value::Bool(boolean) => Ok(boolean.to_string()),
+        serde_json::Value::Number(number) => Ok(number.to_string()),
+        serde_json::Value::Array(_) => Err(format!(
+            "Action '{}' {} references array-valued variable '{}', which is unsupported for scalar substitution.",
+            action_name, field_name, variable
+        )),
+        serde_json::Value::Object(_) => Err(format!(
+            "Action '{}' {} references object-valued variable '{}', which is unsupported for scalar substitution.",
+            action_name, field_name, variable
+        )),
+        serde_json::Value::Null => Err(format!(
+            "Action '{}' {} references null variable '{}', which is unsupported for scalar substitution.",
+            action_name, field_name, variable
+        )),
+    }
+}
+
+fn stringify_scalar_json_value(
+    value: &serde_json::Value,
+    action_name: &str,
+    field_name: &str,
+) -> Result<String, String> {
+    match value {
+        serde_json::Value::String(text) => Ok(text.clone()),
+        serde_json::Value::Bool(boolean) => Ok(boolean.to_string()),
+        serde_json::Value::Number(number) => Ok(number.to_string()),
+        serde_json::Value::Array(_) => Err(format!(
+            "Action '{}' {} cannot use an array literal here.",
+            action_name, field_name
+        )),
+        serde_json::Value::Object(_) => Err(format!(
+            "Action '{}' {} cannot use an object literal here.",
+            action_name, field_name
+        )),
+        serde_json::Value::Null => Err(format!(
+            "Action '{}' {} cannot use null here.",
+            action_name, field_name
+        )),
     }
 }
 
@@ -4284,21 +4334,6 @@ fn validate_child_input_url(url: &str, action_name: &str, input_index: usize) ->
     }
 }
 
-fn validate_child_input_override_url(
-    url: &str,
-    action_name: &str,
-    override_name: &str,
-) -> Result<(), String> {
-    if url.starts_with("http://") || url.starts_with("https://") {
-        Ok(())
-    } else {
-        Err(format!(
-            "Action '{}' child-agent named input override '{}' must resolve to an absolute http(s) URL.",
-            action_name, override_name
-        ))
-    }
-}
-
 fn validate_child_input_path(
     path: &str,
     action_name: &str,
@@ -4331,29 +4366,6 @@ fn validate_child_input_path(
     }
 
     Ok(())
-}
-
-fn validate_child_input_override_file_extension(
-    path: &str,
-    action_name: &str,
-    override_name: &str,
-) -> Result<(), String> {
-    let extension = Path::new(path)
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|value| value.to_ascii_lowercase());
-
-    match extension.as_deref() {
-        Some(
-            "pdf" | "docx" | "csv" | "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlsx" | "xlt"
-            | "xlw" | "tsv" | "iif" | "doc" | "dot" | "odt" | "rtf" | "pot" | "ppa" | "pps"
-            | "ppt" | "pptx" | "pwz" | "wiz",
-        ) => Ok(()),
-        _ => Err(format!(
-            "Action '{}' child-agent named input override '{}' must use a supported file extension: {}.",
-            action_name, override_name, SUPPORTED_FILE_EXTENSIONS_MESSAGE
-        )),
-    }
 }
 
 fn validate_child_file_extension(

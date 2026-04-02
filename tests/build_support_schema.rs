@@ -862,9 +862,13 @@ fn accepts_agent_step_with_input_overrides() {
               {
                 "kind": "agent",
                 "agent": "./summary_agent",
+                "run_vars": {
+                  "year": 2026,
+                  "month": { "var": "value" }
+                },
                 "input_overrides": {
                   "menu_image": { "input": "menu_image" },
-                  "menu_note": { "type": "text", "text": "Spring menu" }
+                  "menu_note": "Spring menu"
                 }
               }
             ]
@@ -879,8 +883,18 @@ fn accepts_agent_step_with_input_overrides() {
 
     let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
 
+    assert!(generated.contains("run_vars: Some(vec!["));
+    assert!(generated
+        .contains("ActionRunVar { name: \"year\".to_string(), value: ActionRunVarValue::Literal("));
     assert!(generated.contains(
-        "input_overrides: Some(vec![ActionInputOverride { name: \"menu_image\".to_string(), value: ActionInput::Named { input: \"menu_image\".to_string() } }, ActionInputOverride { name: \"menu_note\".to_string(), value: ActionInput::Text { text: vec![RunArg::Literal(\"Spring menu\".to_string())] } }])"
+        "ActionRunVar { name: \"month\".to_string(), value: ActionRunVarValue::Variable(\"value\".to_string()) }"
+    ));
+    assert!(generated.contains("input_overrides: Some(vec!["));
+    assert!(generated.contains(
+        "ActionInputOverride { name: \"menu_image\".to_string(), value: ActionInputOverrideValue::NamedInput { input: \"menu_image\".to_string() } }"
+    ));
+    assert!(generated.contains(
+        "ActionInputOverride { name: \"menu_note\".to_string(), value: ActionInputOverrideValue::Literal(\"Spring menu\".to_string()) }"
     ));
 }
 
@@ -925,7 +939,7 @@ fn rejects_input_overrides_on_exec_steps() {
                 "program": "echo",
                 "args": ["hello"],
                 "input_overrides": {
-                  "menu_note": { "type": "text", "text": "Spring menu" }
+                  "menu_note": "Spring menu"
                 }
               }
             ]
