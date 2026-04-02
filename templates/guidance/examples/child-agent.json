@@ -27,11 +27,12 @@
       "run": [
         {
           "kind": "exec",
-          "program": "echo",
+          "program": "/bin/echo",
           "args": [
             "child summary:",
             { "var": "child_summary" }
-          ]
+          ],
+          "platform": "macos"
         }
       ]
     }

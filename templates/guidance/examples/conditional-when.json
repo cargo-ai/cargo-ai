@@ -29,11 +29,12 @@
       "run": [
         {
           "kind": "exec",
-          "program": "echo",
+          "program": "/bin/echo",
           "args": [
             "preparing report:",
             { "var": "report_title" }
           ],
+          "platform": "macos",
           "output_variable": "report_message",
           "status_variable": "prepare_status",
           "error_variable": "prepare_error"

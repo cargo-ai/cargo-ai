@@ -23,16 +23,18 @@
       "run": [
         {
           "kind": "exec",
-          "program": "./generate_report.sh",
+          "program": "/usr/bin/false",
           "args": [],
-          "output_variable": "report_path",
+          "platform": "macos",
           "status_variable": "report_status",
           "error_variable": "report_error"
         },
         {
           "kind": "email_me",
           "subject": "Report ready",
-          "text": ["Generated file: ", { "var": "report_path" }]
+          "text": [
+            "This step only runs if the earlier exec succeeds."
+          ]
         }
       ]
     }

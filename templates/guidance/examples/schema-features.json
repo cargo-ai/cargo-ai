@@ -48,13 +48,14 @@
       "run": [
         {
           "kind": "exec",
-          "program": "echo",
+          "program": "/bin/echo",
           "args": [
             "prepare",
             { "var": "report_title" },
             "as",
             { "var": "summary_style" }
           ],
+          "platform": "macos",
           "output_variable": "prepare_message",
           "status_variable": "prepare_status",
           "error_variable": "prepare_error"

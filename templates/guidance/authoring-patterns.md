@@ -9,9 +9,10 @@ Keep top-level keys in this order:
 
 1. `version`
 2. `inputs`
-3. optional `runtime_vars`
-4. `agent_schema`
-5. `actions`
+3. optional `action_execution`
+4. optional `runtime_vars`
+5. `agent_schema`
+6. `actions`
 
 Keep each action in this order:
 
