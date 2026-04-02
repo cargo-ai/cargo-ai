@@ -16,6 +16,7 @@ Each example is meant to be validated and hatched into a CLI executable.
   - Good starting point when you need a parent to forward one named top-level input with `{ "input": "<name>" }`.
 - `stop-by-default.json`
   - Shows default stop behavior when a later step should not continue after failure.
+  - Uses an intentionally missing command placeholder so the failure path is easy to test on any platform; replace that step with a real command when adapting the example.
 - `continue-on-failure.json`
   - Shows `failure_mode: "continue"` with `status_variable`, `error_variable`, and follow-up behavior.
 - `conditional-when.json`

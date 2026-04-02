@@ -23,9 +23,8 @@
       "run": [
         {
           "kind": "exec",
-          "program": "/usr/bin/false",
+          "program": "this-command-should-not-exist",
           "args": [],
-          "platform": "macos",
           "status_variable": "report_status",
           "error_variable": "report_error"
         },
