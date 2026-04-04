@@ -3730,7 +3730,7 @@ fn print_action_using_line_if_changed(action_index: usize, action_name: &str, us
 }
 
 fn action_lane_prefix(action_index: usize, action_name: &str) -> String {
-    format!("[A{} {}]", action_index + 1, action_name)
+    format!("[Action {}: {}]", action_index + 1, action_name)
 }
 
 fn format_action_line(action_index: usize, action_name: &str, message: &str) -> String {

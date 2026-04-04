@@ -206,15 +206,15 @@ If `logic` evaluates true, the action's `run` steps execute in order.
 - Cargo AI prints one run-level execution header before actions start: `Action execution: sequential` or `Action execution: parallel`.
 - Cargo AI also prints one root `using:` line near run start that shows the effective `profile`, `auth`, `server`, and `model` for that invocation.
 - It adds `url=...` only when the effective URL is custom or materially different from the standard transport.
-- In redirected, piped, CI, or simpler terminal output, Cargo AI prefixes parent-visible action output with deterministic lane labels such as `[A1 generate_images]`.
+- In redirected, piped, CI, or simpler terminal output, Cargo AI prefixes parent-visible action output with deterministic labels such as `[Action 1: generate_images]`.
 - In append-only output, long-running steps also emit a step-start liveness line such as `step 2/2 generate_image started; waiting for provider response...`.
 - Terminal lane summaries and the final run footer also include wall-clock durations, for example `completed in 31s.` and `✅ Run complete in 32s.`.
 - When attached directly to an interactive terminal, Cargo AI switches to a compact live lane dashboard.
-- The first live dashboard slice shows lane label, lane status with elapsed time while running and after terminal completion/failure, terminal step marker or current step when known, the last lifecycle message, and a compact buffered `output` section for parent-visible action output.
+- The first live dashboard slice shows lane label, lane status with elapsed time while running and after terminal completion/failure, terminal step marker or current step when known, and the last lifecycle message.
 - Parent-run `exec` and `email_me` output is bucketed into the originating lane.
 - Child-agent steps stay minimal in the parent lane with start/completion or exit-summary lines instead of recursively inlining the child transcript.
-- Provider-backed or child-agent steps emit another lane-level `using:` line only when the effective `profile`, `auth`, `server`, or `model` changes from the most recently printed context.
-- Child agents report their own effective `using:` line from inside the child runtime; the parent only surfaces that one line when it represents a changed context.
+- In append-only output, provider-backed or child-agent steps emit another action-prefixed `using:` line only when the effective `profile`, `auth`, `server`, or `model` changes from the most recently printed context.
+- Interactive live mode keeps the parent dashboard at the orchestration level and does not surface child or step-level `using:` lines there.
 
 ## Supported Run-Step Kinds
 

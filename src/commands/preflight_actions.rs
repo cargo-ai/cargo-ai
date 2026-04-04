@@ -2280,7 +2280,7 @@ fn print_action_using_line_if_changed(action_index: usize, action_name: &str, us
 }
 
 fn action_lane_prefix(action_index: usize, action_name: &str) -> String {
-    format!("[A{} {}]", action_index + 1, action_name)
+    format!("[Action {}: {}]", action_index + 1, action_name)
 }
 
 fn format_action_line(action_index: usize, action_name: &str, message: &str) -> String {
@@ -4160,9 +4160,12 @@ auth_mode = "api_key"
     fn action_lane_prefix_uses_json_order_and_name() {
         assert_eq!(
             action_lane_prefix(0, "generate_images"),
-            "[A1 generate_images]"
+            "[Action 1: generate_images]"
         );
-        assert_eq!(action_lane_prefix(2, "child_summary"), "[A3 child_summary]");
+        assert_eq!(
+            action_lane_prefix(2, "child_summary"),
+            "[Action 3: child_summary]"
+        );
     }
 
     #[test]
@@ -4184,7 +4187,7 @@ auth_mode = "api_key"
         assert_eq!(snapshot[0], "Action execution: parallel");
         assert!(snapshot
             .iter()
-            .any(|line| line.starts_with("[A1 generate_images] running · ")));
+            .any(|line| line.starts_with("[Action 1: generate_images] running · ")));
         assert!(snapshot
             .iter()
             .any(|line| line == "  step: 1/2 generate_image"));
@@ -4207,7 +4210,7 @@ auth_mode = "api_key"
         let snapshot = output.snapshot_lines_for_test();
         assert!(snapshot
             .iter()
-            .any(|line| line.starts_with("[A1 generate_images] running · ")));
+            .any(|line| line.starts_with("[Action 1: generate_images] running · ")));
         assert!(snapshot
             .iter()
             .any(|line| line == "  step: 2/2 generate_image"));
@@ -4229,7 +4232,7 @@ auth_mode = "api_key"
         let snapshot = output.snapshot_lines_for_test();
         assert!(snapshot
             .iter()
-            .any(|line| line.starts_with("[A1 generate_images] completed · ")));
+            .any(|line| line.starts_with("[Action 1: generate_images] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
         assert!(snapshot.iter().any(|line| line == "  last: completed."));
     }
@@ -4247,7 +4250,7 @@ auth_mode = "api_key"
         let snapshot = output.snapshot_lines_for_test();
         assert!(snapshot
             .iter()
-            .any(|line| line.starts_with("[A2 child_summary] failed · ")));
+            .any(|line| line.starts_with("[Action 2: child_summary] failed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✗ failed"));
         assert!(snapshot
             .iter()
@@ -4440,7 +4443,7 @@ auth_mode = "api_key"
         let snapshot = output.snapshot_lines_for_test();
         assert!(snapshot
             .iter()
-            .any(|line| line.starts_with("[A1 raw_exec] completed · ")));
+            .any(|line| line.starts_with("[Action 1: raw_exec] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
         assert!(snapshot.iter().any(|line| line == "  last: completed."));
         assert!(!snapshot.iter().any(|line| line == "  output:"));
@@ -5165,7 +5168,7 @@ auth_mode = "api_key"
         let snapshot = output.snapshot_lines_for_test();
         assert!(snapshot
             .iter()
-            .any(|line| line.starts_with("[A1 child_summary] completed · ")));
+            .any(|line| line.starts_with("[Action 1: child_summary] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
         assert!(snapshot.iter().any(|line| line == "  last: completed."));
         assert!(!snapshot.iter().any(|line| line == "  output:"));
@@ -6271,7 +6274,7 @@ auth_mode = "api_key"
         let _ = fs::remove_file(&script_path);
         let _ = fs::remove_file(&output_path);
 
-        assert!(error.contains("Run aborted by [A1 first_action]"));
+        assert!(error.contains("Run aborted by [Action 1: first_action]"));
         assert!(error.contains("exit status: 17"));
         assert!(
             !output_exists,
@@ -6423,7 +6426,7 @@ auth_mode = "api_key"
         let later_output_exists = later_output_path.exists();
         let _ = fs::remove_file(&later_output_path);
 
-        assert!(error.contains("Run aborted by [A1 first_action]"));
+        assert!(error.contains("Run aborted by [Action 1: first_action]"));
         assert!(error.contains("exit status: 19"));
         assert!(
             !later_output_exists,
