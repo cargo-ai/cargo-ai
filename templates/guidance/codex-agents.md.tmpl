@@ -68,9 +68,11 @@ If these conflict with the local `.cargo-ai/guidance/` bundle, follow the local 
 - Use canonical field order:
   - `version`
   - `inputs`
+  - optional `action_execution`
   - optional `runtime_vars`
   - `agent_schema`
   - `actions`
+- Within named input objects, prefer `name`, then `type`, then the value-bearing field. Keep unnamed literal inputs as `type` then value.
 - The current supported output schema is flat and top-level only:
   - `string`
   - `number`
@@ -86,6 +88,16 @@ If these conflict with the local `.cargo-ai/guidance/` bundle, follow the local 
 - Prefer the most minimal portable steps that satisfy the user's goal.
 - Use platform-specific commands only when the user explicitly wants local-machine behavior or the task cannot be met portably.
 - Remember that runtime input flags replace the full baked `inputs` array by default; use `--input-mode append` or `--input-mode prepend` when the caller should keep baked inputs too.
+- Prefer named top-level `inputs` when one declared value is part of the workflow contract, reusable by child-agent steps, or overrideable by name at runtime.
+- Keep one-off root-model context unnamed when it does not need that extra reusable identity.
+- Reuse a declared named top-level input inside child `agent.inputs` with `{ "input": "<name>" }`.
+- Prefer child `input_overrides` when the parent is targeting one declared named child input directly; keep child `inputs` for extra anonymous child context and use child `input_mode` exactly the same way the CLI uses `--input-mode`.
+- Use child `run_vars` for the child's declared invocation-scoped settings and keep them CLI-shaped: string, number, boolean, or `{ "var": "..." }`.
+- Keep child `input_overrides` CLI-shaped too: direct string literals, `{ "var": "..." }`, or `{ "input": "<name>" }` when forwarding a named parent input.
+- If another Cargo AI agent should do the work, prefer a native `kind: "agent"` step. Do not create Python or shell wrappers just to launch the child agent.
+- Use wrapper programs only when the task genuinely needs extra non-Cargo-AI behavior around that child invocation.
+- Expect Cargo AI runtime output to print one root `using:` line at run start and another step-level `using:` line only when a child `agent` or `generate_image` step changes the effective `profile`, `auth`, `server`, or `model`.
+- If `agent_schema.properties` is empty, Cargo AI uses the structural action-only shape: named top-level inputs are still allowed there, but anonymous runtime `--input-*` flags remain invalid and invocation-time changes should go through `--input-override NAME=VALUE`.
 - Use top-level `runtime_vars` when the caller should control action behavior or step-local settings at invocation time without editing the JSON.
 - Reference declared runtime vars as `runtime.<name>` and pass them with repeatable `--run-var name=value` flags.
 - If a `--run-var` value contains spaces or shell-sensitive characters, quote it normally for the caller's shell.

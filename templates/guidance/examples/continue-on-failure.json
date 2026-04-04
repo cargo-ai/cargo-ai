@@ -41,8 +41,9 @@
           "when": {
             "==": [{ "var": "child_status" }, "succeeded"]
           },
-          "program": "echo",
-          "args": ["child agent succeeded"]
+          "program": "/bin/echo",
+          "args": ["child agent succeeded"],
+          "platform": "macos"
         }
       ]
     }

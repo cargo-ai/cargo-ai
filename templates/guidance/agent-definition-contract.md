@@ -11,9 +11,10 @@ Every agent definition must be a JSON object with these keys in this order:
 
 1. `version`
 2. optional `inputs`
-3. optional `runtime_vars`
-4. `agent_schema`
-5. `actions`
+3. optional `action_execution`
+4. optional `runtime_vars`
+5. `agent_schema`
+6. `actions`
 
 ## `version`
 
@@ -26,15 +27,29 @@ Every agent definition must be a JSON object with these keys in this order:
 
 - Optional.
 - If present, must be an array with at least one item.
+- Each top-level input may also declare optional `name`.
+- For readability, prefer named input object field order as `name`, then `type`, then the value-bearing field (`text`, `url`, or `path`).
+- For unnamed literal inputs, keep `type` first and the value-bearing field second.
 - Supported input shapes:
   - `text`
-    - required: `type`, `text`
+    - required: `type`
+    - optional: `name`, `text`
   - `url`
-    - required: `type`, `url`
+    - required: `type`
+    - optional: `name`, `url`
   - `image`
-    - required: `type`, `path`
+    - required: `type`
+    - optional: `name`, `path`
   - `file`
-    - required: `type`, `path`
+    - required: `type`
+    - optional: `name`, `path`
+
+Top-level input rules:
+- Unnamed top-level inputs must include a baked value (`text`, `url`, or `path`).
+- Named top-level inputs may either include a baked value or act as a required slot with no baked value.
+- Named top-level inputs are still normal model-facing inputs for schema-backed agents.
+- Named top-level inputs may also be reused explicitly by child-agent steps and targeted by `--input-override`.
+- Top-level named inputs are literal-or-empty-slot only in the current slice; do not use `runtime.*` or other dynamic expressions there.
 
 Path rules for `image` and `file`:
 - Use relative paths only.
@@ -54,6 +69,7 @@ Generated agent binaries may also accept runtime input flags such as:
 - `--input-url`
 - `--input-image`
 - `--input-file`
+- `--input-override NAME=VALUE`
 
 These runtime inputs are separate from the JSON `inputs` array:
 - JSON `inputs` are baked into the definition as default model-facing inputs.
@@ -62,9 +78,21 @@ These runtime inputs are separate from the JSON `inputs` array:
 - `--input-mode replace` explicitly selects runtime-only replacement.
 - `--input-mode append` keeps baked inputs first and appends runtime inputs in CLI order.
 - `--input-mode prepend` keeps runtime inputs in CLI order first and then places baked inputs after them.
+- `--input-override NAME=VALUE` targets one declared named top-level input and replaces that named binding for the current run.
+- `--input-override` is repeatable; one binding per flag, split on the first `=`, and later duplicates win.
+- `--input-override` type-checks `VALUE` against the declared named input kind:
+  - `text`: raw string, including empty string
+  - `url`: must be an absolute `http://` or `https://` URL
+  - `image`: treated like runtime `--input-image`
+  - `file`: treated like runtime `--input-file` and must use a supported file extension
+- Anonymous runtime `--input-*` flags do not bind named input identities.
+- For schema-backed agents, anonymous runtime `--input-*` flags still control the effective root model input list exactly as before.
+- For structural action-only agents, anonymous runtime `--input-*` flags remain invalid; use named top-level inputs plus `--input-override` instead.
 
 Authoring guidance:
 - Use JSON `inputs` when the definition should own a fixed instruction or a fixed local file/image path.
+- Prefer named top-level inputs when a value is part of the workflow contract, reusable by child-agent steps, or overrideable by name.
+- Leave one-off root-model context unnamed when it does not need child reuse or targeted override behavior.
 - Use runtime flags when the caller should choose the content at invocation time.
 - If you use `--input-file` and still need a text instruction, either also pass `--input-text` in replace mode or choose `--input-mode append` / `--input-mode prepend` so the baked text instruction is still included.
 - `{"type":"file","path":"..."}` is for a definition-owned fixed file path, not for a caller-selected runtime file.
@@ -143,8 +171,9 @@ Unsupported schema shapes for the current MVP:
 
 Structural action-only rule:
 - If `agent_schema.properties` is empty, Cargo AI skips the initial model call and begins at the action layer.
-- In that shape, baked top-level `inputs` must be absent.
+- In that shape, top-level `inputs` may still exist, but they must declare `name` because they are reusable parent-owned inputs only.
 - In that shape, runtime model-facing `--input-*` flags are invalid.
+- In that shape, named top-level inputs may be baked literals or required slots satisfied later by parent pass-through or `--input-override`.
 - Top-level action `logic` starts with declared `runtime.*` values only.
 - Step `when` and substitution surfaces may use declared `runtime.*` values plus prior captured step variables as the action runs.
 - References to top-level model-output fields are invalid in that shape because no initial model output exists.
@@ -175,13 +204,17 @@ If `logic` evaluates true, the action's `run` steps execute in order.
 - A hard failure in one top-level action does not prevent later eligible top-level actions from running.
 - Cargo AI aggregates top-level hard failures after all eligible actions finish.
 - Cargo AI prints one run-level execution header before actions start: `Action execution: sequential` or `Action execution: parallel`.
-- In redirected, piped, CI, or simpler terminal output, Cargo AI prefixes parent-visible action output with deterministic lane labels such as `[A1 generate_images]`.
+- Cargo AI also prints one root `using:` line near run start that shows the effective `profile`, `auth`, `server`, and `model` for that invocation.
+- It adds `url=...` only when the effective URL is custom or materially different from the standard transport.
+- In redirected, piped, CI, or simpler terminal output, Cargo AI prefixes parent-visible action output with deterministic labels such as `[Action 1: generate_images]`.
 - In append-only output, long-running steps also emit a step-start liveness line such as `step 2/2 generate_image started; waiting for provider response...`.
 - Terminal lane summaries and the final run footer also include wall-clock durations, for example `completed in 31s.` and `✅ Run complete in 32s.`.
 - When attached directly to an interactive terminal, Cargo AI switches to a compact live lane dashboard.
-- The first live dashboard slice shows lane label, lane status with elapsed time while running and after terminal completion/failure, terminal step marker or current step when known, the last lifecycle message, and a compact buffered `output` section for parent-visible action output.
-- Parent-run `exec` and `email_me` output is bucketed into the originating lane.
+- The first live dashboard slice shows lane label, lane status with elapsed time while running and after terminal completion/failure, terminal step marker or current step when known, and the last lifecycle message.
+- In append-only output, parent-run `exec` and `email_me` output is emitted with the originating action label.
 - Child-agent steps stay minimal in the parent lane with start/completion or exit-summary lines instead of recursively inlining the child transcript.
+- In append-only output, provider-backed or child-agent steps emit another action-prefixed `using:` line only when the effective `profile`, `auth`, `server`, or `model` changes from the most recently printed context.
+- Interactive live mode keeps the parent dashboard at the orchestration level and does not surface child or step-level `using:` lines there.
 
 ## Supported Run-Step Kinds
 
@@ -325,12 +358,32 @@ For `kind: "agent"`:
 ## Child-Agent Data Flow
 
 - A parent action may pass child-agent `inputs`.
+- A parent action may also pass child-agent `run_vars`.
+- A parent action may also pass child-agent `input_overrides`.
+- If the target is another Cargo AI agent, prefer a native `kind: "agent"` step instead of wrapping the child invocation in Python or shell just to launch it.
+- Wrapper scripts are exceptions for genuinely non-Cargo-AI behavior around the call, not the default way to invoke a child agent.
 - A `kind: "agent"` run step may also set `profile` as a literal string or single variable reference; Cargo AI resolves it at step runtime and forwards `--profile <name>` to the child.
+- `run_vars` is the child-step equivalent of repeatable `--run-var NAME=VALUE`.
+- `input_overrides` is the child-step equivalent of repeatable `--input-override NAME=VALUE`.
 - A `kind: "agent"` run step may also set `input_mode` to `replace`, `append`, or `prepend` when child `inputs` are present.
+- Child `run_vars`, child `input_overrides`, child `inputs`, and child `input_mode` are all optional.
+- Child `run_vars` must be an object keyed by the intended child runtime-var name.
+- Child `run_vars` values must be scalar literals (`string`, `number`, or `boolean`) or a single variable reference in the exact shape `{ "var": "<name>" }`.
+- Child `input_overrides` must be an object keyed by the intended child named-input slot.
+- Child `input_overrides` values must be either a string literal, a single variable reference in the exact shape `{ "var": "<name>" }`, or a named parent-input reference in the exact shape `{ "input": "<name>" }`.
+- Child `inputs` may contain either literal input objects or a named parent-input reference in the exact shape `{ "input": "<name>" }`.
+- `{ "input": "<name>" }` may reference only declared named top-level inputs from the parent definition.
+- Cargo AI keeps parent and child agents atomic at hatch/check time; whether a child actually declares a `run_vars` key or `input_overrides` key and whether the resolved values match are checked when the child runs.
+- When a child run step provides both `run_vars` and named/input payload values, Cargo AI forwards `run_vars` first, then named `input_overrides`, and then merges anonymous child `inputs` with `input_mode`.
+- Child `input_mode` applies only to child `inputs`; it does not change whether `input_overrides` are sent.
 - If child `input_mode` is omitted, the child step keeps the current default behavior: child `inputs` replace the child agent's baked `inputs`.
 - Child `append` keeps the child agent's baked inputs first, then appends the action-supplied child inputs in declared order.
+- Native child-agent steps preserve Cargo AI semantics such as child `run_vars`, named input forwarding, child `input_overrides`, child `inputs`, `input_mode`, failure handling, depth limits, and append-only `using:` observability.
 - Child `prepend` keeps the action-supplied child inputs first in declared order, then places the child agent's baked inputs after them.
-- Those child inputs may use dynamic string parts resolved from the parent action-local variable bag.
+- Those child inputs may use dynamic string parts resolved from the parent action-local variable bag. Child `run_vars` and child `input_overrides` stay CLI-shaped and accept only scalar literals or single variable references.
+- Named child-input reuse is explicit only; Cargo AI does not automatically inherit all named inputs into children.
+- If a child only consumes a forwarded named input, it does not need to declare the same name locally.
+- If a child wants to forward that same named input to its own child, it should declare the same named top-level input locally so the incoming value can bind there first.
 - A parent may observe child-agent success or failure through `status_variable` and `error_variable`.
 - A parent cannot directly capture the child agent's top-level returned output fields into its own action-local variables.
 - Treat child agents as orchestration/control-flow steps with input forwarding, not as automatic structured-output merging into the parent.
@@ -346,7 +399,12 @@ Expect `cargo ai hatch <agent-name> --config <config.json> --check` to reject at
 - unsupported run-step kind
 - missing required fields for a step kind
 - invalid child-agent path shape
+- malformed child-agent `input_overrides`
+- malformed child-agent `run_vars`
 - invalid child-agent `input_mode`
+- duplicate named top-level inputs
+- unnamed top-level inputs in the structural action-only shape
+- malformed or unknown `{ "input": "<name>" }` child references
 - invalid relative file or image paths
 - invalid generated-image output path extension
 - invalid `platform` value

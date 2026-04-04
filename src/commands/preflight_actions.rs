@@ -13,6 +13,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 const INFRA_BASE_URL: &str = "https://api.cargo-ai.org";
 const AGENT_ACTION_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_DEPTH";
@@ -45,6 +46,7 @@ struct ActionOutputState {
     action_execution: crate::ActionExecutionMode,
     rendered_lines: usize,
     lanes: BTreeMap<usize, ActionLaneState>,
+    last_using_line: Option<String>,
 }
 
 #[derive(Clone)]
@@ -89,6 +91,7 @@ impl ActionOutput {
             action_execution,
             rendered_lines: 0,
             lanes: BTreeMap::new(),
+            last_using_line: None,
         }));
         let live_refresh_stop = Arc::new(AtomicBool::new(false));
         maybe_spawn_live_action_refresh(inner.clone(), live_refresh_stop.clone(), mode);
@@ -105,6 +108,12 @@ impl ActionOutput {
             } else {
                 render_live_dashboard(state);
             }
+        });
+    }
+
+    fn seed_using_line(&self, using_line: &str) {
+        self.with_state(|state| {
+            state.last_using_line = Some(using_line.to_string());
         });
     }
 
@@ -164,28 +173,25 @@ impl ActionOutput {
 
     fn action_line(&self, action_index: usize, action_name: &str, message: &str) {
         self.with_state(|state| {
-            if state.mode == ActionOutputMode::AppendOnly {
-                for line in split_action_output_lines(message) {
-                    println!(
-                        "{}",
-                        format_action_line(action_index, action_name, line.as_str())
-                    );
-                }
+            emit_action_line_locked(state, action_index, action_name, message);
+        });
+    }
+
+    fn action_using_line_if_changed(
+        &self,
+        action_index: usize,
+        action_name: &str,
+        using_line: &str,
+    ) {
+        self.with_state(|state| {
+            if state.last_using_line.as_deref() == Some(using_line) {
                 return;
             }
-
-            let lane = ensure_lane_state(state, action_index, action_name);
-            lane.last_message = compact_action_output_line(message);
-            push_lane_output_message(lane, message);
-            if lane.status == ActionLaneStatus::Pending {
-                lane.status = inferred_lane_status(message);
-            } else if lane.status == ActionLaneStatus::Running {
-                lane.status = match inferred_lane_status(message) {
-                    ActionLaneStatus::Notice => ActionLaneStatus::Running,
-                    other => other,
-                };
+            state.last_using_line = Some(using_line.to_string());
+            if state.mode == ActionOutputMode::Live {
+                return;
             }
-            render_live_dashboard(state);
+            emit_action_line_locked(state, action_index, action_name, using_line);
         });
     }
 
@@ -360,12 +366,6 @@ impl ActionOutputState {
                 "  last: {}",
                 lane.last_message.as_deref().unwrap_or("-")
             ));
-            if !lane.output_lines.is_empty() {
-                lines.push("  output:".to_string());
-                for line in &lane.output_lines {
-                    lines.push(format!("    {}", line));
-                }
-            }
         }
 
         lines
@@ -413,6 +413,40 @@ fn ensure_lane_state<'a>(
             last_message: None,
             output_lines: VecDeque::new(),
         })
+}
+
+fn emit_action_line_locked(
+    state: &mut ActionOutputState,
+    action_index: usize,
+    action_name: &str,
+    message: &str,
+) {
+    if state.mode == ActionOutputMode::AppendOnly {
+        for line in split_action_output_lines(message) {
+            println!(
+                "{}",
+                format_action_line(action_index, action_name, line.as_str())
+            );
+        }
+        return;
+    }
+
+    if !should_surface_live_dashboard_message(message) {
+        return;
+    }
+
+    let lane = ensure_lane_state(state, action_index, action_name);
+    lane.last_message = compact_action_output_line(message);
+    push_lane_output_message(lane, message);
+    if lane.status == ActionLaneStatus::Pending {
+        lane.status = inferred_lane_status(message);
+    } else if lane.status == ActionLaneStatus::Running {
+        lane.status = match inferred_lane_status(message) {
+            ActionLaneStatus::Notice => ActionLaneStatus::Running,
+            other => other,
+        };
+    }
+    render_live_dashboard(state);
 }
 
 fn maybe_spawn_live_action_refresh(
@@ -473,6 +507,12 @@ fn split_action_output_lines(message: &str) -> Vec<String> {
 
 fn compact_action_output_line(message: &str) -> Option<String> {
     split_action_output_lines(message).into_iter().next()
+}
+
+fn should_surface_live_dashboard_message(message: &str) -> bool {
+    compact_action_output_line(message)
+        .map(|line| !line.starts_with("using: ") && !line.contains("resolved dynamic child-agent "))
+        .unwrap_or(false)
 }
 
 fn push_lane_output_message(lane: &mut ActionLaneState, message: &str) {
@@ -571,10 +611,68 @@ pub(crate) struct InvocationRuntimeBudget {
 #[derive(Debug, Clone)]
 pub(crate) struct ActionProviderContext {
     pub(crate) provider: crate::providers::ProviderKind,
+    pub(crate) profile_name: Option<String>,
+    pub(crate) auth_mode: String,
     pub(crate) model: String,
     pub(crate) url: String,
     pub(crate) token: String,
     pub(crate) inference_timeout_in_sec: u64,
+}
+
+impl ActionProviderContext {
+    pub(crate) fn using_line(&self) -> String {
+        self.using_line_with_model(self.model.as_str())
+    }
+
+    pub(crate) fn using_line_with_model(&self, model: &str) -> String {
+        let mut line = format!(
+            "using: profile={} auth={} server={} model={}",
+            self.profile_name.as_deref().unwrap_or("none"),
+            self.auth_mode,
+            provider_server_name(self.provider),
+            using_line_model(model),
+        );
+
+        if let Some(url) = using_line_url(self.provider, self.url.as_str()) {
+            line.push_str(format!(" url={url}").as_str());
+        }
+
+        line
+    }
+}
+
+fn provider_server_name(provider: crate::providers::ProviderKind) -> &'static str {
+    match provider {
+        crate::providers::ProviderKind::Ollama => "ollama",
+        crate::providers::ProviderKind::OpenAi => "openai",
+    }
+}
+
+fn using_line_model(model: &str) -> &str {
+    if model.trim().is_empty() {
+        "none"
+    } else {
+        model
+    }
+}
+
+fn using_line_url(provider: crate::providers::ProviderKind, url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed == provider.default_url() {
+        return None;
+    }
+
+    if provider == crate::providers::ProviderKind::OpenAi
+        && trimmed == openai_oauth::OPENAI_ACCOUNT_RESPONSES_URL
+    {
+        return None;
+    }
+
+    Some(trimmed.to_string())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -665,6 +763,7 @@ pub(crate) async fn apply_actions(
     output: &crate::Output,
     actions: &[crate::Action],
     runtime_vars: &serde_json::Map<String, serde_json::Value>,
+    named_inputs: &[crate::Input],
     action_execution: crate::ActionExecutionMode,
     action_execution_override: Option<crate::ActionExecutionMode>,
     provider_context: &ActionProviderContext,
@@ -672,81 +771,93 @@ pub(crate) async fn apply_actions(
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<(), String> {
     ACTION_OUTPUT
-        .scope(ActionOutput::new(action_execution), async move {
-            let abort_signal = InvocationAbortSignal::new();
-            let invocation_started_at = Instant::now();
-            let data = match action_data_from_output(output, runtime_vars) {
-                Ok(data) => data,
-                Err(error) => {
-                    eprintln!("❌ Failed to serialize output for action evaluation: {error}");
+        .scope(
+            {
+                let output = ActionOutput::new(action_execution);
+                output.seed_using_line(provider_context.using_line().as_str());
+                output
+            },
+            async move {
+                let abort_signal = InvocationAbortSignal::new();
+                let invocation_started_at = Instant::now();
+                let data = match action_data_from_output(output, runtime_vars) {
+                    Ok(data) => data,
+                    Err(error) => {
+                        eprintln!("❌ Failed to serialize output for action evaluation: {error}");
+                        return Err(format!(
+                            "Failed to serialize output for action evaluation: {error}"
+                        ));
+                    }
+                };
+                let current_platform = current_action_platform();
+                let named_input_lookup = named_input_lookup(named_inputs);
+                print_action_execution_header(action_execution);
+                let top_level_failures = match action_execution {
+                    crate::ActionExecutionMode::Sequential => {
+                        apply_actions_sequential(
+                            actions,
+                            &data,
+                            &named_input_lookup,
+                            current_platform,
+                            action_execution_override,
+                            provider_context,
+                            max_agent_depth,
+                            runtime_budget,
+                            &abort_signal,
+                        )
+                        .await?
+                    }
+                    crate::ActionExecutionMode::Parallel => {
+                        apply_actions_parallel(
+                            actions,
+                            &data,
+                            &named_input_lookup,
+                            current_platform,
+                            action_execution_override,
+                            provider_context,
+                            max_agent_depth,
+                            runtime_budget,
+                            &abort_signal,
+                        )
+                        .await?
+                    }
+                };
+
+                finish_action_output();
+
+                if let Some(abort) = abort_signal.record() {
                     return Err(format!(
-                        "Failed to serialize output for action evaluation: {error}"
+                        "{}\n{}",
+                        format_abort_summary(&abort),
+                        root_run_abort_message(invocation_started_at.elapsed())
                     ));
                 }
-            };
-            let current_platform = current_action_platform();
-            print_action_execution_header(action_execution);
-            let top_level_failures = match action_execution {
-                crate::ActionExecutionMode::Sequential => {
-                    apply_actions_sequential(
-                        actions,
-                        &data,
-                        current_platform,
-                        action_execution_override,
-                        provider_context,
-                        max_agent_depth,
-                        runtime_budget,
-                        &abort_signal,
-                    )
-                    .await?
+
+                if let Some(message) = root_run_completion_message(invocation_started_at.elapsed())
+                {
+                    if top_level_failures.is_empty() {
+                        println!("{message}");
+                    }
                 }
-                crate::ActionExecutionMode::Parallel => {
-                    apply_actions_parallel(
-                        actions,
-                        &data,
-                        current_platform,
-                        action_execution_override,
-                        provider_context,
-                        max_agent_depth,
-                        runtime_budget,
-                        &abort_signal,
-                    )
-                    .await?
-                }
-            };
 
-            finish_action_output();
-
-            if let Some(abort) = abort_signal.record() {
-                return Err(format!(
-                    "{}\n{}",
-                    format_abort_summary(&abort),
-                    root_run_abort_message(invocation_started_at.elapsed())
-                ));
-            }
-
-            if let Some(message) = root_run_completion_message(invocation_started_at.elapsed()) {
                 if top_level_failures.is_empty() {
-                    println!("{message}");
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{}\n{}",
+                        format_top_level_action_failures(&top_level_failures),
+                        root_run_failure_message(invocation_started_at.elapsed())
+                    ))
                 }
-            }
-
-            if top_level_failures.is_empty() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "{}\n{}",
-                    format_top_level_action_failures(&top_level_failures),
-                    root_run_failure_message(invocation_started_at.elapsed())
-                ))
-            }
-        })
+            },
+        )
         .await
 }
 
 async fn apply_actions_sequential(
     actions: &[crate::Action],
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, crate::Input>,
     current_platform: Option<&'static str>,
     action_execution_override: Option<crate::ActionExecutionMode>,
     provider_context: &ActionProviderContext,
@@ -772,6 +883,7 @@ async fn apply_actions_sequential(
                 action_index,
                 action,
                 data,
+                named_inputs,
                 current_platform,
                 action_execution_override,
                 provider_context,
@@ -794,6 +906,7 @@ async fn apply_actions_sequential(
 async fn apply_actions_parallel(
     actions: &[crate::Action],
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, crate::Input>,
     current_platform: Option<&'static str>,
     action_execution_override: Option<crate::ActionExecutionMode>,
     provider_context: &ActionProviderContext,
@@ -818,6 +931,7 @@ async fn apply_actions_parallel(
 
         let action_clone = action.clone();
         let data_clone = data.clone();
+        let named_inputs_clone = named_inputs.clone();
         let provider_context_clone = provider_context.clone();
         let abort_signal_clone = abort_signal.clone();
         let action_output_clone = action_output.clone();
@@ -828,6 +942,7 @@ async fn apply_actions_parallel(
                     action_index,
                     &action_clone,
                     &data_clone,
+                    &named_inputs_clone,
                     current_platform,
                     action_execution_override,
                     &provider_context_clone,
@@ -857,6 +972,16 @@ async fn apply_actions_parallel(
     }
 
     Ok(top_level_failures)
+}
+
+fn named_input_lookup(inputs: &[crate::Input]) -> BTreeMap<String, crate::Input> {
+    let mut named = BTreeMap::new();
+    for input in inputs {
+        if let Some(name) = input.name.as_ref() {
+            named.insert(name.clone(), input.clone());
+        }
+    }
+    named
 }
 
 fn action_logic_matches(
@@ -915,6 +1040,7 @@ async fn run_matching_action_steps(
     action_index: usize,
     action: &crate::Action,
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, crate::Input>,
     current_platform: Option<&'static str>,
     action_execution_override: Option<crate::ActionExecutionMode>,
     provider_context: &ActionProviderContext,
@@ -992,6 +1118,7 @@ async fn run_matching_action_steps(
             run_agent_step(
                 step,
                 &action_data,
+                named_inputs,
                 action_index,
                 &action.name,
                 action_execution_override,
@@ -1471,6 +1598,13 @@ async fn run_generate_image_step(
         step_profile_context.as_ref(),
         provider_context,
     )?;
+    print_action_using_line_if_changed(
+        action_index,
+        action_name,
+        effective_provider_context
+            .using_line_with_model(model.as_str())
+            .as_str(),
+    );
 
     if effective_provider_context
         .url
@@ -1738,6 +1872,8 @@ async fn resolve_generate_image_step_profile_context(
 
     Ok(Some(ActionProviderContext {
         provider,
+        profile_name: Some(profile.name.clone()),
+        auth_mode: profile_auth_mode_display(profile.auth_mode).to_string(),
         model: profile.model.clone(),
         url,
         token,
@@ -1816,9 +1952,18 @@ fn resolve_generate_image_model(
     }
 }
 
+fn profile_auth_mode_display(mode: ProfileAuthMode) -> &'static str {
+    match mode {
+        ProfileAuthMode::None => "none",
+        ProfileAuthMode::ApiKey => "api_key",
+        ProfileAuthMode::OpenaiAccount => "chatgpt_account",
+    }
+}
+
 async fn run_agent_step(
     step: &crate::RunStep,
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, crate::Input>,
     action_index: usize,
     action_name: &str,
     action_execution_override: Option<crate::ActionExecutionMode>,
@@ -1873,8 +2018,15 @@ async fn run_agent_step(
         command.arg("--profile");
         command.arg(profile_name);
     }
-    let (child_args, resolution_notes) =
-        child_input_args(step.input_mode, step.inputs.as_deref(), data, action_name)?;
+    let (child_args, resolution_notes) = child_input_args(
+        step.run_vars.as_deref(),
+        step.input_overrides.as_deref(),
+        step.input_mode,
+        step.inputs.as_deref(),
+        data,
+        action_name,
+        named_inputs,
+    )?;
     for note in resolution_notes {
         print_action_line(action_index, action_name, note.as_str());
     }
@@ -1895,7 +2047,7 @@ async fn run_agent_step(
         AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV,
         runtime_budget.deadline_ms.to_string(),
     );
-    command.stdout(Stdio::null());
+    command.stdout(Stdio::piped());
     command.stderr(Stdio::null());
 
     let remaining = remaining_runtime_duration(
@@ -1913,6 +2065,24 @@ async fn run_agent_step(
         )
     })?;
     let mut child = child;
+    let child_output = current_action_output();
+    let child_action_name = action_name.to_string();
+    let child_using_forwarder = child.stdout.take().map(|stdout| {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let trimmed = line.trim();
+                if trimmed.starts_with("using: ") {
+                    emit_using_line_with_output(
+                        child_output.as_ref(),
+                        action_index,
+                        child_action_name.as_str(),
+                        trimmed,
+                    );
+                }
+            }
+        })
+    });
     print_action_line(
         action_index,
         action_name,
@@ -1921,10 +2091,16 @@ async fn run_agent_step(
 
     let result = match tokio::time::timeout(remaining, child.wait()).await {
         Ok(Ok(status)) if status.success() => {
+            if let Some(task) = child_using_forwarder {
+                let _ = task.await;
+            }
             print_action_line(action_index, action_name, "child: completed successfully");
             Ok(StepExecutionOutcome::Completed)
         }
         Ok(Ok(status)) => {
+            if let Some(task) = child_using_forwarder {
+                let _ = task.await;
+            }
             print_action_line(
                 action_index,
                 action_name,
@@ -1947,6 +2123,9 @@ async fn run_agent_step(
         )),
         Err(_) => {
             let _ = child.kill().await;
+            if let Some(task) = child_using_forwarder {
+                let _ = task.await;
+            }
             print_action_line(
                 action_index,
                 action_name,
@@ -2089,8 +2268,19 @@ fn print_action_execution_header(action_execution: crate::ActionExecutionMode) {
     }
 }
 
+fn print_action_using_line_if_changed(action_index: usize, action_name: &str, using_line: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_using_line_if_changed(action_index, action_name, using_line);
+    } else {
+        println!(
+            "{}",
+            format_action_line(action_index, action_name, using_line)
+        );
+    }
+}
+
 fn action_lane_prefix(action_index: usize, action_name: &str) -> String {
-    format!("[A{} {}]", action_index + 1, action_name)
+    format!("[Action {}: {}]", action_index + 1, action_name)
 }
 
 fn format_action_line(action_index: usize, action_name: &str, message: &str) -> String {
@@ -2114,6 +2304,22 @@ fn print_action_line(action_index: usize, action_name: &str, message: &str) {
         output.action_line(action_index, action_name, message);
     } else {
         println!("{}", format_action_line(action_index, action_name, message));
+    }
+}
+
+fn emit_using_line_with_output(
+    output: Option<&ActionOutput>,
+    action_index: usize,
+    action_name: &str,
+    using_line: &str,
+) {
+    if let Some(output) = output {
+        output.action_using_line_if_changed(action_index, action_name, using_line);
+    } else {
+        println!(
+            "{}",
+            format_action_line(action_index, action_name, using_line)
+        );
     }
 }
 
@@ -2581,13 +2787,45 @@ fn matching_run_steps<'a>(
 }
 
 fn child_input_args(
+    run_vars: Option<&[crate::ActionRunVar]>,
+    input_overrides: Option<&[crate::ActionInputOverride]>,
     input_mode: Option<crate::ActionInputMode>,
     inputs: Option<&[crate::ActionInput]>,
     data: &serde_json::Value,
     action_name: &str,
+    named_inputs: &BTreeMap<String, crate::Input>,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut args = Vec::new();
     let mut notes = Vec::new();
+
+    if let Some(run_vars) = run_vars {
+        for run_var in run_vars {
+            let (resolved_value, resolution_note) =
+                resolve_child_run_var_value(&run_var.value, data, action_name, &run_var.name)?;
+            args.push("--run-var".to_string());
+            args.push(format!("{}={}", run_var.name, resolved_value));
+            if let Some(note) = resolution_note {
+                notes.push(note);
+            }
+        }
+    }
+
+    if let Some(input_overrides) = input_overrides {
+        for input_override in input_overrides {
+            let (resolved_value, resolution_note) = resolve_child_input_override_value(
+                &input_override.value,
+                data,
+                action_name,
+                &input_override.name,
+                named_inputs,
+            )?;
+            args.push("--input-override".to_string());
+            args.push(format!("{}={}", input_override.name, resolved_value));
+            if let Some(note) = resolution_note {
+                notes.push(note);
+            }
+        }
+    }
 
     if let Some(input_mode) = input_mode {
         if inputs.is_none() {
@@ -2686,11 +2924,168 @@ fn child_input_args(
                         ));
                     }
                 }
+                crate::ActionInput::Named { input } => {
+                    let forwarded = named_inputs.get(input).ok_or_else(|| {
+                        format!(
+                            "Action '{}' child-agent named input '{}' is not available for forwarding.",
+                            action_name, input
+                        )
+                    })?;
+                    let value = forwarded.value.as_deref().ok_or_else(|| {
+                        format!(
+                            "Action '{}' child-agent named input '{}' is required but unresolved for this invocation.",
+                            action_name, input
+                        )
+                    })?;
+                    let payload = crate::Input {
+                        name: Some(input.clone()),
+                        kind: forwarded.kind,
+                        value: Some(value.to_string()),
+                    };
+                    args.push("--forwarded-input".to_string());
+                    args.push(serde_json::to_string(&payload).map_err(|error| {
+                        format!(
+                            "Action '{}' failed to serialize forwarded named input '{}': {}",
+                            action_name, input, error
+                        )
+                    })?);
+                }
             }
         }
     }
 
     Ok((args, notes))
+}
+
+fn resolve_child_input_override_value(
+    input: &crate::ActionInputOverrideValue,
+    data: &serde_json::Value,
+    action_name: &str,
+    override_name: &str,
+    named_inputs: &BTreeMap<String, crate::Input>,
+) -> Result<(String, Option<String>), String> {
+    match input {
+        crate::ActionInputOverrideValue::Literal(literal) => Ok((literal.clone(), None)),
+        crate::ActionInputOverrideValue::Variable(variable) => {
+            let resolved = resolve_scalar_action_variable(
+                data,
+                variable,
+                action_name,
+                &format!("child-agent named input override '{}'", override_name),
+            )?;
+            Ok((
+                resolved.clone(),
+                Some(format!(
+                    "Action '{}' resolved dynamic child-agent named override '{}'.",
+                    action_name, override_name
+                )),
+            ))
+        }
+        crate::ActionInputOverrideValue::NamedInput { input } => {
+            let forwarded = named_inputs.get(input).ok_or_else(|| {
+                format!(
+                    "Action '{}' child-agent named input '{}' is not available for forwarding.",
+                    action_name, input
+                )
+            })?;
+            let value = forwarded.value.as_deref().ok_or_else(|| {
+                format!(
+                    "Action '{}' child-agent named input '{}' is required but unresolved for this invocation.",
+                    action_name, input
+                )
+            })?;
+            Ok((value.to_string(), None))
+        }
+    }
+}
+
+fn resolve_child_run_var_value(
+    value: &crate::ActionRunVarValue,
+    data: &serde_json::Value,
+    action_name: &str,
+    run_var_name: &str,
+) -> Result<(String, Option<String>), String> {
+    match value {
+        crate::ActionRunVarValue::Literal(literal) => Ok((
+            stringify_scalar_json_value(
+                literal,
+                action_name,
+                &format!("child-agent runtime var '{}'", run_var_name),
+            )?,
+            None,
+        )),
+        crate::ActionRunVarValue::Variable(variable) => {
+            let resolved = resolve_scalar_action_variable(
+                data,
+                variable,
+                action_name,
+                &format!("child-agent runtime var '{}'", run_var_name),
+            )?;
+            Ok((
+                resolved.clone(),
+                Some(format!(
+                    "Action '{}' resolved dynamic child-agent runtime var '{}'.",
+                    action_name, run_var_name
+                )),
+            ))
+        }
+    }
+}
+
+fn resolve_scalar_action_variable(
+    data: &serde_json::Value,
+    variable: &str,
+    action_name: &str,
+    field_name: &str,
+) -> Result<String, String> {
+    let Some(value) = lookup_action_variable(data, variable) else {
+        return Err(format!(
+            "Action '{}' {} references missing variable '{}'.",
+            action_name, field_name, variable
+        ));
+    };
+
+    match value {
+        serde_json::Value::String(text) => Ok(text.clone()),
+        serde_json::Value::Bool(boolean) => Ok(boolean.to_string()),
+        serde_json::Value::Number(number) => Ok(number.to_string()),
+        serde_json::Value::Array(_) => Err(format!(
+            "Action '{}' {} references array-valued variable '{}', which is unsupported for scalar substitution.",
+            action_name, field_name, variable
+        )),
+        serde_json::Value::Object(_) => Err(format!(
+            "Action '{}' {} references object-valued variable '{}', which is unsupported for scalar substitution.",
+            action_name, field_name, variable
+        )),
+        serde_json::Value::Null => Err(format!(
+            "Action '{}' {} references null variable '{}', which is unsupported for scalar substitution.",
+            action_name, field_name, variable
+        )),
+    }
+}
+
+fn stringify_scalar_json_value(
+    value: &serde_json::Value,
+    action_name: &str,
+    field_name: &str,
+) -> Result<String, String> {
+    match value {
+        serde_json::Value::String(text) => Ok(text.clone()),
+        serde_json::Value::Bool(boolean) => Ok(boolean.to_string()),
+        serde_json::Value::Number(number) => Ok(number.to_string()),
+        serde_json::Value::Array(_) => Err(format!(
+            "Action '{}' {} cannot use an array literal here.",
+            action_name, field_name
+        )),
+        serde_json::Value::Object(_) => Err(format!(
+            "Action '{}' {} cannot use an object literal here.",
+            action_name, field_name
+        )),
+        serde_json::Value::Null => Err(format!(
+            "Action '{}' {} cannot use null here.",
+            action_name, field_name
+        )),
+    }
 }
 
 fn child_input_uses_dynamic_parts(parts: &[crate::RunArg]) -> bool {
@@ -2794,7 +3189,6 @@ fn validate_child_input_path(
 
     Ok(())
 }
-
 fn validate_child_file_extension(
     path: &str,
     action_name: &str,
@@ -2932,6 +3326,7 @@ mod tests {
         run_exec_step, run_generate_image_step, step_matches_platform, validate_agent_action_depth,
         ActionOutput, ActionOutputMode, ActionProviderContext, StepExecutionOutcome, ACTION_OUTPUT,
     };
+    use crate::credentials::openai_oauth;
     use crate::providers::ProviderKind;
     use serde_json::json;
     use std::ffi::OsString;
@@ -3018,6 +3413,8 @@ mod tests {
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: platforms.map(|platforms| {
@@ -3032,6 +3429,8 @@ mod tests {
     fn provider_context() -> ActionProviderContext {
         ActionProviderContext {
             provider: ProviderKind::OpenAi,
+            profile_name: Some("test_profile".to_string()),
+            auth_mode: "api_key".to_string(),
             model: "gpt-5.2".to_string(),
             url: "https://api.openai.com/v1/chat/completions".to_string(),
             token: "test-token".to_string(),
@@ -3069,6 +3468,18 @@ auth_mode = "api_key"
             .iter()
             .map(|(name, value)| ((*name).to_string(), value.clone()))
             .collect()
+    }
+
+    fn no_named_inputs() -> std::collections::BTreeMap<String, crate::Input> {
+        std::collections::BTreeMap::new()
+    }
+
+    fn named_input(name: &str, kind: crate::InputKind, value: Option<&str>) -> crate::Input {
+        crate::Input {
+            name: Some(name.to_string()),
+            kind,
+            value: value.map(str::to_string),
+        }
     }
 
     #[test]
@@ -3217,6 +3628,8 @@ auth_mode = "api_key"
     fn child_input_args_map_to_runtime_flags() {
         let (args, notes) = child_input_args(
             None,
+            None,
+            None,
             Some(&[
                 crate::ActionInput::Text {
                     text: vec![crate::RunArg::Literal("hello".to_string())],
@@ -3233,6 +3646,7 @@ auth_mode = "api_key"
             ]),
             &json!({}),
             "demo",
+            &no_named_inputs(),
         )
         .expect("child input args should resolve");
 
@@ -3255,12 +3669,15 @@ auth_mode = "api_key"
     #[test]
     fn child_input_args_include_explicit_input_mode() {
         let (args, notes) = child_input_args(
+            None,
+            None,
             Some(crate::ActionInputMode::Prepend),
             Some(&[crate::ActionInput::Text {
                 text: vec![crate::RunArg::Literal("hello".to_string())],
             }]),
             &json!({}),
             "demo",
+            &no_named_inputs(),
         )
         .expect("child input args should resolve");
 
@@ -3274,10 +3691,13 @@ auth_mode = "api_key"
     #[test]
     fn child_input_args_reject_input_mode_without_inputs() {
         let error = child_input_args(
+            None,
+            None,
             Some(crate::ActionInputMode::Append),
             None,
             &json!({}),
             "demo",
+            &no_named_inputs(),
         )
         .unwrap_err();
 
@@ -3287,6 +3707,8 @@ auth_mode = "api_key"
     #[test]
     fn child_input_args_resolve_dynamic_text_and_file_path() {
         let (args, notes) = child_input_args(
+            None,
+            None,
             None,
             Some(&[
                 crate::ActionInput::Text {
@@ -3307,6 +3729,7 @@ auth_mode = "api_key"
                 "report_filename": "q1.pdf"
             }),
             "demo",
+            &no_named_inputs(),
         )
         .expect("dynamic child input args should resolve");
 
@@ -3328,6 +3751,8 @@ auth_mode = "api_key"
     fn child_input_args_reject_invalid_dynamic_url() {
         let error = child_input_args(
             None,
+            None,
+            None,
             Some(&[crate::ActionInput::Url {
                 url: vec![crate::RunArg::Variable("source_url".to_string())],
             }]),
@@ -3335,6 +3760,7 @@ auth_mode = "api_key"
                 "source_url": "ftp://example.com/report"
             }),
             "demo",
+            &no_named_inputs(),
         )
         .unwrap_err();
 
@@ -3344,6 +3770,8 @@ auth_mode = "api_key"
     #[test]
     fn child_input_args_reject_invalid_dynamic_file_extension() {
         let error = child_input_args(
+            None,
+            None,
             None,
             Some(&[crate::ActionInput::File {
                 path: vec![
@@ -3355,6 +3783,7 @@ auth_mode = "api_key"
                 "report_filename": "q1.exe"
             }),
             "demo",
+            &no_named_inputs(),
         )
         .unwrap_err();
 
@@ -3365,6 +3794,8 @@ auth_mode = "api_key"
     fn child_input_args_reject_parent_traversal_in_dynamic_path() {
         let error = child_input_args(
             None,
+            None,
+            None,
             Some(&[crate::ActionInput::Image {
                 path: vec![crate::RunArg::Variable("image_path".to_string())],
             }]),
@@ -3372,10 +3803,315 @@ auth_mode = "api_key"
                 "image_path": "../diagram.png"
             }),
             "demo",
+            &no_named_inputs(),
         )
         .unwrap_err();
 
         assert!(error.contains("parent traversal"));
+    }
+
+    #[test]
+    fn child_input_args_forward_named_inputs_as_hidden_runtime_payloads() {
+        let (args, notes) = child_input_args(
+            None,
+            None,
+            None,
+            Some(&[crate::ActionInput::Named {
+                input: "menu_image".to_string(),
+            }]),
+            &json!({}),
+            "demo",
+            &std::collections::BTreeMap::from([(
+                "menu_image".to_string(),
+                named_input(
+                    "menu_image",
+                    crate::InputKind::Image,
+                    Some("./artifacts/menu.png"),
+                ),
+            )]),
+        )
+        .expect("named child input args should resolve");
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "--forwarded-input");
+        let payload: crate::Input =
+            serde_json::from_str(&args[1]).expect("forwarded input payload should deserialize");
+        assert_eq!(payload.name.as_deref(), Some("menu_image"));
+        assert_eq!(payload.kind, crate::InputKind::Image);
+        assert_eq!(payload.value.as_deref(), Some("./artifacts/menu.png"));
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn child_input_args_reject_unresolved_named_inputs() {
+        let error = child_input_args(
+            None,
+            None,
+            None,
+            Some(&[crate::ActionInput::Named {
+                input: "menu_image".to_string(),
+            }]),
+            &json!({}),
+            "demo",
+            &std::collections::BTreeMap::from([(
+                "menu_image".to_string(),
+                named_input("menu_image", crate::InputKind::Image, None),
+            )]),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("required but unresolved"));
+    }
+
+    #[test]
+    fn child_input_args_emit_named_override_flags_before_runtime_inputs() {
+        let (args, notes) = child_input_args(
+            None,
+            Some(&[
+                crate::ActionInputOverride {
+                    name: "menu_note".to_string(),
+                    value: crate::ActionInputOverrideValue::Literal("spring menu".to_string()),
+                },
+                crate::ActionInputOverride {
+                    name: "source_url".to_string(),
+                    value: crate::ActionInputOverrideValue::Literal(
+                        "https://example.com/menu".to_string(),
+                    ),
+                },
+            ]),
+            Some(crate::ActionInputMode::Append),
+            Some(&[crate::ActionInput::Text {
+                text: vec![crate::RunArg::Literal("extra context".to_string())],
+            }]),
+            &json!({}),
+            "demo",
+            &no_named_inputs(),
+        )
+        .expect("child input args should resolve");
+
+        assert_eq!(
+            args,
+            vec![
+                "--input-override",
+                "menu_note=spring menu",
+                "--input-override",
+                "source_url=https://example.com/menu",
+                "--input-mode",
+                "append",
+                "--input-text",
+                "extra context",
+            ]
+        );
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn child_input_args_support_parent_named_inputs_inside_input_overrides() {
+        let (args, notes) = child_input_args(
+            None,
+            Some(&[crate::ActionInputOverride {
+                name: "menu_image".to_string(),
+                value: crate::ActionInputOverrideValue::NamedInput {
+                    input: "menu_image".to_string(),
+                },
+            }]),
+            None,
+            None,
+            &json!({}),
+            "demo",
+            &std::collections::BTreeMap::from([(
+                "menu_image".to_string(),
+                named_input(
+                    "menu_image",
+                    crate::InputKind::Image,
+                    Some("./artifacts/menu.png"),
+                ),
+            )]),
+        )
+        .expect("parent named input should resolve inside child override");
+
+        assert_eq!(
+            args,
+            vec!["--input-override", "menu_image=./artifacts/menu.png"]
+        );
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn child_input_args_resolve_dynamic_named_override_values() {
+        let (args, notes) = child_input_args(
+            None,
+            Some(&[
+                crate::ActionInputOverride {
+                    name: "menu_note".to_string(),
+                    value: crate::ActionInputOverrideValue::Variable("menu_note_value".to_string()),
+                },
+                crate::ActionInputOverride {
+                    name: "source_doc".to_string(),
+                    value: crate::ActionInputOverrideValue::Variable(
+                        "source_doc_value".to_string(),
+                    ),
+                },
+            ]),
+            None,
+            None,
+            &json!({
+                "menu_note_value": "hello Acme",
+                "source_doc_value": "./reports/q1.pdf"
+            }),
+            "demo",
+            &no_named_inputs(),
+        )
+        .expect("dynamic named overrides should resolve");
+
+        assert_eq!(
+            args,
+            vec![
+                "--input-override",
+                "menu_note=hello Acme",
+                "--input-override",
+                "source_doc=./reports/q1.pdf",
+            ]
+        );
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("named override 'menu_note'"));
+        assert!(notes[1].contains("named override 'source_doc'"));
+        assert!(!notes[0].contains("hello Acme"));
+        assert!(!notes[1].contains("./reports/q1.pdf"));
+    }
+
+    #[test]
+    fn child_input_args_reject_object_valued_named_override_variable() {
+        let error = child_input_args(
+            None,
+            Some(&[crate::ActionInputOverride {
+                name: "source_url".to_string(),
+                value: crate::ActionInputOverrideValue::Variable("source_url".to_string()),
+            }]),
+            None,
+            None,
+            &json!({
+                "source_url": { "bad": true }
+            }),
+            "demo",
+            &no_named_inputs(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("named input override 'source_url'"));
+        assert!(error.contains("object-valued variable"));
+    }
+
+    #[test]
+    fn child_input_args_emit_run_var_flags_before_overrides() {
+        let (args, notes) = child_input_args(
+            Some(&[
+                crate::ActionRunVar {
+                    name: "year".to_string(),
+                    value: crate::ActionRunVarValue::Literal(json!(2026)),
+                },
+                crate::ActionRunVar {
+                    name: "month".to_string(),
+                    value: crate::ActionRunVarValue::Literal(json!("08")),
+                },
+            ]),
+            Some(&[crate::ActionInputOverride {
+                name: "menu_note".to_string(),
+                value: crate::ActionInputOverrideValue::Literal("spring menu".to_string()),
+            }]),
+            None,
+            Some(&[crate::ActionInput::Text {
+                text: vec![crate::RunArg::Literal("extra context".to_string())],
+            }]),
+            &json!({}),
+            "demo",
+            &no_named_inputs(),
+        )
+        .expect("child run_vars should resolve");
+
+        assert_eq!(
+            args,
+            vec![
+                "--run-var",
+                "year=2026",
+                "--run-var",
+                "month=08",
+                "--input-override",
+                "menu_note=spring menu",
+                "--input-text",
+                "extra context",
+            ]
+        );
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn child_input_args_resolve_dynamic_run_var_values() {
+        let (args, notes) = child_input_args(
+            Some(&[
+                crate::ActionRunVar {
+                    name: "year".to_string(),
+                    value: crate::ActionRunVarValue::Variable("runtime.year".to_string()),
+                },
+                crate::ActionRunVar {
+                    name: "generate_images".to_string(),
+                    value: crate::ActionRunVarValue::Variable(
+                        "runtime.generate_images".to_string(),
+                    ),
+                },
+            ]),
+            None,
+            None,
+            None,
+            &json!({
+                "runtime": {
+                    "year": 2026,
+                    "generate_images": true
+                }
+            }),
+            "demo",
+            &no_named_inputs(),
+        )
+        .expect("dynamic child run_vars should resolve");
+
+        assert_eq!(
+            args,
+            vec![
+                "--run-var",
+                "year=2026",
+                "--run-var",
+                "generate_images=true",
+            ]
+        );
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("runtime var 'year'"));
+        assert!(notes[1].contains("runtime var 'generate_images'"));
+        assert!(!notes[0].contains("2026"));
+        assert!(!notes[1].contains("true"));
+    }
+
+    #[test]
+    fn child_input_args_reject_object_valued_run_var_variable() {
+        let error = child_input_args(
+            Some(&[crate::ActionRunVar {
+                name: "year".to_string(),
+                value: crate::ActionRunVarValue::Variable("runtime.year".to_string()),
+            }]),
+            None,
+            None,
+            None,
+            &json!({
+                "runtime": {
+                    "year": { "bad": true }
+                }
+            }),
+            "demo",
+            &no_named_inputs(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("runtime var 'year'"));
+        assert!(error.contains("object-valued variable"));
     }
 
     #[test]
@@ -3427,9 +4163,12 @@ auth_mode = "api_key"
     fn action_lane_prefix_uses_json_order_and_name() {
         assert_eq!(
             action_lane_prefix(0, "generate_images"),
-            "[A1 generate_images]"
+            "[Action 1: generate_images]"
         );
-        assert_eq!(action_lane_prefix(2, "child_summary"), "[A3 child_summary]");
+        assert_eq!(
+            action_lane_prefix(2, "child_summary"),
+            "[Action 3: child_summary]"
+        );
     }
 
     #[test]
@@ -3451,17 +4190,14 @@ auth_mode = "api_key"
         assert_eq!(snapshot[0], "Action execution: parallel");
         assert!(snapshot
             .iter()
-            .any(|line| line.starts_with("[A1 generate_images] running · ")));
+            .any(|line| line.starts_with("[Action 1: generate_images] running · ")));
         assert!(snapshot
             .iter()
             .any(|line| line == "  step: 1/2 generate_image"));
         assert!(snapshot
             .iter()
             .any(|line| line == "  last: wrote generated image to './artifacts/hero.png'."));
-        assert!(snapshot.iter().any(|line| line == "  output:"));
-        assert!(snapshot
-            .iter()
-            .any(|line| line == "    wrote generated image to './artifacts/hero.png'."));
+        assert!(!snapshot.iter().any(|line| line == "  output:"));
     }
 
     #[test]
@@ -3477,7 +4213,7 @@ auth_mode = "api_key"
         let snapshot = output.snapshot_lines_for_test();
         assert!(snapshot
             .iter()
-            .any(|line| line.starts_with("[A1 generate_images] running · ")));
+            .any(|line| line.starts_with("[Action 1: generate_images] running · ")));
         assert!(snapshot
             .iter()
             .any(|line| line == "  step: 2/2 generate_image"));
@@ -3499,7 +4235,7 @@ auth_mode = "api_key"
         let snapshot = output.snapshot_lines_for_test();
         assert!(snapshot
             .iter()
-            .any(|line| line.starts_with("[A1 generate_images] completed · ")));
+            .any(|line| line.starts_with("[Action 1: generate_images] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
         assert!(snapshot.iter().any(|line| line == "  last: completed."));
     }
@@ -3517,15 +4253,109 @@ auth_mode = "api_key"
         let snapshot = output.snapshot_lines_for_test();
         assert!(snapshot
             .iter()
-            .any(|line| line.starts_with("[A2 child_summary] failed · ")));
+            .any(|line| line.starts_with("[Action 2: child_summary] failed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✗ failed"));
         assert!(snapshot
             .iter()
             .any(|line| line == "  last: failed: child exited with status 1"));
-        assert!(snapshot.iter().any(|line| line == "  output:"));
+        assert!(!snapshot.iter().any(|line| line == "  output:"));
+    }
+
+    #[test]
+    fn using_line_hides_standard_openai_account_url() {
+        let provider_context = ActionProviderContext {
+            provider: ProviderKind::OpenAi,
+            profile_name: Some("codex_account".to_string()),
+            auth_mode: "chatgpt_account".to_string(),
+            model: "gpt-5.2".to_string(),
+            url: openai_oauth::OPENAI_ACCOUNT_RESPONSES_URL.to_string(),
+            token: "test-token".to_string(),
+            inference_timeout_in_sec: 60,
+        };
+
+        assert_eq!(
+            provider_context.using_line(),
+            "using: profile=codex_account auth=chatgpt_account server=openai model=gpt-5.2"
+        );
+    }
+
+    #[test]
+    fn using_line_includes_custom_url_when_material() {
+        let provider_context = ActionProviderContext {
+            provider: ProviderKind::OpenAi,
+            profile_name: None,
+            auth_mode: "api_key".to_string(),
+            model: "gpt-5.2".to_string(),
+            url: "https://custom.example.test/v1/chat/completions".to_string(),
+            token: "test-token".to_string(),
+            inference_timeout_in_sec: 60,
+        };
+
+        assert_eq!(
+            provider_context.using_line(),
+            "using: profile=none auth=api_key server=openai model=gpt-5.2 url=https://custom.example.test/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn live_dashboard_snapshot_suppresses_duplicate_using_lines() {
+        let output = ActionOutput::new_for_mode(
+            crate::ActionExecutionMode::Parallel,
+            ActionOutputMode::Live,
+        );
+        let root_using = "using: profile=parent auth=api_key server=openai model=gpt-5.2";
+
+        output.seed_using_line(root_using);
+        output.action_started(0, "child_summary");
+        output.action_step_started(0, "child_summary", "agent", 1, 1);
+        output.action_using_line_if_changed(0, "child_summary", root_using);
+
+        let snapshot = output.snapshot_lines_for_test();
+        assert!(!snapshot.iter().any(|line| line.contains(root_using)));
+    }
+
+    #[test]
+    fn live_dashboard_snapshot_suppresses_changed_using_lines() {
+        let output = ActionOutput::new_for_mode(
+            crate::ActionExecutionMode::Parallel,
+            ActionOutputMode::Live,
+        );
+        let changed_using = "using: profile=child_profile auth=api_key server=openai model=gpt-5.2";
+
+        output.seed_using_line("using: profile=parent auth=api_key server=openai model=gpt-5.2");
+        output.action_started(0, "child_summary");
+        output.action_step_started(0, "child_summary", "agent", 1, 1);
+        output.action_using_line_if_changed(0, "child_summary", changed_using);
+
+        let snapshot = output.snapshot_lines_for_test();
         assert!(snapshot
             .iter()
-            .any(|line| line == "    child exited with status 1"));
+            .any(|line| line == "  last: waiting for child agent to finish..."));
+        assert!(!snapshot.iter().any(|line| line.contains(changed_using)));
+    }
+
+    #[test]
+    fn live_dashboard_snapshot_suppresses_dynamic_child_resolution_lines() {
+        let output = ActionOutput::new_for_mode(
+            crate::ActionExecutionMode::Parallel,
+            ActionOutputMode::Live,
+        );
+
+        output.action_started(0, "child_summary");
+        output.action_step_started(0, "child_summary", "agent", 1, 1);
+        output.action_line(
+            0,
+            "child_summary",
+            "Action 'child_summary' resolved dynamic child-agent runtime var 'year' -> 2026.",
+        );
+
+        let snapshot = output.snapshot_lines_for_test();
+        assert!(snapshot
+            .iter()
+            .any(|line| line == "  last: waiting for child agent to finish..."));
+        assert!(!snapshot
+            .iter()
+            .any(|line| line.contains("resolved dynamic child-agent runtime var")));
     }
 
     #[cfg(unix)]
@@ -3550,6 +4380,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -3588,6 +4420,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -3612,10 +4446,12 @@ auth_mode = "api_key"
         let snapshot = output.snapshot_lines_for_test();
         assert!(snapshot
             .iter()
-            .any(|line| line == "[A1 raw_exec] completed"));
+            .any(|line| line.starts_with("[Action 1: raw_exec] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
-        assert!(snapshot.iter().any(|line| line == "    alpha"));
-        assert!(snapshot.iter().any(|line| line == "    beta"));
+        assert!(snapshot.iter().any(|line| line == "  last: completed."));
+        assert!(!snapshot.iter().any(|line| line == "  output:"));
+        assert!(!snapshot.iter().any(|line| line.contains("alpha")));
+        assert!(!snapshot.iter().any(|line| line.contains("beta")));
     }
 
     #[tokio::test]
@@ -3656,12 +4492,16 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
         };
         let provider_context = ActionProviderContext {
             provider: ProviderKind::OpenAi,
+            profile_name: Some("test_profile".to_string()),
+            auth_mode: "api_key".to_string(),
             model: "gpt-5.2".to_string(),
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
@@ -3733,12 +4573,16 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
         };
         let provider_context = ActionProviderContext {
             provider: ProviderKind::OpenAi,
+            profile_name: Some("test_profile".to_string()),
+            auth_mode: "api_key".to_string(),
             model: "gpt-5.2".to_string(),
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
@@ -3814,12 +4658,16 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
         };
         let provider_context = ActionProviderContext {
             provider: ProviderKind::OpenAi,
+            profile_name: Some("test_profile".to_string()),
+            auth_mode: "api_key".to_string(),
             model: "gpt-image-1.5".to_string(),
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
@@ -3870,12 +4718,16 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
         };
         let provider_context = ActionProviderContext {
             provider: ProviderKind::OpenAi,
+            profile_name: Some("test_profile".to_string()),
+            auth_mode: "api_key".to_string(),
             model: String::new(),
             url: "https://api.openai.com/v1/chat/completions".to_string(),
             token: "test-token".to_string(),
@@ -3948,20 +4800,31 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
         };
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let result = run_generate_image_step(
-            &step,
-            &json!({}),
-            0,
-            "generate_art",
-            &provider_context(),
-            runtime_budget,
-        )
-        .await;
+        let output = ActionOutput::new_for_mode(
+            crate::ActionExecutionMode::Sequential,
+            ActionOutputMode::Live,
+        );
+        output.seed_using_line(provider_context().using_line_with_model("gpt-5.2").as_str());
+        let result = ACTION_OUTPUT
+            .scope(output.clone(), async {
+                run_generate_image_step(
+                    &step,
+                    &json!({}),
+                    0,
+                    "generate_art",
+                    &provider_context(),
+                    runtime_budget,
+                )
+                .await
+            })
+            .await;
 
         assert!(
             result.is_ok(),
@@ -3972,6 +4835,14 @@ auth_mode = "api_key"
             std::fs::read(&output_name).expect("generated image file should be written");
         let _ = std::fs::remove_file(&output_name);
         assert_eq!(written_bytes, expected_bytes);
+
+        let snapshot = output.snapshot_lines_for_test();
+        assert!(!snapshot
+            .iter()
+            .any(|line| line.contains("using: profile=image_profile")));
+        assert!(!snapshot
+            .iter()
+            .any(|line| line.contains("url=http://127.0.0.1")));
     }
 
     #[tokio::test]
@@ -4024,6 +4895,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -4079,6 +4952,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -4140,6 +5015,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
+            input_overrides: None,
             inputs: Some(vec![
                 crate::ActionInput::Text {
                     text: vec![
@@ -4171,6 +5048,7 @@ auth_mode = "api_key"
                 "customer": "world",
                 "report_filename": "report.pdf"
             }),
+            &no_named_inputs(),
             0,
             "invoke_child",
             None,
@@ -4221,7 +5099,7 @@ auth_mode = "api_key"
         ));
 
         let script_body = format!(
-            "#!/bin/sh\nprintf 'child detail\\n'\nprintf 'ran' > \"{}\"\n",
+            "#!/bin/sh\nprintf 'using: profile=child_profile auth=api_key server=openai model=gpt-5.2\\n'\nprintf 'child detail\\n'\nprintf 'ran' > \"{}\"\n",
             marker_path.display()
         );
         fs::write(&script_path, script_body).expect("script should be written");
@@ -4247,6 +5125,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -4265,6 +5145,7 @@ auth_mode = "api_key"
                 run_agent_step(
                     &step,
                     &json!({}),
+                    &no_named_inputs(),
                     0,
                     "child_summary",
                     None,
@@ -4290,14 +5171,17 @@ auth_mode = "api_key"
         let snapshot = output.snapshot_lines_for_test();
         assert!(snapshot
             .iter()
-            .any(|line| line == "[A1 child_summary] completed"));
+            .any(|line| line.starts_with("[Action 1: child_summary] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
-        assert!(snapshot
+        assert!(snapshot.iter().any(|line| line == "  last: completed."));
+        assert!(!snapshot.iter().any(|line| line == "  output:"));
+        assert!(!snapshot
             .iter()
-            .any(|line| line == &format!("    child: started ./{}", script_name)));
-        assert!(snapshot
+            .any(|line| line.contains("using: profile=child_profile")));
+        assert!(!snapshot.iter().any(|line| line.contains("child: started")));
+        assert!(!snapshot
             .iter()
-            .any(|line| line == "    child: completed successfully"));
+            .any(|line| line.contains("child: completed successfully")));
         assert!(!snapshot.iter().any(|line| line.contains("child detail")));
     }
 
@@ -4346,6 +5230,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -4355,6 +5241,7 @@ auth_mode = "api_key"
         let result = run_agent_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "invoke_child",
             Some(crate::ActionExecutionMode::Sequential),
@@ -4428,6 +5315,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -4441,6 +5330,7 @@ auth_mode = "api_key"
                     "child_profile": "child_profile"
                 }
             }),
+            &no_named_inputs(),
             0,
             "invoke_child",
             Some(crate::ActionExecutionMode::Sequential),
@@ -4515,6 +5405,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -4535,6 +5427,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
+            input_overrides: None,
             inputs: Some(vec![crate::ActionInput::Text {
                 text: vec![
                     crate::RunArg::Literal("Files:\n".to_string()),
@@ -4563,6 +5457,7 @@ auth_mode = "api_key"
         let result = run_agent_step(
             &agent_step,
             &action_data,
+            &no_named_inputs(),
             0,
             "capture_then_agent",
             None,
@@ -4627,6 +5522,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -4636,6 +5533,7 @@ auth_mode = "api_key"
         let result = run_agent_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "invoke_child",
             None,
@@ -4679,6 +5577,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some("child_agent".to_string()),
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -4688,6 +5588,7 @@ auth_mode = "api_key"
         let error = run_agent_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "invoke_child",
             None,
@@ -4718,6 +5619,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some("./../child_agent".to_string()),
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -4727,6 +5630,7 @@ auth_mode = "api_key"
         let error = run_agent_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "invoke_child",
             None,
@@ -4757,6 +5661,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some("./agents/child_agent".to_string()),
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -4766,6 +5672,7 @@ auth_mode = "api_key"
         let error = run_agent_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "invoke_child",
             None,
@@ -4813,6 +5720,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -4822,6 +5731,7 @@ auth_mode = "api_key"
         let error = run_agent_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "invoke_child",
             None,
@@ -4876,6 +5786,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -4896,6 +5808,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -4906,6 +5820,7 @@ auth_mode = "api_key"
             &crate::Output { answer: 4 },
             &[action(vec![failing_step, second_step])],
             &serde_json::Map::new(),
+            &[],
             crate::ActionExecutionMode::Sequential,
             None,
             &provider_context(),
@@ -4967,6 +5882,8 @@ auth_mode = "api_key"
                 subject: None,
                 text: None,
                 agent: None,
+                run_vars: None,
+                input_overrides: None,
                 inputs: None,
                 input_mode: None,
                 platforms: None,
@@ -4991,6 +5908,8 @@ auth_mode = "api_key"
                 subject: None,
                 text: None,
                 agent: Some(format!("./{}", script_name)),
+                run_vars: None,
+                input_overrides: None,
                 inputs: None,
                 input_mode: None,
                 platforms: None,
@@ -5002,6 +5921,7 @@ auth_mode = "api_key"
             &crate::Output { answer: 4 },
             &[first_action, second_action],
             &serde_json::Map::new(),
+            &[],
             crate::ActionExecutionMode::Sequential,
             None,
             &provider_context(),
@@ -5059,6 +5979,8 @@ auth_mode = "api_key"
                 subject: None,
                 text: None,
                 agent: None,
+                run_vars: None,
+                input_overrides: None,
                 inputs: None,
                 input_mode: None,
                 platforms: None,
@@ -5089,6 +6011,8 @@ auth_mode = "api_key"
                 subject: None,
                 text: None,
                 agent: None,
+                run_vars: None,
+                input_overrides: None,
                 inputs: None,
                 input_mode: None,
                 platforms: None,
@@ -5104,6 +6028,7 @@ auth_mode = "api_key"
             &output,
             &actions,
             &runtime_vars,
+            &[],
             crate::ActionExecutionMode::Parallel,
             None,
             &provider_context,
@@ -5167,6 +6092,8 @@ auth_mode = "api_key"
                 subject: None,
                 text: None,
                 agent: None,
+                run_vars: None,
+                input_overrides: None,
                 inputs: None,
                 input_mode: None,
                 platforms: None,
@@ -5194,6 +6121,8 @@ auth_mode = "api_key"
                 subject: None,
                 text: None,
                 agent: None,
+                run_vars: None,
+                input_overrides: None,
                 inputs: None,
                 input_mode: None,
                 platforms: None,
@@ -5206,6 +6135,7 @@ auth_mode = "api_key"
             &crate::Output { answer: 4 },
             &actions,
             &serde_json::Map::new(),
+            &[],
             crate::ActionExecutionMode::Parallel,
             None,
             &provider_context(),
@@ -5271,6 +6201,8 @@ auth_mode = "api_key"
                     subject: None,
                     text: None,
                     agent: None,
+                    run_vars: None,
+                    input_overrides: None,
                     inputs: None,
                     input_mode: None,
                     platforms: None,
@@ -5291,6 +6223,8 @@ auth_mode = "api_key"
                     subject: None,
                     text: None,
                     agent: Some(format!("./{}", script_name)),
+                    run_vars: None,
+                    input_overrides: None,
                     inputs: None,
                     input_mode: None,
                     platforms: None,
@@ -5316,6 +6250,8 @@ auth_mode = "api_key"
                 subject: None,
                 text: None,
                 agent: Some(format!("./{}", script_name)),
+                run_vars: None,
+                input_overrides: None,
                 inputs: None,
                 input_mode: None,
                 platforms: None,
@@ -5327,6 +6263,7 @@ auth_mode = "api_key"
             &crate::Output { answer: 4 },
             &[first_action, second_action],
             &serde_json::Map::new(),
+            &[],
             crate::ActionExecutionMode::Sequential,
             None,
             &provider_context(),
@@ -5340,7 +6277,7 @@ auth_mode = "api_key"
         let _ = fs::remove_file(&script_path);
         let _ = fs::remove_file(&output_path);
 
-        assert!(error.contains("Run aborted by [A1 first_action]"));
+        assert!(error.contains("Run aborted by [Action 1: first_action]"));
         assert!(error.contains("exit status: 17"));
         assert!(
             !output_exists,
@@ -5381,6 +6318,8 @@ auth_mode = "api_key"
                     subject: None,
                     text: None,
                     agent: None,
+                    run_vars: None,
+                    input_overrides: None,
                     inputs: None,
                     input_mode: None,
                     platforms: None,
@@ -5404,6 +6343,8 @@ auth_mode = "api_key"
                     subject: None,
                     text: None,
                     agent: None,
+                    run_vars: None,
+                    input_overrides: None,
                     inputs: None,
                     input_mode: None,
                     platforms: None,
@@ -5433,6 +6374,8 @@ auth_mode = "api_key"
                     subject: None,
                     text: None,
                     agent: None,
+                    run_vars: None,
+                    input_overrides: None,
                     inputs: None,
                     input_mode: None,
                     platforms: None,
@@ -5459,6 +6402,8 @@ auth_mode = "api_key"
                     subject: None,
                     text: None,
                     agent: None,
+                    run_vars: None,
+                    input_overrides: None,
                     inputs: None,
                     input_mode: None,
                     platforms: None,
@@ -5471,6 +6416,7 @@ auth_mode = "api_key"
             &crate::Output { answer: 4 },
             &[first_action, second_action],
             &serde_json::Map::new(),
+            &[],
             crate::ActionExecutionMode::Parallel,
             None,
             &provider_context(),
@@ -5483,7 +6429,7 @@ auth_mode = "api_key"
         let later_output_exists = later_output_path.exists();
         let _ = fs::remove_file(&later_output_path);
 
-        assert!(error.contains("Run aborted by [A1 first_action]"));
+        assert!(error.contains("Run aborted by [Action 1: first_action]"));
         assert!(error.contains("exit status: 19"));
         assert!(
             !later_output_exists,
@@ -5532,6 +6478,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: None,
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -5552,6 +6500,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -5562,6 +6512,7 @@ auth_mode = "api_key"
             &crate::Output { answer: 4 },
             &[action(vec![failing_step, second_step])],
             &serde_json::Map::new(),
+            &[],
             crate::ActionExecutionMode::Sequential,
             None,
             &provider_context(),
@@ -5620,6 +6571,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -5635,6 +6588,7 @@ auth_mode = "api_key"
             &crate::Output { answer: 4 },
             &[action],
             &runtime_vars(&[("generate_images", json!(true))]),
+            &[],
             crate::ActionExecutionMode::Sequential,
             None,
             &provider_context(),
@@ -5691,6 +6645,8 @@ auth_mode = "api_key"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            run_vars: None,
+            input_overrides: None,
             inputs: None,
             input_mode: None,
             platforms: None,
@@ -5701,6 +6657,7 @@ auth_mode = "api_key"
             &crate::Output { answer: 4 },
             &[action(vec![step])],
             &runtime_vars(&[("generate_images", json!(true))]),
+            &[],
             crate::ActionExecutionMode::Sequential,
             None,
             &provider_context(),

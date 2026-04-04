@@ -112,6 +112,23 @@ pub fn build_cli() -> ArgMatches {
                 .num_args(1)
         )
         .arg(
+            Arg::new("input_override")
+                .long("input-override")
+                .help("Override a declared named top-level input for this invocation (repeatable: name=value)")
+                .value_name("NAME=VALUE")
+                .action(ArgAction::Append)
+                .num_args(1)
+        )
+        .arg(
+            Arg::new("forwarded_input")
+                .long("forwarded-input")
+                .help("Internal: forwarded child input payload")
+                .value_name("JSON")
+                .action(ArgAction::Append)
+                .num_args(1)
+                .hide(true)
+        )
+        .arg(
             Arg::new("input_text")
                 .long("input-text")
                 .help("Text input to provide to the agent at runtime")

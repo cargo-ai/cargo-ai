@@ -8,9 +8,10 @@ use std::process::{Command, Stdio};
 pub fn build_agent_project(
     agent_name: &str,
     build_target: &BuildTarget,
+    shared_target_dir: Option<&Path>,
 ) -> Result<(), std::io::Error> {
     let project_path = super::agent_workspace_path(agent_name);
-    run_cargo_compile_in_path(&project_path, "build", build_target, None)
+    run_cargo_compile_in_path(&project_path, "build", build_target, shared_target_dir)
 }
 
 /// Runs `cargo check` for the agent project at the given path.
@@ -123,6 +124,45 @@ mod tests {
             args,
             vec![
                 OsString::from("check"),
+                OsString::from("--target"),
+                OsString::from("x86_64-pc-windows-msvc"),
+            ]
+        );
+        assert!(envs.iter().any(|(key, value)| {
+            key == "CARGO_TARGET_DIR"
+                && value.as_ref() == Some(&OsString::from("/tmp/shared-target"))
+        }));
+    }
+
+    #[test]
+    fn shared_target_dir_is_applied_to_build_commands() {
+        let build_target = BuildTarget::from_cli(Some("x86_64-pc-windows-msvc"))
+            .expect("explicit target should resolve");
+        let command = prepare_cargo_compile_command(
+            Path::new("/tmp/demo-agent"),
+            "build",
+            &build_target,
+            Some(Path::new("/tmp/shared-target")),
+        );
+
+        let args = command
+            .get_args()
+            .map(|value| value.to_os_string())
+            .collect::<Vec<_>>();
+        let current_dir = command
+            .get_current_dir()
+            .expect("current dir should be set")
+            .to_path_buf();
+        let envs = command
+            .get_envs()
+            .map(|(key, value)| (key.to_os_string(), value.map(|entry| entry.to_os_string())))
+            .collect::<Vec<_>>();
+
+        assert_eq!(current_dir, Path::new("/tmp/demo-agent"));
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("build"),
                 OsString::from("--target"),
                 OsString::from("x86_64-pc-windows-msvc"),
             ]

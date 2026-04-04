@@ -14,6 +14,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use config::loader::{config_path, find_profile, load_config};
 use config::schema::{Profile, ProfileAuthMode, SecretStoreMode};
@@ -62,6 +63,7 @@ struct ActionOutputState {
     action_execution: ActionExecutionMode,
     rendered_lines: usize,
     lanes: BTreeMap<usize, ActionLaneState>,
+    last_using_line: Option<String>,
 }
 
 #[derive(Clone)]
@@ -106,6 +108,7 @@ impl ActionOutput {
             action_execution,
             rendered_lines: 0,
             lanes: BTreeMap::new(),
+            last_using_line: None,
         }));
         let live_refresh_stop = Arc::new(AtomicBool::new(false));
         maybe_spawn_live_action_refresh(inner.clone(), live_refresh_stop.clone(), mode);
@@ -122,6 +125,12 @@ impl ActionOutput {
             } else {
                 render_live_dashboard(state);
             }
+        });
+    }
+
+    fn seed_using_line(&self, using_line: &str) {
+        self.with_state(|state| {
+            state.last_using_line = Some(using_line.to_string());
         });
     }
 
@@ -178,25 +187,25 @@ impl ActionOutput {
 
     fn action_line(&self, action_index: usize, action_name: &str, message: &str) {
         self.with_state(|state| {
-            if state.mode == ActionOutputMode::AppendOnly {
-                for line in split_action_output_lines(message) {
-                    println!("{}", format_action_line(action_index, action_name, line.as_str()));
-                }
+            emit_action_line_locked(state, action_index, action_name, message);
+        });
+    }
+
+    fn action_using_line_if_changed(
+        &self,
+        action_index: usize,
+        action_name: &str,
+        using_line: &str,
+    ) {
+        self.with_state(|state| {
+            if state.last_using_line.as_deref() == Some(using_line) {
                 return;
             }
-
-            let lane = ensure_lane_state(state, action_index, action_name);
-            lane.last_message = compact_action_output_line(message);
-            push_lane_output_message(lane, message);
-            if lane.status == ActionLaneStatus::Pending {
-                lane.status = inferred_lane_status(message);
-            } else if lane.status == ActionLaneStatus::Running {
-                lane.status = match inferred_lane_status(message) {
-                    ActionLaneStatus::Notice => ActionLaneStatus::Running,
-                    other => other,
-                };
+            state.last_using_line = Some(using_line.to_string());
+            if state.mode == ActionOutputMode::Live {
+                return;
             }
-            render_live_dashboard(state);
+            emit_action_line_locked(state, action_index, action_name, using_line);
         });
     }
 
@@ -365,12 +374,6 @@ impl ActionOutputState {
                 "  last: {}",
                 lane.last_message.as_deref().unwrap_or("-")
             ));
-            if !lane.output_lines.is_empty() {
-                lines.push("  output:".to_string());
-                for line in &lane.output_lines {
-                    lines.push(format!("    {}", line));
-                }
-            }
         }
 
         lines
@@ -416,6 +419,37 @@ fn ensure_lane_state<'a>(
             last_message: None,
             output_lines: VecDeque::new(),
         })
+}
+
+fn emit_action_line_locked(
+    state: &mut ActionOutputState,
+    action_index: usize,
+    action_name: &str,
+    message: &str,
+) {
+    if state.mode == ActionOutputMode::AppendOnly {
+        for line in split_action_output_lines(message) {
+            println!("{}", format_action_line(action_index, action_name, line.as_str()));
+        }
+        return;
+    }
+
+    if !should_surface_live_dashboard_message(message) {
+        return;
+    }
+
+    let lane = ensure_lane_state(state, action_index, action_name);
+    lane.last_message = compact_action_output_line(message);
+    push_lane_output_message(lane, message);
+    if lane.status == ActionLaneStatus::Pending {
+        lane.status = inferred_lane_status(message);
+    } else if lane.status == ActionLaneStatus::Running {
+        lane.status = match inferred_lane_status(message) {
+            ActionLaneStatus::Notice => ActionLaneStatus::Running,
+            other => other,
+        };
+    }
+    render_live_dashboard(state);
 }
 
 fn maybe_spawn_live_action_refresh(
@@ -477,6 +511,14 @@ fn split_action_output_lines(message: &str) -> Vec<String> {
 
 fn compact_action_output_line(message: &str) -> Option<String> {
     split_action_output_lines(message).into_iter().next()
+}
+
+fn should_surface_live_dashboard_message(message: &str) -> bool {
+    compact_action_output_line(message)
+        .map(|line| {
+            !line.starts_with("using: ") && !line.contains("resolved dynamic child-agent ")
+        })
+        .unwrap_or(false)
 }
 
 fn push_lane_output_message(lane: &mut ActionLaneState, message: &str) {
@@ -608,10 +650,66 @@ struct InvocationRuntimeBudget {
 #[derive(Debug, Clone)]
 struct ActionProviderContext {
     provider: ProviderKind,
+    profile_name: Option<String>,
+    auth_mode: String,
     model: String,
     url: String,
     token: String,
     inference_timeout_in_sec: u64,
+}
+
+impl ActionProviderContext {
+    fn using_line(&self) -> String {
+        self.using_line_with_model(self.model.as_str())
+    }
+
+    fn using_line_with_model(&self, model: &str) -> String {
+        let mut line = format!(
+            "using: profile={} auth={} server={} model={}",
+            self.profile_name.as_deref().unwrap_or("none"),
+            self.auth_mode,
+            provider_server_name(self.provider),
+            using_line_model(model),
+        );
+
+        if let Some(url) = using_line_url(self.provider, self.url.as_str()) {
+            line.push_str(format!(" url={url}").as_str());
+        }
+
+        line
+    }
+}
+
+fn provider_server_name(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Ollama => "ollama",
+        ProviderKind::OpenAi => "openai",
+    }
+}
+
+fn using_line_model(model: &str) -> &str {
+    if model.trim().is_empty() {
+        "none"
+    } else {
+        model
+    }
+}
+
+fn using_line_url(provider: ProviderKind, url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed == provider.default_url() {
+        return None;
+    }
+
+    if provider == ProviderKind::OpenAi && trimmed == OPENAI_ACCOUNT_RESPONSES_URL {
+        return None;
+    }
+
+    Some(trimmed.to_string())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -806,6 +904,34 @@ fn resolve_profile_api_token(profile: &SelectedProfile) -> Result<String, String
             "Failed to load profile token for '{}': {error}",
             profile.name
         )),
+    }
+}
+
+fn resolved_invocation_auth_mode(
+    provider: ProviderKind,
+    selected_profile: Option<&SelectedProfile>,
+    explicit_token_override: bool,
+    use_openai_account_transport: bool,
+) -> &'static str {
+    match provider {
+        ProviderKind::Ollama => "none",
+        ProviderKind::OpenAi => {
+            if explicit_token_override {
+                return "api_key";
+            }
+            if let Some(profile) = selected_profile {
+                return match profile.auth_mode {
+                    ProfileAuthMode::None => "none",
+                    ProfileAuthMode::ApiKey => "api_key",
+                    ProfileAuthMode::OpenaiAccount => "chatgpt_account",
+                };
+            }
+            if use_openai_account_transport {
+                "chatgpt_account"
+            } else {
+                "none"
+            }
+        }
     }
 }
 
@@ -1395,24 +1521,69 @@ fn apply_profile(profile: &Profile, server: &mut String, model: &mut String, tim
     }
 }
 
-fn runtime_input_overrides(cmd_args: &clap::ArgMatches) -> Vec<Input> {
+fn runtime_input_overrides(cmd_args: &clap::ArgMatches) -> Result<Vec<Input>, String> {
     let mut ordered = Vec::new();
 
     collect_flagged_inputs(cmd_args, "input_text")
         .into_iter()
-        .for_each(|(index, value)| ordered.push((index, Input::Text { text: value })));
+        .for_each(|(index, value)| {
+            ordered.push((
+                index,
+                Input {
+                    name: None,
+                    kind: InputKind::Text,
+                    value: Some(value),
+                },
+            ))
+        });
     collect_flagged_inputs(cmd_args, "input_url")
         .into_iter()
-        .for_each(|(index, value)| ordered.push((index, Input::Url { url: value })));
+        .for_each(|(index, value)| {
+            ordered.push((
+                index,
+                Input {
+                    name: None,
+                    kind: InputKind::Url,
+                    value: Some(value),
+                },
+            ))
+        });
     collect_flagged_inputs(cmd_args, "input_image")
         .into_iter()
-        .for_each(|(index, value)| ordered.push((index, Input::Image { path: value })));
+        .for_each(|(index, value)| {
+            ordered.push((
+                index,
+                Input {
+                    name: None,
+                    kind: InputKind::Image,
+                    value: Some(value),
+                },
+            ))
+        });
     collect_flagged_inputs(cmd_args, "input_file")
         .into_iter()
-        .for_each(|(index, value)| ordered.push((index, Input::File { path: value })));
+        .for_each(|(index, value)| {
+            ordered.push((
+                index,
+                Input {
+                    name: None,
+                    kind: InputKind::File,
+                    value: Some(value),
+                },
+            ))
+        });
+    for (index, raw_value) in collect_flagged_inputs(cmd_args, "forwarded_input") {
+        let input = serde_json::from_str::<Input>(&raw_value).map_err(|error| {
+            format!(
+                "Internal error: invalid forwarded input payload '{}': {}",
+                raw_value, error
+            )
+        })?;
+        ordered.push((index, input));
+    }
 
     ordered.sort_by_key(|(index, _)| *index);
-    ordered.into_iter().map(|(_, input)| input).collect()
+    Ok(ordered.into_iter().map(|(_, input)| input).collect())
 }
 
 fn runtime_input_mode(cmd_args: &clap::ArgMatches) -> Result<RuntimeInputMode, String> {
@@ -1436,8 +1607,57 @@ fn collect_flagged_inputs(cmd_args: &clap::ArgMatches, id: &str) -> Vec<(usize, 
     }
 }
 
-fn resolved_inputs_for_run(cmd_args: &clap::ArgMatches) -> Result<Vec<Input>, String> {
-    let runtime_inputs = runtime_input_overrides(cmd_args);
+fn resolved_named_inputs_for_run(cmd_args: &clap::ArgMatches) -> Result<Vec<Input>, String> {
+    let mut named_inputs = inputs();
+
+    for raw_assignment in cmd_args
+        .get_many::<String>("input_override")
+        .into_iter()
+        .flatten()
+    {
+        let (name, raw_value) = parse_input_override_assignment(raw_assignment)?;
+        let input = named_inputs
+            .iter_mut()
+            .find(|input| input.name.as_deref() == Some(name.as_str()))
+            .ok_or_else(|| {
+                format!(
+                    "Named input override '{}' is not declared in top-level `inputs`.",
+                    name
+                )
+            })?;
+
+        input.value = Some(validate_input_override_value(input.kind, &raw_value, &name)?);
+    }
+
+    let forwarded_inputs = runtime_input_overrides(cmd_args)?;
+    for forwarded in &forwarded_inputs {
+        let Some(name) = forwarded.name.as_deref() else {
+            continue;
+        };
+        if let Some(local_named_input) = named_inputs
+            .iter_mut()
+            .find(|input| input.name.as_deref() == Some(name))
+        {
+            if local_named_input.kind != forwarded.kind {
+                return Err(format!(
+                    "Forwarded named input '{}' expected kind '{}' but received '{}'.",
+                    name,
+                    local_named_input.kind_label(),
+                    forwarded.kind_label()
+                ));
+            }
+            local_named_input.value = forwarded.value.clone();
+        }
+    }
+
+    Ok(named_inputs)
+}
+
+fn resolved_inputs_for_run(
+    cmd_args: &clap::ArgMatches,
+    named_inputs: &[Input],
+) -> Result<Vec<Input>, String> {
+    let runtime_inputs = runtime_input_overrides(cmd_args)?;
 
     if runtime_inputs.is_empty() {
         if cmd_args.get_one::<String>("input_mode").is_some() {
@@ -1446,23 +1666,91 @@ fn resolved_inputs_for_run(cmd_args: &clap::ArgMatches) -> Result<Vec<Input>, St
                     .to_string(),
             );
         }
-        return Ok(inputs());
+        return Ok(named_inputs.to_vec());
     }
 
     let input_mode = runtime_input_mode(cmd_args)?;
     Ok(match input_mode {
         RuntimeInputMode::Replace => runtime_inputs,
         RuntimeInputMode::Append => {
-            let mut selected_inputs = inputs();
+            let mut selected_inputs = named_inputs.to_vec();
             selected_inputs.extend(runtime_inputs);
             selected_inputs
         }
         RuntimeInputMode::Prepend => {
             let mut selected_inputs = runtime_inputs;
-            selected_inputs.extend(inputs());
+            selected_inputs.extend(named_inputs.to_vec());
             selected_inputs
         }
     })
+}
+
+fn parse_input_override_assignment(raw_assignment: &str) -> Result<(String, String), String> {
+    let Some((name, raw_value)) = raw_assignment.split_once('=') else {
+        return Err(format!(
+            "Invalid --input-override assignment '{}'. Expected NAME=VALUE.",
+            raw_assignment
+        ));
+    };
+
+    if name.trim().is_empty() {
+        return Err(format!(
+            "Invalid --input-override assignment '{}'. Input name cannot be empty.",
+            raw_assignment
+        ));
+    }
+    if name != name.trim() || name.chars().any(char::is_whitespace) || name.contains('.') {
+        return Err(format!(
+            "Invalid --input-override assignment '{}'. Input names must be flat and cannot contain whitespace.",
+            raw_assignment
+        ));
+    }
+
+    Ok((name.to_string(), raw_value.to_string()))
+}
+
+fn validate_input_override_value(
+    kind: InputKind,
+    raw_value: &str,
+    name: &str,
+) -> Result<String, String> {
+    match kind {
+        InputKind::Text => Ok(raw_value.to_string()),
+        InputKind::Url => {
+            if raw_value.starts_with("http://") || raw_value.starts_with("https://") {
+                Ok(raw_value.to_string())
+            } else {
+                Err(format!(
+                    "Named input override '{}' must be an absolute http(s) URL.",
+                    name
+                ))
+            }
+        }
+        InputKind::Image => Ok(raw_value.to_string()),
+        InputKind::File => {
+            validate_runtime_file_extension(raw_value, name)?;
+            Ok(raw_value.to_string())
+        }
+    }
+}
+
+fn validate_runtime_file_extension(path: &str, name: &str) -> Result<(), String> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    match extension.as_deref() {
+        Some(
+            "pdf" | "docx" | "csv" | "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlsx" | "xlt"
+            | "xlw" | "tsv" | "iif" | "doc" | "dot" | "odt" | "rtf" | "pot" | "ppa" | "pps"
+            | "ppt" | "pptx" | "pwz" | "wiz",
+        ) => Ok(()),
+        _ => Err(format!(
+            "Named input override '{}' must use a supported file extension: {}.",
+            name, SUPPORTED_FILE_EXTENSIONS_MESSAGE
+        )),
+    }
 }
 
 fn resolved_action_execution_override_for_run(
@@ -1485,14 +1773,27 @@ fn effective_action_execution_for_run(
 
 fn validate_structural_action_only_inputs(
     has_output_schema_properties: bool,
+    named_inputs: &[Input],
     selected_inputs: &[Input],
 ) -> Result<(), String> {
     if has_output_schema_properties || selected_inputs.is_empty() {
         return Ok(());
     }
 
+    let declared_named_inputs = named_inputs
+        .iter()
+        .filter_map(|input| input.name.as_deref())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    if selected_inputs
+        .iter()
+        .all(|input| input.name.as_deref().is_some_and(|name| declared_named_inputs.contains(name)))
+    {
+        return Ok(());
+    }
+
     Err(
-        "This agent declares empty `agent_schema.properties`; runtime model-facing input flags such as --input-text, --input-url, --input-image, and --input-file are not allowed because there is no model pass to consume them."
+        "This agent declares empty `agent_schema.properties`; anonymous runtime model-facing input flags such as --input-text, --input-url, --input-image, and --input-file are not allowed because there is no model pass to consume them. Use declared named top-level inputs and --input-override instead."
             .to_string(),
     )
 }
@@ -1715,18 +2016,19 @@ async fn main() {
             for line in unknown_server_messages(&server) {
                 eprintln!("{line}");
             }
-            return;
+            std::process::exit(1);
         }
     };
 
     let explicit_token_override = cmd_args.get_one::<String>("token").map(|token| token.to_string());
+    let has_explicit_token_override = explicit_token_override.is_some();
     if let Some((kind, profile_name)) = loaded_profile_message.as_ref() {
         for line in profile_selection_messages(
             *kind,
             profile_name,
             &cli_override_descriptions(
                 &cmd_args,
-                explicit_token_override.is_some() && provider == ProviderKind::OpenAi,
+                has_explicit_token_override && provider == ProviderKind::OpenAi,
             ),
         ) {
             println!("{line}");
@@ -1746,7 +2048,7 @@ async fn main() {
             }
             Err(error) => {
                 eprintln!("❌ {error}");
-                return;
+                std::process::exit(1);
             }
         };
     }
@@ -1759,35 +2061,46 @@ async fn main() {
         }
     }
 
-    let selected_inputs = match resolved_inputs_for_run(&cmd_args) {
+    let named_inputs = match resolved_named_inputs_for_run(&cmd_args) {
+        Ok(named_inputs) => named_inputs,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            std::process::exit(1);
+        }
+    };
+    let selected_inputs = match resolved_inputs_for_run(&cmd_args, &named_inputs) {
         Ok(selected_inputs) => selected_inputs,
         Err(error) => {
             eprintln!("❌ {error}");
-            return;
+            std::process::exit(1);
         }
     };
     let runtime_vars = match resolved_runtime_vars_for_run(&cmd_args) {
         Ok(runtime_vars) => runtime_vars,
         Err(error) => {
             eprintln!("❌ {error}");
-            return;
+            std::process::exit(1);
         }
     };
     let action_execution_override = match resolved_action_execution_override_for_run(&cmd_args) {
         Ok(action_execution_override) => action_execution_override,
         Err(error) => {
             eprintln!("❌ {error}");
-            return;
+            std::process::exit(1);
         }
     };
     let effective_action_execution = effective_action_execution_for_run(action_execution_override);
     let has_output_schema_properties = has_output_schema_properties();
 
     if let Err(error) =
-        validate_structural_action_only_inputs(has_output_schema_properties, &selected_inputs)
+        validate_structural_action_only_inputs(
+            has_output_schema_properties,
+            &named_inputs,
+            &selected_inputs,
+        )
     {
         eprintln!("❌ {error}");
-        return;
+        std::process::exit(1);
     }
 
     if !has_output_schema_properties {
@@ -1795,22 +2108,32 @@ async fn main() {
             Ok(output) => output,
             Err(error) => {
                 eprintln!("❌ {error}");
-                return;
+                std::process::exit(1);
             }
         };
         let actions = actions();
         let action_provider_context = ActionProviderContext {
             provider,
+            profile_name: selected_profile.as_ref().map(|profile| profile.name.clone()),
+            auth_mode: resolved_invocation_auth_mode(
+                provider,
+                selected_profile.as_ref(),
+                has_explicit_token_override,
+                use_openai_account_transport,
+            )
+            .to_string(),
             model: model.clone(),
             url: url.clone(),
             token: token.clone(),
             inference_timeout_in_sec,
         };
+        println!("{}", action_provider_context.using_line());
         if let Err(error) =
             apply_actions(
                 &output,
                 &actions,
                 &runtime_vars,
+                &named_inputs,
                 effective_action_execution,
                 action_execution_override,
                 config.as_ref(),
@@ -1830,7 +2153,7 @@ async fn main() {
         for issue in validation_issues {
             eprintln!("{issue}");
         }
-        return;
+        std::process::exit(1);
     }
 
     let resolved_inputs = match crate::providers::resolve_provider_inputs(&selected_inputs).await {
@@ -1838,7 +2161,7 @@ async fn main() {
         Err(error) => {
             eprintln!("❌ Failed to resolve runtime inputs.");
             eprintln!("Reason: {error}");
-            return;
+            std::process::exit(1);
         }
     };
 
@@ -1848,8 +2171,25 @@ async fn main() {
         for issue in validation_issues {
             eprintln!("{issue}");
         }
-        return;
+        std::process::exit(1);
     }
+
+    let action_provider_context = ActionProviderContext {
+        provider,
+        profile_name: selected_profile.as_ref().map(|profile| profile.name.clone()),
+        auth_mode: resolved_invocation_auth_mode(
+            provider,
+            selected_profile.as_ref(),
+            has_explicit_token_override,
+            use_openai_account_transport,
+        )
+        .to_string(),
+        model: model.clone(),
+        url: url.clone(),
+        token: token.clone(),
+        inference_timeout_in_sec,
+    };
+    println!("{}", action_provider_context.using_line());
 
     let static_context =
         "A question will be asked and you will need to return the answer in the specified JSON format.";
@@ -1867,7 +2207,7 @@ async fn main() {
                     "❌ {}",
                     current_agent_runtime_timeout_message(runtime_budget, error.as_str())
                 );
-                return;
+                std::process::exit(1);
             }
         };
 
@@ -1888,7 +2228,7 @@ async fn main() {
                 for line in provider_error_messages(&error) {
                     eprintln!("{line}");
                 }
-                return;
+                std::process::exit(1);
             }
             Err(_) => {
                 eprintln!(
@@ -1898,7 +2238,7 @@ async fn main() {
                         "while waiting for the model response"
                     )
                 );
-                return;
+                std::process::exit(1);
             }
         }
     } else if provider == ProviderKind::OpenAi {
@@ -1923,7 +2263,7 @@ async fn main() {
                     "❌ {}",
                     current_agent_runtime_timeout_message(runtime_budget, error.as_str())
                 );
-                return;
+                std::process::exit(1);
             }
         };
 
@@ -1945,7 +2285,7 @@ async fn main() {
                 for line in provider_error_messages(&error) {
                     eprintln!("{line}");
                 }
-                return;
+                std::process::exit(1);
             }
             Err(_) => {
                 eprintln!(
@@ -1955,7 +2295,7 @@ async fn main() {
                         "while waiting for the model response"
                     )
                 );
-                return;
+                std::process::exit(1);
             }
         };
     }
@@ -1963,7 +2303,7 @@ async fn main() {
     if !ai_cargo.set_response(response.clone()) {
         eprintln!("❌ LLM output did NOT conform to the required JSON schema.");
         eprintln!("Raw output received from server:\n{}\n", response);
-        return;
+        std::process::exit(1);
     }
 
     let output = match ai_cargo.get_response() {
@@ -1971,23 +2311,17 @@ async fn main() {
         None => {
             eprintln!("❌ Internal error: response was expected but missing.");
             eprintln!("Raw output received from server:\n{}\n", response);
-            return;
+            std::process::exit(1);
         }
     };
 
     let actions = actions();
-    let action_provider_context = ActionProviderContext {
-        provider,
-        model: model.clone(),
-        url: url.clone(),
-        token: token.clone(),
-        inference_timeout_in_sec,
-    };
     if let Err(error) =
         apply_actions(
             &output,
             &actions,
             &runtime_vars,
+            &named_inputs,
             effective_action_execution,
             action_execution_override,
             config.as_ref(),
@@ -2006,6 +2340,7 @@ async fn apply_actions(
     output: &Output,
     actions: &[Action],
     runtime_vars: &serde_json::Map<String, serde_json::Value>,
+    named_inputs: &[Input],
     action_execution: ActionExecutionMode,
     action_execution_override: Option<ActionExecutionMode>,
     config: Option<&config::schema::Config>,
@@ -2014,13 +2349,20 @@ async fn apply_actions(
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<(), String> {
     ACTION_OUTPUT
-        .scope(ActionOutput::new(action_execution), async move {
+        .scope(
+            {
+                let output = ActionOutput::new(action_execution);
+                output.seed_using_line(provider_context.using_line().as_str());
+                output
+            },
+            async move {
             let abort_signal = InvocationAbortSignal::new();
             let action_secret_store_mode = config.and_then(|cfg| cfg.secret_store);
             let data = action_data_from_output(output, runtime_vars).map_err(|error| {
                 format!("Failed to serialize output for action evaluation: {error}")
             })?;
             let current_platform = current_action_platform();
+            let named_input_lookup = named_input_lookup(named_inputs);
             let invocation_started_at = Instant::now();
             print_action_execution_header(action_execution);
             let top_level_failures = match action_execution {
@@ -2028,6 +2370,7 @@ async fn apply_actions(
                     apply_actions_sequential(
                         actions,
                         &data,
+                        &named_input_lookup,
                         current_platform,
                         action_execution_override,
                         action_secret_store_mode,
@@ -2042,6 +2385,7 @@ async fn apply_actions(
                     apply_actions_parallel(
                         actions,
                         &data,
+                        &named_input_lookup,
                         current_platform,
                         action_execution_override,
                         action_secret_store_mode,
@@ -2079,13 +2423,15 @@ async fn apply_actions(
                     root_run_failure_message(invocation_started_at.elapsed())
                 ))
             }
-        })
+            },
+        )
         .await
 }
 
 async fn apply_actions_sequential(
     actions: &[Action],
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, Input>,
     current_platform: Option<&'static str>,
     action_execution_override: Option<ActionExecutionMode>,
     action_secret_store_mode: Option<SecretStoreMode>,
@@ -2112,6 +2458,7 @@ async fn apply_actions_sequential(
                 action_index,
                 action,
                 data,
+                named_inputs,
                 current_platform,
                 action_execution_override,
                 action_secret_store_mode,
@@ -2135,6 +2482,7 @@ async fn apply_actions_sequential(
 async fn apply_actions_parallel(
     actions: &[Action],
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, Input>,
     current_platform: Option<&'static str>,
     action_execution_override: Option<ActionExecutionMode>,
     action_secret_store_mode: Option<SecretStoreMode>,
@@ -2160,6 +2508,7 @@ async fn apply_actions_parallel(
 
         let action_clone = action.clone();
         let data_clone = data.clone();
+        let named_inputs_clone = named_inputs.clone();
         let provider_context_clone = provider_context.clone();
         let abort_signal_clone = abort_signal.clone();
         let action_output_clone = action_output.clone();
@@ -2170,6 +2519,7 @@ async fn apply_actions_parallel(
                     action_index,
                     &action_clone,
                     &data_clone,
+                    &named_inputs_clone,
                     current_platform,
                     action_execution_override,
                     action_secret_store_mode,
@@ -2200,6 +2550,16 @@ async fn apply_actions_parallel(
     }
 
     Ok(top_level_failures)
+}
+
+fn named_input_lookup(inputs: &[Input]) -> BTreeMap<String, Input> {
+    let mut named = BTreeMap::new();
+    for input in inputs {
+        if let Some(name) = input.name.as_ref() {
+            named.insert(name.clone(), input.clone());
+        }
+    }
+    named
 }
 
 fn action_logic_matches(action_index: usize, action: &Action, data: &serde_json::Value) -> bool {
@@ -2254,6 +2614,7 @@ async fn run_matching_action_steps(
     action_index: usize,
     action: &Action,
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, Input>,
     current_platform: Option<&'static str>,
     action_execution_override: Option<ActionExecutionMode>,
     action_secret_store_mode: Option<SecretStoreMode>,
@@ -2327,6 +2688,7 @@ async fn run_matching_action_steps(
             run_agent_step(
                 step,
                 &action_data,
+                named_inputs,
                 action_index,
                 &action.name,
                 action_execution_override,
@@ -2727,6 +3089,11 @@ async fn run_generate_image_step(
         step_profile_context.as_ref(),
         provider_context,
     )?;
+    print_action_using_line_if_changed(
+        action_index,
+        action_name,
+        effective_provider_context.using_line_with_model(model.as_str()).as_str(),
+    );
 
     if effective_provider_context
         .url
@@ -2967,6 +3334,8 @@ async fn resolve_generate_image_step_profile_context(
 
     Ok(Some(ActionProviderContext {
         provider,
+        profile_name: Some(profile.name.clone()),
+        auth_mode: profile_auth_mode_display(profile.auth_mode).to_string(),
         model,
         url,
         token: resolved_token.token,
@@ -3045,9 +3414,18 @@ fn resolve_generate_image_model(
     }
 }
 
+fn profile_auth_mode_display(mode: ProfileAuthMode) -> &'static str {
+    match mode {
+        ProfileAuthMode::None => "none",
+        ProfileAuthMode::ApiKey => "api_key",
+        ProfileAuthMode::OpenaiAccount => "chatgpt_account",
+    }
+}
+
 async fn run_agent_step(
     step: &RunStep,
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, Input>,
     action_index: usize,
     action_name: &str,
     action_execution_override: Option<ActionExecutionMode>,
@@ -3100,8 +3478,15 @@ async fn run_agent_step(
         command.arg("--profile");
         command.arg(profile_name);
     }
-    let (child_args, resolution_notes) =
-        child_input_args(step.input_mode, step.inputs.as_deref(), data, action_name)?;
+    let (child_args, resolution_notes) = child_input_args(
+        step.run_vars.as_deref(),
+        step.input_overrides.as_deref(),
+        step.input_mode,
+        step.inputs.as_deref(),
+        data,
+        action_name,
+        named_inputs,
+    )?;
     for note in resolution_notes {
         print_action_line(action_index, action_name, note.as_str());
     }
@@ -3122,7 +3507,7 @@ async fn run_agent_step(
         AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV,
         runtime_budget.deadline_ms.to_string(),
     );
-    command.stdout(Stdio::null());
+    command.stdout(Stdio::piped());
     command.stderr(Stdio::null());
 
     let remaining = remaining_runtime_duration(
@@ -3144,6 +3529,24 @@ async fn run_agent_step(
         )
     })?;
     let mut child = child;
+    let child_output = current_action_output();
+    let child_action_name = action_name.to_string();
+    let child_using_forwarder = child.stdout.take().map(|stdout| {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let trimmed = line.trim();
+                if trimmed.starts_with("using: ") {
+                    emit_using_line_with_output(
+                        child_output.as_ref(),
+                        action_index,
+                        child_action_name.as_str(),
+                        trimmed,
+                    );
+                }
+            }
+        })
+    });
     print_action_line(
         action_index,
         action_name,
@@ -3152,10 +3555,16 @@ async fn run_agent_step(
 
     let result = match tokio::time::timeout(remaining, child.wait()).await {
         Ok(Ok(status)) if status.success() => {
+            if let Some(task) = child_using_forwarder {
+                let _ = task.await;
+            }
             print_action_line(action_index, action_name, "child: completed successfully");
             Ok(StepExecutionOutcome::Completed)
         }
         Ok(Ok(status)) => {
+            if let Some(task) = child_using_forwarder {
+                let _ = task.await;
+            }
             print_action_line(
                 action_index,
                 action_name,
@@ -3178,6 +3587,9 @@ async fn run_agent_step(
         )),
         Err(_) => {
             let _ = child.kill().await;
+            if let Some(task) = child_using_forwarder {
+                let _ = task.await;
+            }
             print_action_line(
                 action_index,
                 action_name,
@@ -3309,8 +3721,16 @@ fn print_action_execution_header(action_execution: ActionExecutionMode) {
     }
 }
 
+fn print_action_using_line_if_changed(action_index: usize, action_name: &str, using_line: &str) {
+    if let Some(output) = current_action_output() {
+        output.action_using_line_if_changed(action_index, action_name, using_line);
+    } else {
+        println!("{}", format_action_line(action_index, action_name, using_line));
+    }
+}
+
 fn action_lane_prefix(action_index: usize, action_name: &str) -> String {
-    format!("[A{} {}]", action_index + 1, action_name)
+    format!("[Action {}: {}]", action_index + 1, action_name)
 }
 
 fn format_action_line(action_index: usize, action_name: &str, message: &str) -> String {
@@ -3326,6 +3746,19 @@ fn print_action_line(action_index: usize, action_name: &str, message: &str) {
         output.action_line(action_index, action_name, message);
     } else {
         println!("{}", format_action_line(action_index, action_name, message));
+    }
+}
+
+fn emit_using_line_with_output(
+    output: Option<&ActionOutput>,
+    action_index: usize,
+    action_name: &str,
+    using_line: &str,
+) {
+    if let Some(output) = output {
+        output.action_using_line_if_changed(action_index, action_name, using_line);
+    } else {
+        println!("{}", format_action_line(action_index, action_name, using_line));
     }
 }
 
@@ -3555,13 +3988,45 @@ fn matching_run_steps<'a>(
 }
 
 fn child_input_args(
+    run_vars: Option<&[ActionRunVar]>,
+    input_overrides: Option<&[ActionInputOverride]>,
     input_mode: Option<ActionInputMode>,
     inputs: Option<&[ActionInput]>,
     data: &serde_json::Value,
     action_name: &str,
+    named_inputs: &BTreeMap<String, Input>,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut args = Vec::new();
     let mut notes = Vec::new();
+
+    if let Some(run_vars) = run_vars {
+        for run_var in run_vars {
+            let (resolved_value, resolution_note) =
+                resolve_child_run_var_value(&run_var.value, data, action_name, &run_var.name)?;
+            args.push("--run-var".to_string());
+            args.push(format!("{}={}", run_var.name, resolved_value));
+            if let Some(note) = resolution_note {
+                notes.push(note);
+            }
+        }
+    }
+
+    if let Some(input_overrides) = input_overrides {
+        for input_override in input_overrides {
+            let (resolved_value, resolution_note) = resolve_child_input_override_value(
+                &input_override.value,
+                data,
+                action_name,
+                &input_override.name,
+                named_inputs,
+            )?;
+            args.push("--input-override".to_string());
+            args.push(format!("{}={}", input_override.name, resolved_value));
+            if let Some(note) = resolution_note {
+                notes.push(note);
+            }
+        }
+    }
 
     if let Some(input_mode) = input_mode {
         if inputs.is_none() {
@@ -3660,11 +4125,163 @@ fn child_input_args(
                         ));
                     }
                 }
+                ActionInput::Named { input } => {
+                    let forwarded = named_inputs.get(input).ok_or_else(|| {
+                        format!(
+                            "Action '{}' child-agent named input '{}' is not available for forwarding.",
+                            action_name, input
+                        )
+                    })?;
+                    let value = forwarded.value.as_deref().ok_or_else(|| {
+                        format!(
+                            "Action '{}' child-agent named input '{}' is required but unresolved for this invocation.",
+                            action_name, input
+                        )
+                    })?;
+                    let payload = Input {
+                        name: Some(input.clone()),
+                        kind: forwarded.kind,
+                        value: Some(value.to_string()),
+                    };
+                    args.push("--forwarded-input".to_string());
+                    args.push(
+                        serde_json::to_string(&payload).map_err(|error| {
+                            format!(
+                                "Action '{}' failed to serialize forwarded named input '{}': {}",
+                                action_name, input, error
+                            )
+                        })?,
+                    );
+                }
             }
         }
     }
 
     Ok((args, notes))
+}
+
+fn resolve_child_input_override_value(
+    input: &ActionInputOverrideValue,
+    data: &serde_json::Value,
+    action_name: &str,
+    override_name: &str,
+    named_inputs: &BTreeMap<String, Input>,
+) -> Result<(String, Option<String>), String> {
+    match input {
+        ActionInputOverrideValue::Literal(literal) => Ok((literal.clone(), None)),
+        ActionInputOverrideValue::Variable(variable) => {
+            let resolved = resolve_scalar_action_variable(
+                data,
+                variable,
+                action_name,
+                &format!("child-agent named input override '{}'", override_name),
+            )?;
+            Ok((
+                resolved.clone(),
+                Some(format!(
+                    "Action '{}' resolved dynamic child-agent named override '{}'.",
+                    action_name, override_name
+                )),
+            ))
+        }
+        ActionInputOverrideValue::NamedInput { input } => {
+            let forwarded = named_inputs.get(input).ok_or_else(|| {
+                format!(
+                    "Action '{}' child-agent named input '{}' is not available for forwarding.",
+                    action_name, input
+                )
+            })?;
+            let value = forwarded.value.as_deref().ok_or_else(|| {
+                format!(
+                    "Action '{}' child-agent named input '{}' is required but unresolved for this invocation.",
+                    action_name, input
+                )
+            })?;
+            Ok((value.to_string(), None))
+        }
+    }
+}
+
+fn resolve_child_run_var_value(
+    value: &ActionRunVarValue,
+    data: &serde_json::Value,
+    action_name: &str,
+    run_var_name: &str,
+) -> Result<(String, Option<String>), String> {
+    match value {
+        ActionRunVarValue::Literal(literal) => Ok((stringify_scalar_json_value(literal, action_name, &format!("child-agent runtime var '{}'", run_var_name))?, None)),
+        ActionRunVarValue::Variable(variable) => {
+            let resolved = resolve_scalar_action_variable(
+                data,
+                variable,
+                action_name,
+                &format!("child-agent runtime var '{}'", run_var_name),
+            )?;
+            Ok((
+                resolved.clone(),
+                Some(format!(
+                    "Action '{}' resolved dynamic child-agent runtime var '{}'.",
+                    action_name, run_var_name
+                )),
+            ))
+        }
+    }
+}
+
+fn resolve_scalar_action_variable(
+    data: &serde_json::Value,
+    variable: &str,
+    action_name: &str,
+    field_name: &str,
+) -> Result<String, String> {
+    let Some(value) = lookup_action_variable(data, variable) else {
+        return Err(format!(
+            "Action '{}' {} references missing variable '{}'.",
+            action_name, field_name, variable
+        ));
+    };
+
+    match value {
+        serde_json::Value::String(text) => Ok(text.clone()),
+        serde_json::Value::Bool(boolean) => Ok(boolean.to_string()),
+        serde_json::Value::Number(number) => Ok(number.to_string()),
+        serde_json::Value::Array(_) => Err(format!(
+            "Action '{}' {} references array-valued variable '{}', which is unsupported for scalar substitution.",
+            action_name, field_name, variable
+        )),
+        serde_json::Value::Object(_) => Err(format!(
+            "Action '{}' {} references object-valued variable '{}', which is unsupported for scalar substitution.",
+            action_name, field_name, variable
+        )),
+        serde_json::Value::Null => Err(format!(
+            "Action '{}' {} references null variable '{}', which is unsupported for scalar substitution.",
+            action_name, field_name, variable
+        )),
+    }
+}
+
+fn stringify_scalar_json_value(
+    value: &serde_json::Value,
+    action_name: &str,
+    field_name: &str,
+) -> Result<String, String> {
+    match value {
+        serde_json::Value::String(text) => Ok(text.clone()),
+        serde_json::Value::Bool(boolean) => Ok(boolean.to_string()),
+        serde_json::Value::Number(number) => Ok(number.to_string()),
+        serde_json::Value::Array(_) => Err(format!(
+            "Action '{}' {} cannot use an array literal here.",
+            action_name, field_name
+        )),
+        serde_json::Value::Object(_) => Err(format!(
+            "Action '{}' {} cannot use an object literal here.",
+            action_name, field_name
+        )),
+        serde_json::Value::Null => Err(format!(
+            "Action '{}' {} cannot use null here.",
+            action_name, field_name
+        )),
+    }
 }
 
 fn child_input_uses_dynamic_parts(parts: &[RunArg]) -> bool {

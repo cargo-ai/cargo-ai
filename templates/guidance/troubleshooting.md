@@ -41,6 +41,17 @@ Check for:
 - expecting runtime input flags to append to JSON `inputs` without also setting `--input-mode append` or `--input-mode prepend`
 - using a JSON `file.path` when the caller should really choose the file at invocation time
 
+### Named input confusion
+
+Check for:
+- declaring a named input slot with `name` plus `type` but no baked value, then never satisfying it before use
+- expecting anonymous runtime `--input-*` flags to satisfy a named input slot; use `--input-override NAME=VALUE` for that
+- using anonymous runtime `--input-*` on a structural action-only agent, where the model call is skipped and only named top-level inputs remain valid
+- referencing `{ "input": "<name>" }` from a child step when the parent did not declare that named top-level input
+- expecting a child to forward a named input onward without declaring the same named input locally first
+- using child `inputs` when the intent was really to target one declared named child slot directly; prefer child `input_overrides` for that
+- expecting child `input_mode` to change child `input_overrides`; it only applies to anonymous child `inputs`
+
 ### Runtime variable confusion
 
 Check for:
@@ -63,6 +74,14 @@ Check for:
 Check for:
 - expecting parent actions to read child top-level output fields directly
 - missing `status_variable` / `error_variable` when the parent needs to react to child success or failure
+- expecting the parent to inline the entire child transcript; Cargo AI only surfaces child start/completion summaries plus any changed child `using:` line by default
+
+### Runtime observability confusion
+
+Check for:
+- expecting a repeated `using:` line when the effective `profile`, `auth`, `server`, and `model` did not change from the last printed context
+- expecting `url=...` to appear for the standard OpenAI API or ChatGPT account transports; it only appears when the effective URL is custom or materially different
+- assuming a child inherited the same context just because the parent emitted `child: started ...`; if the child changed context, look for a later child `using:` line
 
 ### Portability drift
 

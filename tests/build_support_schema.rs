@@ -154,7 +154,48 @@ fn rejects_invalid_action_execution_values() {
 }
 
 #[test]
-fn rejects_baked_inputs_when_schema_properties_are_empty() {
+fn accepts_named_inputs_when_schema_properties_are_empty() {
+    let cfg = config_with_optional_inputs(
+        "",
+        "",
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [true, true] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./summary_agent",
+                "inputs": [
+                  { "input": "menu_image" },
+                  { "input": "menu_note" }
+                ]
+              }
+            ]
+          }
+        ]"#,
+        Some(
+            r#"[
+        { "name": "menu_image", "type": "image", "path": "./artifacts/menu.png" },
+        { "name": "menu_note", "type": "text" }
+    ]"#,
+        ),
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains(
+        "Input { name: Some(\"menu_image\".to_string()), kind: InputKind::Image, value: Some(\"./artifacts/menu.png\".to_string()) }"
+    ));
+    assert!(generated.contains(
+        "Input { name: Some(\"menu_note\".to_string()), kind: InputKind::Text, value: None }"
+    ));
+    assert!(generated.contains("ActionInput::Named { input: \"menu_image\".to_string() }"));
+    assert!(generated.contains("ActionInput::Named { input: \"menu_note\".to_string() }"));
+}
+
+#[test]
+fn rejects_unnamed_inputs_when_schema_properties_are_empty() {
     let cfg = config_with_optional_inputs(
         "",
         "",
@@ -170,8 +211,43 @@ fn rejects_baked_inputs_when_schema_properties_are_empty() {
         .unwrap_err()
         .to_string();
 
-    assert!(err.contains("$.inputs"));
-    assert!(err.contains("are not allowed when `agent_schema.properties` is empty"));
+    assert!(err.contains("$.inputs[0].name"));
+    assert!(err.contains("must declare `name`"));
+}
+
+#[test]
+fn rejects_unknown_named_child_input_reference() {
+    let cfg = config_with_optional_inputs(
+        "",
+        "",
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [true, true] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./summary_agent",
+                "inputs": [
+                  { "input": "missing_input" }
+                ]
+              }
+            ]
+          }
+        ]"#,
+        Some(
+            r#"[
+        { "name": "menu_image", "type": "image", "path": "./artifacts/menu.png" }
+    ]"#,
+        ),
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].inputs[0].input"));
+    assert!(err.contains("unknown named top-level input `missing_input`"));
 }
 
 #[test]
@@ -774,6 +850,112 @@ fn accepts_agent_step_with_relative_path_and_inputs() {
 }
 
 #[test]
+fn accepts_agent_step_with_input_overrides() {
+    let cfg = config_with_optional_inputs(
+        r#""value": { "type": "integer" }"#,
+        "",
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./summary_agent",
+                "run_vars": {
+                  "year": 2026,
+                  "month": { "var": "value" }
+                },
+                "input_overrides": {
+                  "menu_image": { "input": "menu_image" },
+                  "menu_note": "Spring menu"
+                }
+              }
+            ]
+          }
+        ]"#,
+        Some(
+            r#"[
+        { "name": "menu_image", "type": "image", "path": "./artifacts/menu.png" }
+    ]"#,
+        ),
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains("run_vars: Some(vec!["));
+    assert!(generated
+        .contains("ActionRunVar { name: \"year\".to_string(), value: ActionRunVarValue::Literal("));
+    assert!(generated.contains(
+        "ActionRunVar { name: \"month\".to_string(), value: ActionRunVarValue::Variable(\"value\".to_string()) }"
+    ));
+    assert!(generated.contains("input_overrides: Some(vec!["));
+    assert!(generated.contains(
+        "ActionInputOverride { name: \"menu_image\".to_string(), value: ActionInputOverrideValue::NamedInput { input: \"menu_image\".to_string() } }"
+    ));
+    assert!(generated.contains(
+        "ActionInputOverride { name: \"menu_note\".to_string(), value: ActionInputOverrideValue::Literal(\"Spring menu\".to_string()) }"
+    ));
+}
+
+#[test]
+fn rejects_non_object_input_overrides() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "child_agent",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "agent",
+                "agent": "./summary_agent",
+                "input_overrides": []
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].input_overrides"));
+    assert!(err.contains("expected `input_overrides` to be an object"));
+}
+
+#[test]
+fn rejects_input_overrides_on_exec_steps() {
+    let cfg = config_with(
+        r#""value": { "type": "integer" }"#,
+        r#"[
+          {
+            "name": "exec_with_overrides",
+            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "run": [
+              {
+                "kind": "exec",
+                "program": "echo",
+                "args": ["hello"],
+                "input_overrides": {
+                  "menu_note": "Spring menu"
+                }
+              }
+            ]
+          }
+        ]"#,
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.actions[0].run[0].input_overrides"));
+    assert!(err.contains("only supported for `agent` actions"));
+}
+
+#[test]
 fn rejects_agent_input_mode_without_inputs() {
     let cfg = config_with(
         r#""value": { "type": "integer" }"#,
@@ -1330,7 +1512,9 @@ fn accepts_pdf_file_inputs() {
 
     let generated = build_support::generate_agent_model_from_str(cfg).unwrap();
 
-    assert!(generated.contains("Input::File { path: \"./reports/q1.pdf\".to_string() }"));
+    assert!(generated.contains(
+        "Input { name: None, kind: InputKind::File, value: Some(\"./reports/q1.pdf\".to_string()) }"
+    ));
 }
 
 #[test]
@@ -1351,7 +1535,9 @@ fn accepts_docx_file_inputs() {
 
     let generated = build_support::generate_agent_model_from_str(cfg).unwrap();
 
-    assert!(generated.contains("Input::File { path: \"./reports/q1.docx\".to_string() }"));
+    assert!(generated.contains(
+        "Input { name: None, kind: InputKind::File, value: Some(\"./reports/q1.docx\".to_string()) }"
+    ));
 }
 
 #[test]
@@ -1372,7 +1558,9 @@ fn accepts_csv_file_inputs() {
 
     let generated = build_support::generate_agent_model_from_str(cfg).unwrap();
 
-    assert!(generated.contains("Input::File { path: \"./reports/q1.csv\".to_string() }"));
+    assert!(generated.contains(
+        "Input { name: None, kind: InputKind::File, value: Some(\"./reports/q1.csv\".to_string()) }"
+    ));
 }
 
 #[test]
@@ -1404,7 +1592,7 @@ fn accepts_phase_three_file_inputs() {
 
         assert!(
             generated.contains(&format!(
-                "Input::File {{ path: \"./reports/q1.{extension}\".to_string() }}"
+                "Input {{ name: None, kind: InputKind::File, value: Some(\"./reports/q1.{extension}\".to_string()) }}"
             )),
             "generated code should preserve the {extension} path"
         );

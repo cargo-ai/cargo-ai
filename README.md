@@ -209,6 +209,25 @@ You can also override or inject runtime input without editing the JSON. Generate
 ./my_agent --input-text "What is 3 + 3?"
 ```
 
+Top-level inputs may also declare optional `name`. Named inputs stay regular inputs for schema-backed agents, but they also become reusable bindings for child-agent steps and targeted runtime replacement with repeatable `--input-override NAME=VALUE`.
+As a rule of thumb, prefer `name` when an input is part of the workflow contract, reusable by child steps, or likely to be operator-overrideable. Leave one-off root-model context unnamed when it does not need that extra identity.
+For readability, prefer named input object field order as `name`, then `type`, then the value field. Keep unnamed literal inputs as `type`, then the value field.
+
+```json
+{
+  "inputs": [
+    { "name": "menu_image", "type": "image" },
+    { "name": "menu_note", "type": "text", "text": "Use the attached menu image as the source of truth." }
+  ]
+}
+```
+
+```bash
+./my_agent \
+  --input-override menu_image=./artifacts/menu-spring.png \
+  --input-override menu_note="Use the spring menu."
+```
+
 You can also declare typed runtime variables for action control and step-local settings. Define them under top-level `runtime_vars`, pass values with repeatable `--run-var name=value`, and reference them in JSON as `runtime.<name>`.
 
 ```json
@@ -228,14 +247,16 @@ You can also declare typed runtime variables for action control and step-local s
 
 Quote `--run-var` values when your shell would otherwise split them, for example `--run-var subject="Quarterly Review"`.
 
-You can also author a structural action-only worker by leaving `agent_schema.properties` empty and omitting top-level `inputs`. In that shape, Cargo AI skips the initial model pass and starts directly at action `logic`, which can read declared `runtime.*` values.
+You can also author a structural action-only worker by leaving `agent_schema.properties` empty. In that shape, Cargo AI skips the initial model pass and starts directly at action `logic`, which can read declared `runtime.*` values. Top-level named `inputs` are still allowed there as reusable parent-owned inputs for child forwarding.
 
 ```json
 {
   "version": "2026-03-03.r1",
+  "inputs": [
+    { "name": "menu_image", "type": "image" }
+  ],
   "runtime_vars": {
-    "generate_images": { "type": "boolean", "default": true },
-    "hero_image_model": { "type": "string" }
+    "generate_images": { "type": "boolean", "default": true }
   },
   "agent_schema": {
     "type": "object",
@@ -247,15 +268,21 @@ You can also author a structural action-only worker by leaving `agent_schema.pro
       "logic": { "==": [{ "var": "runtime.generate_images" }, true] },
       "run": [
         {
-          "kind": "generate_image",
-          "model": { "var": "runtime.hero_image_model" },
-          "prompt": "Create the launch image.",
-          "path": "./artifacts/launch.png"
+          "kind": "agent",
+          "agent": "./child_renderer",
+          "inputs": [
+            { "input": "menu_image" },
+            { "type": "text", "text": "Create the launch image." }
+          ]
         }
       ]
     }
   ]
 }
+```
+
+```bash
+./launch_parent --input-override menu_image=./artifacts/menu-spring.png
 ```
 
 ## Start Simple, Then Expand
@@ -307,6 +334,17 @@ File input:
 }
 ```
 
+Named input:
+
+```json
+{
+  "inputs": [
+    { "name": "menu_image", "type": "image" },
+    { "name": "menu_note", "type": "text", "text": "Use the attached menu image." }
+  ]
+}
+```
+
 <details>
 <summary>Expanded example: multiple inputs with related scoring</summary>
 
@@ -346,7 +384,7 @@ Multiple inputs with related scoring:
 }
 ```
 
-You can override the baked inputs any time you run the generated agent. By default, runtime input flags replace the configured `inputs` for that execution, and the runtime input order is preserved exactly as you pass it on the command line. Use `--input-mode append` to keep baked inputs first, or `--input-mode prepend` to keep runtime inputs first.
+You can override the baked inputs any time you run the generated agent. By default, runtime input flags replace the configured `inputs` for that execution, and the runtime input order is preserved exactly as you pass it on the command line. Use `--input-mode append` to keep baked inputs first, or `--input-mode prepend` to keep runtime inputs first. When you need to target one declared named input specifically, use repeatable `--input-override NAME=VALUE`.
 
 ```bash
 ./agent_x \
@@ -566,7 +604,7 @@ Top-level actions run `sequential`ly by default. If you want matching top-level 
 
 That only changes scheduling across top-level actions. Each individual action still keeps its own `run` list in order, and a hard failure in one top-level action no longer prevents later eligible top-level actions from running. Cargo AI aggregates those top-level hard failures after all eligible actions finish.
 
-Cargo AI prints one run-level mode header before actions start. When output is redirected, piped, or running in simpler terminals, it prefixes parent-visible action output with deterministic lane labels such as `[A1 first_action]`, long-running steps emit a step-start liveness line such as `step 2/2 generate_image started; waiting for provider response...`, and terminal lane summaries plus the root run footer include wall-clock durations such as `completed in 31s.` and `✅ Run complete in 32s.`. When attached directly to an interactive terminal, it switches to a compact live lane dashboard that groups each action lane by label, running or terminal status with elapsed time, terminal step marker/current step, last lifecycle message, and a compact buffered `output` section. Parent-run `exec` and `email_me` output is bucketed into that lane, while child-agent steps stay minimal in the parent view with start/completion or exit summaries instead of recursively inlining the child transcript.
+Cargo AI prints one root `using:` line near run start that shows the effective `profile`, `auth`, `server`, and `model` for that invocation. It only adds `url=...` when the effective URL is custom or materially different from the standard transport. Cargo AI also prints one run-level mode header before actions start. When output is redirected, piped, or running in simpler terminals, it prefixes parent-visible action output with deterministic labels such as `[Action 1: first_action]`, long-running steps emit a step-start liveness line such as `step 2/2 generate_image started; waiting for provider response...`, and terminal lane summaries plus the root run footer include wall-clock durations such as `completed in 31s.` and `✅ Run complete in 32s.`. When attached directly to an interactive terminal, it switches to a compact live dashboard that groups each action by label, running or terminal status with elapsed time, terminal step marker/current step, and the last high-level lifecycle message only. Child-agent steps stay minimal in the parent view with start/completion or exit summaries instead of recursively inlining child detail.
 
 If you need a safety/testing pass, invoke a parallel-capable agent with `--action-execution sequential`. That runtime override forces the whole invocation tree down to sequential scheduling for that run, including child-agent handoffs.
 
@@ -643,6 +681,8 @@ Use `run` to sequence multiple side effects in order. `exec` steps can capture o
 
 `generate_image` and child `agent` steps also accept an optional step-level `profile`. Use it when one step should resolve its provider/model/url/token context differently from the parent invocation. For `generate_image`, explicit `model` still wins, then the step-profile model, then the parent invocation model. For child `agent` steps, the resolved profile is forwarded to the child as `--profile <name>`.
 
+Cargo AI always prints one root `using:` line near run start. In append-only output, it also prints another action-prefixed `using:` line when a provider-backed or child-agent step changes the effective `profile`, `auth`, `server`, or `model`. Interactive live mode keeps the parent dashboard at the orchestration level and does not surface child or step-level `using:` lines there.
+
 For the default OpenAI account transport, use a tool-capable mainline model such as `gpt-5.2`. For a direct OpenAI API token and URL, prefer GPT Image models such as `gpt-image-1.5` or `gpt-image-1-mini`. Official OpenAI docs list `gpt-image-1.5` as the latest GPT Image model, and the image-generation guide lists `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini` for direct image generation. Verified: 2026-03-28.
 
 ```json
@@ -675,8 +715,24 @@ Use child agents when one agent needs to hand work to another agent.
 - By default, an agent can call child agents up to `5` levels deep. Override that with `--max-agent-depth`.
 - By default, the parent plus any child agents share a total runtime budget of `600` seconds. Override that with `--max-runtime-in-sec`.
 - A parent can pass inputs to a child and record whether the child succeeded or failed.
+- A parent can also reuse one declared named top-level input explicitly inside child `inputs` with `{ "input": "<name>" }`.
+- Child `agent` steps may set `run_vars` to pass child runtime vars the same way the CLI uses repeatable `--run-var NAME=VALUE`.
+- Child `agent` steps may set `input_overrides` to target the child's declared named inputs directly.
+- Child `agent` steps may still provide anonymous child `inputs`.
 - Child `agent` steps may set `input_mode` to `replace`, `append`, or `prepend` when they also provide child `inputs`.
+- Named child-input reuse is explicit only. Cargo AI does not automatically inherit every named parent input into the child.
+- If a middle agent wants to pass the same named input to its own child, it should declare the same named top-level input locally first.
+- `run_vars`, `input_overrides`, `inputs`, and `input_mode` mirror the CLI mental model:
+  - `run_vars` is the child-step equivalent of `--run-var NAME=VALUE`
+  - `input_overrides` is the child-step equivalent of `--input-override NAME=VALUE`
+  - `inputs` is the child-step equivalent of anonymous runtime `--input-*`
+  - `input_mode` applies only to child `inputs`, not to `input_overrides`
+- Prefer `input_overrides` when targeting declared named child inputs. Use child `inputs` for extra anonymous context.
+- If the target is another Cargo AI agent, prefer a native `kind: "agent"` step instead of a Python or shell wrapper that only launches the child.
+- Use wrapper programs only when the task truly needs extra non-Cargo-AI behavior around that child call.
 - A parent cannot automatically pull the child's structured return fields back into its own output.
+
+Assume the parent definition also declares `{ "name": "menu_image", "type": "image" }` at top level.
 
 Example:
 
@@ -685,17 +741,51 @@ Example:
   "kind": "agent",
   "agent": "./child_reporter",
   "profile": { "var": "runtime.child_profile" },
+  "run_vars": {
+    "year": { "var": "runtime.year" },
+    "month": "08",
+    "generate_images": true
+  },
+  "input_overrides": {
+    "menu_image": { "input": "menu_image" },
+    "review_reason": { "var": "reason" }
+  },
   "input_mode": "append",
   "status_variable": "child_status",
   "error_variable": "child_error",
   "inputs": [
     {
       "type": "text",
-      "text": ["Follow up on this review: ", { "var": "reason" }]
+      "text": "Follow up on the latest review details."
     }
   ]
 }
 ```
+
+That child step behaves like a structured CLI invocation:
+
+- `run_vars.year` is equivalent to `--run-var year=...`
+- `run_vars.month` is equivalent to `--run-var month=08`
+- `run_vars.generate_images` is equivalent to `--run-var generate_images=true`
+- `input_overrides.menu_image` is equivalent to `--input-override menu_image=...`
+- `input_overrides.review_reason` is equivalent to `--input-override review_reason=...`
+- child `inputs` stays the anonymous extra-input list
+- child `input_mode` still controls only that anonymous `inputs` list
+
+Use these child-step value shapes:
+
+- `run_vars.<name>`: string, number, boolean, or `{ "var": "..." }`
+- `input_overrides.<name>`: string, `{ "var": "..." }`, or `{ "input": "<name>" }`
+
+For schema-backed agents, `--input-override` and anonymous runtime inputs operate at different layers. This is valid:
+
+```bash
+./menu_agent \
+  --input-override menu_image=./artifacts/menu-spring.png \
+  --input-text "Ignore baked inputs and use this prompt"
+```
+
+In that case, the root model input list is replaced by the runtime text, but child steps that use `{ "input": "menu_image" }` still receive the named override.
 
 ## Build In Any Editor
 

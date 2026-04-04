@@ -27,7 +27,7 @@ For broader shape and validation rules, also read:
 - A hard failure in one top-level action does not prevent later eligible top-level actions from running.
 - Cargo AI aggregates top-level hard failures after all eligible actions finish.
 - Cargo AI prints one run-level header, `Action execution: sequential` or `Action execution: parallel`, before action work begins.
-- In redirected, piped, CI, or simpler terminal output, Cargo AI prefixes parent-visible action output with deterministic lane labels such as `[A1 generate_images]`.
+- In redirected, piped, CI, or simpler terminal output, Cargo AI prefixes parent-visible action output with deterministic labels such as `[Action 1: generate_images]`.
 - In append-only output, long-running steps also emit a step-start liveness line such as `step 2/2 generate_image started; waiting for provider response...`.
 - Terminal lane summaries and the final run footer also include wall-clock durations, for example `completed in 31s.` and `✅ Run complete in 32s.`.
 - When attached directly to an interactive terminal, Cargo AI switches to a compact live lane dashboard instead of append-only lifecycle lines.
@@ -36,8 +36,7 @@ For broader shape and validation rules, also read:
   - lane status with elapsed time while running and after terminal completion/failure
   - terminal step marker or current step when known
   - last lifecycle message
-  - compact buffered `output` section for parent-visible action output
-- Parent-run `exec` and `email_me` output is bucketed into the originating lane.
+- In append-only output, parent-run `exec` and `email_me` output is emitted with the originating action label.
 - Child-agent steps stay minimal in the parent lane with start/completion or exit-summary lines instead of recursively inlining the child transcript.
 
 ## Supported Step Kinds
@@ -103,7 +102,9 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - Action steps are side effects or follow-up orchestration after that output exists.
 - `output_variable` captures step-local stdout only. It does not change the returned top-level output object.
 - If `agent_schema.properties` is empty, Cargo AI skips the initial model call and starts directly at the action layer.
-- In that structural action-only shape, top-level `inputs` and runtime `--input-*` flags are invalid.
+- In that structural action-only shape, top-level `inputs` are allowed only as named reusable parent-owned inputs.
+- In that structural action-only shape, anonymous runtime `--input-*` flags remain invalid.
+- Use `--input-override NAME=VALUE` to satisfy or replace declared named top-level inputs at invocation time.
 
 ## Variable Namespace Rules
 - Captured names are flat. Dotted names are invalid.
@@ -135,12 +136,40 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 ## Child-Agent Data Flow
 
 - Parent actions may pass child-agent `inputs`, including dynamic string parts resolved from current action-local data.
-- Those child `inputs` may resolve declared `runtime.*` values alongside top-level model output fields and prior captured step variables.
+- Parent actions may also pass child-agent `run_vars` keyed by the intended child runtime var.
+- Parent actions may also pass child-agent `input_overrides` keyed by the intended named child input.
+- If the target is another Cargo AI agent, prefer a native `kind: "agent"` step instead of an `exec` wrapper that launches Python, shell, or another helper just to call the child.
+- Use wrapper programs only when the task truly needs extra non-Cargo-AI behavior around that child call.
+- Child `inputs` may also reference declared named top-level inputs with the exact shape `{ "input": "<name>" }`.
+- Child `input_overrides` may also use `{ "input": "<name>" }` when the parent wants to bind one named parent input into one named child slot explicitly.
+- Named child-input reuse is explicit only; parent inputs are not auto-inherited.
+- Child `run_vars` values should stay CLI-shaped: string, number, boolean, or `{ "var": "<name>" }`.
+- Child `input_overrides` values should stay CLI-shaped too: string, `{ "var": "<name>" }`, or `{ "input": "<name>" }`.
+- Child `inputs` may still resolve declared `runtime.*` values alongside top-level model output fields and prior captured step variables.
+- Parent `agent` steps should prefer `input_overrides` when targeting declared named child inputs and use child `inputs` for extra anonymous context.
+- Parent `agent` steps should use child `run_vars` for invocation-scoped operational settings that the child already declares in top-level `runtime_vars`.
 - Parent `agent` steps may set child `input_mode` to `replace`, `append`, or `prepend` when they also provide child `inputs`.
 - Parent `agent` steps may also set a step-level `profile` as a literal string or single variable reference; Cargo AI resolves it at step runtime and forwards `--profile <name>` to the child.
+- Child `input_mode` applies only to child `inputs`; it does not suppress or merge child `input_overrides`.
 - Omitted child `input_mode` keeps the current replace behavior for child inputs.
+- If a child wants to forward the same named input to its own child, it should declare that named top-level input locally first.
 - Parent actions may capture child-agent success/failure with `status_variable` and `error_variable`.
 - Parent actions cannot directly capture the child agent's top-level returned output fields into the parent action-local namespace.
+- Cargo AI prints one root `using:` line at run start. In append-only output, it also emits another action-prefixed `using:` line when a child `agent` or `generate_image` step changes the effective `profile`, `auth`, `server`, or `model`.
+- Interactive live mode keeps the parent dashboard at the orchestration level and does not surface child or step-level `using:` lines there.
+- Native child-agent steps preserve child input forwarding, failure handling, depth limits, and runtime observability without inventing an extra scripting layer.
+
+## Named Input Notes
+
+- Top-level inputs may declare optional `name`.
+- Prefer `name` when an input is part of the workflow contract, reusable by child steps, or intentionally operator-overrideable.
+- For named input objects, prefer field order `name`, then `type`, then the value-bearing field.
+- For unnamed literal inputs, keep `type` first and the value-bearing field second.
+- Keep one-off root-model context unnamed when it does not need child reuse or targeted override behavior.
+- Unnamed top-level inputs must keep a baked value.
+- Named top-level inputs may keep a baked value or act as required slots with no baked value.
+- Repeatable `--input-override NAME=VALUE` replaces declared named bindings for the current run.
+- Anonymous runtime `--input-*` flags still control only the root model input list for schema-backed agents; they do not bind named input identities.
 
 ## Check Loop
 1. Edit one JSON definition at a time.

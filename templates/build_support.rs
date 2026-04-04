@@ -91,12 +91,19 @@ impl Error for BuildError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputKind {
+    Text,
+    Url,
+    Image,
+    File,
+}
+
 #[derive(Debug, Clone)]
-enum InputSpec {
-    Text { text: String },
-    Url { url: String },
-    Image { path: String },
-    File { path: String },
+struct InputSpec {
+    name: Option<String>,
+    kind: InputKind,
+    value: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +112,32 @@ enum ActionInputSpec {
     Url { url: Vec<RunArg> },
     Image { path: Vec<RunArg> },
     File { path: Vec<RunArg> },
+    Named { input: String },
+}
+
+#[derive(Debug, Clone)]
+struct ActionInputOverrideSpec {
+    name: String,
+    value: ActionInputOverrideValueSpec,
+}
+
+#[derive(Debug, Clone)]
+enum ActionInputOverrideValueSpec {
+    Literal(String),
+    Variable(String),
+    NamedInput(String),
+}
+
+#[derive(Debug, Clone)]
+struct ActionRunVarSpec {
+    name: String,
+    value: ActionRunVarValueSpec,
+}
+
+#[derive(Debug, Clone)]
+enum ActionRunVarValueSpec {
+    Literal(Value),
+    Variable(String),
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +157,8 @@ struct RunStep {
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
     agent: Option<String>,
+    run_vars: Option<Vec<ActionRunVarSpec>>,
+    input_overrides: Option<Vec<ActionInputOverrideSpec>>,
     inputs: Option<Vec<ActionInputSpec>>,
     input_mode: Option<ActionInputMode>,
     platforms: Option<Vec<String>>,
@@ -442,16 +477,16 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
         parsed_properties.push(parsed_property);
     }
 
-    if parsed_properties.is_empty() && root_obj.contains_key("inputs") {
-        return Err(BuildError::config(
-            "$.inputs",
-            "top-level `inputs` are not allowed when `agent_schema.properties` is empty; remove `inputs` or declare at least one schema property",
-        ));
-    }
-
-    let inputs = parse_inputs(root_obj)?;
+    let has_output_schema_properties = !parsed_properties.is_empty();
+    let inputs = parse_inputs(root_obj, has_output_schema_properties)?;
+    let named_input_kinds = named_input_kinds(&inputs);
     let action_field_types = action_field_types(&schema_field_types, &runtime_vars);
-    let actions = parse_actions(root_obj, &schema_field_types, &action_field_types)?;
+    let actions = parse_actions(
+        root_obj,
+        &schema_field_types,
+        &action_field_types,
+        &named_input_kinds,
+    )?;
 
     Ok(AgentConfig {
         inputs,
@@ -562,17 +597,24 @@ fn is_leap_year(year: u32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
-fn parse_inputs(root_obj: &Map<String, Value>) -> Result<Vec<InputSpec>, BuildError> {
+fn parse_inputs(
+    root_obj: &Map<String, Value>,
+    has_output_schema_properties: bool,
+) -> Result<Vec<InputSpec>, BuildError> {
     let Some(inputs_value) = root_obj.get("inputs") else {
         return Ok(Vec::new());
     };
     let inputs = inputs_value
         .as_array()
         .ok_or_else(|| BuildError::config("$.inputs", "expected an array"))?;
-    parse_input_specs(inputs, "$.inputs")
+    parse_input_specs(inputs, "$.inputs", has_output_schema_properties)
 }
 
-fn parse_input_specs(inputs: &[Value], base_path: &str) -> Result<Vec<InputSpec>, BuildError> {
+fn parse_input_specs(
+    inputs: &[Value],
+    base_path: &str,
+    has_output_schema_properties: bool,
+) -> Result<Vec<InputSpec>, BuildError> {
     if inputs.is_empty() {
         return Err(BuildError::config(
             base_path,
@@ -581,50 +623,53 @@ fn parse_input_specs(inputs: &[Value], base_path: &str) -> Result<Vec<InputSpec>
     }
 
     let mut parsed = Vec::with_capacity(inputs.len());
+    let mut seen_names = BTreeSet::new();
     for (index, entry) in inputs.iter().enumerate() {
         let path = format!("{base_path}[{index}]");
         let entry_obj = expect_object(entry, &path)?;
+        let name = parse_optional_named_input_name(entry_obj, &path)?;
+        if !has_output_schema_properties && name.is_none() {
+            return Err(BuildError::config(
+                format!("{path}.name"),
+                "top-level `inputs` in the structural action-only shape must declare `name` because they are reusable parent-owned inputs only",
+            ));
+        }
+        if let Some(name) = name.as_ref() {
+            if !seen_names.insert(name.clone()) {
+                return Err(BuildError::config(
+                    format!("{path}.name"),
+                    format!("duplicate named input `{name}`"),
+                ));
+            }
+        }
         let input_type = get_required_string(entry_obj, "type", &path)?
             .trim()
             .to_ascii_lowercase();
 
         let input = match input_type.as_str() {
-            "text" => InputSpec::Text {
-                text: get_required_string(entry_obj, "text", &path)?.to_string(),
+            "text" => InputSpec {
+                name,
+                kind: InputKind::Text,
+                value: parse_optional_top_level_input_value(entry_obj, "text", &path)?,
             },
-            "url" => InputSpec::Url {
-                url: get_required_string(entry_obj, "url", &path)?.to_string(),
+            "url" => InputSpec {
+                name,
+                kind: InputKind::Url,
+                value: parse_optional_top_level_input_value(entry_obj, "url", &path)?,
             },
-            "image" => InputSpec::Image {
-                path: {
-                    let image_path = get_required_string(entry_obj, "path", &path)?
-                        .trim()
-                        .to_string();
-                    validate_definition_owned_local_path(
-                        &image_path,
-                        &format!("{path}.path"),
-                        "image input",
-                    )?;
-                    image_path
-                },
+            "image" => InputSpec {
+                name,
+                kind: InputKind::Image,
+                value: parse_optional_validated_definition_owned_input_path(
+                    entry_obj, "image", &path,
+                )?,
             },
-            "file" => InputSpec::File {
-                path: {
-                    let file_path = get_required_string(entry_obj, "path", &path)?
-                        .trim()
-                        .to_string();
-                    validate_definition_owned_local_path(
-                        &file_path,
-                        &format!("{path}.path"),
-                        "file input",
-                    )?;
-                    validate_supported_file_extension(
-                        &file_path,
-                        &format!("{path}.path"),
-                        "file input",
-                    )?;
-                    file_path
-                },
+            "file" => InputSpec {
+                name,
+                kind: InputKind::File,
+                value: parse_optional_validated_definition_owned_input_path(
+                    entry_obj, "file", &path,
+                )?,
             },
             _ => {
                 return Err(BuildError::config(
@@ -636,16 +681,90 @@ fn parse_input_specs(inputs: &[Value], base_path: &str) -> Result<Vec<InputSpec>
             }
         };
 
+        if input.value.is_none() && input.name.is_none() {
+            let value_path = match input.kind {
+                InputKind::Text => format!("{path}.text"),
+                InputKind::Url => format!("{path}.url"),
+                InputKind::Image | InputKind::File => format!("{path}.path"),
+            };
+            return Err(BuildError::config(
+                value_path,
+                "unnamed top-level inputs must include a baked value",
+            ));
+        }
+
         parsed.push(input);
     }
 
     Ok(parsed)
 }
 
+fn parse_optional_named_input_name(
+    entry_obj: &Map<String, Value>,
+    parent_path: &str,
+) -> Result<Option<String>, BuildError> {
+    let Some(value) = entry_obj.get("name") else {
+        return Ok(None);
+    };
+    let path = format!("{parent_path}.name");
+    let name = value
+        .as_str()
+        .ok_or_else(|| BuildError::config(&path, "expected a string"))?;
+    validate_named_input_name(name, &path)?;
+    Ok(Some(name.to_string()))
+}
+
+fn parse_optional_top_level_input_value(
+    entry_obj: &Map<String, Value>,
+    key: &str,
+    parent_path: &str,
+) -> Result<Option<String>, BuildError> {
+    let Some(value) = entry_obj.get(key) else {
+        return Ok(None);
+    };
+    let path = format!("{parent_path}.{key}");
+    let value = value
+        .as_str()
+        .ok_or_else(|| BuildError::config(&path, "expected a string"))?;
+    Ok(Some(value.to_string()))
+}
+
+fn parse_optional_validated_definition_owned_input_path(
+    entry_obj: &Map<String, Value>,
+    input_kind: &str,
+    parent_path: &str,
+) -> Result<Option<String>, BuildError> {
+    let Some(value) = entry_obj.get("path") else {
+        return Ok(None);
+    };
+    let path = format!("{parent_path}.path");
+    let raw_path = value
+        .as_str()
+        .ok_or_else(|| BuildError::config(&path, "expected a string"))?
+        .trim()
+        .to_string();
+    validate_definition_owned_local_path(&raw_path, &path, &format!("{input_kind} input"))?;
+    if input_kind == "file" {
+        validate_supported_file_extension(&raw_path, &path, "file input")?;
+    }
+    Ok(Some(raw_path))
+}
+
+fn named_input_kinds(inputs: &[InputSpec]) -> BTreeMap<String, InputKind> {
+    let mut kinds = BTreeMap::new();
+    for input in inputs {
+        if let Some(name) = input.name.as_ref() {
+            kinds.insert(name.clone(), input.kind);
+        }
+    }
+    kinds
+}
+
 fn parse_actions(
     root_obj: &Map<String, Value>,
     schema_field_types: &BTreeMap<String, FieldType>,
     action_field_types: &BTreeMap<String, FieldType>,
+    named_input_kinds: &BTreeMap<String, InputKind>,
 ) -> Result<Vec<Action>, BuildError> {
     let actions = get_required_array(root_obj, "actions", "$")?;
     let mut parsed = Vec::with_capacity(actions.len());
@@ -735,6 +854,18 @@ fn parse_actions(
                             "`inputs` is only supported for `agent` actions",
                         ));
                     }
+                    if run_obj.contains_key("input_overrides") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.input_overrides"),
+                            "`input_overrides` is only supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("run_vars") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.run_vars"),
+                            "`run_vars` is only supported for `agent` actions",
+                        ));
+                    }
                     if run_obj.contains_key("input_mode") {
                         return Err(BuildError::config(
                             format!("{run_path}.input_mode"),
@@ -774,6 +905,8 @@ fn parse_actions(
                         subject: None,
                         text: None,
                         agent: None,
+                        run_vars: None,
+                        input_overrides: None,
                         inputs: None,
                         input_mode: None,
                         platforms,
@@ -828,6 +961,18 @@ fn parse_actions(
                             "`inputs` is not supported for `email_me` actions",
                         ));
                     }
+                    if run_obj.contains_key("input_overrides") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.input_overrides"),
+                            "`input_overrides` is only supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("run_vars") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.run_vars"),
+                            "`run_vars` is only supported for `agent` actions",
+                        ));
+                    }
                     if run_obj.contains_key("output_variable") {
                         return Err(BuildError::config(
                             format!("{run_path}.output_variable"),
@@ -870,6 +1015,8 @@ fn parse_actions(
                         subject: Some(subject),
                         text: Some(text),
                         agent: None,
+                        run_vars: None,
+                        input_overrides: None,
                         inputs: None,
                         input_mode: None,
                         platforms,
@@ -932,6 +1079,14 @@ fn parse_actions(
                     validate_child_agent_target(&agent, &agent_path)?;
                     let profile =
                         parse_optional_profile_field(run_obj, &run_path, action_field_types)?;
+                    let run_vars =
+                        parse_optional_action_run_vars(run_obj, &run_path, &available_field_types)?;
+                    let input_overrides = parse_optional_action_input_overrides(
+                        run_obj,
+                        &run_path,
+                        &available_field_types,
+                        named_input_kinds,
+                    )?;
                     let input_mode = parse_optional_action_input_mode(run_obj, &run_path)?;
 
                     let inputs = match run_obj.get("inputs") {
@@ -947,6 +1102,7 @@ fn parse_actions(
                                 input_array,
                                 &input_path,
                                 &available_field_types,
+                                named_input_kinds,
                             )?)
                         }
                         None => None,
@@ -975,6 +1131,8 @@ fn parse_actions(
                         subject: None,
                         text: None,
                         agent: Some(agent),
+                        run_vars,
+                        input_overrides,
                         inputs,
                         input_mode,
                         platforms,
@@ -1015,6 +1173,18 @@ fn parse_actions(
                         return Err(BuildError::config(
                             format!("{run_path}.inputs"),
                             "`inputs` is not supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("input_overrides") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.input_overrides"),
+                            "`input_overrides` is only supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("run_vars") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.run_vars"),
+                            "`run_vars` is only supported for `agent` actions",
                         ));
                     }
                     if run_obj.contains_key("output_variable") {
@@ -1076,6 +1246,8 @@ fn parse_actions(
                         subject: None,
                         text: None,
                         agent: None,
+                        run_vars: None,
+                        input_overrides: None,
                         inputs: None,
                         input_mode: None,
                         platforms,
@@ -1210,6 +1382,230 @@ fn parse_optional_action_input_mode(
             "unsupported `input_mode` (supported: `replace`, `append`, `prepend`)",
         )),
     }
+}
+
+fn parse_optional_action_input_overrides(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+    named_input_kinds: &BTreeMap<String, InputKind>,
+) -> Result<Option<Vec<ActionInputOverrideSpec>>, BuildError> {
+    let Some(value) = run_obj.get("input_overrides") else {
+        return Ok(None);
+    };
+
+    let input_overrides_path = format!("{run_path}.input_overrides");
+    let overrides_obj = value.as_object().ok_or_else(|| {
+        BuildError::config(
+            &input_overrides_path,
+            "expected `input_overrides` to be an object keyed by child named input",
+        )
+    })?;
+
+    if overrides_obj.is_empty() {
+        return Err(BuildError::config(
+            &input_overrides_path,
+            "must contain at least one named child input override",
+        ));
+    }
+
+    let mut parsed = Vec::with_capacity(overrides_obj.len());
+    for (name, entry_value) in overrides_obj {
+        let entry_path = format!("{input_overrides_path}.{}", name);
+        validate_named_input_name(name, &entry_path)?;
+        let value = parse_action_input_override_value(
+            entry_value,
+            &entry_path,
+            schema_field_types,
+            named_input_kinds,
+        )?;
+        parsed.push(ActionInputOverrideSpec {
+            name: name.to_string(),
+            value,
+        });
+    }
+
+    Ok(Some(parsed))
+}
+
+fn parse_optional_action_run_vars(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<Option<Vec<ActionRunVarSpec>>, BuildError> {
+    let Some(value) = run_obj.get("run_vars") else {
+        return Ok(None);
+    };
+
+    let run_vars_path = format!("{run_path}.run_vars");
+    let run_vars_obj = value.as_object().ok_or_else(|| {
+        BuildError::config(
+            &run_vars_path,
+            "expected `run_vars` to be an object keyed by child runtime var",
+        )
+    })?;
+
+    if run_vars_obj.is_empty() {
+        return Err(BuildError::config(
+            &run_vars_path,
+            "must contain at least one child runtime var",
+        ));
+    }
+
+    let mut parsed = Vec::with_capacity(run_vars_obj.len());
+    for (name, entry_value) in run_vars_obj {
+        let entry_path = format!("{run_vars_path}.{}", name);
+        validate_runtime_var_name(name, &entry_path)?;
+        let value = parse_action_run_var_value(entry_value, &entry_path, schema_field_types)?;
+        parsed.push(ActionRunVarSpec {
+            name: name.to_string(),
+            value,
+        });
+    }
+
+    Ok(Some(parsed))
+}
+
+fn parse_action_input_override_value(
+    value: &Value,
+    path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+    named_input_kinds: &BTreeMap<String, InputKind>,
+) -> Result<ActionInputOverrideValueSpec, BuildError> {
+    match value {
+        Value::String(literal) => Ok(ActionInputOverrideValueSpec::Literal(literal.to_string())),
+        Value::Object(map) => {
+            if map.len() != 1 {
+                return Err(BuildError::config(
+                    path,
+                    "expected a string literal override or an object with exactly one key (`var` or `input`)",
+                ));
+            }
+
+            let Some((key, entry_value)) = map.iter().next() else {
+                return Err(BuildError::config(
+                    path,
+                    "expected a string literal override or an object with exactly one key (`var` or `input`)",
+                ));
+            };
+
+            match key.as_str() {
+                "var" => Ok(ActionInputOverrideValueSpec::Variable(
+                    parse_action_scalar_variable_reference(
+                        entry_value,
+                        &format!("{path}.var"),
+                        schema_field_types,
+                        "child `input_overrides`",
+                    )?,
+                )),
+                "input" => {
+                    let input_name = entry_value.as_str().ok_or_else(|| {
+                        BuildError::config(
+                            format!("{path}.input"),
+                            "expected `input` to be a string named parent input reference",
+                        )
+                    })?;
+                    validate_named_input_name(input_name, &format!("{path}.input"))?;
+                    if !named_input_kinds.contains_key(input_name) {
+                        return Err(BuildError::config(
+                            format!("{path}.input"),
+                            format!("unknown named top-level input `{input_name}`"),
+                        ));
+                    }
+                    Ok(ActionInputOverrideValueSpec::NamedInput(
+                        input_name.to_string(),
+                    ))
+                }
+                other => Err(BuildError::config(
+                    path,
+                    format!(
+                        "unsupported child `input_overrides` object key `{other}` (supported: `var`, `input`)"
+                    ),
+                )),
+            }
+        }
+        _ => Err(BuildError::config(
+            path,
+            "expected a string literal override or an object of the form `{ \"var\": \"field_name\" }` or `{ \"input\": \"name\" }`",
+        )),
+    }
+}
+
+fn parse_action_run_var_value(
+    value: &Value,
+    path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<ActionRunVarValueSpec, BuildError> {
+    match value {
+        Value::String(_) | Value::Bool(_) | Value::Number(_) => {
+            Ok(ActionRunVarValueSpec::Literal(value.clone()))
+        }
+        Value::Object(map) => {
+            if map.len() != 1 {
+                return Err(BuildError::config(
+                    path,
+                    "expected a scalar literal or an object with exactly one key (`var`)",
+                ));
+            }
+
+            let Some((key, entry_value)) = map.iter().next() else {
+                return Err(BuildError::config(
+                    path,
+                    "expected a scalar literal or an object with exactly one key (`var`)",
+                ));
+            };
+
+            if key != "var" {
+                return Err(BuildError::config(
+                    path,
+                    format!("unsupported child `run_vars` object key `{key}` (supported: `var`)"),
+                ));
+            }
+
+            Ok(ActionRunVarValueSpec::Variable(
+                parse_action_scalar_variable_reference(
+                    entry_value,
+                    &format!("{path}.var"),
+                    schema_field_types,
+                    "child `run_vars`",
+                )?,
+            ))
+        }
+        _ => Err(BuildError::config(
+            path,
+            "expected a string, boolean, or number literal, or an object of the form `{ \"var\": \"field_name\" }`",
+        )),
+    }
+}
+
+fn parse_action_scalar_variable_reference(
+    value: &Value,
+    path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+    field_description: &str,
+) -> Result<String, BuildError> {
+    let variable_name = value
+        .as_str()
+        .ok_or_else(|| BuildError::config(path, "expected `var` to be a string field name"))?;
+    let normalized_name = variable_name.trim();
+    validate_variable_lookup_name(normalized_name, path)?;
+    let field_type = resolve_var_field_type(
+        &Value::String(normalized_name.to_string()),
+        schema_field_types,
+        path,
+    )?;
+
+    if field_type == FieldType::Array {
+        return Err(BuildError::config(
+            path,
+            format!(
+                "{field_description} variables must resolve from scalar fields; `{normalized_name}` is {}",
+                type_name(&field_type)
+            ),
+        ));
+    }
+
+    Ok(normalized_name.to_string())
 }
 
 fn parse_optional_when(
@@ -1416,6 +1812,35 @@ fn validate_runtime_var_name(name: &str, path: &str) -> Result<(), BuildError> {
     validate_reserved_top_level_name(name, path)
 }
 
+fn validate_named_input_name(name: &str, path: &str) -> Result<(), BuildError> {
+    if name.trim().is_empty() {
+        return Err(BuildError::config(path, "named input name cannot be empty"));
+    }
+
+    if name != name.trim() {
+        return Err(BuildError::config(
+            path,
+            "named input names cannot start or end with whitespace",
+        ));
+    }
+
+    if name.chars().any(char::is_whitespace) {
+        return Err(BuildError::config(
+            path,
+            "named input names cannot contain whitespace",
+        ));
+    }
+
+    if name.contains('.') {
+        return Err(BuildError::config(
+            path,
+            "named input names must be flat; nested names with `.` are not supported",
+        ));
+    }
+
+    validate_reserved_top_level_name(name, path)
+}
+
 fn parse_runtime_var_type(spec: &Map<String, Value>, path: &str) -> Result<FieldType, BuildError> {
     let schema_type = get_schema_type(spec, path)?;
     match schema_type.as_str() {
@@ -1522,6 +1947,7 @@ fn parse_action_input_specs(
     inputs: &[Value],
     base_path: &str,
     schema_field_types: &BTreeMap<String, FieldType>,
+    named_input_kinds: &BTreeMap<String, InputKind>,
 ) -> Result<Vec<ActionInputSpec>, BuildError> {
     if inputs.is_empty() {
         return Err(BuildError::config(
@@ -1533,75 +1959,107 @@ fn parse_action_input_specs(
     let mut parsed = Vec::with_capacity(inputs.len());
     for (index, entry) in inputs.iter().enumerate() {
         let path = format!("{base_path}[{index}]");
-        let entry_obj = expect_object(entry, &path)?;
-        let input_type = get_required_string(entry_obj, "type", &path)?
-            .trim()
-            .to_ascii_lowercase();
-
-        let input = match input_type.as_str() {
-            "text" => ActionInputSpec::Text {
-                text: parse_string_parts_value(
-                    get_required_field(entry_obj, "text", &path)?,
-                    &format!("{path}.text"),
-                    schema_field_types,
-                )?,
-            },
-            "url" => ActionInputSpec::Url {
-                url: parse_string_parts_value(
-                    get_required_field(entry_obj, "url", &path)?,
-                    &format!("{path}.url"),
-                    schema_field_types,
-                )?,
-            },
-            "image" => {
-                let path_parts = parse_string_parts_value(
-                    get_required_field(entry_obj, "path", &path)?,
-                    &format!("{path}.path"),
-                    schema_field_types,
-                )?;
-                if let Some(resolved_path) = resolve_literal_run_args(&path_parts) {
-                    validate_definition_owned_local_path(
-                        &resolved_path,
-                        &format!("{path}.path"),
-                        "image input",
-                    )?;
-                }
-                ActionInputSpec::Image { path: path_parts }
-            }
-            "file" => {
-                let path_parts = parse_string_parts_value(
-                    get_required_field(entry_obj, "path", &path)?,
-                    &format!("{path}.path"),
-                    schema_field_types,
-                )?;
-                if let Some(resolved_path) = resolve_literal_run_args(&path_parts) {
-                    validate_definition_owned_local_path(
-                        &resolved_path,
-                        &format!("{path}.path"),
-                        "file input",
-                    )?;
-                    validate_supported_file_extension(
-                        &resolved_path,
-                        &format!("{path}.path"),
-                        "file input",
-                    )?;
-                }
-                ActionInputSpec::File { path: path_parts }
-            }
-            _ => {
-                return Err(BuildError::config(
-                    format!("{path}.type"),
-                    format!(
-                        "unsupported input type `{input_type}` (supported: `text`, `url`, `image`, `file`)"
-                    ),
-                ));
-            }
-        };
-
-        parsed.push(input);
+        parsed.push(parse_action_input_spec(
+            entry,
+            &path,
+            schema_field_types,
+            named_input_kinds,
+        )?);
     }
 
     Ok(parsed)
+}
+
+fn parse_action_input_spec(
+    entry: &Value,
+    path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+    named_input_kinds: &BTreeMap<String, InputKind>,
+) -> Result<ActionInputSpec, BuildError> {
+    let entry_obj = expect_object(entry, path)?;
+    if let Some(named_input_value) = entry_obj.get("input") {
+        if entry_obj.len() != 1 {
+            return Err(BuildError::config(
+                path,
+                "named child input references must use exactly `{ \"input\": \"<name>\" }`",
+            ));
+        }
+        let input_name = named_input_value
+            .as_str()
+            .ok_or_else(|| BuildError::config(format!("{path}.input"), "expected a string"))?;
+        validate_named_input_name(input_name, &format!("{path}.input"))?;
+        if !named_input_kinds.contains_key(input_name) {
+            return Err(BuildError::config(
+                format!("{path}.input"),
+                format!("unknown named top-level input `{input_name}`"),
+            ));
+        }
+        return Ok(ActionInputSpec::Named {
+            input: input_name.to_string(),
+        });
+    }
+
+    let input_type = get_required_string(entry_obj, "type", path)?
+        .trim()
+        .to_ascii_lowercase();
+
+    match input_type.as_str() {
+        "text" => Ok(ActionInputSpec::Text {
+            text: parse_string_parts_value(
+                get_required_field(entry_obj, "text", path)?,
+                &format!("{path}.text"),
+                schema_field_types,
+            )?,
+        }),
+        "url" => Ok(ActionInputSpec::Url {
+            url: parse_string_parts_value(
+                get_required_field(entry_obj, "url", path)?,
+                &format!("{path}.url"),
+                schema_field_types,
+            )?,
+        }),
+        "image" => {
+            let path_parts = parse_string_parts_value(
+                get_required_field(entry_obj, "path", path)?,
+                &format!("{path}.path"),
+                schema_field_types,
+            )?;
+            if let Some(resolved_path) = resolve_literal_run_args(&path_parts) {
+                validate_definition_owned_local_path(
+                    &resolved_path,
+                    &format!("{path}.path"),
+                    "image input",
+                )?;
+            }
+            Ok(ActionInputSpec::Image { path: path_parts })
+        }
+        "file" => {
+            let path_parts = parse_string_parts_value(
+                get_required_field(entry_obj, "path", path)?,
+                &format!("{path}.path"),
+                schema_field_types,
+            )?;
+            if let Some(resolved_path) = resolve_literal_run_args(&path_parts) {
+                validate_definition_owned_local_path(
+                    &resolved_path,
+                    &format!("{path}.path"),
+                    "file input",
+                )?;
+                validate_supported_file_extension(
+                    &resolved_path,
+                    &format!("{path}.path"),
+                    "file input",
+                )?;
+            }
+            Ok(ActionInputSpec::File { path: path_parts })
+        }
+        _ => Err(BuildError::config(
+            format!("{path}.type"),
+            format!(
+                "unsupported input type `{input_type}` (supported: `text`, `url`, `image`, `file`; or use `{{ \"input\": \"<name>\" }}`)"
+            ),
+        )),
+    }
 }
 
 fn parse_string_parts_field(
@@ -2687,6 +3145,61 @@ fn render_run_arg_parts(parts: &[RunArg]) -> String {
         .join(", ")
 }
 
+fn render_action_input_spec(input: &ActionInputSpec) -> String {
+    match input {
+        ActionInputSpec::Text { text } => format!(
+            "ActionInput::Text {{ text: vec![{}] }}",
+            render_run_arg_parts(text)
+        ),
+        ActionInputSpec::Url { url } => format!(
+            "ActionInput::Url {{ url: vec![{}] }}",
+            render_run_arg_parts(url)
+        ),
+        ActionInputSpec::Image { path } => format!(
+            "ActionInput::Image {{ path: vec![{}] }}",
+            render_run_arg_parts(path)
+        ),
+        ActionInputSpec::File { path } => format!(
+            "ActionInput::File {{ path: vec![{}] }}",
+            render_run_arg_parts(path)
+        ),
+        ActionInputSpec::Named { input } => format!(
+            "ActionInput::Named {{ input: {}.to_string() }}",
+            rust_string_literal(input)
+        ),
+    }
+}
+
+fn render_action_input_override_value(value: &ActionInputOverrideValueSpec) -> String {
+    match value {
+        ActionInputOverrideValueSpec::Literal(literal) => format!(
+            "ActionInputOverrideValue::Literal({}.to_string())",
+            rust_string_literal(literal)
+        ),
+        ActionInputOverrideValueSpec::Variable(variable) => format!(
+            "ActionInputOverrideValue::Variable({}.to_string())",
+            rust_string_literal(variable)
+        ),
+        ActionInputOverrideValueSpec::NamedInput(input) => format!(
+            "ActionInputOverrideValue::NamedInput {{ input: {}.to_string() }}",
+            rust_string_literal(input)
+        ),
+    }
+}
+
+fn render_action_run_var_value(value: &ActionRunVarValueSpec) -> String {
+    match value {
+        ActionRunVarValueSpec::Literal(literal) => format!(
+            "ActionRunVarValue::Literal(serde_json::from_str({}).expect(\"generated child run_var literal must be valid JSON\"))",
+            rust_string_literal(&literal.to_string())
+        ),
+        ActionRunVarValueSpec::Variable(variable) => format!(
+            "ActionRunVarValue::Variable({}.to_string())",
+            rust_string_literal(variable)
+        ),
+    }
+}
+
 fn render_agent_model(config: &AgentConfig) -> String {
     let mut struct_fields = String::new();
     let mut validation_calls = String::new();
@@ -2788,24 +3301,26 @@ fn render_agent_model(config: &AgentConfig) -> String {
     }
 
     for input in &config.inputs {
-        let rendered = match input {
-            InputSpec::Text { text } => format!(
-                "        Input::Text {{ text: {}.to_string() }},\n",
-                rust_string_literal(text)
-            ),
-            InputSpec::Url { url } => format!(
-                "        Input::Url {{ url: {}.to_string() }},\n",
-                rust_string_literal(url)
-            ),
-            InputSpec::Image { path } => format!(
-                "        Input::Image {{ path: {}.to_string() }},\n",
-                rust_string_literal(path)
-            ),
-            InputSpec::File { path } => format!(
-                "        Input::File {{ path: {}.to_string() }},\n",
-                rust_string_literal(path)
-            ),
+        let kind = match input.kind {
+            InputKind::Text => "InputKind::Text",
+            InputKind::Url => "InputKind::Url",
+            InputKind::Image => "InputKind::Image",
+            InputKind::File => "InputKind::File",
         };
+        let name = input
+            .name
+            .as_ref()
+            .map(|value| format!("Some({}.to_string())", rust_string_literal(value)))
+            .unwrap_or_else(|| "None".to_string());
+        let value = input
+            .value
+            .as_ref()
+            .map(|value| format!("Some({}.to_string())", rust_string_literal(value)))
+            .unwrap_or_else(|| "None".to_string());
+        let rendered = format!(
+            "        Input {{ name: {}, kind: {}, value: {} }},\n",
+            name, kind, value
+        );
         input_list.push_str(&rendered);
     }
 
@@ -2886,29 +3401,48 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     .as_ref()
                     .map(|agent| format!("Some({}.to_string())", rust_string_literal(agent)))
                     .unwrap_or_else(|| "None".to_string());
+                let run_vars = run_step
+                    .run_vars
+                    .as_ref()
+                    .map(|run_vars| {
+                        let rendered = run_vars
+                            .iter()
+                            .map(|run_var| {
+                                format!(
+                                    "ActionRunVar {{ name: {}.to_string(), value: {} }}",
+                                    rust_string_literal(&run_var.name),
+                                    render_action_run_var_value(&run_var.value)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("Some(vec![{}])", rendered)
+                    })
+                    .unwrap_or_else(|| "None".to_string());
                 let inputs = run_step
                     .inputs
                     .as_ref()
                     .map(|inputs| {
                         let rendered = inputs
                             .iter()
-                            .map(|input| match input {
-                                ActionInputSpec::Text { text } => format!(
-                                    "ActionInput::Text {{ text: vec![{}] }}",
-                                    render_run_arg_parts(text)
-                                ),
-                                ActionInputSpec::Url { url } => format!(
-                                    "ActionInput::Url {{ url: vec![{}] }}",
-                                    render_run_arg_parts(url)
-                                ),
-                                ActionInputSpec::Image { path } => format!(
-                                    "ActionInput::Image {{ path: vec![{}] }}",
-                                    render_run_arg_parts(path)
-                                ),
-                                ActionInputSpec::File { path } => format!(
-                                    "ActionInput::File {{ path: vec![{}] }}",
-                                    render_run_arg_parts(path)
-                                ),
+                            .map(render_action_input_spec)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("Some(vec![{}])", rendered)
+                    })
+                    .unwrap_or_else(|| "None".to_string());
+                let input_overrides = run_step
+                    .input_overrides
+                    .as_ref()
+                    .map(|input_overrides| {
+                        let rendered = input_overrides
+                            .iter()
+                            .map(|input_override| {
+                                format!(
+                                    "ActionInputOverride {{ name: {}.to_string(), value: {} }}",
+                                    rust_string_literal(&input_override.name),
+                                    render_action_input_override_value(&input_override.value)
+                                )
                             })
                             .collect::<Vec<_>>()
                             .join(", ");
@@ -2956,6 +3490,8 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         subject: {},
                         text: {},
                         agent: {},
+                        run_vars: {},
+                        input_overrides: {},
                         inputs: {},
                         input_mode: {},
                         platforms: {},
@@ -2981,6 +3517,8 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     subject,
                     text,
                     agent,
+                    run_vars,
+                    input_overrides,
                     inputs,
                     input_mode,
                     platforms
@@ -3061,12 +3599,30 @@ impl crate::providers::ValidatedResponse for Output {{
 
 {validation_helpers}
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum InputKind {{
+    Text,
+    Url,
+    Image,
+    File,
+}}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum Input {{
-    Text {{ text: String }},
-    Url {{ url: String }},
-    Image {{ path: String }},
-    File {{ path: String }},
+pub struct Input {{
+    pub name: Option<String>,
+    pub kind: InputKind,
+    pub value: Option<String>,
+}}
+
+impl Input {{
+    pub fn kind_label(&self) -> &'static str {{
+        match self.kind {{
+            InputKind::Text => "text",
+            InputKind::Url => "url",
+            InputKind::Image => "image",
+            InputKind::File => "file",
+        }}
+    }}
 }}
 
 pub fn inputs() -> Vec<Input> {{
@@ -3138,6 +3694,32 @@ pub enum ActionInput {{
     Url {{ url: Vec<RunArg> }},
     Image {{ path: Vec<RunArg> }},
     File {{ path: Vec<RunArg> }},
+    Named {{ input: String }},
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum ActionInputOverrideValue {{
+    Literal(String),
+    Variable(String),
+    NamedInput {{ input: String }},
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ActionInputOverride {{
+    name: String,
+    value: ActionInputOverrideValue,
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum ActionRunVarValue {{
+    Literal(serde_json::Value),
+    Variable(String),
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ActionRunVar {{
+    name: String,
+    value: ActionRunVarValue,
 }}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3171,6 +3753,8 @@ pub struct RunStep {{
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
     agent: Option<String>,
+    run_vars: Option<Vec<ActionRunVar>>,
+    input_overrides: Option<Vec<ActionInputOverride>>,
     inputs: Option<Vec<ActionInput>>,
     input_mode: Option<ActionInputMode>,
     platforms: Option<Vec<String>>,

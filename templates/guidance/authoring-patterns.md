@@ -9,9 +9,10 @@ Keep top-level keys in this order:
 
 1. `version`
 2. `inputs`
-3. optional `runtime_vars`
-4. `agent_schema`
-5. `actions`
+3. optional `action_execution`
+4. optional `runtime_vars`
+5. `agent_schema`
+6. `actions`
 
 Keep each action in this order:
 
@@ -28,6 +29,11 @@ Keep each run step in this order:
 5. `output_variable`
 6. `status_variable`
 7. `error_variable`
+
+Keep input objects easy to scan:
+
+- named input objects: `name`, then `type`, then the value field such as `text`, `url`, or `path`
+- unnamed literal inputs: `type`, then the value field
 
 ## Naming Patterns
 
@@ -115,6 +121,11 @@ Prefer these in order:
 1. plain model output with minimal actions
 2. `email_me` or child-agent steps when they fit the task
 3. `exec` only when the task truly needs a local command
+
+If one Cargo AI agent needs to call another Cargo AI agent:
+- prefer a native `kind: "agent"` step
+- do not add Python or shell wrappers just to launch the child agent
+- use wrapper programs only when the task truly needs non-Cargo-AI behavior around that call
 
 When the user wants portability across macOS, Windows, and Linux:
 - avoid shell-specific scripts when possible

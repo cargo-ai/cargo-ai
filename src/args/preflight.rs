@@ -90,6 +90,14 @@ pub fn command() -> Command {
                 .num_args(1),
         )
         .arg(
+            Arg::new("input_override")
+                .long("input-override")
+                .help("Override a declared named top-level input for this invocation (repeatable: name=value)")
+                .value_name("NAME=VALUE")
+                .action(ArgAction::Append)
+                .num_args(1),
+        )
+        .arg(
             Arg::new("input_text")
                 .long("input-text")
                 .help("Text input to provide to the agent at runtime")
@@ -181,5 +189,18 @@ mod tests {
         assert!(help.contains(
             "Runtime variable assignment declared in runtime_vars (repeatable: name=value)"
         ));
+    }
+
+    #[test]
+    fn help_describes_input_override_assignments() {
+        let mut command = super::command();
+        let mut help = Vec::new();
+        command
+            .write_long_help(&mut help)
+            .expect("preflight help should render");
+        let help = String::from_utf8(help).expect("help should be utf8");
+
+        assert!(help.contains("--input-override <NAME=VALUE>"));
+        assert!(help.contains("Override a declared named top-level input for this invocation"));
     }
 }
