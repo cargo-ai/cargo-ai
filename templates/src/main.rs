@@ -4179,8 +4179,8 @@ fn resolve_child_input_override_value(
             Ok((
                 resolved.clone(),
                 Some(format!(
-                    "Action '{}' resolved dynamic child-agent named override '{}' -> {}.",
-                    action_name, override_name, resolved
+                    "Action '{}' resolved dynamic child-agent named override '{}'.",
+                    action_name, override_name
                 )),
             ))
         }
@@ -4220,8 +4220,8 @@ fn resolve_child_run_var_value(
             Ok((
                 resolved.clone(),
                 Some(format!(
-                    "Action '{}' resolved dynamic child-agent runtime var '{}' -> {}.",
-                    action_name, run_var_name, resolved
+                    "Action '{}' resolved dynamic child-agent runtime var '{}'.",
+                    action_name, run_var_name
                 )),
             ))
         }

@@ -36,7 +36,7 @@ For broader shape and validation rules, also read:
   - lane status with elapsed time while running and after terminal completion/failure
   - terminal step marker or current step when known
   - last lifecycle message
-- Parent-run `exec` and `email_me` output is bucketed into the originating lane.
+- In append-only output, parent-run `exec` and `email_me` output is emitted with the originating action label.
 - Child-agent steps stay minimal in the parent lane with start/completion or exit-summary lines instead of recursively inlining the child transcript.
 
 ## Supported Step Kinds
@@ -155,8 +155,8 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - If a child wants to forward the same named input to its own child, it should declare that named top-level input locally first.
 - Parent actions may capture child-agent success/failure with `status_variable` and `error_variable`.
 - Parent actions cannot directly capture the child agent's top-level returned output fields into the parent action-local namespace.
-- Cargo AI prints one root `using:` line at run start and only emits another lane-level `using:` line when a child `agent` or `generate_image` step changes the effective `profile`, `auth`, `server`, or `model`.
-- Child-agent passthrough stays minimal: the parent surfaces the child's own `using:` line when it represents a changed context, but it does not inline the rest of the child transcript.
+- Cargo AI prints one root `using:` line at run start. In append-only output, it also emits another action-prefixed `using:` line when a child `agent` or `generate_image` step changes the effective `profile`, `auth`, `server`, or `model`.
+- Interactive live mode keeps the parent dashboard at the orchestration level and does not surface child or step-level `using:` lines there.
 - Native child-agent steps preserve child input forwarding, failure handling, depth limits, and runtime observability without inventing an extra scripting layer.
 
 ## Named Input Notes

@@ -2976,8 +2976,8 @@ fn resolve_child_input_override_value(
             Ok((
                 resolved.clone(),
                 Some(format!(
-                    "Action '{}' resolved dynamic child-agent named override '{}' -> {}.",
-                    action_name, override_name, resolved
+                    "Action '{}' resolved dynamic child-agent named override '{}'.",
+                    action_name, override_name
                 )),
             ))
         }
@@ -3024,8 +3024,8 @@ fn resolve_child_run_var_value(
             Ok((
                 resolved.clone(),
                 Some(format!(
-                    "Action '{}' resolved dynamic child-agent runtime var '{}' -> {}.",
-                    action_name, run_var_name, resolved
+                    "Action '{}' resolved dynamic child-agent runtime var '{}'.",
+                    action_name, run_var_name
                 )),
             ))
         }
@@ -3975,7 +3975,9 @@ auth_mode = "api_key"
         );
         assert_eq!(notes.len(), 2);
         assert!(notes[0].contains("named override 'menu_note'"));
-        assert!(notes[1].contains("./reports/q1.pdf"));
+        assert!(notes[1].contains("named override 'source_doc'"));
+        assert!(!notes[0].contains("hello Acme"));
+        assert!(!notes[1].contains("./reports/q1.pdf"));
     }
 
     #[test]
@@ -4084,7 +4086,8 @@ auth_mode = "api_key"
         assert_eq!(notes.len(), 2);
         assert!(notes[0].contains("runtime var 'year'"));
         assert!(notes[1].contains("runtime var 'generate_images'"));
-        assert!(notes[1].contains("true"));
+        assert!(!notes[0].contains("2026"));
+        assert!(!notes[1].contains("true"));
     }
 
     #[test]

@@ -681,7 +681,7 @@ Use `run` to sequence multiple side effects in order. `exec` steps can capture o
 
 `generate_image` and child `agent` steps also accept an optional step-level `profile`. Use it when one step should resolve its provider/model/url/token context differently from the parent invocation. For `generate_image`, explicit `model` still wins, then the step-profile model, then the parent invocation model. For child `agent` steps, the resolved profile is forwarded to the child as `--profile <name>`.
 
-When a provider-backed or child-agent step changes the effective execution context, Cargo AI prints another lane-level `using:` line with the full effective `profile`, `auth`, `server`, and `model` for that step. It does not repeat the line when the effective context is unchanged from the most recently printed one.
+Cargo AI always prints one root `using:` line near run start. In append-only output, it also prints another action-prefixed `using:` line when a provider-backed or child-agent step changes the effective `profile`, `auth`, `server`, or `model`. Interactive live mode keeps the parent dashboard at the orchestration level and does not surface child or step-level `using:` lines there.
 
 For the default OpenAI account transport, use a tool-capable mainline model such as `gpt-5.2`. For a direct OpenAI API token and URL, prefer GPT Image models such as `gpt-image-1.5` or `gpt-image-1-mini`. Official OpenAI docs list `gpt-image-1.5` as the latest GPT Image model, and the image-generation guide lists `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini` for direct image generation. Verified: 2026-03-28.
 

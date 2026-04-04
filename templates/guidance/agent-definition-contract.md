@@ -211,7 +211,7 @@ If `logic` evaluates true, the action's `run` steps execute in order.
 - Terminal lane summaries and the final run footer also include wall-clock durations, for example `completed in 31s.` and `✅ Run complete in 32s.`.
 - When attached directly to an interactive terminal, Cargo AI switches to a compact live lane dashboard.
 - The first live dashboard slice shows lane label, lane status with elapsed time while running and after terminal completion/failure, terminal step marker or current step when known, and the last lifecycle message.
-- Parent-run `exec` and `email_me` output is bucketed into the originating lane.
+- In append-only output, parent-run `exec` and `email_me` output is emitted with the originating action label.
 - Child-agent steps stay minimal in the parent lane with start/completion or exit-summary lines instead of recursively inlining the child transcript.
 - In append-only output, provider-backed or child-agent steps emit another action-prefixed `using:` line only when the effective `profile`, `auth`, `server`, or `model` changes from the most recently printed context.
 - Interactive live mode keeps the parent dashboard at the orchestration level and does not surface child or step-level `using:` lines there.
@@ -378,7 +378,7 @@ For `kind: "agent"`:
 - Child `input_mode` applies only to child `inputs`; it does not change whether `input_overrides` are sent.
 - If child `input_mode` is omitted, the child step keeps the current default behavior: child `inputs` replace the child agent's baked `inputs`.
 - Child `append` keeps the child agent's baked inputs first, then appends the action-supplied child inputs in declared order.
-- Native child-agent steps preserve Cargo AI semantics such as child `run_vars`, named input forwarding, child `input_overrides`, child `inputs`, `input_mode`, failure handling, depth limits, and step-level `using:` observability.
+- Native child-agent steps preserve Cargo AI semantics such as child `run_vars`, named input forwarding, child `input_overrides`, child `inputs`, `input_mode`, failure handling, depth limits, and append-only `using:` observability.
 - Child `prepend` keeps the action-supplied child inputs first in declared order, then places the child agent's baked inputs after them.
 - Those child inputs may use dynamic string parts resolved from the parent action-local variable bag. Child `run_vars` and child `input_overrides` stay CLI-shaped and accept only scalar literals or single variable references.
 - Named child-input reuse is explicit only; Cargo AI does not automatically inherit all named inputs into children.
