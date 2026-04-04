@@ -188,6 +188,9 @@ impl ActionOutput {
                 return;
             }
             state.last_using_line = Some(using_line.to_string());
+            if state.mode == ActionOutputMode::Live {
+                return;
+            }
             emit_action_line_locked(state, action_index, action_name, using_line);
         });
     }
@@ -363,12 +366,6 @@ impl ActionOutputState {
                 "  last: {}",
                 lane.last_message.as_deref().unwrap_or("-")
             ));
-            if !lane.output_lines.is_empty() {
-                lines.push("  output:".to_string());
-                for line in &lane.output_lines {
-                    lines.push(format!("    {}", line));
-                }
-            }
         }
 
         lines
@@ -431,6 +428,10 @@ fn emit_action_line_locked(
                 format_action_line(action_index, action_name, line.as_str())
             );
         }
+        return;
+    }
+
+    if !should_surface_live_dashboard_message(message) {
         return;
     }
 
@@ -506,6 +507,12 @@ fn split_action_output_lines(message: &str) -> Vec<String> {
 
 fn compact_action_output_line(message: &str) -> Option<String> {
     split_action_output_lines(message).into_iter().next()
+}
+
+fn should_surface_live_dashboard_message(message: &str) -> bool {
+    compact_action_output_line(message)
+        .map(|line| !line.starts_with("using: ") && !line.contains("resolved dynamic child-agent "))
+        .unwrap_or(false)
 }
 
 fn push_lane_output_message(lane: &mut ActionLaneState, message: &str) {
@@ -4184,10 +4191,7 @@ auth_mode = "api_key"
         assert!(snapshot
             .iter()
             .any(|line| line == "  last: wrote generated image to './artifacts/hero.png'."));
-        assert!(snapshot.iter().any(|line| line == "  output:"));
-        assert!(snapshot
-            .iter()
-            .any(|line| line == "    wrote generated image to './artifacts/hero.png'."));
+        assert!(!snapshot.iter().any(|line| line == "  output:"));
     }
 
     #[test]
@@ -4248,10 +4252,7 @@ auth_mode = "api_key"
         assert!(snapshot
             .iter()
             .any(|line| line == "  last: failed: child exited with status 1"));
-        assert!(snapshot.iter().any(|line| line == "  output:"));
-        assert!(snapshot
-            .iter()
-            .any(|line| line == "    child exited with status 1"));
+        assert!(!snapshot.iter().any(|line| line == "  output:"));
     }
 
     #[test]
@@ -4308,7 +4309,7 @@ auth_mode = "api_key"
     }
 
     #[test]
-    fn live_dashboard_snapshot_records_changed_using_lines() {
+    fn live_dashboard_snapshot_suppresses_changed_using_lines() {
         let output = ActionOutput::new_for_mode(
             crate::ActionExecutionMode::Parallel,
             ActionOutputMode::Live,
@@ -4323,10 +4324,32 @@ auth_mode = "api_key"
         let snapshot = output.snapshot_lines_for_test();
         assert!(snapshot
             .iter()
-            .any(|line| line == &format!("  last: {changed_using}")));
+            .any(|line| line == "  last: waiting for child agent to finish..."));
+        assert!(!snapshot.iter().any(|line| line.contains(changed_using)));
+    }
+
+    #[test]
+    fn live_dashboard_snapshot_suppresses_dynamic_child_resolution_lines() {
+        let output = ActionOutput::new_for_mode(
+            crate::ActionExecutionMode::Parallel,
+            ActionOutputMode::Live,
+        );
+
+        output.action_started(0, "child_summary");
+        output.action_step_started(0, "child_summary", "agent", 1, 1);
+        output.action_line(
+            0,
+            "child_summary",
+            "Action 'child_summary' resolved dynamic child-agent runtime var 'year' -> 2026.",
+        );
+
+        let snapshot = output.snapshot_lines_for_test();
         assert!(snapshot
             .iter()
-            .any(|line| line == &format!("    {changed_using}")));
+            .any(|line| line == "  last: waiting for child agent to finish..."));
+        assert!(!snapshot
+            .iter()
+            .any(|line| line.contains("resolved dynamic child-agent runtime var")));
     }
 
     #[cfg(unix)]
@@ -4419,8 +4442,10 @@ auth_mode = "api_key"
             .iter()
             .any(|line| line.starts_with("[A1 raw_exec] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
-        assert!(snapshot.iter().any(|line| line == "    alpha"));
-        assert!(snapshot.iter().any(|line| line == "    beta"));
+        assert!(snapshot.iter().any(|line| line == "  last: completed."));
+        assert!(!snapshot.iter().any(|line| line == "  output:"));
+        assert!(!snapshot.iter().any(|line| line.contains("alpha")));
+        assert!(!snapshot.iter().any(|line| line.contains("beta")));
     }
 
     #[tokio::test]
@@ -4806,12 +4831,10 @@ auth_mode = "api_key"
         assert_eq!(written_bytes, expected_bytes);
 
         let snapshot = output.snapshot_lines_for_test();
-        assert!(snapshot.iter().any(|line| {
-            line.contains(
-                "using: profile=image_profile auth=api_key server=openai model=gpt-image-step-profile"
-            )
-        }));
-        assert!(snapshot
+        assert!(!snapshot
+            .iter()
+            .any(|line| line.contains("using: profile=image_profile")));
+        assert!(!snapshot
             .iter()
             .any(|line| line.contains("url=http://127.0.0.1")));
     }
@@ -5144,15 +5167,15 @@ auth_mode = "api_key"
             .iter()
             .any(|line| line.starts_with("[A1 child_summary] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
-        assert!(snapshot.iter().any(|line| {
-            line == "    using: profile=child_profile auth=api_key server=openai model=gpt-5.2"
-        }));
-        assert!(snapshot
+        assert!(snapshot.iter().any(|line| line == "  last: completed."));
+        assert!(!snapshot.iter().any(|line| line == "  output:"));
+        assert!(!snapshot
             .iter()
-            .any(|line| line == &format!("    child: started ./{}", script_name)));
-        assert!(snapshot
+            .any(|line| line.contains("using: profile=child_profile")));
+        assert!(!snapshot.iter().any(|line| line.contains("child: started")));
+        assert!(!snapshot
             .iter()
-            .any(|line| line == "    child: completed successfully"));
+            .any(|line| line.contains("child: completed successfully")));
         assert!(!snapshot.iter().any(|line| line.contains("child detail")));
     }
 

@@ -202,6 +202,9 @@ impl ActionOutput {
                 return;
             }
             state.last_using_line = Some(using_line.to_string());
+            if state.mode == ActionOutputMode::Live {
+                return;
+            }
             emit_action_line_locked(state, action_index, action_name, using_line);
         });
     }
@@ -371,12 +374,6 @@ impl ActionOutputState {
                 "  last: {}",
                 lane.last_message.as_deref().unwrap_or("-")
             ));
-            if !lane.output_lines.is_empty() {
-                lines.push("  output:".to_string());
-                for line in &lane.output_lines {
-                    lines.push(format!("    {}", line));
-                }
-            }
         }
 
         lines
@@ -434,6 +431,10 @@ fn emit_action_line_locked(
         for line in split_action_output_lines(message) {
             println!("{}", format_action_line(action_index, action_name, line.as_str()));
         }
+        return;
+    }
+
+    if !should_surface_live_dashboard_message(message) {
         return;
     }
 
@@ -510,6 +511,14 @@ fn split_action_output_lines(message: &str) -> Vec<String> {
 
 fn compact_action_output_line(message: &str) -> Option<String> {
     split_action_output_lines(message).into_iter().next()
+}
+
+fn should_surface_live_dashboard_message(message: &str) -> bool {
+    compact_action_output_line(message)
+        .map(|line| {
+            !line.starts_with("using: ") && !line.contains("resolved dynamic child-agent ")
+        })
+        .unwrap_or(false)
 }
 
 fn push_lane_output_message(lane: &mut ActionLaneState, message: &str) {
