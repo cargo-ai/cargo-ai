@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 enum HatchConfigSource {
     LocalPath {
         path: String,
+        #[cfg_attr(not(test), allow(dead_code))]
         from_positional_shorthand: bool,
     },
     RegistryName(String),
@@ -14,6 +15,21 @@ enum HatchConfigSource {
 struct HatchResolution {
     project_name: String,
     config_source: HatchConfigSource,
+}
+
+fn presentation_from_resolution(
+    resolution: &HatchResolution,
+) -> super::hatch_pipeline::HatchPresentation {
+    let source = match &resolution.config_source {
+        HatchConfigSource::LocalPath { path, .. } => {
+            super::hatch_pipeline::HatchSource::LocalFile { path: path.clone() }
+        }
+        HatchConfigSource::RegistryName(name) => {
+            super::hatch_pipeline::HatchSource::Registry { name: name.clone() }
+        }
+    };
+
+    super::hatch_pipeline::HatchPresentation { source }
 }
 
 fn resolve_local_output_dir(sub_m: &ArgMatches) -> Result<Option<PathBuf>, String> {
@@ -206,43 +222,28 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         }
     };
 
+    let presentation = presentation_from_resolution(&resolution);
     let new_project_name = resolution.project_name;
     let hatch_mode = mode_from_check_flag(check_only);
-
-    if check_only {
-        println!("Check new cargo agent: {new_project_name}");
-    } else {
-        println!("Build new cargo agent: {new_project_name}");
-    }
+    super::hatch_pipeline::print_hatch_start(&new_project_name, hatch_mode);
+    super::hatch_pipeline::print_hatch_progress(
+        super::hatch_pipeline::HatchProgressStep::PreparingDefinition,
+    );
 
     let file_contents = match resolution.config_source {
         HatchConfigSource::LocalPath {
             path,
-            from_positional_shorthand,
-        } => {
-            if from_positional_shorthand {
-                println!(
-                    "📄 Detected local JSON config '{}'; derived agent name '{}'.",
-                    path, new_project_name
-                );
+            from_positional_shorthand: _,
+        } => match super::hatch_pipeline::read_local_config(&path) {
+            Ok(contents) => contents,
+            Err(e) => {
+                println!("❌ Failed to read local config file '{}'.", path);
+                println!("Reason: {e}");
+                println!("Hint: Ensure the path is valid and points to a UTF-8 JSON file.");
+                return false;
             }
-
-            match super::hatch_pipeline::read_local_config(&path) {
-                Ok(contents) => contents,
-                Err(e) => {
-                    println!("❌ Failed to read local config file '{}'.", path);
-                    println!("Reason: {e}");
-                    println!("Hint: Ensure the path is valid and points to a UTF-8 JSON file.");
-                    return false;
-                }
-            }
-        }
+        },
         HatchConfigSource::RegistryName(registry_name) => {
-            println!(
-                "🌐 No --config flag detected. Fetching default template '{}' from Cargo-AI registry...",
-                registry_name
-            );
-
             match super::hatch_pipeline::fetch_from_registry(&registry_name) {
                 Ok(contents) => contents,
                 Err(e) => {
@@ -266,6 +267,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         keep_project,
         build_target,
         output_dir,
+        presentation,
     );
 
     super::hatch_pipeline::run_hatch_pipeline(request)

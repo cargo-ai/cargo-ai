@@ -142,6 +142,35 @@ fn render_account_agents_response(response: &serde_json::Value) {
     }
 }
 
+fn account_hatch_presentation(
+    hatch: &AccountHatchCommand,
+    response: &serde_json::Value,
+) -> crate::commands::hatch_pipeline::HatchPresentation {
+    let owner = response
+        .get("owner_handle")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| hatch.owner_handle.as_deref().unwrap_or("self"));
+    let agent = response
+        .get("agent")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(hatch.source_name.as_str());
+    let path = response
+        .get("definition_path")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| hatch.definition_path.as_deref().unwrap_or("/"));
+
+    crate::commands::hatch_pipeline::HatchPresentation {
+        source: crate::commands::hatch_pipeline::HatchSource::Account {
+            owner: owner.to_string(),
+            agent: agent.to_string(),
+            path: path.to_string(),
+        },
+    }
+}
+
 fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &serde_json::Value) -> bool {
     let is_pull_success = response
         .get("type")
@@ -164,8 +193,6 @@ fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &serde_js
         }
     };
 
-    render_account_agents_response(response);
-
     let definition_json_str = match serde_json::to_string_pretty(definition_json) {
         Ok(pretty) => pretty,
         Err(error) => {
@@ -173,28 +200,6 @@ fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &serde_js
             return false;
         }
     };
-
-    let owner_label = hatch.owner_handle.as_deref().unwrap_or("self");
-    let path_label = hatch.definition_path.as_deref().unwrap_or("/");
-    println!(
-        "📦 Using account agent definition: owner='{}', name='{}', path='{}'",
-        owner_label, hatch.source_name, path_label
-    );
-    if hatch.local_name != hatch.source_name {
-        println!(
-            "ℹ️ Remote source override: remote='{}' local='{}'.",
-            hatch.source_name, hatch.local_name
-        );
-    }
-
-    match hatch.mode {
-        crate::commands::hatch_pipeline::HatchMode::Build => {
-            println!("Build new cargo agent: {}", hatch.local_name);
-        }
-        crate::commands::hatch_pipeline::HatchMode::Check => {
-            println!("Check new cargo agent: {}", hatch.local_name);
-        }
-    }
 
     let request = crate::commands::hatch_pipeline::HatchRequest::new(
         hatch.local_name.clone(),
@@ -204,6 +209,7 @@ fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &serde_js
         hatch.keep_project,
         hatch.build_target.clone(),
         hatch.output_dir.clone(),
+        account_hatch_presentation(hatch, response),
     );
 
     crate::commands::hatch_pipeline::run_hatch_pipeline(request)
@@ -451,6 +457,13 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
     };
     let access_token_owned = auth.access_token;
     let refresh_token = auth.refresh_token;
+
+    if let AgentsCommand::Hatch(hatch) = &agents_command {
+        crate::commands::hatch_pipeline::print_hatch_start(&hatch.local_name, hatch.mode);
+        crate::commands::hatch_pipeline::print_hatch_progress(
+            crate::commands::hatch_pipeline::HatchProgressStep::PreparingDefinition,
+        );
+    }
 
     // 4. Execute first attempt using current access token.
     let mut response = match &agents_command {
@@ -843,6 +856,11 @@ pub async fn run_hatch(hatch_m: &ArgMatches) -> bool {
     };
     let access_token_owned = auth.access_token;
     let refresh_token = auth.refresh_token;
+
+    crate::commands::hatch_pipeline::print_hatch_start(&hatch.local_name, hatch.mode);
+    crate::commands::hatch_pipeline::print_hatch_progress(
+        crate::commands::hatch_pipeline::HatchProgressStep::PreparingDefinition,
+    );
 
     let mut response = match request_hatch_pull(access_token_owned.as_str(), &hatch).await {
         Ok(response) => response,

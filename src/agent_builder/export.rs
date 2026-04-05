@@ -3,13 +3,13 @@
 use super::build_target::BuildTarget;
 use std::fs;
 use std::io::{self, ErrorKind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn export_binary_to_path(
     source_path: &Path,
     dest_path: &Path,
     force_overwrite: bool,
-) -> io::Result<()> {
+) -> io::Result<PathBuf> {
     if !source_path.exists() {
         return Err(io::Error::new(
             ErrorKind::NotFound,
@@ -27,12 +27,10 @@ fn export_binary_to_path(
                 ),
             ));
         }
-        println!("ℹ️ Existing binary at {:?} will be overwritten.", dest_path);
     }
 
     fs::copy(source_path, dest_path)?;
-    println!("✅ Exported binary to: {:?}", dest_path);
-    Ok(())
+    Ok(dest_path.to_path_buf())
 }
 
 /// Copies the built binary from `.cargo-ai/agents/{agent}/target/...`
@@ -43,7 +41,7 @@ pub fn export_binary(
     build_target: &BuildTarget,
     output_dir: Option<&Path>,
     source_project_path: Option<&Path>,
-) -> io::Result<()> {
+) -> io::Result<PathBuf> {
     let project_path = super::agent_workspace_path(agent_name);
     let source_root = source_project_path.unwrap_or(project_path.as_path());
     let source_path = build_target.compiled_binary_path(source_root, agent_name);
