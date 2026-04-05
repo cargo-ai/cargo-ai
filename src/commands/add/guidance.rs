@@ -1,7 +1,10 @@
 //! Runtime behavior for `cargo ai add guidance`.
 use clap::ArgMatches;
+use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use crate::ui;
 
 const CODEX_GUIDANCE_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -148,6 +151,55 @@ struct GuidanceBundleReport {
     artifact_paths: Vec<PathBuf>,
 }
 
+fn display_path(path: &Path) -> String {
+    if path.is_relative() {
+        return path.display().to_string();
+    }
+
+    match std::env::current_dir() {
+        Ok(current_dir) => match path.strip_prefix(&current_dir) {
+            Ok(relative) if relative.as_os_str().is_empty() => ".".to_string(),
+            Ok(relative) => format!("./{}", relative.display()),
+            Err(_) => path.display().to_string(),
+        },
+        Err(_) => path.display().to_string(),
+    }
+}
+
+fn guidance_success_ui_response(report: &GuidanceBundleReport) -> serde_json::Value {
+    json!({
+        "ui": {
+            "schema": "1.0",
+            "kind": "success",
+            "icon": "✓",
+            "title": "Guidance added",
+            "summary": "Installed the Codex guidance bundle in this workspace.",
+            "sections": [
+                {
+                    "type": "kv",
+                    "title": "Output",
+                    "title_style": "plain",
+                    "layout": "aligned",
+                    "items": [
+                        {
+                            "label": "Entry file",
+                            "value": format!("`{}`", display_path(report.root_output_path.as_path()))
+                        },
+                        {
+                            "label": "Bundle",
+                            "value": format!("`{}`", display_path(report.guidance_root.as_path()))
+                        },
+                        {
+                            "label": "Files",
+                            "value": report.artifact_paths.len()
+                        }
+                    ]
+                }
+            ]
+        }
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GuidanceStyle {
     Codex,
@@ -253,25 +305,16 @@ fn run_impl(sub_m: &ArgMatches) -> Result<(), String> {
     let current_dir = std::env::current_dir()
         .map_err(|error| format!("Failed to resolve current directory: {error}"))?;
     let report = write_guidance_bundle(&current_dir, style)?;
-
-    println!(
-        "✅ Wrote guidance file: {}",
-        report.root_output_path.display()
-    );
-    println!(
-        "ℹ️ Added offline guidance bundle: {}",
-        report.guidance_root.display()
-    );
-    for artifact_path in report.artifact_paths.iter().skip(1) {
-        println!("   - {}", artifact_path.display());
-    }
+    ui::account_status::render_backend_ui(&guidance_success_ui_response(&report));
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{write_guidance_bundle, GuidanceStyle};
+    use super::{
+        guidance_success_ui_response, write_guidance_bundle, GuidanceBundleReport, GuidanceStyle,
+    };
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -411,5 +454,30 @@ mod tests {
         assert!(error.contains("already exist"));
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn guidance_success_ui_uses_compact_output_section() {
+        let report = GuidanceBundleReport {
+            root_output_path: PathBuf::from("./AGENTS.md"),
+            guidance_root: PathBuf::from("./.cargo-ai/guidance"),
+            artifact_paths: vec![
+                PathBuf::from("./AGENTS.md"),
+                PathBuf::from("./.cargo-ai/guidance/start-here.md"),
+            ],
+        };
+
+        let response = guidance_success_ui_response(&report);
+
+        assert_eq!(response["ui"]["title"].as_str(), Some("Guidance added"));
+        assert_eq!(
+            response["ui"]["sections"][0]["items"][0]["value"].as_str(),
+            Some("`./AGENTS.md`")
+        );
+        assert_eq!(
+            response["ui"]["sections"][0]["items"][1]["value"].as_str(),
+            Some("`./.cargo-ai/guidance`")
+        );
+        assert_eq!(response["ui"]["sections"][0]["items"][2]["value"], 2);
     }
 }

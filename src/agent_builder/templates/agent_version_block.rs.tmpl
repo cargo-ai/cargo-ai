@@ -101,6 +101,21 @@ fn generated_agent_inspect_value() -> serde_json::Value {
 }
 
 #[allow(dead_code)]
+fn push_aligned_lines(lines: &mut Vec<String>, title: &str, items: &[(&str, String)]) {
+    if items.is_empty() {
+        return;
+    }
+
+    lines.push(String::new());
+    lines.push(title.to_string());
+
+    let label_width = items.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
+    for (label, value) in items {
+        lines.push(format!("  {label:<width$}  {value}", width = label_width));
+    }
+}
+
+#[allow(dead_code)]
 fn print_agent_version_status() {
     let provenance = generated_agent_provenance();
     let generated_by_version = provenance
@@ -121,35 +136,60 @@ fn print_agent_version_status() {
         local_cargo_ai_version.as_deref(),
         local_template_version.as_deref(),
     );
-
-    println!("agent_version_status = \"{}\"", status);
-    println!(
-        "generated_by_cargo_ai_version = \"{}\"",
-        generated_by_version
-    );
-    println!(
-        "generated_with_template_schema_version = \"{}\"",
-        generated_template_version
-    );
-    println!(
-        "local_cargo_ai_version = \"{}\"",
-        local_cargo_ai_version.as_deref().unwrap_or("unknown")
-    );
-    println!(
-        "local_template_schema_version = \"{}\"",
-        local_template_version.as_deref().unwrap_or("unknown")
-    );
-
-    if status == __SYNC_STATUS_IN_SYNC__ {
-        println!("guidance = \"Agent provenance matches local Cargo-AI metadata.\"");
+    let (icon, sync_label, summary) = if status == __SYNC_STATUS_IN_SYNC__ {
+        (
+            "✓",
+            "In sync",
+            "Agent provenance matches local Cargo AI metadata.".to_string(),
+        )
     } else if status == __SYNC_STATUS_OUT_OF_SYNC__ {
-        println!(
-            "guidance = \"Agent is out of sync with local Cargo-AI metadata. Re-hatch this agent with the latest cargo-ai (use --force to overwrite).\""
-        );
+        (
+            "!",
+            "Out of sync",
+            "Agent is out of sync with local Cargo AI metadata. Re-hatch this agent with the latest cargo-ai (use --force to overwrite).".to_string(),
+        )
     } else {
-        println!(
-            "guidance = \"Local Cargo-AI metadata is unavailable. Run cargo ai version on this machine, then re-run this command.\""
-        );
+        (
+            "!",
+            "Unknown",
+            "Local Cargo AI metadata is unavailable. Run `cargo ai version` on this machine, then re-run this command.".to_string(),
+        )
+    };
+
+    println!("{icon} Agent version status");
+    println!("{summary}");
+
+    let mut lines = Vec::new();
+    push_aligned_lines(
+        &mut lines,
+        "Versions",
+        &[
+            ("Agent cargo-ai", generated_by_version.to_string()),
+            ("Agent template", generated_template_version.to_string()),
+            (
+                "Local cargo-ai",
+                local_cargo_ai_version
+                    .as_deref()
+                    .unwrap_or("unknown")
+                    .to_string(),
+            ),
+            (
+                "Local template",
+                local_template_version
+                    .as_deref()
+                    .unwrap_or("unknown")
+                    .to_string(),
+            ),
+        ],
+    );
+    push_aligned_lines(
+        &mut lines,
+        "Status",
+        &[("Sync", sync_label.to_string())],
+    );
+
+    for line in lines {
+        println!("{line}");
     }
 }
 
@@ -165,19 +205,31 @@ fn print_agent_inspect(as_json: bool) {
         return;
     }
 
-    println!(
-        "generated_by_cargo_ai_version = \"{}\"",
-        GENERATED_BY_CARGO_AI_VERSION
+    println!("✓ Agent inspect");
+    println!("Embedded agent provenance and definition.");
+
+    let mut lines = Vec::new();
+    push_aligned_lines(
+        &mut lines,
+        "Build",
+        &[
+            ("Cargo AI version", GENERATED_BY_CARGO_AI_VERSION.to_string()),
+            (
+                "Template schema",
+                GENERATED_WITH_TEMPLATE_SCHEMA_VERSION.to_string(),
+            ),
+            ("Build id", AGENT_BUILD_ID.to_string()),
+            ("Target", AGENT_TARGET_TRIPLE.to_string()),
+            ("Definition SHA", AGENT_DEFINITION_SHA256.to_string()),
+            ("Built at", AGENT_BUILD_TIMESTAMP_UTC.to_string()),
+        ],
     );
-    println!(
-        "generated_with_template_schema_version = \"{}\"",
-        GENERATED_WITH_TEMPLATE_SCHEMA_VERSION
-    );
-    println!("agent_build_id = \"{}\"", AGENT_BUILD_ID);
-    println!("target_triple = \"{}\"", AGENT_TARGET_TRIPLE);
-    println!("definition_sha256 = \"{}\"", AGENT_DEFINITION_SHA256);
-    println!("build_timestamp_utc = \"{}\"", AGENT_BUILD_TIMESTAMP_UTC);
-    println!("embedded_definition_json =");
+
+    for line in lines {
+        println!("{line}");
+    }
+    println!();
+    println!("Embedded definition");
 
     let embedded_definition = inspect_value
         .get("embedded_definition_json")

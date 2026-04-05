@@ -225,11 +225,11 @@ fn auth_status_ui_response(status: &AuthStatusJson) -> Value {
     ) {
         sections.push(json!({
             "type": "kv",
-            "title": "Next steps",
+            "title": "Available commands",
             "title_style": "plain",
             "layout": "aligned",
             "items": [
-                {"label": "Login", "value": "cargo ai auth login openai"}
+                {"label": "Login", "value": "`cargo ai auth login openai`"}
             ]
         }));
     }
@@ -242,6 +242,95 @@ fn auth_status_ui_response(status: &AuthStatusJson) -> Value {
             "title": "Auth status",
             "summary": summary,
             "sections": sections
+        }
+    })
+}
+
+fn auth_login_success_ui_response(profile_name: Option<&str>, set_default: bool) -> Value {
+    let mut sections = Vec::new();
+
+    if let Some(profile_name) = profile_name {
+        sections.push(json!({
+            "type": "kv",
+            "title": "Profile",
+            "title_style": "plain",
+            "layout": "aligned",
+            "items": [
+                {"label": "Name", "value": profile_name},
+                {"label": "Auth mode", "value": ProfileAuthMode::OpenaiAccount.as_str()},
+                {"label": "Default", "value": if set_default { "Yes" } else { "No" }}
+            ]
+        }));
+    }
+
+    sections.push(json!({
+        "type": "kv",
+        "title": "Next steps",
+        "title_style": "plain",
+        "layout": "aligned",
+        "items": [
+            {"label": "Check auth", "value": "`cargo ai auth status`"}
+        ]
+    }));
+
+    json!({
+        "ui": {
+            "schema": "1.0",
+            "kind": "success",
+            "icon": "✓",
+            "title": "OpenAI login complete",
+            "summary": "Codex session detected and Cargo AI can use it.",
+            "sections": sections
+        }
+    })
+}
+
+fn auth_logout_success_ui_response(global: bool) -> Value {
+    let summary = if global {
+        "Cargo AI local OpenAI session cleared and Codex was logged out."
+    } else {
+        "Cargo AI local OpenAI session cleared."
+    };
+    let codex_state = if global {
+        "Logged out"
+    } else {
+        "Still signed in"
+    };
+    let scope = if global {
+        "Cargo AI + Codex"
+    } else {
+        "Cargo AI only"
+    };
+
+    json!({
+        "ui": {
+            "schema": "1.0",
+            "kind": "success",
+            "icon": "✓",
+            "title": "Logged out",
+            "summary": summary,
+            "sections": [
+                {
+                    "type": "kv",
+                    "title": "Session",
+                    "title_style": "plain",
+                    "layout": "aligned",
+                    "items": [
+                        {"label": "Scope", "value": scope},
+                        {"label": "Codex", "value": codex_state}
+                    ]
+                },
+                {
+                    "type": "kv",
+                    "title": "Available commands",
+                    "title_style": "plain",
+                    "layout": "aligned",
+                    "items": [
+                        {"label": "Sign in again", "value": "`cargo ai auth login openai`"},
+                        {"label": "Check auth", "value": "`cargo ai auth status`"}
+                    ]
+                }
+            ]
         }
     })
 }
@@ -298,7 +387,8 @@ async fn run_login_openai(login_openai_m: &ArgMatches) -> bool {
         }
     }
 
-    println!("Starting OpenAI browser login via Codex...");
+    println!("Starting OpenAI browser login...");
+    println!("Your browser will open to complete sign-in.");
     if let Err(error) = run_codex_login() {
         eprintln!("❌ {error}");
         return false;
@@ -341,16 +431,10 @@ async fn run_login_openai(login_openai_m: &ArgMatches) -> bool {
         }
     }
 
-    println!("✅ OpenAI login complete (Codex session detected).");
-    if let Some(profile_name) = profile_name {
-        println!(
-            "Profile '{profile_name}' auth mode set to '{}'.",
-            ProfileAuthMode::OpenaiAccount.as_str()
-        );
-        if set_default {
-            println!("Profile '{profile_name}' set as default.");
-        }
-    }
+    ui::account_status::render_backend_ui(&auth_login_success_ui_response(
+        profile_name,
+        set_default,
+    ));
 
     true
 }
@@ -381,10 +465,13 @@ async fn run_status(status_m: &ArgMatches) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{auth_status_summary, auth_status_ui_response, AuthStatusJson};
+    use super::{
+        auth_login_success_ui_response, auth_logout_success_ui_response, auth_status_summary,
+        auth_status_ui_response, AuthStatusJson,
+    };
 
     #[test]
-    fn auth_status_logged_out_local_has_login_next_step() {
+    fn auth_status_logged_out_local_has_login_available_command() {
         let response = auth_status_ui_response(&AuthStatusJson {
             provider: "openai",
             session_state: "logged_out_local".to_string(),
@@ -397,8 +484,12 @@ mod tests {
         assert_eq!(response["ui"]["title"].as_str(), Some("Auth status"));
         assert_eq!(response["ui"]["icon"].as_str(), Some("!"));
         assert_eq!(
+            response["ui"]["sections"][3]["title"].as_str(),
+            Some("Available commands")
+        );
+        assert_eq!(
             response["ui"]["sections"][3]["items"][0]["value"].as_str(),
-            Some("cargo ai auth login openai")
+            Some("`cargo ai auth login openai`")
         );
     }
 
@@ -415,6 +506,47 @@ mod tests {
 
         assert_eq!(icon, "✓");
         assert_eq!(summary, "OpenAI session active.");
+    }
+
+    #[test]
+    fn auth_login_success_uses_profile_section_and_next_step() {
+        let response = auth_login_success_ui_response(Some("my_open_ai"), true);
+
+        assert_eq!(
+            response["ui"]["title"].as_str(),
+            Some("OpenAI login complete")
+        );
+        assert_eq!(
+            response["ui"]["sections"][0]["items"][0]["value"].as_str(),
+            Some("my_open_ai")
+        );
+        assert_eq!(
+            response["ui"]["sections"][1]["title"].as_str(),
+            Some("Next steps")
+        );
+        assert_eq!(
+            response["ui"]["sections"][1]["items"][0]["value"].as_str(),
+            Some("`cargo ai auth status`")
+        );
+    }
+
+    #[test]
+    fn auth_logout_success_uses_available_commands() {
+        let response = auth_logout_success_ui_response(false);
+
+        assert_eq!(response["ui"]["title"].as_str(), Some("Logged out"));
+        assert_eq!(
+            response["ui"]["sections"][1]["title"].as_str(),
+            Some("Available commands")
+        );
+        assert_eq!(
+            response["ui"]["sections"][1]["items"][0]["value"].as_str(),
+            Some("`cargo ai auth login openai`")
+        );
+        assert_eq!(
+            response["ui"]["sections"][1]["items"][1]["value"].as_str(),
+            Some("`cargo ai auth status`")
+        );
     }
 }
 
@@ -457,11 +589,7 @@ async fn run_logout(logout_m: &ArgMatches) -> bool {
         return false;
     }
 
-    if global {
-        println!("✅ OpenAI logged out globally via Codex and logged out for Cargo AI.");
-    } else {
-        println!("✅ OpenAI logged out for Cargo AI only. Codex session remains signed in.");
-    }
+    ui::account_status::render_backend_ui(&auth_logout_success_ui_response(global));
     true
 }
 

@@ -131,11 +131,11 @@ fn credential_store_status_ui_response(status: &store::SecretStoreStatus) -> Val
     {
         sections.push(json!({
             "type": "kv",
-            "title": "Next steps",
+            "title": "Available commands",
             "title_style": "plain",
             "layout": "aligned",
             "items": [
-                {"label": "Set mode", "value": "cargo ai credentials store set <file|keychain>"}
+                {"label": "Set mode", "value": "`cargo ai credentials store set <file|keychain>`"}
             ]
         }));
     }
@@ -146,6 +146,66 @@ fn credential_store_status_ui_response(status: &store::SecretStoreStatus) -> Val
             "kind": kind,
             "icon": icon,
             "title": "Credential-store status",
+            "summary": summary,
+            "sections": sections
+        }
+    })
+}
+
+fn credential_store_set_success_ui_response(
+    target_mode: SecretStoreMode,
+    migrated_profile_tokens: Option<usize>,
+    migrated_account_tokens: Option<bool>,
+    changing_mode: bool,
+) -> Value {
+    let title = if changing_mode {
+        "Credential-store mode updated"
+    } else {
+        "Credential-store mode unchanged"
+    };
+    let summary = if changing_mode {
+        format!("Credential storage now uses `{}`.", target_mode.as_str())
+    } else {
+        format!(
+            "Credential storage already uses `{}`.",
+            target_mode.as_str()
+        )
+    };
+
+    let mut sections = Vec::new();
+
+    if let Some(migrated_profile_tokens) = migrated_profile_tokens {
+        sections.push(json!({
+            "type": "kv",
+            "title": "Migration",
+            "title_style": "plain",
+            "layout": "aligned",
+            "items": [
+                {"label": "Profile tokens", "value": format!("{migrated_profile_tokens} migrated")},
+                {
+                    "label": "Account tokens",
+                    "value": if migrated_account_tokens.unwrap_or(false) { "Yes" } else { "No" }
+                }
+            ]
+        }));
+    }
+
+    sections.push(json!({
+        "type": "kv",
+        "title": "Available commands",
+        "title_style": "plain",
+        "layout": "aligned",
+        "items": [
+            {"label": "Check status", "value": "`cargo ai credentials store status`"}
+        ]
+    }));
+
+    json!({
+        "ui": {
+            "schema": "1.0",
+            "kind": "success",
+            "icon": "✓",
+            "title": title,
             "summary": summary,
             "sections": sections
         }
@@ -282,16 +342,12 @@ fn run_set(sub_m: &ArgMatches) -> bool {
             return false;
         }
 
-        println!(
-            "✅ Credential-store mode set to '{}'. Migrated {} profile token(s); account tokens migrated: {}.",
-            target_mode.as_str(),
-            outcome.migrated_profile_tokens,
-            if outcome.migrated_account_tokens {
-                "yes"
-            } else {
-                "no"
-            }
-        );
+        ui::account_status::render_backend_ui(&credential_store_set_success_ui_response(
+            target_mode,
+            Some(outcome.migrated_profile_tokens),
+            Some(outcome.migrated_account_tokens),
+            changing_mode,
+        ));
         return true;
     }
 
@@ -300,29 +356,27 @@ fn run_set(sub_m: &ArgMatches) -> bool {
         return false;
     }
 
-    if changing_mode {
-        println!(
-            "✅ Credential-store mode set to '{}'. No credentials required migration.",
-            target_mode.as_str()
-        );
-    } else {
-        println!(
-            "Credential-store mode is already '{}'.",
-            target_mode.as_str()
-        );
-    }
+    ui::account_status::render_backend_ui(&credential_store_set_success_ui_response(
+        target_mode,
+        None,
+        None,
+        changing_mode,
+    ));
 
     true
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{credential_store_status_ui_response, credential_store_summary};
+    use super::{
+        credential_store_set_success_ui_response, credential_store_status_ui_response,
+        credential_store_summary,
+    };
     use crate::config::schema::{default_secret_store_mode, SecretStoreMode};
     use crate::credentials::store::SecretStoreStatus;
 
     #[test]
-    fn credential_store_unset_mode_has_next_step() {
+    fn credential_store_unset_mode_has_available_command() {
         let response = credential_store_status_ui_response(&SecretStoreStatus {
             configured_mode: None,
             default_mode: default_secret_store_mode(),
@@ -334,8 +388,12 @@ mod tests {
 
         assert_eq!(response["ui"]["icon"].as_str(), Some("!"));
         assert_eq!(
+            response["ui"]["sections"][2]["title"].as_str(),
+            Some("Available commands")
+        );
+        assert_eq!(
             response["ui"]["sections"][2]["items"][0]["value"].as_str(),
-            Some("cargo ai credentials store set <file|keychain>")
+            Some("`cargo ai credentials store set <file|keychain>`")
         );
     }
 
@@ -352,6 +410,33 @@ mod tests {
 
         assert_eq!(icon, "!");
         assert!(summary.contains("keychain backend is unavailable"));
+    }
+
+    #[test]
+    fn credential_store_set_success_reports_migration_and_status_command() {
+        let response = credential_store_set_success_ui_response(
+            SecretStoreMode::Keychain,
+            Some(2),
+            Some(true),
+            true,
+        );
+
+        assert_eq!(
+            response["ui"]["title"].as_str(),
+            Some("Credential-store mode updated")
+        );
+        assert_eq!(
+            response["ui"]["sections"][0]["items"][0]["value"].as_str(),
+            Some("2 migrated")
+        );
+        assert_eq!(
+            response["ui"]["sections"][1]["title"].as_str(),
+            Some("Available commands")
+        );
+        assert_eq!(
+            response["ui"]["sections"][1]["items"][0]["value"].as_str(),
+            Some("`cargo ai credentials store status`")
+        );
     }
 }
 

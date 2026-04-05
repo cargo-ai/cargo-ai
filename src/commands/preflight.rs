@@ -199,9 +199,21 @@ fn render_preflight_failure_lines(
 
     push_list_section(&mut lines, "Problem", problems);
     push_plain_section(&mut lines, detail_title.unwrap_or("Details"), detail_lines);
-    push_aligned_section(&mut lines, "Next steps", next_steps);
+    let recovery_items = next_steps
+        .iter()
+        .map(|(label, value)| (*label, format_recovery_value(value)))
+        .collect::<Vec<_>>();
+    push_aligned_section(&mut lines, "Recovery", &recovery_items);
 
     lines
+}
+
+fn format_recovery_value(value: &str) -> String {
+    if value.contains("cargo ai ") || value.contains("codex ") {
+        format!("`{value}`")
+    } else {
+        value.to_string()
+    }
 }
 
 fn print_preflight_failure(
@@ -1384,7 +1396,7 @@ mod tests {
     }
 
     #[test]
-    fn render_preflight_failure_lines_include_context_and_next_steps() {
+    fn render_preflight_failure_lines_include_context_and_recovery() {
         let context = crate::commands::preflight_actions::ActionProviderContext {
             provider: ProviderKind::OpenAi,
             profile_name: Some("my_open_ai".to_string()),
@@ -1412,8 +1424,27 @@ mod tests {
         assert!(rendered.contains("Profile  my_open_ai"));
         assert!(rendered.contains("Auth     chatgpt_account"));
         assert!(rendered.contains("- Reason: missing /tmp/demo.pdf"));
+        assert!(rendered.contains("\nRecovery\n"));
         assert!(rendered
             .contains("Fix inputs  Verify referenced files and URLs exist and are readable."));
+    }
+
+    #[test]
+    fn render_preflight_failure_lines_backtick_command_recovery_values() {
+        let lines = render_preflight_failure_lines(
+            "Provider output did not match the required schema.",
+            None,
+            &[String::from("Reason: invalid JSON body")],
+            None,
+            &[],
+            &[(
+                "Retry",
+                "cargo ai preflight --profile my_open_ai".to_string(),
+            )],
+        );
+        let rendered = lines.join("\n");
+
+        assert!(rendered.contains("Retry  `cargo ai preflight --profile my_open_ai`"));
     }
 
     #[test]

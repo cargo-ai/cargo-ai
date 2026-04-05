@@ -240,28 +240,135 @@ fn account_pull_success_ui_response(source: &AccountAgentSourceDetails, file_pat
                     "title_style": "plain",
                     "layout": "aligned",
                     "items": [
-                        {"label": "File", "value": file_display}
+                        {"label": "File", "value": format!("`{file_display}`")}
                     ]
                 },
                 {
                     "type": "kv",
-                    "title": "Next steps",
+                    "title": "Available commands",
                     "title_style": "plain",
                     "layout": "aligned",
                     "items": [
                         {
                             "label": "Hatch agent",
-                            "value": format!("cargo ai account hatch {}{}", source.agent, selector_suffix)
+                            "value": format!("`cargo ai account hatch {}{}`", source.agent, selector_suffix)
                         },
                         {
                             "label": "Print JSON",
-                            "value": format!("cargo ai account agents pull {} --stdout{}", source.agent, selector_suffix)
+                            "value": format!("`cargo ai account agents pull {} --stdout{}`", source.agent, selector_suffix)
                         }
                     ]
                 }
             ]
         }
     })
+}
+
+fn restyle_agents_list_ui(response: &mut Value, truncation: Option<(usize, usize)>) {
+    let agents = match response.get("agents").and_then(|value| value.as_array()) {
+        Some(agents) => agents,
+        None => return,
+    };
+
+    let count = agents.len();
+    let summary = match truncation {
+        Some((shown, total)) if total > shown => {
+            format!("Showing {shown} of {total} account agents.")
+        }
+        _ if count == 0 => "No account agents found.".to_string(),
+        _ => format!("{count} account agents found."),
+    };
+
+    let mut sections = Vec::new();
+
+    if count == 0 {
+        sections.push(json!({
+            "type": "notice",
+            "title": "Agents",
+            "message": "No agents were found for this query."
+        }));
+        sections.push(json!({
+            "type": "kv",
+            "title": "Available commands",
+            "title_style": "plain",
+            "layout": "aligned",
+            "items": [
+                {"label": "Push agent", "value": "`cargo ai account agents push --name <agent> --json-file ./<agent>.json`"}
+            ]
+        }));
+    } else {
+        let items: Vec<Value> = agents
+            .iter()
+            .filter_map(|item| {
+                let name = item
+                    .get("agent_name")
+                    .and_then(|value| value.as_str())?
+                    .trim();
+                let path = item
+                    .get("definition_path")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("/")
+                    .trim();
+                if name.is_empty() || path.is_empty() {
+                    return None;
+                }
+
+                let visibility = match item.get("is_public").and_then(|value| value.as_bool()) {
+                    Some(true) => "public",
+                    Some(false) => "private",
+                    None => "unknown",
+                };
+                let archived_suffix =
+                    match item.get("is_archived").and_then(|value| value.as_bool()) {
+                        Some(true) => ", archived",
+                        _ => "",
+                    };
+
+                Some(json!({
+                    "label": name,
+                    "value": format!("{path}  {visibility}{archived_suffix}")
+                }))
+            })
+            .collect();
+
+        sections.push(json!({
+            "type": "kv",
+            "title": "Agents",
+            "title_style": "plain",
+            "layout": "aligned",
+            "items": items
+        }));
+
+        if let Some((shown, total)) = truncation {
+            if total > shown {
+                sections.push(json!({
+                    "type": "notice",
+                    "title": "Details",
+                    "message": format!("Showing {shown} of {total} agents. Use `--limit <N>` or `--all` to adjust output.")
+                }));
+            }
+        }
+
+        sections.push(json!({
+            "type": "kv",
+            "title": "Available commands",
+            "title_style": "plain",
+            "layout": "aligned",
+            "items": [
+                {"label": "Pull agent", "value": "`cargo ai account agents pull <agent>`"},
+                {"label": "Push agent", "value": "`cargo ai account agents push --name <agent> --json-file ./<agent>.json`"}
+            ]
+        }));
+    }
+
+    response["ui"] = json!({
+        "schema": "1.0",
+        "kind": "success",
+        "icon": "✓",
+        "title": "Agents",
+        "summary": summary,
+        "sections": sections
+    });
 }
 
 fn account_hatch_presentation(
@@ -949,15 +1056,17 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         _ => None,
     };
 
+    let is_list_success = response
+        .get("type")
+        .and_then(|value| value.as_str())
+        .map(|value| value == "account_agents_list_succeeded")
+        .unwrap_or(false);
+    if is_list_success {
+        restyle_agents_list_ui(&mut response, list_display_truncation);
+    }
+
     // 6. Render backend-provided UI when available, fallback to raw JSON.
     render_account_agents_response(&response);
-
-    if let Some((shown, total)) = list_display_truncation {
-        println!(
-            "ℹ️ Showing {} of {} agents. Use --limit <N> or --all to adjust output.",
-            shown, total
-        );
-    }
 
     response
         .get("status")
@@ -1060,7 +1169,7 @@ mod tests {
     use super::{
         account_agent_selector_suffix, account_agent_source_details,
         account_pull_success_ui_response, hatch_mode_from_check_flag, resolve_account_hatch_names,
-        AccountAgentSourceDetails,
+        restyle_agents_list_ui, AccountAgentSourceDetails,
     };
     use serde_json::json;
     use std::path::Path;
@@ -1139,7 +1248,7 @@ mod tests {
     }
 
     #[test]
-    fn account_pull_success_ui_includes_selector_specific_next_steps() {
+    fn account_pull_success_ui_includes_selector_specific_available_commands() {
         let response = account_pull_success_ui_response(
             &AccountAgentSourceDetails {
                 owner: "shared".to_string(),
@@ -1153,16 +1262,62 @@ mod tests {
             .as_array()
             .expect("next steps should be rendered as kv items");
         assert_eq!(
+            response["ui"]["sections"][2]["title"].as_str(),
+            Some("Available commands")
+        );
+        assert_eq!(
             next_step_items[0]["value"].as_str(),
             Some(
-                "cargo ai account hatch weather_test --owner-handle shared --definition-path /agents/public"
+                "`cargo ai account hatch weather_test --owner-handle shared --definition-path /agents/public`"
             )
         );
         assert_eq!(
             next_step_items[1]["value"].as_str(),
             Some(
-                "cargo ai account agents pull weather_test --stdout --owner-handle shared --definition-path /agents/public"
+                "`cargo ai account agents pull weather_test --stdout --owner-handle shared --definition-path /agents/public`"
             )
+        );
+    }
+
+    #[test]
+    fn restyle_agents_list_ui_uses_aligned_sections_and_truncation_notice() {
+        let mut response = json!({
+            "agents": [
+                {
+                    "agent_name": "weather",
+                    "definition_path": "/",
+                    "is_public": true,
+                    "is_archived": false
+                }
+            ]
+        });
+
+        restyle_agents_list_ui(&mut response, Some((1, 2)));
+
+        assert_eq!(response["ui"]["title"].as_str(), Some("Agents"));
+        assert_eq!(
+            response["ui"]["summary"].as_str(),
+            Some("Showing 1 of 2 account agents.")
+        );
+        assert_eq!(
+            response["ui"]["sections"][0]["title"].as_str(),
+            Some("Agents")
+        );
+        assert_eq!(
+            response["ui"]["sections"][0]["items"][0]["value"].as_str(),
+            Some("/  public")
+        );
+        assert_eq!(
+            response["ui"]["sections"][1]["title"].as_str(),
+            Some("Details")
+        );
+        assert_eq!(
+            response["ui"]["sections"][2]["title"].as_str(),
+            Some("Available commands")
+        );
+        assert_eq!(
+            response["ui"]["sections"][2]["items"][0]["value"].as_str(),
+            Some("`cargo ai account agents pull <agent>`")
         );
     }
 

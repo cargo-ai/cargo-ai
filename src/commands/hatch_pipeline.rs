@@ -389,7 +389,10 @@ fn render_hatch_success_lines(summary: &HatchRunSummary) -> Vec<String> {
 
     if let Some(binary_path) = &summary.binary_path {
         let output_items = vec![
-            ("Binary", display_path(binary_path.as_path())),
+            (
+                "Binary",
+                format!("`{}`", display_path(binary_path.as_path())),
+            ),
             ("Target", summary.build_target.clone()),
         ];
         push_aligned_section(&mut lines, "Output", &output_items);
@@ -413,7 +416,7 @@ fn render_hatch_success_lines(summary: &HatchRunSummary) -> Vec<String> {
     if let Some(binary_path) = &summary.binary_path {
         let next_step_items = vec![(
             "Run agent",
-            format!("{} --help", display_path(binary_path.as_path())),
+            format!("`{} --help`", display_path(binary_path.as_path())),
         )];
         push_aligned_section(&mut lines, "Next steps", &next_step_items);
     }
@@ -662,11 +665,11 @@ mod tests {
         assert!(rendered.contains("Built local agent `weather_test`."));
         assert!(rendered.contains("Type  Registry"));
         assert!(rendered.contains("Name  weather_test"));
-        assert!(rendered.contains("Binary  ./weather_test"));
+        assert!(rendered.contains("Binary  `./weather_test`"));
         assert!(rendered.contains("Target  aarch64-apple-darwin"));
         assert!(rendered.contains("Template   Reused warmed template"));
         assert!(rendered.contains("Workspace  Removed"));
-        assert!(rendered.contains("Run agent  ./weather_test --help"));
+        assert!(rendered.contains("Run agent  `./weather_test --help`"));
     }
 
     #[test]
