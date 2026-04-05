@@ -5,20 +5,13 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Guard that keeps an agent lock held for the lifetime of the value.
 pub struct AgentLockGuard {
     _file: File,
     path: PathBuf,
-}
-
-impl AgentLockGuard {
-    /// Returns lock file path for diagnostics.
-    pub fn path(&self) -> &Path {
-        self.path.as_path()
-    }
 }
 
 impl Drop for AgentLockGuard {
