@@ -1,5 +1,6 @@
 //! Runtime behavior for `cargo ai account agents`.
 use clap::ArgMatches;
+use serde_json::{json, Value};
 
 use crate::agent_builder::build_target::BuildTarget;
 use crate::infra_api;
@@ -26,6 +27,13 @@ struct AccountHatchCommand {
     keep_project: bool,
     build_target: BuildTarget,
     output_dir: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AccountAgentSourceDetails {
+    owner: String,
+    agent: String,
+    path: String,
 }
 
 fn hatch_mode_from_check_flag(check_only: bool) -> crate::commands::hatch_pipeline::HatchMode {
@@ -121,7 +129,7 @@ fn parse_hatch_command(hatch_m: &ArgMatches) -> Result<AccountHatchCommand, Stri
 async fn request_hatch_pull(
     access_token: &str,
     hatch: &AccountHatchCommand,
-) -> Result<serde_json::Value, String> {
+) -> Result<Value, String> {
     infra_api::account::agents::pull_agent(
         INFRA_BASE_URL,
         access_token,
@@ -133,7 +141,7 @@ async fn request_hatch_pull(
     .map_err(|error| format!("{error:?}"))
 }
 
-fn render_account_agents_response(response: &serde_json::Value) {
+fn render_account_agents_response(response: &Value) {
     if !ui::account_status::render_backend_ui(response) {
         match serde_json::to_string_pretty(response) {
             Ok(pretty) => println!("{pretty}"),
@@ -142,36 +150,141 @@ fn render_account_agents_response(response: &serde_json::Value) {
     }
 }
 
-fn account_hatch_presentation(
-    hatch: &AccountHatchCommand,
-    response: &serde_json::Value,
-) -> crate::commands::hatch_pipeline::HatchPresentation {
+fn display_path(path: &Path) -> String {
+    if path.is_relative() {
+        return path.display().to_string();
+    }
+
+    match std::env::current_dir() {
+        Ok(current_dir) => match path.strip_prefix(&current_dir) {
+            Ok(relative) if relative.as_os_str().is_empty() => ".".to_string(),
+            Ok(relative) => format!("./{}", relative.display()),
+            Err(_) => path.display().to_string(),
+        },
+        Err(_) => path.display().to_string(),
+    }
+}
+
+fn account_agent_source_details(
+    source_name: &str,
+    owner_handle: Option<&str>,
+    definition_path: Option<&str>,
+    response: &Value,
+) -> AccountAgentSourceDetails {
     let owner = response
         .get("owner_handle")
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| hatch.owner_handle.as_deref().unwrap_or("self"));
+        .unwrap_or_else(|| owner_handle.unwrap_or("self"));
     let agent = response
         .get("agent")
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or(hatch.source_name.as_str());
+        .unwrap_or(source_name);
     let path = response
         .get("definition_path")
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| hatch.definition_path.as_deref().unwrap_or("/"));
+        .unwrap_or_else(|| definition_path.unwrap_or("/"));
+
+    AccountAgentSourceDetails {
+        owner: owner.to_string(),
+        agent: agent.to_string(),
+        path: path.to_string(),
+    }
+}
+
+fn account_agent_selector_suffix(source: &AccountAgentSourceDetails) -> String {
+    let mut args = Vec::new();
+
+    if source.owner != "self" {
+        args.push(format!("--owner-handle {}", source.owner));
+    }
+    if source.path != "/" {
+        args.push(format!("--definition-path {}", source.path));
+    }
+
+    if args.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", args.join(" "))
+    }
+}
+
+fn account_pull_success_ui_response(source: &AccountAgentSourceDetails, file_path: &Path) -> Value {
+    let selector_suffix = account_agent_selector_suffix(source);
+    let file_display = display_path(file_path);
+
+    json!({
+        "ui": {
+            "schema": "1.0",
+            "kind": "success",
+            "icon": "✓",
+            "title": "Agent definition saved",
+            "summary": format!("Saved `{}` to `{}`.", source.agent, file_display),
+            "sections": [
+                {
+                    "type": "kv",
+                    "title": "Source",
+                    "title_style": "plain",
+                    "layout": "aligned",
+                    "items": [
+                        {"label": "Owner", "value": source.owner},
+                        {"label": "Agent", "value": source.agent},
+                        {"label": "Path", "value": source.path}
+                    ]
+                },
+                {
+                    "type": "kv",
+                    "title": "Output",
+                    "title_style": "plain",
+                    "layout": "aligned",
+                    "items": [
+                        {"label": "File", "value": file_display}
+                    ]
+                },
+                {
+                    "type": "kv",
+                    "title": "Next steps",
+                    "title_style": "plain",
+                    "layout": "aligned",
+                    "items": [
+                        {
+                            "label": "Hatch agent",
+                            "value": format!("cargo ai account hatch {}{}", source.agent, selector_suffix)
+                        },
+                        {
+                            "label": "Print JSON",
+                            "value": format!("cargo ai account agents pull {} --stdout{}", source.agent, selector_suffix)
+                        }
+                    ]
+                }
+            ]
+        }
+    })
+}
+
+fn account_hatch_presentation(
+    hatch: &AccountHatchCommand,
+    response: &Value,
+) -> crate::commands::hatch_pipeline::HatchPresentation {
+    let source = account_agent_source_details(
+        hatch.source_name.as_str(),
+        hatch.owner_handle.as_deref(),
+        hatch.definition_path.as_deref(),
+        response,
+    );
 
     crate::commands::hatch_pipeline::HatchPresentation {
         source: crate::commands::hatch_pipeline::HatchSource::Account {
-            owner: owner.to_string(),
-            agent: agent.to_string(),
-            path: path.to_string(),
+            owner: source.owner,
+            agent: source.agent,
+            path: source.path,
         },
     }
 }
 
-fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &serde_json::Value) -> bool {
+fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &Value) -> bool {
     let is_pull_success = response
         .get("type")
         .and_then(|v| v.as_str())
@@ -738,6 +851,8 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
     let mut pull_stdout_payload: Option<String> = None;
     if let AgentsCommand::Pull {
         name,
+        owner_handle,
+        definition_path,
         json_file,
         stdout,
         force,
@@ -774,6 +889,12 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             } else {
                 Some(format!("{}.json", name))
             };
+            let source = account_agent_source_details(
+                name.as_str(),
+                owner_handle.as_deref(),
+                definition_path.as_deref(),
+                &response,
+            );
 
             if let Some(path) = output_path {
                 if Path::new(&path).exists() && !*force {
@@ -793,9 +914,16 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                 }
 
                 if *stdout {
-                    eprintln!("ℹ️ Saved pulled definition to '{}'.", path);
+                    eprintln!(
+                        "Saved agent definition to '{}'.",
+                        display_path(Path::new(&path))
+                    );
                 } else {
-                    println!("✅ Saved pulled definition to '{}'.", path);
+                    render_account_agents_response(&account_pull_success_ui_response(
+                        &source,
+                        Path::new(&path),
+                    ));
+                    return true;
                 }
             }
 
@@ -929,7 +1057,13 @@ pub async fn run_hatch(hatch_m: &ArgMatches) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{hatch_mode_from_check_flag, resolve_account_hatch_names};
+    use super::{
+        account_agent_selector_suffix, account_agent_source_details,
+        account_pull_success_ui_response, hatch_mode_from_check_flag, resolve_account_hatch_names,
+        AccountAgentSourceDetails,
+    };
+    use serde_json::json;
+    use std::path::Path;
 
     #[test]
     fn account_hatch_name_defaults_remote_source_to_local_name() {
@@ -979,5 +1113,67 @@ mod tests {
             hatch_mode_from_check_flag(false),
             crate::commands::hatch_pipeline::HatchMode::Build
         );
+    }
+
+    #[test]
+    fn account_pull_source_defaults_to_self_and_root_path() {
+        let source = account_agent_source_details(
+            "weather_test",
+            None,
+            None,
+            &json!({
+                "agent": "weather_test",
+                "owner_handle": null,
+                "definition_path": "/"
+            }),
+        );
+
+        assert_eq!(
+            source,
+            AccountAgentSourceDetails {
+                owner: "self".to_string(),
+                agent: "weather_test".to_string(),
+                path: "/".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn account_pull_success_ui_includes_selector_specific_next_steps() {
+        let response = account_pull_success_ui_response(
+            &AccountAgentSourceDetails {
+                owner: "shared".to_string(),
+                agent: "weather_test".to_string(),
+                path: "/agents/public".to_string(),
+            },
+            Path::new("./weather_test.json"),
+        );
+
+        let next_step_items = response["ui"]["sections"][2]["items"]
+            .as_array()
+            .expect("next steps should be rendered as kv items");
+        assert_eq!(
+            next_step_items[0]["value"].as_str(),
+            Some(
+                "cargo ai account hatch weather_test --owner-handle shared --definition-path /agents/public"
+            )
+        );
+        assert_eq!(
+            next_step_items[1]["value"].as_str(),
+            Some(
+                "cargo ai account agents pull weather_test --stdout --owner-handle shared --definition-path /agents/public"
+            )
+        );
+    }
+
+    #[test]
+    fn selector_suffix_omits_self_root_defaults() {
+        let suffix = account_agent_selector_suffix(&AccountAgentSourceDetails {
+            owner: "self".to_string(),
+            agent: "weather_test".to_string(),
+            path: "/".to_string(),
+        });
+
+        assert!(suffix.is_empty());
     }
 }

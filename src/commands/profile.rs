@@ -1,5 +1,6 @@
 //! Runtime behavior for `cargo ai profile`.
 use clap::ArgMatches;
+use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, Read, Write};
 
@@ -8,6 +9,7 @@ use crate::config::loader::{config_path, find_profile, load_config};
 use crate::config::remover::remove_profile;
 use crate::config::schema::{Profile, ProfileAuthMode};
 use crate::credentials::store;
+use crate::ui;
 
 fn parse_auth_mode(raw: &str) -> Option<ProfileAuthMode> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -79,6 +81,29 @@ fn write_config(cfg: &crate::config::schema::Config) -> Result<(), String> {
         .map_err(|error| format!("failed to serialize config: {error}"))?;
     fs::write(&path, serialized)
         .map_err(|error| format!("failed to write '{}': {error}", path.display()))
+}
+
+fn profile_remove_success_ui_response(name: &str) -> Value {
+    json!({
+        "ui": {
+            "schema": "1.0",
+            "kind": "success",
+            "icon": "✓",
+            "title": "Profile removed",
+            "summary": format!("Profile `{name}` was removed."),
+            "sections": [
+                {
+                    "type": "kv",
+                    "title": "Next steps",
+                    "title_style": "plain",
+                    "layout": "aligned",
+                    "items": [
+                        {"label": "List profiles", "value": "cargo ai profile list"}
+                    ]
+                }
+            ]
+        }
+    })
 }
 
 fn run_list() -> bool {
@@ -353,6 +378,7 @@ fn run_remove(remove_m: &ArgMatches) -> bool {
             eprintln!("Failed to remove profile '{}': {error}", name);
             false
         } else {
+            ui::account_status::render_backend_ui(&profile_remove_success_ui_response(name));
             true
         }
     } else {
@@ -385,7 +411,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_auth_mode;
+    use super::{parse_auth_mode, profile_remove_success_ui_response};
     use crate::config::schema::ProfileAuthMode;
 
     #[test]
@@ -397,5 +423,15 @@ mod tests {
             Some(ProfileAuthMode::OpenaiAccount)
         );
         assert_eq!(parse_auth_mode("wat"), None);
+    }
+
+    #[test]
+    fn profile_remove_success_includes_list_profiles_next_step() {
+        let response = profile_remove_success_ui_response("openai-prod");
+        assert_eq!(response["ui"]["title"].as_str(), Some("Profile removed"));
+        assert_eq!(
+            response["ui"]["sections"][0]["items"][0]["value"].as_str(),
+            Some("cargo ai profile list")
+        );
     }
 }

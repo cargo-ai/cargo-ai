@@ -76,6 +76,154 @@ fn profile_selection_messages(
     }
 }
 
+fn provider_display_name(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Ollama => "ollama",
+        ProviderKind::OpenAi => "openai",
+    }
+}
+
+fn display_profile_name(profile_name: Option<&str>) -> &str {
+    profile_name.unwrap_or("none")
+}
+
+fn display_model_name(model: &str) -> &str {
+    if model.trim().is_empty() {
+        "none"
+    } else {
+        model
+    }
+}
+
+fn normalize_cli_issue(message: &str) -> String {
+    message
+        .trim()
+        .strip_prefix("❌ ")
+        .unwrap_or(message.trim())
+        .to_string()
+}
+
+fn push_aligned_section(lines: &mut Vec<String>, title: &str, items: &[(&str, String)]) {
+    if items.is_empty() {
+        return;
+    }
+
+    lines.push(String::new());
+    lines.push(title.to_string());
+
+    let label_width = items
+        .iter()
+        .map(|(label, _)| label.len())
+        .max()
+        .unwrap_or(0);
+    for (label, value) in items {
+        lines.push(format!("  {label:<width$}  {value}", width = label_width));
+    }
+}
+
+fn push_list_section(lines: &mut Vec<String>, title: &str, items: &[String]) {
+    let rendered_items: Vec<String> = items
+        .iter()
+        .map(|item| normalize_cli_issue(item))
+        .filter(|item| !item.trim().is_empty())
+        .collect();
+
+    if rendered_items.is_empty() {
+        return;
+    }
+
+    lines.push(String::new());
+    lines.push(title.to_string());
+    for item in rendered_items {
+        lines.push(format!("- {item}"));
+    }
+}
+
+fn push_plain_section(lines: &mut Vec<String>, title: &str, items: &[String]) {
+    let rendered_items: Vec<String> = items
+        .iter()
+        .map(|item| item.trim_end().to_string())
+        .filter(|item| !item.trim().is_empty())
+        .collect();
+
+    if rendered_items.is_empty() {
+        return;
+    }
+
+    lines.push(String::new());
+    lines.push(title.to_string());
+    lines.extend(rendered_items);
+}
+
+fn preflight_context_items(
+    context: &super::preflight_actions::ActionProviderContext,
+) -> Vec<(&'static str, String)> {
+    let mut items = vec![
+        (
+            "Profile",
+            display_profile_name(context.profile_name.as_deref()).to_string(),
+        ),
+        ("Auth", context.auth_mode.clone()),
+        (
+            "Server",
+            provider_display_name(context.provider).to_string(),
+        ),
+        (
+            "Model",
+            display_model_name(context.model.as_str()).to_string(),
+        ),
+    ];
+
+    let trimmed_url = context.url.trim();
+    if !trimmed_url.is_empty() && trimmed_url != context.provider.default_url() {
+        items.push(("URL", trimmed_url.to_string()));
+    }
+
+    items
+}
+
+fn render_preflight_failure_lines(
+    summary: &str,
+    context: Option<&super::preflight_actions::ActionProviderContext>,
+    problems: &[String],
+    detail_title: Option<&str>,
+    detail_lines: &[String],
+    next_steps: &[(&str, String)],
+) -> Vec<String> {
+    let mut lines = vec!["x Preflight failed".to_string(), summary.to_string()];
+
+    if let Some(context) = context {
+        let items = preflight_context_items(context);
+        push_aligned_section(&mut lines, "Context", &items);
+    }
+
+    push_list_section(&mut lines, "Problem", problems);
+    push_plain_section(&mut lines, detail_title.unwrap_or("Details"), detail_lines);
+    push_aligned_section(&mut lines, "Next steps", next_steps);
+
+    lines
+}
+
+fn print_preflight_failure(
+    summary: &str,
+    context: Option<&super::preflight_actions::ActionProviderContext>,
+    problems: &[String],
+    detail_title: Option<&str>,
+    detail_lines: &[String],
+    next_steps: &[(&str, String)],
+) {
+    for line in render_preflight_failure_lines(
+        summary,
+        context,
+        problems,
+        detail_title,
+        detail_lines,
+        next_steps,
+    ) {
+        eprintln!("{line}");
+    }
+}
+
 fn cli_override_descriptions(sub_m: &ArgMatches, include_token_override: bool) -> Vec<String> {
     let mut overrides = Vec::new();
 
@@ -781,6 +929,24 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         }
     }
 
+    let action_provider_context = super::preflight_actions::ActionProviderContext {
+        provider,
+        profile_name: selected_profile
+            .as_ref()
+            .map(|profile| profile.name.clone()),
+        auth_mode: resolved_invocation_auth_mode(
+            provider,
+            selected_profile.as_ref(),
+            has_explicit_token_override,
+            use_openai_account_transport,
+        )
+        .to_string(),
+        model: model.clone(),
+        url: url.clone(),
+        token: token.clone(),
+        inference_timeout_in_sec,
+    };
+
     let named_inputs = match resolved_named_inputs_for_run(sub_m) {
         Ok(named_inputs) => named_inputs,
         Err(error) => {
@@ -830,23 +996,6 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             }
         };
         let actions = crate::actions();
-        let action_provider_context = super::preflight_actions::ActionProviderContext {
-            provider,
-            profile_name: selected_profile
-                .as_ref()
-                .map(|profile| profile.name.clone()),
-            auth_mode: resolved_invocation_auth_mode(
-                provider,
-                selected_profile.as_ref(),
-                has_explicit_token_override,
-                use_openai_account_transport,
-            )
-            .to_string(),
-            model: model.clone(),
-            url: url.clone(),
-            token: token.clone(),
-            inference_timeout_in_sec,
-        };
         println!("{}", action_provider_context.using_line());
 
         return match super::preflight_actions::apply_actions(
@@ -864,16 +1013,31 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         {
             Ok(()) => true,
             Err(error) => {
-                eprintln!("❌ {error}");
+                print_preflight_failure(
+                    "Action execution failed during preflight.",
+                    Some(&action_provider_context),
+                    &[error],
+                    None,
+                    &[],
+                    &[],
+                );
                 false
             }
         };
     }
 
     if let Err(validation_issues) = validate_provider_request(provider, &model, &url, &token) {
-        for issue in validation_issues {
-            eprintln!("{issue}");
-        }
+        print_preflight_failure(
+            "Provider request settings are incomplete or invalid.",
+            Some(&action_provider_context),
+            &validation_issues,
+            None,
+            &[],
+            &[(
+                "Fix settings",
+                "Review server, model, URL, and auth inputs.".to_string(),
+            )],
+        );
         return false;
     }
 
@@ -882,8 +1046,17 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     let resolved_inputs = match crate::providers::resolve_provider_inputs(&selected_inputs).await {
         Ok(resolved_inputs) => resolved_inputs,
         Err(error) => {
-            eprintln!("❌ Failed to resolve runtime inputs.");
-            eprintln!("Reason: {error}");
+            print_preflight_failure(
+                "Runtime inputs could not be resolved.",
+                Some(&action_provider_context),
+                &[format!("Reason: {error}")],
+                None,
+                &[],
+                &[(
+                    "Fix inputs",
+                    "Verify referenced files and URLs exist and are readable.".to_string(),
+                )],
+            );
             return false;
         }
     };
@@ -891,29 +1064,19 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     if let Err(validation_issues) =
         validate_provider_content_parts(provider, &url, &resolved_inputs)
     {
-        for issue in validation_issues {
-            eprintln!("{issue}");
-        }
+        print_preflight_failure(
+            "Resolved inputs are not valid for the provider request.",
+            Some(&action_provider_context),
+            &validation_issues,
+            None,
+            &[],
+            &[(
+                "Update inputs",
+                "Adjust the selected input files, images, or URLs and retry.".to_string(),
+            )],
+        );
         return false;
     }
-
-    let action_provider_context = super::preflight_actions::ActionProviderContext {
-        provider,
-        profile_name: selected_profile
-            .as_ref()
-            .map(|profile| profile.name.clone()),
-        auth_mode: resolved_invocation_auth_mode(
-            provider,
-            selected_profile.as_ref(),
-            has_explicit_token_override,
-            use_openai_account_transport,
-        )
-        .to_string(),
-        model: model.clone(),
-        url: url.clone(),
-        token: token.clone(),
-        inference_timeout_in_sec,
-    };
     println!("{}", action_provider_context.using_line());
 
     let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
@@ -954,18 +1117,38 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         {
             Ok(Ok(r)) => response.push_str(&r),
             Ok(Err(error)) => {
-                for line in provider_error_messages(&error) {
-                    eprintln!("{}", line);
-                }
+                let details = provider_error_messages(&error);
+                let summary = details
+                    .first()
+                    .map(|line| normalize_cli_issue(line))
+                    .unwrap_or_else(|| "Issue communicating with the AI server.".to_string());
+                print_preflight_failure(
+                    summary.as_str(),
+                    Some(&action_provider_context),
+                    &[],
+                    Some("Details"),
+                    &details[1..],
+                    &[(
+                        "Retry request",
+                        "Check connectivity or credentials, then retry preflight.".to_string(),
+                    )],
+                );
                 return false;
             }
             Err(_) => {
-                eprintln!(
-                    "❌ {}",
-                    current_agent_runtime_timeout_message(
+                print_preflight_failure(
+                    "The provider did not return a response before the runtime budget expired.",
+                    Some(&action_provider_context),
+                    &[current_agent_runtime_timeout_message(
                         runtime_budget,
-                        "while waiting for the model response"
-                    )
+                        "while waiting for the model response",
+                    )],
+                    None,
+                    &[],
+                    &[(
+                        "Reduce runtime",
+                        "Shorten the request or increase the allowed runtime budget.".to_string(),
+                    )],
                 );
                 return false;
             }
@@ -1016,18 +1199,38 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         {
             Ok(Ok(r)) => response.push_str(&r),
             Ok(Err(error)) => {
-                for line in provider_error_messages(&error) {
-                    eprintln!("{}", line);
-                }
+                let details = provider_error_messages(&error);
+                let summary = details
+                    .first()
+                    .map(|line| normalize_cli_issue(line))
+                    .unwrap_or_else(|| "Issue communicating with the AI server.".to_string());
+                print_preflight_failure(
+                    summary.as_str(),
+                    Some(&action_provider_context),
+                    &[],
+                    Some("Details"),
+                    &details[1..],
+                    &[(
+                        "Retry request",
+                        "Check connectivity or credentials, then retry preflight.".to_string(),
+                    )],
+                );
                 return false;
             }
             Err(_) => {
-                eprintln!(
-                    "❌ {}",
-                    current_agent_runtime_timeout_message(
+                print_preflight_failure(
+                    "The provider did not return a response before the runtime budget expired.",
+                    Some(&action_provider_context),
+                    &[current_agent_runtime_timeout_message(
                         runtime_budget,
-                        "while waiting for the model response"
-                    )
+                        "while waiting for the model response",
+                    )],
+                    None,
+                    &[],
+                    &[(
+                        "Reduce runtime",
+                        "Shorten the request or increase the allowed runtime budget.".to_string(),
+                    )],
                 );
                 return false;
             }
@@ -1036,16 +1239,42 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 
     // Attempt to conform the LLM response to the Output schema
     if !ai_cargo.set_response(response.clone()) {
-        eprintln!("❌ LLM output did NOT conform to the required JSON schema.");
-        eprintln!("Raw output received from server:\n{}\n", response);
+        print_preflight_failure(
+            "Provider output did not match the required JSON schema.",
+            Some(&action_provider_context),
+            &[String::from(
+                "The provider returned output that could not be parsed as the expected JSON shape.",
+            )],
+            Some("Raw output"),
+            &response
+                .lines()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>(),
+            &[(
+                "Retry request",
+                "Retry preflight after reviewing the provider output and selected inputs."
+                    .to_string(),
+            )],
+        );
         return false; // Stop execution cleanly — do NOT continue to unwrap
     }
 
     let output = match ai_cargo.get_response() {
         Some(o) => o,
         None => {
-            eprintln!("❌ Internal error: response was expected but missing.");
-            eprintln!("Raw output received from server:\n{}\n", response);
+            print_preflight_failure(
+                "Response parsing failed unexpectedly after inference.",
+                Some(&action_provider_context),
+                &[String::from(
+                    "The provider response was expected but missing after schema validation.",
+                )],
+                Some("Raw output"),
+                &response
+                    .lines()
+                    .map(|line| line.to_string())
+                    .collect::<Vec<_>>(),
+                &[],
+            );
             return false;
         }
     };
@@ -1068,7 +1297,14 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     {
         Ok(()) => true,
         Err(error) => {
-            eprintln!("❌ {error}");
+            print_preflight_failure(
+                "Action execution failed during preflight.",
+                Some(&action_provider_context),
+                &[error],
+                None,
+                &[],
+                &[],
+            );
             false
         }
     }
@@ -1078,10 +1314,12 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 mod tests {
     use super::{
         cli_override_descriptions, effective_action_execution_for_run, profile_selection_messages,
-        resolve_runtime_vars_from_specs, resolved_action_execution_override_for_run,
-        unknown_server_messages, validate_structural_action_only_inputs, LoadedProfileKind,
+        render_preflight_failure_lines, resolve_runtime_vars_from_specs,
+        resolved_action_execution_override_for_run, unknown_server_messages,
+        validate_structural_action_only_inputs, LoadedProfileKind,
     };
     use crate::args::test_cli_command;
+    use crate::providers::ProviderKind;
     use serde_json::json;
 
     fn input_debug_strings(inputs: &[crate::Input]) -> Vec<String> {
@@ -1143,6 +1381,39 @@ mod tests {
             "Using default profile 'my_open_ai' as fallback."
         );
         assert_eq!(messages[1], "CLI overrides: server=ollama, model=mistral");
+    }
+
+    #[test]
+    fn render_preflight_failure_lines_include_context_and_next_steps() {
+        let context = crate::commands::preflight_actions::ActionProviderContext {
+            provider: ProviderKind::OpenAi,
+            profile_name: Some("my_open_ai".to_string()),
+            auth_mode: "chatgpt_account".to_string(),
+            model: "gpt-5".to_string(),
+            url: "https://api.openai.com/v1/responses".to_string(),
+            token: "secret".to_string(),
+            inference_timeout_in_sec: 60,
+        };
+
+        let lines = render_preflight_failure_lines(
+            "Runtime inputs could not be resolved.",
+            Some(&context),
+            &[String::from("Reason: missing /tmp/demo.pdf")],
+            None,
+            &[],
+            &[(
+                "Fix inputs",
+                "Verify referenced files and URLs exist and are readable.".to_string(),
+            )],
+        );
+        let rendered = lines.join("\n");
+
+        assert!(rendered.contains("x Preflight failed"));
+        assert!(rendered.contains("Profile  my_open_ai"));
+        assert!(rendered.contains("Auth     chatgpt_account"));
+        assert!(rendered.contains("- Reason: missing /tmp/demo.pdf"));
+        assert!(rendered
+            .contains("Fix inputs  Verify referenced files and URLs exist and are readable."));
     }
 
     #[test]
