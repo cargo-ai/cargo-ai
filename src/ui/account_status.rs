@@ -1,5 +1,22 @@
 use serde_json::Value;
 
+pub fn normalize_leading_glyph(message: &str) -> String {
+    if let Some(rest) = message.strip_prefix("✅ ") {
+        return format!("✓ {rest}");
+    }
+    if let Some(rest) = message.strip_prefix("⚠️ ") {
+        return format!("! {rest}");
+    }
+    if let Some(rest) = message.strip_prefix("❌ ") {
+        return format!("x {rest}");
+    }
+    if let Some(rest) = message.strip_prefix("ℹ️ ") {
+        return format!("i {rest}");
+    }
+
+    message.to_string()
+}
+
 pub fn render_backend_ui(response: &Value) -> bool {
     let Some(lines) = render_backend_ui_lines(response) else {
         return false;
@@ -35,10 +52,10 @@ fn render_backend_ui_lines(response: &Value) -> Option<Vec<String>> {
         .and_then(|v| v.as_str())
         .filter(|icon| !icon.trim().is_empty())
         .unwrap_or_else(|| match kind {
-            "success" => "✅",
-            "error" => "⚠️",
-            "failure" => "❌",
-            _ => "ℹ️",
+            "success" => "✓",
+            "error" => "!",
+            "failure" => "x",
+            _ => "i",
         });
 
     let mut lines = Vec::new();
@@ -70,7 +87,7 @@ fn render_backend_ui_lines(response: &Value) -> Option<Vec<String>> {
 
             if !printed_header {
                 lines.push(String::new());
-                lines.push("Actions:".to_string());
+                lines.push("Actions".to_string());
                 printed_header = true;
             }
 
@@ -95,7 +112,7 @@ fn render_backend_ui_lines(response: &Value) -> Option<Vec<String>> {
 
             if !printed_header {
                 lines.push(String::new());
-                lines.push("Next steps:".to_string());
+                lines.push("Next steps".to_string());
                 printed_header = true;
             }
 
@@ -224,7 +241,7 @@ fn push_multiline(lines: &mut Vec<String>, text: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::render_backend_ui_lines;
+    use super::{normalize_leading_glyph, render_backend_ui_lines};
     use serde_json::json;
 
     #[test]
@@ -298,5 +315,34 @@ mod tests {
         let lines = render_backend_ui_lines(&response).expect("expected rendered lines");
         assert!(lines.iter().any(|line| line == "Summary:"));
         assert!(lines.iter().any(|line| line == "- State: Enabled"));
+    }
+
+    #[test]
+    fn defaults_to_plain_glyphs_and_plain_next_steps_header() {
+        let response = json!({
+            "ui": {
+                "schema": "1.0",
+                "kind": "success",
+                "title": "Mail preferences",
+                "summary": "All account emails are currently enabled.",
+                "next_steps": [
+                    "Run `cargo ai account mail prefs --disable-all`."
+                ]
+            }
+        });
+
+        let lines = render_backend_ui_lines(&response).expect("expected rendered lines");
+        assert_eq!(lines[0], "✓ Mail preferences");
+        assert!(lines.iter().any(|line| line == "Next steps"));
+        assert!(!lines.iter().any(|line| line == "Next steps:"));
+    }
+
+    #[test]
+    fn normalize_leading_glyph_rewrites_decorative_prefixes() {
+        assert_eq!(normalize_leading_glyph("✅ Good"), "✓ Good");
+        assert_eq!(normalize_leading_glyph("⚠️ Heads up"), "! Heads up");
+        assert_eq!(normalize_leading_glyph("❌ Failed"), "x Failed");
+        assert_eq!(normalize_leading_glyph("ℹ️ Note"), "i Note");
+        assert_eq!(normalize_leading_glyph("plain"), "plain");
     }
 }

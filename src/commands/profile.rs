@@ -234,7 +234,7 @@ fn run_list() -> bool {
         }
         true
     } else {
-        eprintln!("❌ No config file found.");
+        eprintln!("x No config file found.");
         false
     }
 }
@@ -257,7 +257,7 @@ fn run_show(show_m: &ArgMatches) -> bool {
                     Ok(Some(_)) => true,
                     Ok(None) => profile.token.is_some(),
                     Err(error) => {
-                        eprintln!("⚠️ Failed to load profile token from credential store: {error}");
+                        eprintln!("! Failed to load profile token from credential store: {error}");
                         profile.token.is_some()
                     }
                 };
@@ -274,15 +274,15 @@ fn run_show(show_m: &ArgMatches) -> bool {
                 }
                 true
             } else {
-                eprintln!("❌ Profile '{}' not found.", name);
+                eprintln!("x Profile '{}' not found.", name);
                 false
             }
         } else {
-            eprintln!("❌ No config file found.");
+            eprintln!("x No config file found.");
             false
         }
     } else {
-        eprintln!("❌ Please provide a profile name. Example: cargo ai profile show openai-prod");
+        eprintln!("x Please provide a profile name. Example: cargo ai profile show openai-prod");
         false
     }
 }
@@ -330,20 +330,20 @@ fn run_add(add_m: &ArgMatches) -> bool {
 
 fn run_set(set_m: &ArgMatches) -> bool {
     let Some(name) = set_m.get_one::<String>("name") else {
-        eprintln!("❌ Missing profile name.");
+        eprintln!("x Missing profile name.");
         return false;
     };
 
     let mut cfg = match load_config() {
         Some(cfg) => cfg,
         None => {
-            eprintln!("❌ No config file found.");
+            eprintln!("x No config file found.");
             return false;
         }
     };
 
     let Some(profile) = cfg.profile.iter_mut().find(|profile| profile.name == *name) else {
-        eprintln!("❌ Profile '{}' not found.", name);
+        eprintln!("x Profile '{}' not found.", name);
         return false;
     };
 
@@ -362,7 +362,7 @@ fn run_set(set_m: &ArgMatches) -> bool {
     if let Some(raw_mode) = set_m.get_one::<String>("auth") {
         let Some(mode) = parse_auth_mode(raw_mode) else {
             eprintln!(
-                "❌ Invalid auth mode '{}'. Use none|api_key|openai_account.",
+                "x Invalid auth mode '{}'. Use none|api_key|openai_account.",
                 raw_mode
             );
             return false;
@@ -395,7 +395,7 @@ fn run_set(set_m: &ArgMatches) -> bool {
     let mut token_change: Option<&str> = None;
     if set_m.get_flag("clear_token") {
         if let Err(error) = store::clear_profile_token(name) {
-            eprintln!("❌ Failed to clear token for profile '{}': {error}", name);
+            eprintln!("x Failed to clear token for profile '{}': {error}", name);
             return false;
         }
         token_change = Some("cleared");
@@ -406,12 +406,12 @@ fn run_set(set_m: &ArgMatches) -> bool {
         let token = match resolve_token_input(set_m) {
             Ok(token) => token,
             Err(error) => {
-                eprintln!("❌ Failed to read token input: {error}");
+                eprintln!("x Failed to read token input: {error}");
                 return false;
             }
         };
         if let Err(error) = store::store_profile_token(name, token.as_str()) {
-            eprintln!("❌ Failed to store token for profile '{}': {error}", name);
+            eprintln!("x Failed to store token for profile '{}': {error}", name);
             return false;
         }
         token_change = Some("updated");
@@ -419,7 +419,7 @@ fn run_set(set_m: &ArgMatches) -> bool {
 
     if !metadata_changes.is_empty() {
         if let Err(error) = write_config(&cfg) {
-            eprintln!("❌ Failed to persist profile updates: {error}");
+            eprintln!("x Failed to persist profile updates: {error}");
             return false;
         }
     }
@@ -443,7 +443,7 @@ fn run_set(set_m: &ArgMatches) -> bool {
 fn run_remove(remove_m: &ArgMatches) -> bool {
     if let Some(name) = remove_m.get_one::<String>("name") {
         if !profile_exists(name) {
-            eprintln!("❌ Profile '{}' not found.", name);
+            eprintln!("x Profile '{}' not found.", name);
             return false;
         }
 
@@ -452,7 +452,7 @@ fn run_remove(remove_m: &ArgMatches) -> bool {
         )) {
             Ok(confirmed) => confirmed,
             Err(error) => {
-                eprintln!("❌ {error}");
+                eprintln!("x {error}");
                 return false;
             }
         };
@@ -471,7 +471,7 @@ fn run_remove(remove_m: &ArgMatches) -> bool {
         }
     } else {
         eprintln!(
-            "❌ Please provide a profile name to remove. Example: cargo ai profile remove openai-prod"
+            "x Please provide a profile name to remove. Example: cargo ai profile remove openai-prod"
         );
         false
     }
@@ -491,7 +491,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         run_remove(remove_m)
     } else {
         eprintln!(
-            "❌ No profile subcommand found. Try 'cargo ai profile list', 'cargo ai profile show <name>', 'cargo ai profile add ...', or 'cargo ai profile set ...'."
+            "x No profile subcommand found. Try 'cargo ai profile list', 'cargo ai profile show <name>', 'cargo ai profile add ...', or 'cargo ai profile set ...'."
         );
         false
     }

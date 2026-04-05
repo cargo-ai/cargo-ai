@@ -406,9 +406,7 @@ fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &Value) -
     let definition_json = match response.get("definition_json") {
         Some(value) => value,
         None => {
-            eprintln!(
-                "❌ Hatch could not continue because response did not include 'definition_json'."
-            );
+            eprintln!("x Hatch could not continue because response did not include 'definition_json'.");
             return false;
         }
     };
@@ -416,7 +414,7 @@ fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &Value) -
     let definition_json_str = match serde_json::to_string_pretty(definition_json) {
         Ok(pretty) => pretty,
         Err(error) => {
-            eprintln!("❌ Failed to serialize pulled definition JSON: {error}");
+            eprintln!("x Failed to serialize pulled definition JSON: {error}");
             return false;
         }
     };
@@ -527,7 +525,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             let trimmed_name = name.trim();
             if looks_like_file_path(trimmed_name) {
                 eprintln!(
-                    "❌ The value passed to --name ('{}') looks like a file path. Use --json-file <FILE> for file input and keep --name for the agent name.",
+                    "x The value passed to --name ('{}') looks like a file path. Use --json-file <FILE> for file input and keep --name for the agent name.",
                     name
                 );
                 return false;
@@ -543,7 +541,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                 Some(s) => s,
                 None => {
                     eprintln!(
-                        "❌ Could not infer agent name from file '{}'. Use --name explicitly.",
+                        "x Could not infer agent name from file '{}'. Use --name explicitly.",
                         file_path
                     );
                     return false;
@@ -552,16 +550,16 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
 
             if !is_valid_inferred_name(stem) {
                 eprintln!(
-                    "❌ Inferred agent name '{}' from '{}' is invalid. Use --name explicitly.",
+                    "x Inferred agent name '{}' from '{}' is invalid. Use --name explicitly.",
                     stem, file_path
                 );
                 return false;
             }
 
-            println!("ℹ️ Using inferred agent name from file: {}", stem);
+            println!("Using inferred agent name from file: {}", stem);
             stem.to_string()
         } else {
-            eprintln!("❌ Missing agent name. Provide --name or use --json-file <FILE> (or positional FILE).");
+            eprintln!("x Missing agent name. Provide --name or use --json-file <FILE> (or positional FILE).");
             return false;
         };
 
@@ -574,12 +572,12 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             match fs::read_to_string(file_path) {
                 Ok(contents) => contents,
                 Err(e) => {
-                    eprintln!("❌ Failed to read JSON file '{}': {e}", file_path);
+                    eprintln!("x Failed to read JSON file '{}': {e}", file_path);
                     return false;
                 }
             }
         } else {
-            eprintln!("❌ Missing required input: provide --json, --json-file <FILE>, or positional FILE.");
+            eprintln!("x Missing required input: provide --json, --json-file <FILE>, or positional FILE.");
             return false;
         };
 
@@ -587,7 +585,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("❌ Invalid JSON provided for agent definition: {e}");
+                eprintln!("x Invalid JSON provided for agent definition: {e}");
                 return false;
             }
         };
@@ -604,7 +602,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| {
-                eprintln!("❌ Missing agent name. Provide positional NAME or --name <NAME>.");
+                eprintln!("x Missing agent name. Provide positional NAME or --name <NAME>.");
                 String::new()
             });
         if name.is_empty() {
@@ -627,13 +625,13 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         match parse_hatch_command(hatch_m) {
             Ok(hatch) => AgentsCommand::Hatch(hatch),
             Err(error) => {
-                eprintln!("❌ {}", error);
+                eprintln!("x {}", error);
                 return false;
             }
         }
     } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
         let Some(name) = visibility_m.get_one::<String>("name") else {
-            eprintln!("❌ Missing agent name. Provide --name <NAME>.");
+            eprintln!("x Missing agent name. Provide --name <NAME>.");
             return false;
         };
         AgentsCommand::Visibility {
@@ -651,7 +649,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         }
     } else if let Some(archive_m) = agents_m.subcommand_matches("archive") {
         let Some(name) = archive_m.get_one::<String>("name") else {
-            eprintln!("❌ Missing agent name. Provide --name <NAME>.");
+            eprintln!("x Missing agent name. Provide --name <NAME>.");
             return false;
         };
         AgentsCommand::Archive {
@@ -671,7 +669,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
     let auth = match load_account_auth() {
         Ok(auth) => auth,
         Err(message) => {
-            eprintln!("{message}");
+            eprintln!("{}", ui::account_status::normalize_leading_glyph(&message));
             return false;
         }
     };
@@ -701,7 +699,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("❌ Request failed: {e:?}");
+                eprintln!("x Request failed: {e:?}");
                 return false;
             }
         },
@@ -720,7 +718,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("❌ Request failed: {e:?}");
+                eprintln!("x Request failed: {e:?}");
                 return false;
             }
         },
@@ -740,7 +738,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("❌ Request failed: {e:?}");
+                eprintln!("x Request failed: {e:?}");
                 return false;
             }
         },
@@ -748,7 +746,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             match request_hatch_pull(access_token_owned.as_str(), hatch).await {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("❌ Request failed: {e}");
+                    eprintln!("x Request failed: {e}");
                     return false;
                 }
             }
@@ -772,7 +770,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("❌ Request failed: {e:?}");
+                eprintln!("x Request failed: {e:?}");
                 return false;
             }
         },
@@ -791,7 +789,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("❌ Request failed: {e:?}");
+                eprintln!("x Request failed: {e:?}");
                 return false;
             }
         },
@@ -809,7 +807,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             .await
         {
             Err(RefreshAccessError::MissingRefreshToken) => {
-                eprintln!("⚠️ Access token expired, and no refresh token exists in credential store. Run `cargo ai account status` or re-confirm account.");
+                eprintln!("! Access token expired, and no refresh token exists in credential store. Run `cargo ai account status` or re-confirm account.");
                 if !ui::account_status::render_backend_ui(&response) {
                     match serde_json::to_string_pretty(&response) {
                         Ok(pretty) => println!("{pretty}"),
@@ -819,11 +817,11 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                 return false;
             }
             Err(RefreshAccessError::RequestFailed(error)) => {
-                eprintln!("❌ Request failed while refreshing session: {error}");
+                eprintln!("x Request failed while refreshing session: {error}");
                 return false;
             }
             Err(RefreshAccessError::MissingRefreshedToken(refresh_response)) => {
-                eprintln!("⚠️ Session refresh did not return a new access token. Cannot retry agents request.");
+                eprintln!("! Session refresh did not return a new access token. Cannot retry agents request.");
                 if !ui::account_status::render_backend_ui(&refresh_response) {
                     match serde_json::to_string_pretty(&refresh_response) {
                         Ok(pretty) => println!("{pretty}"),
@@ -856,7 +854,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            eprintln!("x Request failed after session refresh: {e:?}");
                             return false;
                         }
                     },
@@ -875,7 +873,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            eprintln!("x Request failed after session refresh: {e:?}");
                             return false;
                         }
                     },
@@ -895,7 +893,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            eprintln!("x Request failed after session refresh: {e:?}");
                             return false;
                         }
                     },
@@ -903,7 +901,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                         match request_hatch_pull(retry_access_token.as_str(), hatch).await {
                             Ok(r) => r,
                             Err(e) => {
-                                eprintln!("❌ Request failed after session refresh: {e}");
+                                eprintln!("x Request failed after session refresh: {e}");
                                 return false;
                             }
                         }
@@ -927,7 +925,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            eprintln!("x Request failed after session refresh: {e:?}");
                             return false;
                         }
                     },
@@ -946,7 +944,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            eprintln!("x Request failed after session refresh: {e:?}");
                             return false;
                         }
                     },
@@ -976,7 +974,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             let definition_json = match response.get("definition_json") {
                 Some(value) => value,
                 None => {
-                    eprintln!("❌ Pull succeeded but response did not include 'definition_json'.");
+                    eprintln!("x Pull succeeded but response did not include 'definition_json'.");
                     return false;
                 }
             };
@@ -984,7 +982,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             let pretty_definition = match serde_json::to_string_pretty(definition_json) {
                 Ok(pretty) => pretty,
                 Err(e) => {
-                    eprintln!("❌ Failed to serialize pulled definition JSON: {e}");
+                    eprintln!("x Failed to serialize pulled definition JSON: {e}");
                     return false;
                 }
             };
@@ -1006,7 +1004,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             if let Some(path) = output_path {
                 if Path::new(&path).exists() && !*force {
                     eprintln!(
-                        "❌ Output file '{}' already exists. Use --force to overwrite or --json-file <FILE> to choose another path.",
+                        "x Output file '{}' already exists. Use --force to overwrite or --json-file <FILE> to choose another path.",
                         path
                     );
                     return false;
@@ -1014,7 +1012,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
 
                 if let Err(e) = fs::write(&path, format!("{pretty_definition}\n")) {
                     eprintln!(
-                        "❌ Failed to write pulled definition JSON to '{}': {e}",
+                        "x Failed to write pulled definition JSON to '{}': {e}",
                         path
                     );
                     return false;
@@ -1079,7 +1077,7 @@ pub async fn run_hatch(hatch_m: &ArgMatches) -> bool {
     let hatch = match parse_hatch_command(hatch_m) {
         Ok(hatch) => hatch,
         Err(error) => {
-            eprintln!("❌ {}", error);
+            eprintln!("x {}", error);
             return false;
         }
     };
@@ -1087,7 +1085,7 @@ pub async fn run_hatch(hatch_m: &ArgMatches) -> bool {
     let auth = match load_account_auth() {
         Ok(auth) => auth,
         Err(message) => {
-            eprintln!("{message}");
+            eprintln!("{}", ui::account_status::normalize_leading_glyph(&message));
             return false;
         }
     };
@@ -1102,7 +1100,7 @@ pub async fn run_hatch(hatch_m: &ArgMatches) -> bool {
     let mut response = match request_hatch_pull(access_token_owned.as_str(), &hatch).await {
         Ok(response) => response,
         Err(error) => {
-            eprintln!("❌ Request failed: {error}");
+            eprintln!("x Request failed: {error}");
             return false;
         }
     };
@@ -1118,7 +1116,7 @@ pub async fn run_hatch(hatch_m: &ArgMatches) -> bool {
             .await
         {
             Err(RefreshAccessError::MissingRefreshToken) => {
-                eprintln!("⚠️ Access token expired, and no refresh token exists in credential store. Run `cargo ai account status` or re-confirm account.");
+                eprintln!("! Access token expired, and no refresh token exists in credential store. Run `cargo ai account status` or re-confirm account.");
                 if !ui::account_status::render_backend_ui(&response) {
                     match serde_json::to_string_pretty(&response) {
                         Ok(pretty) => println!("{pretty}"),
@@ -1128,11 +1126,11 @@ pub async fn run_hatch(hatch_m: &ArgMatches) -> bool {
                 return false;
             }
             Err(RefreshAccessError::RequestFailed(error)) => {
-                eprintln!("❌ Request failed while refreshing session: {error}");
+                eprintln!("x Request failed while refreshing session: {error}");
                 return false;
             }
             Err(RefreshAccessError::MissingRefreshedToken(refresh_response)) => {
-                eprintln!("⚠️ Session refresh did not return a new access token. Cannot retry account hatch.");
+                eprintln!("! Session refresh did not return a new access token. Cannot retry account hatch.");
                 if !ui::account_status::render_backend_ui(&refresh_response) {
                     match serde_json::to_string_pretty(&refresh_response) {
                         Ok(pretty) => println!("{pretty}"),
@@ -1153,7 +1151,7 @@ pub async fn run_hatch(hatch_m: &ArgMatches) -> bool {
                 response = match request_hatch_pull(retry_access_token.as_str(), &hatch).await {
                     Ok(response) => response,
                     Err(error) => {
-                        eprintln!("❌ Request failed after session refresh: {error}");
+                        eprintln!("x Request failed after session refresh: {error}");
                         return false;
                     }
                 };

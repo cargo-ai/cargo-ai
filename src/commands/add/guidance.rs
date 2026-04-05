@@ -293,7 +293,7 @@ fn write_guidance_bundle(
 /// Executes the `guidance` subcommand flow from parsed CLI arguments.
 pub fn run(sub_m: &ArgMatches) -> bool {
     if let Err(error) = run_impl(sub_m) {
-        eprintln!("❌ {}", error);
+        eprintln!("x {}", error);
         return false;
     }
 

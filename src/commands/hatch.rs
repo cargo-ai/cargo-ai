@@ -189,7 +189,7 @@ fn resolve_hatch_input(
 /// Executes the `hatch` command flow from parsed CLI arguments.
 pub fn run(sub_m: &ArgMatches) -> bool {
     let Some(name_or_path) = sub_m.get_one::<String>("name") else {
-        eprintln!("❌ Missing project name. Use `cargo ai hatch <name>`.");
+        eprintln!("x Missing project name. Use `cargo ai hatch <name>`.");
         return false;
     };
     let check_only = sub_m.get_flag("check");
@@ -198,7 +198,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
     let output_dir = match resolve_local_output_dir(sub_m) {
         Ok(output_dir) => output_dir,
         Err(error) => {
-            eprintln!("❌ {}", error);
+            eprintln!("x {}", error);
             return false;
         }
     };
@@ -207,7 +207,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
     ) {
         Ok(build_target) => build_target,
         Err(error) => {
-            eprintln!("❌ {}", error);
+            eprintln!("x {}", error);
             return false;
         }
     };
@@ -217,7 +217,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
     ) {
         Ok(resolution) => resolution,
         Err(error) => {
-            eprintln!("❌ {}", error);
+            eprintln!("x {}", error);
             return false;
         }
     };
@@ -237,7 +237,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         } => match super::hatch_pipeline::read_local_config(&path) {
             Ok(contents) => contents,
             Err(e) => {
-                println!("❌ Failed to read local config file '{}'.", path);
+                println!("x Failed to read local config file '{}'.", path);
                 println!("Reason: {e}");
                 println!("Hint: Ensure the path is valid and points to a UTF-8 JSON file.");
                 return false;
@@ -248,7 +248,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
                 Ok(contents) => contents,
                 Err(e) => {
                     println!(
-                        "❌ Failed to fetch agent configuration for '{}' from Cargo-AI registry.",
+                        "x Failed to fetch agent configuration for '{}' from Cargo-AI registry.",
                         registry_name
                     );
                     println!("Reason: {e}");

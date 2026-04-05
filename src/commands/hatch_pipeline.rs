@@ -172,14 +172,14 @@ where
         Ok(lock) => lock,
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             println!(
-                "❌ Agent '{}' is already running a hatch/check operation in another process.",
+                "x Agent '{}' is already running a hatch/check operation in another process.",
                 project_name
             );
             return false;
         }
         Err(error) => {
             println!(
-                "❌ Failed to acquire lock for agent '{}' ({}): {}",
+                "x Failed to acquire lock for agent '{}' ({}): {}",
                 project_name,
                 crate::agent_builder::agent_workspace_path(project_name.as_str()).display(),
                 error
@@ -194,7 +194,7 @@ where
         |agent_name| crate::agent_builder::agent_workspace_path(agent_name).exists(),
         crate::agent_builder::cleanup::delete_agent_workspace,
     ) {
-        println!("❌ {message}");
+        println!("x {message}");
         return false;
     }
 
@@ -203,7 +203,7 @@ where
         match crate::agent_builder::template_cache::ensure_warmed_template(&build_target) {
             Ok(template) => template,
             Err(error) => {
-                println!("❌ Failed to prepare warmed template: {error}");
+                println!("x Failed to prepare warmed template: {error}");
                 return false;
             }
         };
@@ -221,12 +221,12 @@ where
     ) {
         Ok(_) => {}
         Err(error) => {
-            println!("❌ Failed to create project: {error}");
+            println!("x Failed to create project: {error}");
             print_hatch_progress(workspace_progress_step(keep_project));
             if let WorkspaceSummaryStatus::CleanupFailed(error) =
                 finalize_workspace(project_name.as_str(), keep_project)
             {
-                println!("⚠️ Failed to clean up workspace: {error}");
+                println!("! Failed to clean up workspace: {error}");
             }
             return false;
         }
@@ -245,12 +245,12 @@ where
             ) {
                 Ok(_) => {}
                 Err(error) => {
-                    println!("❌ Build failed: {error}");
+                    println!("x Build failed: {error}");
                     print_hatch_progress(workspace_progress_step(keep_project));
                     if let WorkspaceSummaryStatus::CleanupFailed(error) =
                         finalize_workspace(project_name.as_str(), keep_project)
                     {
-                        println!("⚠️ Failed to clean up workspace: {error}");
+                        println!("! Failed to clean up workspace: {error}");
                     }
                     return false;
                 }
@@ -266,12 +266,12 @@ where
             ) {
                 Ok(path) => binary_path = Some(path),
                 Err(error) => {
-                    println!("❌ Export failed: {error}");
+                    println!("x Export failed: {error}");
                     print_hatch_progress(workspace_progress_step(keep_project));
                     if let WorkspaceSummaryStatus::CleanupFailed(error) =
                         finalize_workspace(project_name.as_str(), keep_project)
                     {
-                        println!("⚠️ Failed to clean up workspace: {error}");
+                        println!("! Failed to clean up workspace: {error}");
                     }
                     return false;
                 }
@@ -286,12 +286,12 @@ where
             ) {
                 Ok(_) => {}
                 Err(error) => {
-                    println!("❌ Check failed: {error}");
+                    println!("x Check failed: {error}");
                     print_hatch_progress(workspace_progress_step(keep_project));
                     if let WorkspaceSummaryStatus::CleanupFailed(error) =
                         finalize_workspace(project_name.as_str(), keep_project)
                     {
-                        println!("⚠️ Failed to clean up workspace: {error}");
+                        println!("! Failed to clean up workspace: {error}");
                     }
                     return false;
                 }
@@ -302,7 +302,7 @@ where
     print_hatch_progress(workspace_progress_step(keep_project));
     let workspace_status = finalize_workspace(project_name.as_str(), keep_project);
     if let WorkspaceSummaryStatus::CleanupFailed(error) = &workspace_status {
-        println!("⚠️ Failed to clean up workspace: {error}");
+        println!("! Failed to clean up workspace: {error}");
     }
 
     let summary = HatchRunSummary {

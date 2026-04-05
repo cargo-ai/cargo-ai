@@ -382,7 +382,7 @@ async fn run_login_openai(login_openai_m: &ArgMatches) -> bool {
 
     if let Some(profile_name) = profile_name {
         if let Err(error) = validate_profile_target(profile_name) {
-            eprintln!("❌ {error}");
+            eprintln!("x {error}");
             return false;
         }
     }
@@ -390,7 +390,7 @@ async fn run_login_openai(login_openai_m: &ArgMatches) -> bool {
     println!("Starting OpenAI browser login...");
     println!("Your browser will open to complete sign-in.");
     if let Err(error) = run_codex_login() {
-        eprintln!("❌ {error}");
+        eprintln!("x {error}");
         return false;
     }
 
@@ -398,12 +398,12 @@ async fn run_login_openai(login_openai_m: &ArgMatches) -> bool {
         Ok(Some(_)) => {}
         Ok(None) => {
             eprintln!(
-                "❌ Codex login completed, but no local auth session was found. Verify Codex is configured and run `codex login` again."
+                "x Codex login completed, but no local auth session was found. Verify Codex is configured and run `codex login` again."
             );
             return false;
         }
         Err(error) => {
-            eprintln!("❌ Failed to read Codex auth session: {error}");
+            eprintln!("x Failed to read Codex auth session: {error}");
             return false;
         }
     }
@@ -411,7 +411,7 @@ async fn run_login_openai(login_openai_m: &ArgMatches) -> bool {
     // Clean up any duplicated OpenAI session material from prior Cargo AI builds.
     openai_oauth::clear_legacy_openai_session_tokens();
     if let Err(error) = config_settings::set_openai_auth_locally_disabled(false) {
-        eprintln!("❌ Login succeeded, but failed to clear local logout state: {error}");
+        eprintln!("x Login succeeded, but failed to clear local logout state: {error}");
         return false;
     }
 
@@ -419,13 +419,13 @@ async fn run_login_openai(login_openai_m: &ArgMatches) -> bool {
         if let Err(error) =
             config_settings::set_profile_auth_mode(profile_name, ProfileAuthMode::OpenaiAccount)
         {
-            eprintln!("❌ Login succeeded, but failed to update profile auth mode: {error}");
+            eprintln!("x Login succeeded, but failed to update profile auth mode: {error}");
             return false;
         }
 
         if set_default {
             if let Err(error) = config_settings::set_default_profile(profile_name) {
-                eprintln!("❌ Login succeeded, but failed to set default profile: {error}");
+                eprintln!("x Login succeeded, but failed to set default profile: {error}");
                 return false;
             }
         }
@@ -443,7 +443,7 @@ async fn run_status(status_m: &ArgMatches) -> bool {
     let status = match local_session_state() {
         Ok(status) => status,
         Err(error) => {
-            eprintln!("❌ {error}");
+            eprintln!("x {error}");
             return false;
         }
     };
@@ -452,7 +452,7 @@ async fn run_status(status_m: &ArgMatches) -> bool {
         match serde_json::to_string_pretty(&status) {
             Ok(serialized) => println!("{serialized}"),
             Err(error) => {
-                eprintln!("❌ Failed to serialize auth status JSON: {error}");
+                eprintln!("x Failed to serialize auth status JSON: {error}");
                 return false;
             }
         }
@@ -563,7 +563,7 @@ async fn run_logout(logout_m: &ArgMatches) -> bool {
         let confirmed = match confirm(prompt) {
             Ok(confirmed) => confirmed,
             Err(error) => {
-                eprintln!("❌ {error}");
+                eprintln!("x {error}");
                 return false;
             }
         };
@@ -575,17 +575,17 @@ async fn run_logout(logout_m: &ArgMatches) -> bool {
 
     if global {
         if let Err(error) = run_codex_logout() {
-            eprintln!("❌ {error}");
+            eprintln!("x {error}");
             return false;
         }
     }
 
     if let Err(error) = openai_oauth::clear_local_session() {
-        eprintln!("❌ Failed to clear local OpenAI metadata: {error}");
+        eprintln!("x Failed to clear local OpenAI metadata: {error}");
         return false;
     }
     if let Err(error) = config_settings::set_openai_auth_locally_disabled(true) {
-        eprintln!("❌ Failed to persist local Cargo AI logout state: {error}");
+        eprintln!("x Failed to persist local Cargo AI logout state: {error}");
         return false;
     }
 
@@ -599,7 +599,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         if let Some(login_openai_m) = login_m.subcommand_matches("openai") {
             run_login_openai(login_openai_m).await
         } else {
-            eprintln!("No auth login provider found. Try 'cargo ai auth login openai'.");
+            eprintln!("x No auth login provider found. Try 'cargo ai auth login openai'.");
             false
         }
     } else if let Some(status_m) = sub_m.subcommand_matches("status") {
@@ -608,7 +608,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         run_logout(logout_m).await
     } else {
         eprintln!(
-            "No auth subcommand found. Try 'cargo ai auth login openai', 'cargo ai auth status [--json]', or 'cargo ai auth logout [--global] [--yes]'."
+            "x No auth subcommand found. Try 'cargo ai auth login openai', 'cargo ai auth status [--json]', or 'cargo ai auth logout [--global] [--yes]'."
         );
         false
     }

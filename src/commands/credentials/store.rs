@@ -216,7 +216,7 @@ fn run_status() -> bool {
     let status = match store::secret_store_status() {
         Ok(status) => status,
         Err(error) => {
-            eprintln!("❌ Failed to inspect credential-store status: {error}");
+            eprintln!("x Failed to inspect credential-store status: {error}");
             return false;
         }
     };
@@ -228,12 +228,12 @@ fn run_status() -> bool {
 
 fn run_set(sub_m: &ArgMatches) -> bool {
     let Some(raw_mode) = sub_m.get_one::<String>("mode") else {
-        eprintln!("❌ Missing mode. Use `cargo ai credentials store set <file|keychain>`.");
+        eprintln!("x Missing mode. Use `cargo ai credentials store set <file|keychain>`.");
         return false;
     };
 
     let Some(target_mode) = parse_mode(raw_mode) else {
-        eprintln!("❌ Invalid mode '{raw_mode}'. Use `file` or `keychain`.");
+        eprintln!("x Invalid mode '{raw_mode}'. Use `file` or `keychain`.");
         return false;
     };
 
@@ -244,7 +244,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
     let status = match store::secret_store_status() {
         Ok(status) => status,
         Err(error) => {
-            eprintln!("❌ Failed to inspect credential-store status: {error}");
+            eprintln!("x Failed to inspect credential-store status: {error}");
             return false;
         }
     };
@@ -254,7 +254,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
             .keychain_probe_error
             .as_deref()
             .unwrap_or("keychain backend is unavailable");
-        eprintln!("❌ Cannot switch to keychain mode: {detail}");
+        eprintln!("x Cannot switch to keychain mode: {detail}");
         return false;
     }
 
@@ -264,7 +264,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
             .keychain_probe_error
             .as_deref()
             .unwrap_or("keychain backend is unavailable");
-        eprintln!("❌ Keychain credentials cannot be inspected right now: {detail}");
+        eprintln!("x Keychain credentials cannot be inspected right now: {detail}");
         eprintln!("Unlock/allow keychain access, then retry the mode switch.");
         return false;
     }
@@ -273,7 +273,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
     let changing_mode = configured_mode != Some(target_mode);
 
     if changing_mode && source_has_credentials && !migrate {
-        eprintln!("❌ Existing credentials were detected for the current mode.");
+        eprintln!("x Existing credentials were detected for the current mode.");
         eprintln!(
             "Re-run with `--migrate` to copy credentials into '{}' before switching.",
             target_mode.as_str()
@@ -286,7 +286,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
             let confirmed = match confirm("Migrate credentials and switch credential-store mode?") {
                 Ok(confirmed) => confirmed,
                 Err(error) => {
-                    eprintln!("❌ {error}");
+                    eprintln!("x {error}");
                     return false;
                 }
             };
@@ -299,7 +299,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
         let outcome = match store::migrate_secret_store(target_mode, dry_run) {
             Ok(outcome) => outcome,
             Err(error) => {
-                eprintln!("❌ Failed to migrate credential store: {error}");
+                eprintln!("x Failed to migrate credential store: {error}");
                 return false;
             }
         };
@@ -338,7 +338,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
         }
 
         if let Err(error) = config_settings::set_secret_store_mode(target_mode) {
-            eprintln!("❌ Failed to persist credential-store mode: {error}");
+            eprintln!("x Failed to persist credential-store mode: {error}");
             return false;
         }
 
@@ -352,7 +352,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
     }
 
     if let Err(error) = config_settings::set_secret_store_mode(target_mode) {
-        eprintln!("❌ Failed to persist credential-store mode: {error}");
+        eprintln!("x Failed to persist credential-store mode: {error}");
         return false;
     }
 

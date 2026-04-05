@@ -21,7 +21,7 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
     };
 
     vec![
-        format!("❌ Unknown AI server '{}'.", display_server),
+        format!("x Unknown AI server '{}'.", display_server),
         "Use `--server ollama` or `--server openai`.".to_string(),
         "Hint: Set `--server` explicitly or configure a default profile with a supported server."
             .to_string(),
@@ -98,7 +98,8 @@ fn display_model_name(model: &str) -> &str {
 fn normalize_cli_issue(message: &str) -> String {
     message
         .trim()
-        .strip_prefix("❌ ")
+        .strip_prefix("x ")
+        .or_else(|| message.trim().strip_prefix("❌ "))
         .unwrap_or(message.trim())
         .to_string()
 }
@@ -926,7 +927,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                 resolved_token.token
             }
             Err(error) => {
-                eprintln!("❌ {error}");
+                eprintln!("x {error}");
                 return false;
             }
         };
@@ -962,28 +963,28 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     let named_inputs = match resolved_named_inputs_for_run(sub_m) {
         Ok(named_inputs) => named_inputs,
         Err(error) => {
-            eprintln!("❌ {error}");
+            eprintln!("x {error}");
             return false;
         }
     };
     let selected_inputs = match resolved_inputs_for_run(sub_m, &named_inputs) {
         Ok(selected_inputs) => selected_inputs,
         Err(error) => {
-            eprintln!("❌ {error}");
+            eprintln!("x {error}");
             return false;
         }
     };
     let runtime_vars = match resolved_runtime_vars_for_run(sub_m) {
         Ok(runtime_vars) => runtime_vars,
         Err(error) => {
-            eprintln!("❌ {error}");
+            eprintln!("x {error}");
             return false;
         }
     };
     let action_execution_override = match resolved_action_execution_override_for_run(sub_m) {
         Ok(action_execution_override) => action_execution_override,
         Err(error) => {
-            eprintln!("❌ {error}");
+            eprintln!("x {error}");
             return false;
         }
     };
@@ -995,7 +996,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         &named_inputs,
         &selected_inputs,
     ) {
-        eprintln!("❌ {error}");
+        eprintln!("x {error}");
         return false;
     }
 
@@ -1003,7 +1004,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         let output = match empty_action_only_output() {
             Ok(output) => output,
             Err(error) => {
-                eprintln!("❌ {error}");
+                eprintln!("x {error}");
                 return false;
             }
         };
@@ -1108,7 +1109,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                 Ok(remaining) => remaining,
                 Err(error) => {
                     eprintln!(
-                        "❌ {}",
+                        "x {}",
                         current_agent_runtime_timeout_message(runtime_budget, error.as_str())
                     );
                     return false;
@@ -1189,7 +1190,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                 Ok(remaining) => remaining,
                 Err(error) => {
                     eprintln!(
-                        "❌ {}",
+                        "x {}",
                         current_agent_runtime_timeout_message(runtime_budget, error.as_str())
                     );
                     return false;

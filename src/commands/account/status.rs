@@ -22,7 +22,7 @@ pub async fn run() -> bool {
         Some(cfg) => cfg,
         None => {
             eprintln!(
-                "❌ No local config file found at '{}'. Run `cargo ai account register <email>` on this machine, or copy your config from another machine.",
+                "x No local config file found at '{}'. Run `cargo ai account register <email>` on this machine, or copy your config from another machine.",
                 config_path().display()
             );
             return false;
@@ -33,7 +33,7 @@ pub async fn run() -> bool {
     let acct = match cfg.account.as_ref() {
         Some(acct) => acct,
         None => {
-            eprintln!("❌ No account found in config. You must confirm your account first.");
+            eprintln!("x No account found in config. You must confirm your account first.");
             return false;
         }
     };
@@ -42,13 +42,13 @@ pub async fn run() -> bool {
     let auth = match load_account_auth() {
         Ok(auth) => auth,
         Err(error) => {
-            eprintln!("{error}");
+            eprintln!("{}", ui::account_status::normalize_leading_glyph(&error));
             return false;
         }
     };
 
     if auth.refresh_token.is_none() {
-        eprintln!("⚠️ No refresh token found in credential store. Status will work only while the access token remains valid.");
+        eprintln!("! No refresh token found in credential store. Status will work only while the access token remains valid.");
     }
 
     // Compute token expiration using consistent integer types.
@@ -101,7 +101,7 @@ pub async fn run() -> bool {
     {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("❌ Request failed: {e:?}");
+            eprintln!("x Request failed: {e:?}");
             return false;
         }
     };
@@ -129,7 +129,7 @@ pub async fn run() -> bool {
             {
                 Ok(r) => response = r,
                 Err(e) => {
-                    eprintln!("❌ Request failed: {e:?}");
+                    eprintln!("x Request failed: {e:?}");
                     return false;
                 }
             }
@@ -166,7 +166,7 @@ pub async fn run() -> bool {
                     Some(rt) => rt,
                     None => {
                         // Shouldn't happen in the refresh scenario, but don't clobber anything.
-                        eprintln!("⚠️ Refreshed access token returned, but no refresh token exists in credential store to persist alongside it.");
+                        eprintln!("! Refreshed access token returned, but no refresh token exists in credential store to persist alongside it.");
                         return false;
                     }
                 };
