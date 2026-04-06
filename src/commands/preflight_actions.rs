@@ -1578,9 +1578,13 @@ async fn run_generate_image_step(
     provider_context: &ActionProviderContext,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
-    let step_profile_context =
-        resolve_generate_image_step_profile_context(step.profile.as_ref(), data, action_name)
-            .await?;
+    let step_profile_context = resolve_generate_image_step_profile_context(
+        step.profile.as_ref(),
+        data,
+        action_name,
+        provider_context.inference_timeout_in_sec,
+    )
+    .await?;
     let effective_provider_context = step_profile_context.as_ref().unwrap_or(provider_context);
 
     let model = resolve_generate_image_model(
@@ -1811,6 +1815,7 @@ async fn resolve_generate_image_step_profile_context(
     profile: Option<&crate::RunArg>,
     data: &serde_json::Value,
     action_name: &str,
+    invocation_timeout_in_sec: u64,
 ) -> Result<Option<ActionProviderContext>, String> {
     let Some(profile_name) =
         resolve_step_profile_name(profile, data, action_name, "generate_image")?
@@ -1895,7 +1900,7 @@ async fn resolve_generate_image_step_profile_context(
         model: profile.model.clone(),
         url,
         token,
-        inference_timeout_in_sec: profile.timeout_in_sec,
+        inference_timeout_in_sec: invocation_timeout_in_sec,
     }))
 }
 
@@ -3355,9 +3360,10 @@ mod tests {
         action_completion_summary, action_execution_header, action_lane_prefix, apply_actions,
         child_input_args, configured_agent_action_runtime_budget, format_backend_error_message,
         format_backend_ui_message, insert_action_output_variable, matching_run_steps,
-        resolve_run_args, resolve_string_parts, run_agent_step, run_completion_message_for_depth,
-        run_exec_step, run_generate_image_step, step_matches_platform, validate_agent_action_depth,
-        ActionOutput, ActionOutputMode, ActionProviderContext, StepExecutionOutcome, ACTION_OUTPUT,
+        resolve_generate_image_step_profile_context, resolve_run_args, resolve_string_parts,
+        run_agent_step, run_completion_message_for_depth, run_exec_step, run_generate_image_step,
+        step_matches_platform, validate_agent_action_depth, ActionOutput, ActionOutputMode,
+        ActionProviderContext, StepExecutionOutcome, ACTION_OUTPUT,
     };
     use crate::credentials::openai_oauth;
     use crate::providers::ProviderKind;
@@ -4914,6 +4920,29 @@ auth_mode = "{auth_mode}"
         assert!(!snapshot
             .iter()
             .any(|line| line.contains("url=http://127.0.0.1")));
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_profile_inherits_invocation_timeout() {
+        let config = profile_config(
+            "image_profile",
+            "https://api.openai.com/v1/chat/completions",
+            "gpt-image-step-profile",
+        );
+        let _test_env = TestCargoHome::new(&config);
+
+        let context = resolve_generate_image_step_profile_context(
+            Some(&crate::RunArg::Literal("image_profile".to_string())),
+            &json!({}),
+            "generate_art",
+            180,
+        )
+        .await
+        .expect("profile lookup should succeed")
+        .expect("profile context should resolve");
+
+        assert_eq!(context.inference_timeout_in_sec, 180);
+        assert_eq!(context.model, "gpt-image-step-profile");
     }
 
     #[tokio::test]

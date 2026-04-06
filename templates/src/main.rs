@@ -3070,8 +3070,13 @@ async fn run_generate_image_step(
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
     let step_profile_context =
-        resolve_generate_image_step_profile_context(step.profile.as_ref(), data, action_name)
-            .await?;
+        resolve_generate_image_step_profile_context(
+            step.profile.as_ref(),
+            data,
+            action_name,
+            provider_context.inference_timeout_in_sec,
+        )
+        .await?;
     let effective_provider_context = step_profile_context.as_ref().unwrap_or(provider_context);
 
     let model = resolve_generate_image_model(
@@ -3281,6 +3286,7 @@ async fn resolve_generate_image_step_profile_context(
     profile: Option<&RunArg>,
     data: &serde_json::Value,
     action_name: &str,
+    invocation_timeout_in_sec: u64,
 ) -> Result<Option<ActionProviderContext>, String> {
     let Some(profile_name) =
         resolve_step_profile_name(profile, data, action_name, "generate_image")?
@@ -3314,13 +3320,13 @@ async fn resolve_generate_image_step_profile_context(
 
     let mut server = String::new();
     let mut model = String::new();
-    let mut timeout_in_sec = 60;
+    let mut profile_timeout_in_sec = 60;
     let mut url = String::new();
     let selected_profile = apply_profile(
         profile,
         &mut server,
         &mut model,
-        &mut timeout_in_sec,
+        &mut profile_timeout_in_sec,
         &mut url,
     );
 
@@ -3371,7 +3377,7 @@ async fn resolve_generate_image_step_profile_context(
         model,
         url,
         token: resolved_token.token,
-        inference_timeout_in_sec: timeout_in_sec,
+        inference_timeout_in_sec: invocation_timeout_in_sec,
     }))
 }
 
