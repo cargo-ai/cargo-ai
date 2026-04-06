@@ -256,6 +256,7 @@ Required fields:
 - If `model` is omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override.
 - If `profile` is present, Cargo AI resolves that profile at step runtime and uses it for the image step's provider/url/token context.
 - With `generate_image.profile`, explicit `model` still wins, then the step-profile model, then the parent invocation model.
+- `generate_image.profile` may point to a different provider from the parent invocation; for example, a parent may stay on OpenAI while one image step switches to an Ollama profile.
 - If neither the step nor the invocation provides a model, the step fails clearly at runtime.
 - `model` may be:
   - a literal non-empty string
@@ -264,6 +265,7 @@ Required fields:
 - `generate_image.model` may not read captured `output_variable`, `status_variable`, or `error_variable` values in the current contract.
 - For Cargo AI's default OpenAI account transport, use a tool-capable mainline model such as `gpt-5.2`.
 - For a direct OpenAI API token and URL, prefer GPT Image models such as `gpt-image-1.5` or `gpt-image-1-mini`.
+- For Ollama's experimental OpenAI-compatible `/v1/images/generations` endpoint, use an Ollama image model on an Ollama profile. The current compatibility slice uses Ollama's documented `b64_json` response path, so Ollama-backed `generate_image` steps currently require a `.png` output path.
 - Current-at-ship-date note: official OpenAI docs list `gpt-image-1.5` as the latest GPT Image model, and the image-generation guide lists `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini` for direct image generation. Verified: 2026-03-28.
 
 ## Common Optional Step Fields

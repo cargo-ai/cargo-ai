@@ -11,7 +11,9 @@ pub(crate) use error::{
     provider_error_messages, validate_provider_content_parts, validate_provider_request,
     ProviderError, ProviderKind,
 };
-pub(crate) use ollama::send_request as send_ollama_request;
+pub(crate) use ollama::{
+    send_image_request as send_ollama_image_request, send_request as send_ollama_request,
+};
 pub(crate) use openai::{
     send_image_request as send_openai_image_request, send_request as send_openai_request,
 };

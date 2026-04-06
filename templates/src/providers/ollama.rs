@@ -1,8 +1,11 @@
 // External Crates
 use super::{runtime::ContentPart, ProviderError, ProviderKind};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use reqwest::ClientBuilder;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+
+const DEFAULT_IMAGE_SIZE: &str = "1024x1024";
 
 #[derive(Serialize, Debug)]
 struct Request {
@@ -52,6 +55,25 @@ struct Choice {
 #[derive(Deserialize, Debug)]
 struct Response {
     choices: Vec<Choice>,
+}
+
+#[derive(Serialize, Debug)]
+struct ImageGenerationRequest {
+    model: String,
+    prompt: String,
+    n: u8,
+    size: String,
+    response_format: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct ImageGenerationResponse {
+    data: Vec<ImageGenerationData>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ImageGenerationData {
+    b64_json: String,
 }
 
 fn normalize_response_format(response_format: serde_json::Value) -> serde_json::Value {
@@ -135,6 +157,97 @@ pub async fn send_request(
             "Ollama returned no chat completion choices.",
         )),
     }
+}
+
+fn normalize_images_url(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    if let Some(index) = trimmed.find("/v1/") {
+        return format!("{}/v1/images/generations", &trimmed[..index]);
+    }
+
+    if trimmed.ends_with("/v1") {
+        format!("{trimmed}/images/generations")
+    } else {
+        format!("{trimmed}/v1/images/generations")
+    }
+}
+
+pub async fn send_image_request(
+    url: &String,
+    model: &String,
+    prompt: &str,
+    timeout_in_sec: u64,
+    token: &str,
+) -> Result<Vec<u8>, ProviderError> {
+    let request = ImageGenerationRequest {
+        model: model.clone(),
+        prompt: prompt.to_string(),
+        n: 1,
+        size: DEFAULT_IMAGE_SIZE.to_string(),
+        response_format: "b64_json".to_string(),
+    };
+
+    let client = ClientBuilder::new()
+        .timeout(Duration::from_secs(timeout_in_sec))
+        .build()
+        .map_err(|error| ProviderError::from_reqwest(ProviderKind::Ollama, error))?;
+
+    let endpoint = normalize_images_url(url);
+    let mut request_builder = client
+        .post(endpoint.as_str())
+        .header("Content-Type", "application/json");
+    if !token.trim().is_empty() {
+        request_builder = request_builder.header("Authorization", format!("Bearer {}", token));
+    }
+
+    let http_resp = request_builder
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| ProviderError::from_reqwest(ProviderKind::Ollama, error))?;
+
+    let status = http_resp.status();
+    let body_bytes = http_resp
+        .bytes()
+        .await
+        .map_err(|error| ProviderError::from_reqwest(ProviderKind::Ollama, error))?;
+
+    if !status.is_success() {
+        let raw = String::from_utf8_lossy(&body_bytes);
+        return Err(ProviderError::from_http_status(
+            ProviderKind::Ollama,
+            status,
+            &raw,
+        ));
+    }
+
+    let response: ImageGenerationResponse =
+        serde_json::from_slice(&body_bytes).map_err(|error| {
+            let raw = String::from_utf8_lossy(&body_bytes);
+            ProviderError::invalid_response(
+                ProviderKind::Ollama,
+                format!("Failed to parse image-generation JSON: {error}\nRaw response:\n{raw}"),
+            )
+        })?;
+
+    let encoded_image = response
+        .data
+        .first()
+        .map(|image| image.b64_json.trim())
+        .filter(|image| !image.is_empty())
+        .ok_or_else(|| {
+            ProviderError::invalid_response(
+                ProviderKind::Ollama,
+                "Image generation response did not include `data[0].b64_json`.",
+            )
+        })?;
+
+    BASE64_STANDARD.decode(encoded_image).map_err(|error| {
+        ProviderError::invalid_response(
+            ProviderKind::Ollama,
+            format!("Failed to decode generated image bytes: {error}"),
+        )
+    })
 }
 
 fn request_content_parts(content_parts: &[ContentPart]) -> Vec<RequestContentPart> {
