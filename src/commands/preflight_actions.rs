@@ -1578,18 +1578,14 @@ async fn run_generate_image_step(
     provider_context: &ActionProviderContext,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
-    let step_profile_context =
-        resolve_generate_image_step_profile_context(step.profile.as_ref(), data, action_name)
-            .await?;
+    let step_profile_context = resolve_generate_image_step_profile_context(
+        step.profile.as_ref(),
+        data,
+        action_name,
+        provider_context.inference_timeout_in_sec,
+    )
+    .await?;
     let effective_provider_context = step_profile_context.as_ref().unwrap_or(provider_context);
-
-    if effective_provider_context.provider != crate::providers::ProviderKind::OpenAi {
-        return Err(format!(
-            "Action '{}' generate_image step requires `--server openai`; current server is {}.",
-            action_name,
-            effective_provider_context.provider.display_name()
-        ));
-    }
 
     let model = resolve_generate_image_model(
         step.model.as_ref(),
@@ -1634,6 +1630,11 @@ async fn run_generate_image_step(
     let output_path = resolve_string_parts(path_parts, data, action_name, "path")
         .map_err(|error| format!("Action '{}': {error}", action_name))?;
     let output_format = generated_image_output_format(output_path.as_str(), action_name)?;
+    validate_generate_image_output_format_for_provider(
+        effective_provider_context.provider,
+        output_format,
+        action_name,
+    )?;
 
     let remaining = remaining_runtime_duration(
         runtime_budget,
@@ -1643,17 +1644,31 @@ async fn run_generate_image_step(
         action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
     })?;
 
-    let image_bytes = match tokio::time::timeout(
-        remaining,
-        crate::providers::send_openai_image_request(
-            &effective_provider_context.url,
-            &model,
-            prompt.as_str(),
-            effective_provider_context.inference_timeout_in_sec,
-            &effective_provider_context.token,
-            output_format,
-        ),
-    )
+    let image_bytes = match tokio::time::timeout(remaining, async {
+        match effective_provider_context.provider {
+            crate::providers::ProviderKind::OpenAi => {
+                crate::providers::send_openai_image_request(
+                    &effective_provider_context.url,
+                    &model,
+                    prompt.as_str(),
+                    effective_provider_context.inference_timeout_in_sec,
+                    &effective_provider_context.token,
+                    output_format,
+                )
+                .await
+            }
+            crate::providers::ProviderKind::Ollama => {
+                crate::providers::send_ollama_image_request(
+                    &effective_provider_context.url,
+                    &model,
+                    prompt.as_str(),
+                    effective_provider_context.inference_timeout_in_sec,
+                    &effective_provider_context.token,
+                )
+                .await
+            }
+        }
+    })
     .await
     {
         Ok(Ok(bytes)) => bytes,
@@ -1800,6 +1815,7 @@ async fn resolve_generate_image_step_profile_context(
     profile: Option<&crate::RunArg>,
     data: &serde_json::Value,
     action_name: &str,
+    invocation_timeout_in_sec: u64,
 ) -> Result<Option<ActionProviderContext>, String> {
     let Some(profile_name) =
         resolve_step_profile_name(profile, data, action_name, "generate_image")?
@@ -1832,32 +1848,39 @@ async fn resolve_generate_image_step_profile_context(
             )
         })?;
 
-    if provider != crate::providers::ProviderKind::OpenAi {
-        return Err(format!(
-            "Action '{}' generate_image step profile '{}' uses server '{}', but generate_image requires openai.",
-            action_name, profile.name, profile.server
-        ));
-    }
-
     let mut url = profile.url.clone().unwrap_or_default();
     let token = match profile.auth_mode {
         ProfileAuthMode::ApiKey => resolve_profile_api_token_for_action_step(profile)?,
         ProfileAuthMode::OpenaiAccount => {
+            if provider != crate::providers::ProviderKind::OpenAi {
+                return Err(format!(
+                    "Action '{}' generate_image step profile '{}' uses auth mode '{}', but server '{}' supports only '{}' or '{}'.",
+                    action_name,
+                    profile.name,
+                    ProfileAuthMode::OpenaiAccount.as_str(),
+                    profile.server,
+                    ProfileAuthMode::None.as_str(),
+                    ProfileAuthMode::ApiKey.as_str()
+                ));
+            }
             url = openai_oauth::OPENAI_ACCOUNT_RESPONSES_URL.to_string();
             openai_oauth::resolve_session_for_runtime()
                 .await
                 .map(|session| session.access_token)?
         }
-        ProfileAuthMode::None => {
-            return Err(format!(
-                "Action '{}' generate_image step profile '{}' auth mode is '{}'. Set it to '{}' or '{}' before using it here.",
-                action_name,
-                profile.name,
-                ProfileAuthMode::None.as_str(),
-                ProfileAuthMode::ApiKey.as_str(),
-                ProfileAuthMode::OpenaiAccount.as_str()
-            ));
-        }
+        ProfileAuthMode::None => match provider {
+            crate::providers::ProviderKind::Ollama => String::new(),
+            crate::providers::ProviderKind::OpenAi => {
+                return Err(format!(
+                    "Action '{}' generate_image step profile '{}' auth mode is '{}'. Set it to '{}' or '{}' before using it here.",
+                    action_name,
+                    profile.name,
+                    ProfileAuthMode::None.as_str(),
+                    ProfileAuthMode::ApiKey.as_str(),
+                    ProfileAuthMode::OpenaiAccount.as_str()
+                ));
+            }
+        },
     };
 
     if url.trim().is_empty() {
@@ -1877,7 +1900,7 @@ async fn resolve_generate_image_step_profile_context(
         model: profile.model.clone(),
         url,
         token,
-        inference_timeout_in_sec: profile.timeout_in_sec,
+        inference_timeout_in_sec: invocation_timeout_in_sec,
     }))
 }
 
@@ -3141,6 +3164,21 @@ fn generated_image_output_format(
     }
 }
 
+fn validate_generate_image_output_format_for_provider(
+    provider: crate::providers::ProviderKind,
+    output_format: &str,
+    action_name: &str,
+) -> Result<(), String> {
+    if provider == crate::providers::ProviderKind::Ollama && output_format != "png" {
+        return Err(format!(
+            "Action '{}' generate_image step targeting Ollama currently requires a `.png` output path because the current Ollama compatibility slice only guarantees `b64_json` image payloads, not OpenAI-style output-format selection.",
+            action_name
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_child_input_url(
     url: &str,
     action_name: &str,
@@ -3322,9 +3360,10 @@ mod tests {
         action_completion_summary, action_execution_header, action_lane_prefix, apply_actions,
         child_input_args, configured_agent_action_runtime_budget, format_backend_error_message,
         format_backend_ui_message, insert_action_output_variable, matching_run_steps,
-        resolve_run_args, resolve_string_parts, run_agent_step, run_completion_message_for_depth,
-        run_exec_step, run_generate_image_step, step_matches_platform, validate_agent_action_depth,
-        ActionOutput, ActionOutputMode, ActionProviderContext, StepExecutionOutcome, ACTION_OUTPUT,
+        resolve_generate_image_step_profile_context, resolve_run_args, resolve_string_parts,
+        run_agent_step, run_completion_message_for_depth, run_exec_step, run_generate_image_step,
+        step_matches_platform, validate_agent_action_depth, ActionOutput, ActionOutputMode,
+        ActionProviderContext, StepExecutionOutcome, ACTION_OUTPUT,
     };
     use crate::credentials::openai_oauth;
     use crate::providers::ProviderKind;
@@ -3438,18 +3477,56 @@ mod tests {
         }
     }
 
-    fn profile_config(profile_name: &str, server_url: &str, model: &str) -> String {
+    fn profile_config_with_server_and_auth(
+        profile_name: &str,
+        server: &str,
+        server_url: &str,
+        model: &str,
+        auth_mode: &str,
+    ) -> String {
         format!(
             r#"
 [[profile]]
 name = "{profile_name}"
-server = "openai"
+server = "{server}"
 model = "{model}"
 url = "{server_url}"
-token = "profile-token"
 timeout_in_sec = 42
-auth_mode = "api_key"
-"#
+auth_mode = "{auth_mode}"
+"#,
+        ) + if auth_mode == "api_key" {
+            "token = \"profile-token\"\n"
+        } else {
+            ""
+        }
+    }
+
+    fn profile_config(profile_name: &str, server_url: &str, model: &str) -> String {
+        profile_config_with_server_and_auth(profile_name, "openai", server_url, model, "api_key")
+    }
+
+    fn ollama_profile_config(profile_name: &str, server_url: &str, model: &str) -> String {
+        profile_config_with_server_and_auth(profile_name, "ollama", server_url, model, "none")
+    }
+
+    fn ollama_provider_context(server_url: &str, model: &str) -> ActionProviderContext {
+        ActionProviderContext {
+            provider: ProviderKind::Ollama,
+            profile_name: Some("ollama_profile".to_string()),
+            auth_mode: "none".to_string(),
+            model: model.to_string(),
+            url: server_url.to_string(),
+            token: String::new(),
+            inference_timeout_in_sec: 60,
+        }
+    }
+
+    fn ollama_image_response_bytes(body: &[u8]) -> String {
+        use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+
+        format!(
+            r#"{{"data":[{{"b64_json":"{}"}}]}}"#,
+            BASE64_STANDARD.encode(body)
         )
     }
 
@@ -4846,6 +4923,29 @@ auth_mode = "api_key"
     }
 
     #[tokio::test]
+    async fn generate_image_step_profile_inherits_invocation_timeout() {
+        let config = profile_config(
+            "image_profile",
+            "https://api.openai.com/v1/chat/completions",
+            "gpt-image-step-profile",
+        );
+        let _test_env = TestCargoHome::new(&config);
+
+        let context = resolve_generate_image_step_profile_context(
+            Some(&crate::RunArg::Literal("image_profile".to_string())),
+            &json!({}),
+            "generate_art",
+            180,
+        )
+        .await
+        .expect("profile lookup should succeed")
+        .expect("profile context should resolve");
+
+        assert_eq!(context.inference_timeout_in_sec, 180);
+        assert_eq!(context.model, "gpt-image-step-profile");
+    }
+
+    #[tokio::test]
     async fn generate_image_step_explicit_model_overrides_step_profile_model() {
         use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 
@@ -4971,6 +5071,204 @@ auth_mode = "api_key"
         .expect_err("missing profile should fail");
 
         assert!(error.contains("unknown profile 'missing_profile'"));
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_supports_direct_ollama_provider_context() {
+        let mut server = mockito::Server::new_async().await;
+        let expected_bytes = b"fake-ollama-png";
+        let _mock = server
+            .mock("POST", "/v1/images/generations")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "model": "x/flux2-klein:4b",
+                "prompt": "Create an image for Acme",
+                "n": 1,
+                "size": "1024x1024",
+                "response_format": "b64_json"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(ollama_image_response_bytes(expected_bytes))
+            .create_async()
+            .await;
+
+        let output_name = format!(
+            ".tmp-cai2057-generated-image-ollama-direct-{}.png",
+            std::process::id()
+        );
+        let step = crate::RunStep {
+            kind: "generate_image".to_string(),
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![crate::RunArg::Literal(
+                "Create an image for Acme".to_string(),
+            )]),
+            path: Some(vec![crate::RunArg::Literal(output_name.clone())]),
+            subject: None,
+            text: None,
+            agent: None,
+            run_vars: None,
+            input_overrides: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_generate_image_step(
+            &step,
+            &json!({}),
+            0,
+            "generate_art",
+            &ollama_provider_context(
+                format!("{}/v1/chat/completions", server.url()).as_str(),
+                "x/flux2-klein:4b",
+            ),
+            runtime_budget,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "direct ollama image generation should succeed: {result:?}"
+        );
+
+        let written_bytes =
+            std::fs::read(&output_name).expect("generated image file should be written");
+        let _ = std::fs::remove_file(&output_name);
+        assert_eq!(written_bytes, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_supports_ollama_step_profile_from_openai_parent() {
+        let mut server = mockito::Server::new_async().await;
+        let expected_bytes = b"fake-ollama-profile-png";
+        let _mock = server
+            .mock("POST", "/v1/images/generations")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "model": "x/flux2-klein:4b",
+                "prompt": "Create an image for Acme",
+                "n": 1,
+                "size": "1024x1024",
+                "response_format": "b64_json"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(ollama_image_response_bytes(expected_bytes))
+            .create_async()
+            .await;
+
+        let config = ollama_profile_config(
+            "ollama_images",
+            format!("{}/v1/chat/completions", server.url()).as_str(),
+            "x/flux2-klein:4b",
+        );
+        let _test_env = TestCargoHome::new(&config);
+
+        let output_name = format!(
+            ".tmp-cai2057-generated-image-ollama-profile-{}.png",
+            std::process::id()
+        );
+        let step = crate::RunStep {
+            kind: "generate_image".to_string(),
+            program: None,
+            model: None,
+            profile: Some(crate::RunArg::Literal("ollama_images".to_string())),
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![crate::RunArg::Literal(
+                "Create an image for Acme".to_string(),
+            )]),
+            path: Some(vec![crate::RunArg::Literal(output_name.clone())]),
+            subject: None,
+            text: None,
+            agent: None,
+            run_vars: None,
+            input_overrides: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_generate_image_step(
+            &step,
+            &json!({}),
+            0,
+            "generate_art",
+            &provider_context(),
+            runtime_budget,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "mixed-provider ollama image generation should succeed: {result:?}"
+        );
+
+        let written_bytes =
+            std::fs::read(&output_name).expect("generated image file should be written");
+        let _ = std::fs::remove_file(&output_name);
+        assert_eq!(written_bytes, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_rejects_non_png_output_for_ollama() {
+        let step = crate::RunStep {
+            kind: "generate_image".to_string(),
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![crate::RunArg::Literal(
+                "Create an image for Acme".to_string(),
+            )]),
+            path: Some(vec![crate::RunArg::Literal(
+                "./artifacts/generated.webp".to_string(),
+            )]),
+            subject: None,
+            text: None,
+            agent: None,
+            run_vars: None,
+            input_overrides: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = run_generate_image_step(
+            &step,
+            &json!({}),
+            0,
+            "generate_art",
+            &ollama_provider_context(
+                "http://localhost:11434/v1/chat/completions",
+                "x/flux2-klein:4b",
+            ),
+            runtime_budget,
+        )
+        .await
+        .expect_err("non-png ollama image generation should fail");
+
+        assert!(error.contains("requires a `.png` output path"));
+        assert!(error.contains("Ollama"));
     }
 
     #[cfg(unix)]

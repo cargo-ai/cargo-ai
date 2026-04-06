@@ -3070,17 +3070,14 @@ async fn run_generate_image_step(
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
     let step_profile_context =
-        resolve_generate_image_step_profile_context(step.profile.as_ref(), data, action_name)
-            .await?;
-    let effective_provider_context = step_profile_context.as_ref().unwrap_or(provider_context);
-
-    if effective_provider_context.provider != ProviderKind::OpenAi {
-        return Err(format!(
-            "Action '{}' generate_image step requires `--server openai`; current server is {}.",
+        resolve_generate_image_step_profile_context(
+            step.profile.as_ref(),
+            data,
             action_name,
-            effective_provider_context.provider.display_name()
-        ));
-    }
+            provider_context.inference_timeout_in_sec,
+        )
+        .await?;
+    let effective_provider_context = step_profile_context.as_ref().unwrap_or(provider_context);
 
     let model = resolve_generate_image_model(
         step.model.as_ref(),
@@ -3123,6 +3120,11 @@ async fn run_generate_image_step(
     let output_path = resolve_string_parts(path_parts, data, action_name, "path")
         .map_err(|error| format!("Action '{}': {error}", action_name))?;
     let output_format = generated_image_output_format(output_path.as_str(), action_name)?;
+    validate_generate_image_output_format_for_provider(
+        effective_provider_context.provider,
+        output_format,
+        action_name,
+    )?;
 
     let remaining = remaining_runtime_duration(
         runtime_budget,
@@ -3138,14 +3140,31 @@ async fn run_generate_image_step(
 
     let image_bytes = match tokio::time::timeout(
         remaining,
-        crate::providers::send_openai_image_request(
-            &effective_provider_context.url,
-            &model,
-            prompt.as_str(),
-            effective_provider_context.inference_timeout_in_sec,
-            &effective_provider_context.token,
-            output_format,
-        ),
+        async {
+            match effective_provider_context.provider {
+                ProviderKind::OpenAi => {
+                    crate::providers::send_openai_image_request(
+                        &effective_provider_context.url,
+                        &model,
+                        prompt.as_str(),
+                        effective_provider_context.inference_timeout_in_sec,
+                        &effective_provider_context.token,
+                        output_format,
+                    )
+                    .await
+                }
+                ProviderKind::Ollama => {
+                    crate::providers::send_ollama_image_request(
+                        &effective_provider_context.url,
+                        &model,
+                        prompt.as_str(),
+                        effective_provider_context.inference_timeout_in_sec,
+                        &effective_provider_context.token,
+                    )
+                    .await
+                }
+            }
+        },
     )
     .await
     {
@@ -3267,6 +3286,7 @@ async fn resolve_generate_image_step_profile_context(
     profile: Option<&RunArg>,
     data: &serde_json::Value,
     action_name: &str,
+    invocation_timeout_in_sec: u64,
 ) -> Result<Option<ActionProviderContext>, String> {
     let Some(profile_name) =
         resolve_step_profile_name(profile, data, action_name, "generate_image")?
@@ -3298,28 +3318,46 @@ async fn resolve_generate_image_step_profile_context(
         )
     })?;
 
-    if provider != ProviderKind::OpenAi {
-        return Err(format!(
-            "Action '{}' generate_image step profile '{}' uses server '{}', but generate_image requires openai.",
-            action_name, profile.name, profile.server
-        ));
-    }
-
     let mut server = String::new();
     let mut model = String::new();
-    let mut timeout_in_sec = 60;
+    let mut profile_timeout_in_sec = 60;
     let mut url = String::new();
     let selected_profile = apply_profile(
         profile,
         &mut server,
         &mut model,
-        &mut timeout_in_sec,
+        &mut profile_timeout_in_sec,
         &mut url,
     );
 
-    let resolved_token = resolve_openai_token_for_request(Some(&selected_profile), Some(&config)).await?;
+    let resolved_token = match provider {
+        ProviderKind::OpenAi => {
+            resolve_openai_token_for_request(Some(&selected_profile), Some(&config)).await?
+        }
+        ProviderKind::Ollama => match profile.auth_mode {
+            ProfileAuthMode::None => ResolvedOpenAiToken {
+                token: String::new(),
+                uses_account_session: false,
+            },
+            ProfileAuthMode::ApiKey => ResolvedOpenAiToken {
+                token: resolve_profile_api_token(&selected_profile)?,
+                uses_account_session: false,
+            },
+            ProfileAuthMode::OpenaiAccount => {
+                return Err(format!(
+                    "Action '{}' generate_image step profile '{}' uses auth mode '{}', but server '{}' supports only '{}' or '{}'.",
+                    action_name,
+                    profile.name,
+                    ProfileAuthMode::OpenaiAccount.as_str(),
+                    profile.server,
+                    ProfileAuthMode::None.as_str(),
+                    ProfileAuthMode::ApiKey.as_str()
+                ));
+            }
+        },
+    };
     if url.is_empty() {
-        if resolved_token.uses_account_session {
+        if provider == ProviderKind::OpenAi && resolved_token.uses_account_session {
             url = OPENAI_ACCOUNT_RESPONSES_URL.to_string();
         } else {
             url = provider.default_url().to_string();
@@ -3339,7 +3377,7 @@ async fn resolve_generate_image_step_profile_context(
         model,
         url,
         token: resolved_token.token,
-        inference_timeout_in_sec: timeout_in_sec,
+        inference_timeout_in_sec: invocation_timeout_in_sec,
     }))
 }
 
@@ -4330,6 +4368,21 @@ fn generated_image_output_format(raw_path: &str, action_name: &str) -> Result<&'
             action_name
         )),
     }
+}
+
+fn validate_generate_image_output_format_for_provider(
+    provider: ProviderKind,
+    output_format: &str,
+    action_name: &str,
+) -> Result<(), String> {
+    if provider == ProviderKind::Ollama && output_format != "png" {
+        return Err(format!(
+            "Action '{}' generate_image step targeting Ollama currently requires a `.png` output path because the current Ollama compatibility slice only guarantees `b64_json` image payloads, not OpenAI-style output-format selection.",
+            action_name
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_child_input_url(url: &str, action_name: &str, input_index: usize) -> Result<(), String> {

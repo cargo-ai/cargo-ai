@@ -53,10 +53,11 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - `generate_image`
   - Required: `kind`, `prompt`, `path`
   - Optional: `model`, `profile`
-  - First slice: OpenAI-backed single-image output only
+  - First slice: direct OpenAI image transport, OpenAI account transport, and Ollama's experimental OpenAI-compatible image transport
   - If `model` is omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override.
   - If `profile` is present, Cargo AI resolves that profile at step runtime and uses it for the image step's provider/url/token context.
   - With `generate_image.profile`, explicit `model` still wins, then the step-profile model, then the parent invocation model.
+  - `generate_image.profile` may switch providers; for example, a parent may stay on OpenAI while one image step uses an Ollama profile.
   - If neither the step nor the invocation provides a model, the step fails clearly at runtime.
   - `model` may be:
     - a literal non-empty string
@@ -65,6 +66,8 @@ These documented step kinds and helper fields are exhaustive for the current MVP
   - `generate_image.model` may not read captured `output_variable`, `status_variable`, or `error_variable` values
   - Use a tool-capable mainline model such as `gpt-5.2` for OpenAI account transport
   - For a direct OpenAI API token and URL, prefer GPT Image models such as `gpt-image-1.5` or `gpt-image-1-mini`
+  - For Ollama's experimental OpenAI-compatible `/v1/images/generations` endpoint, use an Ollama image model on an Ollama profile such as `x/flux2-klein:4b`
+  - The current Ollama compatibility slice uses Ollama's documented `b64_json` response path, so Ollama-backed `generate_image` steps currently require a `.png` output path
   - Current-at-ship-date note: official OpenAI docs list `gpt-image-1.5` as the latest GPT Image model, and the image-generation guide lists `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini` for direct image generation. Verified: 2026-03-28.
 
 ## Optional Control Fields
@@ -132,6 +135,7 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - Local file and image paths should stay relative.
 - Parent-directory traversal such as `../` is invalid.
 - `generate_image` output paths must use one of: `.png`, `.jpg`, `.jpeg`, `.webp`.
+- For the current Ollama-backed `generate_image` compatibility path, use `.png`.
 
 ## Child-Agent Data Flow
 
