@@ -12,7 +12,7 @@ use super::helpers::INFRA_BASE_URL;
 /// Confirms a registration code and persists returned tokens on success.
 pub async fn run(conf_m: &ArgMatches) -> bool {
     let Some(code) = conf_m.get_one::<String>("code") else {
-        eprintln!("❌ Missing confirmation code. Use `cargo ai account confirm <code>`.");
+        eprintln!("x Missing confirmation code. Use `cargo ai account confirm <code>`.");
         return false;
     };
 
@@ -20,7 +20,7 @@ pub async fn run(conf_m: &ArgMatches) -> bool {
         Some(cfg) => cfg,
         None => {
             eprintln!(
-                "❌ No local config file found at '{}'. Run `cargo ai account register <email>` on this machine, or copy your config from another machine.",
+                "x No local config file found at '{}'. Run `cargo ai account register <email>` on this machine, or copy your config from another machine.",
                 config_path().display()
             );
             return false;
@@ -31,7 +31,7 @@ pub async fn run(conf_m: &ArgMatches) -> bool {
     let email = match cfg.account.and_then(|acct| acct.email) {
         Some(e) => e,
         None => {
-            eprintln!("❌ No account email found in config. Run `cargo ai account register <email>` first.");
+            eprintln!("x No account email found in config. Run `cargo ai account register <email>` first.");
             return false;
         }
     };
@@ -72,11 +72,11 @@ pub async fn run(conf_m: &ArgMatches) -> bool {
                 match (access_token, refresh_token, expires_in) {
                     (Some(at), Some(rt), Some(ex)) => {
                         if let Err(e) = set_account_tokens(at, rt, ex) {
-                            eprintln!("⚠️ Failed to save account tokens to credential store: {e}");
+                            eprintln!("! Failed to save account tokens to credential store: {e}");
                         }
                     }
                     _ => {
-                        eprintln!("⚠️ Confirmation succeeded, but expected credentials were missing from the response.");
+                        eprintln!("! Confirmation succeeded, but expected credentials were missing from the response.");
                     }
                 }
             }
@@ -86,7 +86,7 @@ pub async fn run(conf_m: &ArgMatches) -> bool {
                 .unwrap_or(false)
         }
         Err(e) => {
-            eprintln!("❌ Request failed: {e:?}");
+            eprintln!("x Request failed: {e:?}");
             false
         }
     }

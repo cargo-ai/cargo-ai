@@ -43,7 +43,7 @@ async fn run_test(test_m: &ArgMatches) -> bool {
     let auth = match load_account_auth() {
         Ok(auth) => auth,
         Err(message) => {
-            eprintln!("{message}");
+            eprintln!("{}", ui::account_status::normalize_leading_glyph(&message));
             return false;
         }
     };
@@ -61,7 +61,7 @@ async fn run_test(test_m: &ArgMatches) -> bool {
     {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("❌ Request failed: {e:?}");
+            eprintln!("x Request failed: {e:?}");
             return false;
         }
     };
@@ -78,7 +78,7 @@ async fn run_test(test_m: &ArgMatches) -> bool {
             .await
         {
             Err(RefreshAccessError::MissingRefreshToken) => {
-                eprintln!("⚠️ Access token expired, and no refresh token exists in credential store. Run `cargo ai account status` or re-confirm account.");
+                eprintln!("! Access token expired, and no refresh token exists in credential store. Run `cargo ai account status` or re-confirm account.");
                 if !ui::account_status::render_backend_ui(&response) {
                     match serde_json::to_string_pretty(&response) {
                         Ok(pretty) => println!("{pretty}"),
@@ -88,11 +88,11 @@ async fn run_test(test_m: &ArgMatches) -> bool {
                 return false;
             }
             Err(RefreshAccessError::RequestFailed(error)) => {
-                eprintln!("❌ Request failed while refreshing session: {error}");
+                eprintln!("x Request failed while refreshing session: {error}");
                 return false;
             }
             Err(RefreshAccessError::MissingRefreshedToken(refresh_response)) => {
-                eprintln!("⚠️ Session refresh did not return a new access token. Cannot retry send-mail request.");
+                eprintln!("! Session refresh did not return a new access token. Cannot retry send-mail request.");
                 if !ui::account_status::render_backend_ui(&refresh_response) {
                     match serde_json::to_string_pretty(&refresh_response) {
                         Ok(pretty) => println!("{pretty}"),
@@ -120,7 +120,7 @@ async fn run_test(test_m: &ArgMatches) -> bool {
                 {
                     Ok(r) => r,
                     Err(e) => {
-                        eprintln!("❌ Request failed after session refresh: {e:?}");
+                        eprintln!("x Request failed after session refresh: {e:?}");
                         return false;
                     }
                 };
@@ -156,7 +156,7 @@ async fn run_prefs(prefs_m: &ArgMatches) -> bool {
     let auth = match load_account_auth() {
         Ok(auth) => auth,
         Err(message) => {
-            eprintln!("{message}");
+            eprintln!("{}", ui::account_status::normalize_leading_glyph(&message));
             return false;
         }
     };
@@ -174,7 +174,7 @@ async fn run_prefs(prefs_m: &ArgMatches) -> bool {
         {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("❌ Request failed: {e:?}");
+                eprintln!("x Request failed: {e:?}");
                 return false;
             }
         }
@@ -187,7 +187,7 @@ async fn run_prefs(prefs_m: &ArgMatches) -> bool {
         {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("❌ Request failed: {e:?}");
+                eprintln!("x Request failed: {e:?}");
                 return false;
             }
         }
@@ -205,7 +205,7 @@ async fn run_prefs(prefs_m: &ArgMatches) -> bool {
             .await
         {
             Err(RefreshAccessError::MissingRefreshToken) => {
-                eprintln!("⚠️ Access token expired, and no refresh token exists in credential store. Run `cargo ai account status` or re-confirm account.");
+                eprintln!("! Access token expired, and no refresh token exists in credential store. Run `cargo ai account status` or re-confirm account.");
                 if !ui::account_status::render_backend_ui(&response) {
                     match serde_json::to_string_pretty(&response) {
                         Ok(pretty) => println!("{pretty}"),
@@ -215,11 +215,11 @@ async fn run_prefs(prefs_m: &ArgMatches) -> bool {
                 return false;
             }
             Err(RefreshAccessError::RequestFailed(error)) => {
-                eprintln!("❌ Request failed while refreshing session: {error}");
+                eprintln!("x Request failed while refreshing session: {error}");
                 return false;
             }
             Err(RefreshAccessError::MissingRefreshedToken(refresh_response)) => {
-                eprintln!("⚠️ Session refresh did not return a new access token. Cannot retry mail-preferences request.");
+                eprintln!("! Session refresh did not return a new access token. Cannot retry mail-preferences request.");
                 if !ui::account_status::render_backend_ui(&refresh_response) {
                     match serde_json::to_string_pretty(&refresh_response) {
                         Ok(pretty) => println!("{pretty}"),
@@ -247,7 +247,7 @@ async fn run_prefs(prefs_m: &ArgMatches) -> bool {
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            eprintln!("x Request failed after session refresh: {e:?}");
                             return false;
                         }
                     }
@@ -260,7 +260,7 @@ async fn run_prefs(prefs_m: &ArgMatches) -> bool {
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            eprintln!("❌ Request failed after session refresh: {e:?}");
+                            eprintln!("x Request failed after session refresh: {e:?}");
                             return false;
                         }
                     }

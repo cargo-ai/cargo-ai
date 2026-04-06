@@ -4,7 +4,7 @@
 //! source resolution for hatch-style flows.
 use std::fs;
 use std::io::{Error, ErrorKind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::agent_builder::build_target::BuildTarget;
 
@@ -15,6 +15,38 @@ pub(crate) enum HatchMode {
     Check,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum HatchSource {
+    Registry {
+        name: String,
+    },
+    LocalFile {
+        path: String,
+    },
+    Account {
+        owner: String,
+        agent: String,
+        path: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HatchPresentation {
+    pub source: HatchSource,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HatchProgressStep {
+    PreparingDefinition,
+    PreparingBuildTemplate,
+    BuildingLocalAgent,
+    CheckingLocalAgent,
+    ExportingBinary,
+    CleaningWorkspace,
+    FinalizingWorkspace,
+}
+
+/// Request used to run a hatch/check pipeline.
 #[derive(Clone, Debug)]
 pub(crate) struct HatchRequest {
     pub project_name: String,
@@ -24,6 +56,7 @@ pub(crate) struct HatchRequest {
     pub keep_project: bool,
     pub build_target: BuildTarget,
     pub output_dir: Option<PathBuf>,
+    pub presentation: HatchPresentation,
 }
 
 impl HatchRequest {
@@ -35,6 +68,7 @@ impl HatchRequest {
         keep_project: bool,
         build_target: BuildTarget,
         output_dir: Option<PathBuf>,
+        presentation: HatchPresentation,
     ) -> Self {
         Self {
             project_name,
@@ -44,8 +78,60 @@ impl HatchRequest {
             keep_project,
             build_target,
             output_dir,
+            presentation,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TemplateSummaryStatus {
+    Created,
+    Reused,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum WorkspaceSummaryStatus {
+    Removed,
+    Preserved,
+    CleanupFailed(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HatchRunSummary {
+    project_name: String,
+    mode: HatchMode,
+    source: HatchSource,
+    build_target: String,
+    binary_path: Option<PathBuf>,
+    template_status: TemplateSummaryStatus,
+    workspace_status: WorkspaceSummaryStatus,
+}
+
+pub(crate) fn print_hatch_start(project_name: &str, mode: HatchMode) {
+    println!(
+        "{} agent `{}`...",
+        match mode {
+            HatchMode::Build => "Hatching",
+            HatchMode::Check => "Checking",
+        },
+        project_name
+    );
+    println!("First run may take longer while the build template is prepared.");
+    println!();
+}
+
+pub(crate) fn print_hatch_progress(step: HatchProgressStep) {
+    let message = match step {
+        HatchProgressStep::PreparingDefinition => "Preparing definition",
+        HatchProgressStep::PreparingBuildTemplate => "Preparing build template",
+        HatchProgressStep::BuildingLocalAgent => "Building local agent",
+        HatchProgressStep::CheckingLocalAgent => "Checking local agent",
+        HatchProgressStep::ExportingBinary => "Exporting binary",
+        HatchProgressStep::CleaningWorkspace => "Cleaning workspace",
+        HatchProgressStep::FinalizingWorkspace => "Finalizing workspace",
+    };
+
+    println!("{message}");
 }
 
 /// Parses `--output-dir` into an optional directory path.
@@ -79,19 +165,21 @@ where
         keep_project,
         build_target,
         output_dir,
+        presentation,
     } = request;
+
     let _agent_lock = match acquire_lock(project_name.as_str()) {
         Ok(lock) => lock,
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             println!(
-                "❌ Agent '{}' is already running a hatch/check operation in another process.",
+                "x Agent '{}' is already running a hatch/check operation in another process.",
                 project_name
             );
             return false;
         }
         Err(error) => {
             println!(
-                "❌ Failed to acquire lock for agent '{}' ({}): {}",
+                "x Failed to acquire lock for agent '{}' ({}): {}",
                 project_name,
                 crate::agent_builder::agent_workspace_path(project_name.as_str()).display(),
                 error
@@ -100,77 +188,75 @@ where
         }
     };
 
-    println!(
-        "🔒 Acquired workspace lock: {}",
-        _agent_lock.path().display()
-    );
-
-    if let Some(target_triple) = build_target.cargo_target() {
-        println!("🎯 Requested build target: {target_triple}");
-    }
-
     if let Err(message) = prepare_workspace_for_hatch(
         project_name.as_str(),
         force_overwrite,
         |agent_name| crate::agent_builder::agent_workspace_path(agent_name).exists(),
         crate::agent_builder::cleanup::delete_agent_workspace,
     ) {
-        println!("❌ {message}");
+        println!("x {message}");
         return false;
     }
 
+    print_hatch_progress(HatchProgressStep::PreparingBuildTemplate);
     let warmed_template =
         match crate::agent_builder::template_cache::ensure_warmed_template(&build_target) {
-            Ok(template) => {
-                if template.created {
-                    println!("🧱 Created warmed template: {}", template.path.display());
-                } else {
-                    println!("🧱 Reusing warmed template: {}", template.path.display());
-                }
-                if template.pruned_parent_count > 0 {
-                    println!(
-                        "🧹 Pruned {} stale template cache parent(s).",
-                        template.pruned_parent_count
-                    );
-                }
-                template
-            }
+            Ok(template) => template,
             Err(error) => {
-                println!("❌ Failed to prepare warmed template: {error}");
+                println!("x Failed to prepare warmed template: {error}");
                 return false;
             }
         };
+
+    let template_status = if warmed_template.created {
+        TemplateSummaryStatus::Created
+    } else {
+        TemplateSummaryStatus::Reused
+    };
 
     match crate::agent_builder::project::create_new_agent_project(
         &warmed_template.path,
         project_name.as_str(),
         Ok(file_contents),
     ) {
-        Ok(_) => println!("✅ Project created successfully."),
-        Err(e) => {
-            println!("❌ Failed to create project: {e}");
-            finalize_workspace(project_name.as_str(), keep_project);
+        Ok(_) => {}
+        Err(error) => {
+            println!("x Failed to create project: {error}");
+            print_hatch_progress(workspace_progress_step(keep_project));
+            if let WorkspaceSummaryStatus::CleanupFailed(error) =
+                finalize_workspace(project_name.as_str(), keep_project)
+            {
+                println!("! Failed to clean up workspace: {error}");
+            }
             return false;
         }
     }
 
     let shared_target_dir = warmed_template.path.join("target");
+    let mut binary_path = None;
 
     match mode {
         HatchMode::Build => {
+            print_hatch_progress(HatchProgressStep::BuildingLocalAgent);
             match crate::agent_builder::build::build_agent_project(
                 project_name.as_str(),
                 &build_target,
                 Some(shared_target_dir.as_path()),
             ) {
-                Ok(_) => println!("✅ Project built successfully."),
-                Err(e) => {
-                    println!("❌ Build failed: {e}");
-                    finalize_workspace(project_name.as_str(), keep_project);
+                Ok(_) => {}
+                Err(error) => {
+                    println!("x Build failed: {error}");
+                    print_hatch_progress(workspace_progress_step(keep_project));
+                    if let WorkspaceSummaryStatus::CleanupFailed(error) =
+                        finalize_workspace(project_name.as_str(), keep_project)
+                    {
+                        println!("! Failed to clean up workspace: {error}");
+                    }
                     return false;
                 }
             }
 
+            print_hatch_progress(HatchProgressStep::ExportingBinary);
             match crate::agent_builder::export::export_binary(
                 project_name.as_str(),
                 force_overwrite,
@@ -178,51 +264,80 @@ where
                 output_dir.as_deref(),
                 Some(warmed_template.path.as_path()),
             ) {
-                Ok(_) => println!("✅ Project binary exported successfully."),
-                Err(e) => {
-                    println!("❌ Export failed: {e}");
-                    finalize_workspace(project_name.as_str(), keep_project);
+                Ok(path) => binary_path = Some(path),
+                Err(error) => {
+                    println!("x Export failed: {error}");
+                    print_hatch_progress(workspace_progress_step(keep_project));
+                    if let WorkspaceSummaryStatus::CleanupFailed(error) =
+                        finalize_workspace(project_name.as_str(), keep_project)
+                    {
+                        println!("! Failed to clean up workspace: {error}");
+                    }
                     return false;
                 }
             }
         }
         HatchMode::Check => {
+            print_hatch_progress(HatchProgressStep::CheckingLocalAgent);
             match crate::agent_builder::build::check_agent_project(
                 project_name.as_str(),
                 &build_target,
                 Some(shared_target_dir.as_path()),
             ) {
-                Ok(_) => println!("✅ Project checked successfully."),
-                Err(e) => {
-                    println!("❌ Check failed: {e}");
-                    finalize_workspace(project_name.as_str(), keep_project);
+                Ok(_) => {}
+                Err(error) => {
+                    println!("x Check failed: {error}");
+                    print_hatch_progress(workspace_progress_step(keep_project));
+                    if let WorkspaceSummaryStatus::CleanupFailed(error) =
+                        finalize_workspace(project_name.as_str(), keep_project)
+                    {
+                        println!("! Failed to clean up workspace: {error}");
+                    }
                     return false;
                 }
             }
         }
     }
 
-    finalize_workspace(project_name.as_str(), keep_project);
+    print_hatch_progress(workspace_progress_step(keep_project));
+    let workspace_status = finalize_workspace(project_name.as_str(), keep_project);
+    if let WorkspaceSummaryStatus::CleanupFailed(error) = &workspace_status {
+        println!("! Failed to clean up workspace: {error}");
+    }
+
+    let summary = HatchRunSummary {
+        project_name,
+        mode,
+        source: presentation.source,
+        build_target: build_target.cache_key_target().to_string(),
+        binary_path,
+        template_status,
+        workspace_status,
+    };
+    for line in render_hatch_success_lines(&summary) {
+        println!("{line}");
+    }
+
     true
 }
 
-fn cleanup_workspace(new_project_name: &str) {
-    match crate::agent_builder::cleanup::delete_agent_workspace(new_project_name) {
-        Ok(_) => println!("🧼 Agent workspace removed."),
-        Err(e) => println!("⚠️ Failed to clean up workspace: {e}"),
+fn workspace_progress_step(keep_project: bool) -> HatchProgressStep {
+    if keep_project {
+        HatchProgressStep::FinalizingWorkspace
+    } else {
+        HatchProgressStep::CleaningWorkspace
     }
 }
 
-fn finalize_workspace(new_project_name: &str, keep_project: bool) {
+fn finalize_workspace(new_project_name: &str, keep_project: bool) -> WorkspaceSummaryStatus {
     if keep_project {
-        let workspace_path = crate::agent_builder::agent_workspace_path(new_project_name);
-        if workspace_path.exists() {
-            println!("ℹ️ Preserved agent workspace: {}", workspace_path.display());
-        }
-        return;
+        return WorkspaceSummaryStatus::Preserved;
     }
 
-    cleanup_workspace(new_project_name);
+    match crate::agent_builder::cleanup::delete_agent_workspace(new_project_name) {
+        Ok(_) => WorkspaceSummaryStatus::Removed,
+        Err(error) => WorkspaceSummaryStatus::CleanupFailed(error.to_string()),
+    }
 }
 
 fn prepare_workspace_for_hatch<FExists, FDelete>(
@@ -253,11 +368,158 @@ where
             workspace_path.display()
         )
     })?;
-    println!(
-        "ℹ️ Existing internal agent workspace removed: {}",
-        workspace_path.display()
-    );
+
     Ok(())
+}
+
+fn render_hatch_success_lines(summary: &HatchRunSummary) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(String::new());
+    lines.push(format!(
+        "✓ {}",
+        match summary.mode {
+            HatchMode::Build => "Agent hatched",
+            HatchMode::Check => "Agent checked",
+        }
+    ));
+    lines.push(summary_line(summary));
+
+    let source_items = source_items(summary);
+    push_aligned_section(&mut lines, "Source", &source_items);
+
+    if let Some(binary_path) = &summary.binary_path {
+        let output_items = vec![
+            (
+                "Binary",
+                format!("`{}`", display_path(binary_path.as_path())),
+            ),
+            ("Target", summary.build_target.clone()),
+        ];
+        push_aligned_section(&mut lines, "Output", &output_items);
+    }
+
+    let mut build_items = vec![
+        (
+            "Template",
+            template_status_label(summary.template_status).to_string(),
+        ),
+        (
+            "Workspace",
+            workspace_status_label(&summary.workspace_status),
+        ),
+    ];
+    if summary.binary_path.is_none() {
+        build_items.insert(0, ("Target", summary.build_target.clone()));
+    }
+    push_aligned_section(&mut lines, "Build", &build_items);
+
+    if let Some(binary_path) = &summary.binary_path {
+        let next_step_items = vec![(
+            "Run agent",
+            format!("`{} --help`", display_path(binary_path.as_path())),
+        )];
+        push_aligned_section(&mut lines, "Next steps", &next_step_items);
+    }
+
+    lines
+}
+
+fn summary_line(summary: &HatchRunSummary) -> String {
+    match (&summary.mode, &summary.source) {
+        (HatchMode::Build, HatchSource::Registry { .. }) => {
+            format!("Built local agent `{}`.", summary.project_name)
+        }
+        (HatchMode::Build, HatchSource::LocalFile { .. }) => {
+            format!(
+                "Built local agent `{}` from local definition.",
+                summary.project_name
+            )
+        }
+        (HatchMode::Build, HatchSource::Account { agent, .. }) => format!(
+            "Built local agent `{}` from account definition `{}`.",
+            summary.project_name, agent
+        ),
+        (HatchMode::Check, HatchSource::Registry { .. }) => {
+            format!("Checked local agent `{}`.", summary.project_name)
+        }
+        (HatchMode::Check, HatchSource::LocalFile { .. }) => {
+            format!(
+                "Checked local agent `{}` from local definition.",
+                summary.project_name
+            )
+        }
+        (HatchMode::Check, HatchSource::Account { agent, .. }) => format!(
+            "Checked local agent `{}` from account definition `{}`.",
+            summary.project_name, agent
+        ),
+    }
+}
+
+fn source_items(summary: &HatchRunSummary) -> Vec<(&'static str, String)> {
+    match &summary.source {
+        HatchSource::Registry { name } => {
+            vec![("Type", "Registry".to_string()), ("Name", name.clone())]
+        }
+        HatchSource::LocalFile { path } => vec![
+            ("Type", "Local file".to_string()),
+            ("File", path.clone()),
+            ("Agent", summary.project_name.clone()),
+        ],
+        HatchSource::Account { owner, agent, path } => vec![
+            ("Type", "Account".to_string()),
+            ("Owner", owner.clone()),
+            ("Agent", agent.clone()),
+            ("Path", path.clone()),
+        ],
+    }
+}
+
+fn template_status_label(status: TemplateSummaryStatus) -> &'static str {
+    match status {
+        TemplateSummaryStatus::Created => "Created warmed template",
+        TemplateSummaryStatus::Reused => "Reused warmed template",
+    }
+}
+
+fn workspace_status_label(status: &WorkspaceSummaryStatus) -> String {
+    match status {
+        WorkspaceSummaryStatus::Removed => "Removed".to_string(),
+        WorkspaceSummaryStatus::Preserved => "Preserved".to_string(),
+        WorkspaceSummaryStatus::CleanupFailed(_) => "Cleanup failed".to_string(),
+    }
+}
+
+fn push_aligned_section(lines: &mut Vec<String>, title: &str, items: &[(&str, String)]) {
+    if items.is_empty() {
+        return;
+    }
+
+    lines.push(String::new());
+    lines.push(title.to_string());
+
+    let label_width = items
+        .iter()
+        .map(|(label, _)| label.len())
+        .max()
+        .unwrap_or(0);
+    for (label, value) in items {
+        lines.push(format!("  {label:<width$}  {value}", width = label_width));
+    }
+}
+
+fn display_path(path: &Path) -> String {
+    if path.is_relative() {
+        return path.display().to_string();
+    }
+
+    match std::env::current_dir() {
+        Ok(current_dir) => match path.strip_prefix(&current_dir) {
+            Ok(relative) if relative.as_os_str().is_empty() => ".".to_string(),
+            Ok(relative) => format!("./{}", relative.display()),
+            Err(_) => path.display().to_string(),
+        },
+        Err(_) => path.display().to_string(),
+    }
 }
 
 /// Reads a local agent config file as UTF-8 text.
@@ -309,8 +571,9 @@ pub(crate) fn fetch_from_registry(name: &str) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        prepare_workspace_for_hatch, resolve_output_dir, run_hatch_pipeline_with_lock, HatchMode,
-        HatchRequest,
+        display_path, prepare_workspace_for_hatch, render_hatch_success_lines, resolve_output_dir,
+        run_hatch_pipeline_with_lock, HatchMode, HatchPresentation, HatchRequest, HatchRunSummary,
+        HatchSource, TemplateSummaryStatus, WorkspaceSummaryStatus,
     };
     use crate::agent_builder::build_target::BuildTarget;
     use std::cell::Cell;
@@ -328,6 +591,11 @@ mod tests {
                 false,
                 BuildTarget::from_cli(None).expect("default target should resolve"),
                 None,
+                HatchPresentation {
+                    source: HatchSource::Registry {
+                        name: "agent_lock_conflict_test".to_string(),
+                    },
+                },
             ),
             |_| {
                 Err(io::Error::new(
@@ -376,5 +644,69 @@ mod tests {
         let output_dir =
             resolve_output_dir(Some("./dist")).expect("non-empty output dir should parse");
         assert_eq!(output_dir, Some(PathBuf::from("./dist")));
+    }
+
+    #[test]
+    fn renders_registry_build_summary_lines() {
+        let lines = render_hatch_success_lines(&HatchRunSummary {
+            project_name: "weather_test".to_string(),
+            mode: HatchMode::Build,
+            source: HatchSource::Registry {
+                name: "weather_test".to_string(),
+            },
+            build_target: "aarch64-apple-darwin".to_string(),
+            binary_path: Some(PathBuf::from("./weather_test")),
+            template_status: TemplateSummaryStatus::Reused,
+            workspace_status: WorkspaceSummaryStatus::Removed,
+        });
+
+        let rendered = lines.join("\n");
+        assert!(rendered.contains("✓ Agent hatched"));
+        assert!(rendered.contains("Built local agent `weather_test`."));
+        assert!(rendered.contains("Type  Registry"));
+        assert!(rendered.contains("Name  weather_test"));
+        assert!(rendered.contains("Binary  `./weather_test`"));
+        assert!(rendered.contains("Target  aarch64-apple-darwin"));
+        assert!(rendered.contains("Template   Reused warmed template"));
+        assert!(rendered.contains("Workspace  Removed"));
+        assert!(rendered.contains("Run agent  `./weather_test --help`"));
+    }
+
+    #[test]
+    fn renders_account_check_summary_without_output_section() {
+        let lines = render_hatch_success_lines(&HatchRunSummary {
+            project_name: "weather_local".to_string(),
+            mode: HatchMode::Check,
+            source: HatchSource::Account {
+                owner: "self".to_string(),
+                agent: "weather_remote".to_string(),
+                path: "/".to_string(),
+            },
+            build_target: "aarch64-apple-darwin".to_string(),
+            binary_path: None,
+            template_status: TemplateSummaryStatus::Created,
+            workspace_status: WorkspaceSummaryStatus::Preserved,
+        });
+
+        let rendered = lines.join("\n");
+        assert!(rendered.contains("✓ Agent checked"));
+        assert!(rendered.contains(
+            "Checked local agent `weather_local` from account definition `weather_remote`."
+        ));
+        assert!(rendered.contains("Owner  self"));
+        assert!(rendered.contains("Agent  weather_remote"));
+        assert!(rendered.contains("Path   /"));
+        assert!(rendered.contains("Target     aarch64-apple-darwin"));
+        assert!(rendered.contains("Template   Created warmed template"));
+        assert!(rendered.contains("Workspace  Preserved"));
+        assert!(!rendered.contains("\nOutput\n"));
+        assert!(!rendered.contains("\nNext steps\n"));
+    }
+
+    #[test]
+    fn displays_absolute_current_dir_children_as_dot_relative_paths() {
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let rendered = display_path(current_dir.join("weather_test").as_path());
+        assert_eq!(rendered, "./weather_test");
     }
 }

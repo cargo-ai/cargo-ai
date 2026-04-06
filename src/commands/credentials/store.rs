@@ -1,10 +1,12 @@
 //! Runtime behavior for `cargo ai credentials store`.
 use clap::ArgMatches;
+use serde_json::{json, Value};
 use std::io::{self, Write};
 
 use crate::config::schema::SecretStoreMode;
 use crate::config::settings as config_settings;
 use crate::credentials::store;
+use crate::ui;
 
 fn parse_mode(raw: &str) -> Option<SecretStoreMode> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -40,68 +42,198 @@ fn source_has_credentials_for_mode(
     }
 }
 
-fn run_status() -> bool {
-    let status = match store::secret_store_status() {
-        Ok(status) => status,
-        Err(error) => {
-            eprintln!("❌ Failed to inspect credential-store status: {error}");
-            return false;
-        }
-    };
+fn credential_store_summary(
+    status: &store::SecretStoreStatus,
+) -> (&'static str, &'static str, String) {
+    if status.configured_mode == Some(SecretStoreMode::Keychain)
+        && !status.keychain_backend_accessible
+    {
+        return (
+            "info",
+            "!",
+            "Keychain mode is configured, but the keychain backend is unavailable.".to_string(),
+        );
+    }
 
+    if status.configured_mode.is_none() {
+        return (
+            "info",
+            "!",
+            "Credential-store mode is unset; legacy compatibility reads remain active.".to_string(),
+        );
+    }
+
+    (
+        "success",
+        "✓",
+        "Credential-store status is healthy.".to_string(),
+    )
+}
+
+fn credential_store_status_ui_response(status: &store::SecretStoreStatus) -> Value {
+    let (kind, icon, summary) = credential_store_summary(status);
     let configured = match status.configured_mode {
         Some(mode) => mode.as_str().to_string(),
         None => "(unset; legacy compatibility mode)".to_string(),
     };
-    println!("Configured mode: {configured}");
-    println!("Default for new installs: {}", status.default_mode.as_str());
-
     let effective_reads = match status.configured_mode {
         Some(SecretStoreMode::File) => "file only",
         Some(SecretStoreMode::Keychain) => "keychain only",
         None => "legacy keychain-first, then file fallback",
     };
-    println!("Effective read behavior: {effective_reads}");
-    println!(
-        "File credentials present: {}",
-        if status.file_credentials_present {
-            "yes"
-        } else {
-            "no"
-        }
-    );
-    println!(
-        "Keychain credentials present: {}",
-        if status.keychain_credentials_present {
-            "yes"
-        } else {
-            "no"
-        }
-    );
-    println!(
-        "Keychain backend accessible: {}",
-        if status.keychain_backend_accessible {
-            "yes"
-        } else {
-            "no"
-        }
-    );
 
-    if let Some(error) = status.keychain_probe_error {
-        println!("Keychain probe detail: {error}");
+    let mut sections = vec![
+        json!({
+            "type": "kv",
+            "title": "Configuration",
+            "title_style": "plain",
+            "layout": "aligned",
+            "items": [
+                {"label": "Configured mode", "value": configured},
+                {"label": "Default mode", "value": status.default_mode.as_str()},
+                {"label": "Effective reads", "value": effective_reads}
+            ]
+        }),
+        json!({
+            "type": "kv",
+            "title": "Availability",
+            "title_style": "plain",
+            "layout": "aligned",
+            "items": [
+                {
+                    "label": "File credentials",
+                    "value": if status.file_credentials_present { "Yes" } else { "No" }
+                },
+                {
+                    "label": "Keychain credentials",
+                    "value": if status.keychain_credentials_present { "Yes" } else { "No" }
+                },
+                {
+                    "label": "Keychain backend",
+                    "value": if status.keychain_backend_accessible { "Available" } else { "Unavailable" }
+                }
+            ]
+        }),
+    ];
+
+    if let Some(error) = &status.keychain_probe_error {
+        sections.push(json!({
+            "type": "notice",
+            "title": "Details",
+            "title_style": "plain",
+            "message": error
+        }));
     }
+
+    if status.configured_mode.is_none()
+        || (status.configured_mode == Some(SecretStoreMode::Keychain)
+            && !status.keychain_backend_accessible)
+    {
+        sections.push(json!({
+            "type": "kv",
+            "title": "Available commands",
+            "title_style": "plain",
+            "layout": "aligned",
+            "items": [
+                {"label": "Set mode", "value": "`cargo ai credentials store set <file|keychain>`"}
+            ]
+        }));
+    }
+
+    json!({
+        "ui": {
+            "schema": "1.0",
+            "kind": kind,
+            "icon": icon,
+            "title": "Credential-store status",
+            "summary": summary,
+            "sections": sections
+        }
+    })
+}
+
+fn credential_store_set_success_ui_response(
+    target_mode: SecretStoreMode,
+    migrated_profile_tokens: Option<usize>,
+    migrated_account_tokens: Option<bool>,
+    changing_mode: bool,
+) -> Value {
+    let title = if changing_mode {
+        "Credential-store mode updated"
+    } else {
+        "Credential-store mode unchanged"
+    };
+    let summary = if changing_mode {
+        format!("Credential storage now uses `{}`.", target_mode.as_str())
+    } else {
+        format!(
+            "Credential storage already uses `{}`.",
+            target_mode.as_str()
+        )
+    };
+
+    let mut sections = Vec::new();
+
+    if let Some(migrated_profile_tokens) = migrated_profile_tokens {
+        sections.push(json!({
+            "type": "kv",
+            "title": "Migration",
+            "title_style": "plain",
+            "layout": "aligned",
+            "items": [
+                {"label": "Profile tokens", "value": format!("{migrated_profile_tokens} migrated")},
+                {
+                    "label": "Account tokens",
+                    "value": if migrated_account_tokens.unwrap_or(false) { "Yes" } else { "No" }
+                }
+            ]
+        }));
+    }
+
+    sections.push(json!({
+        "type": "kv",
+        "title": "Available commands",
+        "title_style": "plain",
+        "layout": "aligned",
+        "items": [
+            {"label": "Check status", "value": "`cargo ai credentials store status`"}
+        ]
+    }));
+
+    json!({
+        "ui": {
+            "schema": "1.0",
+            "kind": "success",
+            "icon": "✓",
+            "title": title,
+            "summary": summary,
+            "sections": sections
+        }
+    })
+}
+
+fn run_status() -> bool {
+    let status = match store::secret_store_status() {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("x Failed to inspect credential-store status: {error}");
+            return false;
+        }
+    };
+
+    ui::account_status::render_backend_ui(&credential_store_status_ui_response(&status));
 
     true
 }
 
 fn run_set(sub_m: &ArgMatches) -> bool {
     let Some(raw_mode) = sub_m.get_one::<String>("mode") else {
-        eprintln!("❌ Missing mode. Use `cargo ai credentials store set <file|keychain>`.");
+        eprintln!("x Missing mode. Use `cargo ai credentials store set <file|keychain>`.");
         return false;
     };
 
     let Some(target_mode) = parse_mode(raw_mode) else {
-        eprintln!("❌ Invalid mode '{raw_mode}'. Use `file` or `keychain`.");
+        eprintln!("x Invalid mode '{raw_mode}'. Use `file` or `keychain`.");
         return false;
     };
 
@@ -112,7 +244,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
     let status = match store::secret_store_status() {
         Ok(status) => status,
         Err(error) => {
-            eprintln!("❌ Failed to inspect credential-store status: {error}");
+            eprintln!("x Failed to inspect credential-store status: {error}");
             return false;
         }
     };
@@ -122,7 +254,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
             .keychain_probe_error
             .as_deref()
             .unwrap_or("keychain backend is unavailable");
-        eprintln!("❌ Cannot switch to keychain mode: {detail}");
+        eprintln!("x Cannot switch to keychain mode: {detail}");
         return false;
     }
 
@@ -132,7 +264,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
             .keychain_probe_error
             .as_deref()
             .unwrap_or("keychain backend is unavailable");
-        eprintln!("❌ Keychain credentials cannot be inspected right now: {detail}");
+        eprintln!("x Keychain credentials cannot be inspected right now: {detail}");
         eprintln!("Unlock/allow keychain access, then retry the mode switch.");
         return false;
     }
@@ -141,7 +273,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
     let changing_mode = configured_mode != Some(target_mode);
 
     if changing_mode && source_has_credentials && !migrate {
-        eprintln!("❌ Existing credentials were detected for the current mode.");
+        eprintln!("x Existing credentials were detected for the current mode.");
         eprintln!(
             "Re-run with `--migrate` to copy credentials into '{}' before switching.",
             target_mode.as_str()
@@ -154,7 +286,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
             let confirmed = match confirm("Migrate credentials and switch credential-store mode?") {
                 Ok(confirmed) => confirmed,
                 Err(error) => {
-                    eprintln!("❌ {error}");
+                    eprintln!("x {error}");
                     return false;
                 }
             };
@@ -167,7 +299,7 @@ fn run_set(sub_m: &ArgMatches) -> bool {
         let outcome = match store::migrate_secret_store(target_mode, dry_run) {
             Ok(outcome) => outcome,
             Err(error) => {
-                eprintln!("❌ Failed to migrate credential store: {error}");
+                eprintln!("x Failed to migrate credential store: {error}");
                 return false;
             }
         };
@@ -206,41 +338,106 @@ fn run_set(sub_m: &ArgMatches) -> bool {
         }
 
         if let Err(error) = config_settings::set_secret_store_mode(target_mode) {
-            eprintln!("❌ Failed to persist credential-store mode: {error}");
+            eprintln!("x Failed to persist credential-store mode: {error}");
             return false;
         }
 
-        println!(
-            "✅ Credential-store mode set to '{}'. Migrated {} profile token(s); account tokens migrated: {}.",
-            target_mode.as_str(),
-            outcome.migrated_profile_tokens,
-            if outcome.migrated_account_tokens {
-                "yes"
-            } else {
-                "no"
-            }
-        );
+        ui::account_status::render_backend_ui(&credential_store_set_success_ui_response(
+            target_mode,
+            Some(outcome.migrated_profile_tokens),
+            Some(outcome.migrated_account_tokens),
+            changing_mode,
+        ));
         return true;
     }
 
     if let Err(error) = config_settings::set_secret_store_mode(target_mode) {
-        eprintln!("❌ Failed to persist credential-store mode: {error}");
+        eprintln!("x Failed to persist credential-store mode: {error}");
         return false;
     }
 
-    if changing_mode {
-        println!(
-            "✅ Credential-store mode set to '{}'. No credentials required migration.",
-            target_mode.as_str()
+    ui::account_status::render_backend_ui(&credential_store_set_success_ui_response(
+        target_mode,
+        None,
+        None,
+        changing_mode,
+    ));
+
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        credential_store_set_success_ui_response, credential_store_status_ui_response,
+        credential_store_summary,
+    };
+    use crate::config::schema::{default_secret_store_mode, SecretStoreMode};
+    use crate::credentials::store::SecretStoreStatus;
+
+    #[test]
+    fn credential_store_unset_mode_has_available_command() {
+        let response = credential_store_status_ui_response(&SecretStoreStatus {
+            configured_mode: None,
+            default_mode: default_secret_store_mode(),
+            file_credentials_present: false,
+            keychain_credentials_present: false,
+            keychain_backend_accessible: true,
+            keychain_probe_error: None,
+        });
+
+        assert_eq!(response["ui"]["icon"].as_str(), Some("!"));
+        assert_eq!(
+            response["ui"]["sections"][2]["title"].as_str(),
+            Some("Available commands")
         );
-    } else {
-        println!(
-            "Credential-store mode is already '{}'.",
-            target_mode.as_str()
+        assert_eq!(
+            response["ui"]["sections"][2]["items"][0]["value"].as_str(),
+            Some("`cargo ai credentials store set <file|keychain>`")
         );
     }
 
-    true
+    #[test]
+    fn credential_store_keychain_failure_uses_warning_summary() {
+        let (_, icon, summary) = credential_store_summary(&SecretStoreStatus {
+            configured_mode: Some(SecretStoreMode::Keychain),
+            default_mode: default_secret_store_mode(),
+            file_credentials_present: false,
+            keychain_credentials_present: false,
+            keychain_backend_accessible: false,
+            keychain_probe_error: Some("locked".to_string()),
+        });
+
+        assert_eq!(icon, "!");
+        assert!(summary.contains("keychain backend is unavailable"));
+    }
+
+    #[test]
+    fn credential_store_set_success_reports_migration_and_status_command() {
+        let response = credential_store_set_success_ui_response(
+            SecretStoreMode::Keychain,
+            Some(2),
+            Some(true),
+            true,
+        );
+
+        assert_eq!(
+            response["ui"]["title"].as_str(),
+            Some("Credential-store mode updated")
+        );
+        assert_eq!(
+            response["ui"]["sections"][0]["items"][0]["value"].as_str(),
+            Some("2 migrated")
+        );
+        assert_eq!(
+            response["ui"]["sections"][1]["title"].as_str(),
+            Some("Available commands")
+        );
+        assert_eq!(
+            response["ui"]["sections"][1]["items"][0]["value"].as_str(),
+            Some("`cargo ai credentials store status`")
+        );
+    }
 }
 
 /// Executes `cargo ai credentials store ...`.

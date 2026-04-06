@@ -1,6 +1,7 @@
 //! Runtime behavior for `cargo ai auth`.
 use clap::ArgMatches;
 use serde::Serialize;
+use serde_json::{json, Value};
 use std::io::{self, Write};
 use std::process::Command;
 
@@ -10,6 +11,7 @@ use crate::config::schema::{
 };
 use crate::config::settings as config_settings;
 use crate::credentials::{openai_oauth, store};
+use crate::ui;
 
 #[derive(Debug, Serialize)]
 struct AuthStatusJson {
@@ -150,6 +152,189 @@ fn local_session_state() -> Result<AuthStatusJson, String> {
     })
 }
 
+fn auth_status_summary(status: &AuthStatusJson) -> (&'static str, &'static str, String) {
+    match status.session_state.as_str() {
+        "active" => ("success", "✓", "OpenAI session active.".to_string()),
+        "active_unknown_expiry" => (
+            "success",
+            "✓",
+            "OpenAI session active, but expiry is unknown.".to_string(),
+        ),
+        "expiring" => (
+            "info",
+            "!",
+            "OpenAI session is expiring or needs attention soon.".to_string(),
+        ),
+        "logged_out_local" => (
+            "info",
+            "!",
+            "Cargo AI is logged out locally; Codex may still be signed in.".to_string(),
+        ),
+        "logged_out" => ("info", "!", "OpenAI session is logged out.".to_string()),
+        other => ("info", "!", format!("OpenAI session state is '{other}'.")),
+    }
+}
+
+fn auth_status_ui_response(status: &AuthStatusJson) -> Value {
+    let (kind, icon, summary) = auth_status_summary(status);
+    let mut sections = vec![
+        json!({
+            "type": "kv",
+            "title": "Context",
+            "title_style": "plain",
+            "layout": "aligned",
+            "items": [
+                {"label": "Provider", "value": status.provider},
+                {"label": "Session", "value": status.session_state},
+                {"label": "Auth mode", "value": status.auth_mode_effective}
+            ]
+        }),
+        json!({
+            "type": "kv",
+            "title": "Session",
+            "title_style": "plain",
+            "layout": "aligned",
+            "items": [
+                {
+                    "label": "Refresh token",
+                    "value": if status.has_refresh_token { "Yes" } else { "No" }
+                },
+                {
+                    "label": "Access token expiry (unix)",
+                    "value": status
+                        .access_token_expires_at_unix
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "(unknown)".to_string())
+                }
+            ]
+        }),
+        json!({
+            "type": "kv",
+            "title": "Storage",
+            "title_style": "plain",
+            "layout": "aligned",
+            "items": [
+                {"label": "Secret store", "value": status.secret_store_mode}
+            ]
+        }),
+    ];
+
+    if matches!(
+        status.session_state.as_str(),
+        "logged_out" | "logged_out_local" | "expiring"
+    ) {
+        sections.push(json!({
+            "type": "kv",
+            "title": "Available commands",
+            "title_style": "plain",
+            "layout": "aligned",
+            "items": [
+                {"label": "Login", "value": "`cargo ai auth login openai`"}
+            ]
+        }));
+    }
+
+    json!({
+        "ui": {
+            "schema": "1.0",
+            "kind": kind,
+            "icon": icon,
+            "title": "Auth status",
+            "summary": summary,
+            "sections": sections
+        }
+    })
+}
+
+fn auth_login_success_ui_response(profile_name: Option<&str>, set_default: bool) -> Value {
+    let mut sections = Vec::new();
+
+    if let Some(profile_name) = profile_name {
+        sections.push(json!({
+            "type": "kv",
+            "title": "Profile",
+            "title_style": "plain",
+            "layout": "aligned",
+            "items": [
+                {"label": "Name", "value": profile_name},
+                {"label": "Auth mode", "value": ProfileAuthMode::OpenaiAccount.as_str()},
+                {"label": "Default", "value": if set_default { "Yes" } else { "No" }}
+            ]
+        }));
+    }
+
+    sections.push(json!({
+        "type": "kv",
+        "title": "Next steps",
+        "title_style": "plain",
+        "layout": "aligned",
+        "items": [
+            {"label": "Check auth", "value": "`cargo ai auth status`"}
+        ]
+    }));
+
+    json!({
+        "ui": {
+            "schema": "1.0",
+            "kind": "success",
+            "icon": "✓",
+            "title": "OpenAI login complete",
+            "summary": "Codex session detected and Cargo AI can use it.",
+            "sections": sections
+        }
+    })
+}
+
+fn auth_logout_success_ui_response(global: bool) -> Value {
+    let summary = if global {
+        "Cargo AI local OpenAI session cleared and Codex was logged out."
+    } else {
+        "Cargo AI local OpenAI session cleared."
+    };
+    let codex_state = if global {
+        "Logged out"
+    } else {
+        "Still signed in"
+    };
+    let scope = if global {
+        "Cargo AI + Codex"
+    } else {
+        "Cargo AI only"
+    };
+
+    json!({
+        "ui": {
+            "schema": "1.0",
+            "kind": "success",
+            "icon": "✓",
+            "title": "Logged out",
+            "summary": summary,
+            "sections": [
+                {
+                    "type": "kv",
+                    "title": "Session",
+                    "title_style": "plain",
+                    "layout": "aligned",
+                    "items": [
+                        {"label": "Scope", "value": scope},
+                        {"label": "Codex", "value": codex_state}
+                    ]
+                },
+                {
+                    "type": "kv",
+                    "title": "Available commands",
+                    "title_style": "plain",
+                    "layout": "aligned",
+                    "items": [
+                        {"label": "Sign in again", "value": "`cargo ai auth login openai`"},
+                        {"label": "Check auth", "value": "`cargo ai auth status`"}
+                    ]
+                }
+            ]
+        }
+    })
+}
+
 fn run_codex_login() -> Result<(), String> {
     let status = Command::new("codex")
         .arg("login")
@@ -197,14 +382,15 @@ async fn run_login_openai(login_openai_m: &ArgMatches) -> bool {
 
     if let Some(profile_name) = profile_name {
         if let Err(error) = validate_profile_target(profile_name) {
-            eprintln!("❌ {error}");
+            eprintln!("x {error}");
             return false;
         }
     }
 
-    println!("Starting OpenAI browser login via Codex...");
+    println!("Starting OpenAI browser login...");
+    println!("Your browser will open to complete sign-in.");
     if let Err(error) = run_codex_login() {
-        eprintln!("❌ {error}");
+        eprintln!("x {error}");
         return false;
     }
 
@@ -212,12 +398,12 @@ async fn run_login_openai(login_openai_m: &ArgMatches) -> bool {
         Ok(Some(_)) => {}
         Ok(None) => {
             eprintln!(
-                "❌ Codex login completed, but no local auth session was found. Verify Codex is configured and run `codex login` again."
+                "x Codex login completed, but no local auth session was found. Verify Codex is configured and run `codex login` again."
             );
             return false;
         }
         Err(error) => {
-            eprintln!("❌ Failed to read Codex auth session: {error}");
+            eprintln!("x Failed to read Codex auth session: {error}");
             return false;
         }
     }
@@ -225,7 +411,7 @@ async fn run_login_openai(login_openai_m: &ArgMatches) -> bool {
     // Clean up any duplicated OpenAI session material from prior Cargo AI builds.
     openai_oauth::clear_legacy_openai_session_tokens();
     if let Err(error) = config_settings::set_openai_auth_locally_disabled(false) {
-        eprintln!("❌ Login succeeded, but failed to clear local logout state: {error}");
+        eprintln!("x Login succeeded, but failed to clear local logout state: {error}");
         return false;
     }
 
@@ -233,59 +419,31 @@ async fn run_login_openai(login_openai_m: &ArgMatches) -> bool {
         if let Err(error) =
             config_settings::set_profile_auth_mode(profile_name, ProfileAuthMode::OpenaiAccount)
         {
-            eprintln!("❌ Login succeeded, but failed to update profile auth mode: {error}");
+            eprintln!("x Login succeeded, but failed to update profile auth mode: {error}");
             return false;
         }
 
         if set_default {
             if let Err(error) = config_settings::set_default_profile(profile_name) {
-                eprintln!("❌ Login succeeded, but failed to set default profile: {error}");
+                eprintln!("x Login succeeded, but failed to set default profile: {error}");
                 return false;
             }
         }
     }
 
-    println!("✅ OpenAI login complete (Codex session detected).");
-    if let Some(profile_name) = profile_name {
-        println!(
-            "Profile '{profile_name}' auth mode set to '{}'.",
-            ProfileAuthMode::OpenaiAccount.as_str()
-        );
-        if set_default {
-            println!("Profile '{profile_name}' set as default.");
-        }
-    }
+    ui::account_status::render_backend_ui(&auth_login_success_ui_response(
+        profile_name,
+        set_default,
+    ));
 
     true
-}
-
-fn render_status_text(status: &AuthStatusJson) {
-    println!("Provider: {}", status.provider);
-    println!("Session state: {}", status.session_state);
-    println!("Effective auth mode: {}", status.auth_mode_effective);
-    println!(
-        "Refresh token present: {}",
-        if status.has_refresh_token {
-            "yes"
-        } else {
-            "no"
-        }
-    );
-    println!(
-        "Access token expires at (unix): {}",
-        status
-            .access_token_expires_at_unix
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "(unknown)".to_string())
-    );
-    println!("Secret-store mode: {}", status.secret_store_mode);
 }
 
 async fn run_status(status_m: &ArgMatches) -> bool {
     let status = match local_session_state() {
         Ok(status) => status,
         Err(error) => {
-            eprintln!("❌ {error}");
+            eprintln!("x {error}");
             return false;
         }
     };
@@ -294,15 +452,102 @@ async fn run_status(status_m: &ArgMatches) -> bool {
         match serde_json::to_string_pretty(&status) {
             Ok(serialized) => println!("{serialized}"),
             Err(error) => {
-                eprintln!("❌ Failed to serialize auth status JSON: {error}");
+                eprintln!("x Failed to serialize auth status JSON: {error}");
                 return false;
             }
         }
     } else {
-        render_status_text(&status);
+        ui::account_status::render_backend_ui(&auth_status_ui_response(&status));
     }
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        auth_login_success_ui_response, auth_logout_success_ui_response, auth_status_summary,
+        auth_status_ui_response, AuthStatusJson,
+    };
+
+    #[test]
+    fn auth_status_logged_out_local_has_login_available_command() {
+        let response = auth_status_ui_response(&AuthStatusJson {
+            provider: "openai",
+            session_state: "logged_out_local".to_string(),
+            auth_mode_effective: "openai_account".to_string(),
+            has_refresh_token: false,
+            access_token_expires_at_unix: None,
+            secret_store_mode: "keychain".to_string(),
+        });
+
+        assert_eq!(response["ui"]["title"].as_str(), Some("Auth status"));
+        assert_eq!(response["ui"]["icon"].as_str(), Some("!"));
+        assert_eq!(
+            response["ui"]["sections"][3]["title"].as_str(),
+            Some("Available commands")
+        );
+        assert_eq!(
+            response["ui"]["sections"][3]["items"][0]["value"].as_str(),
+            Some("`cargo ai auth login openai`")
+        );
+    }
+
+    #[test]
+    fn auth_status_active_uses_success_summary() {
+        let (_, icon, summary) = auth_status_summary(&AuthStatusJson {
+            provider: "openai",
+            session_state: "active".to_string(),
+            auth_mode_effective: "api_key".to_string(),
+            has_refresh_token: true,
+            access_token_expires_at_unix: Some(123),
+            secret_store_mode: "file".to_string(),
+        });
+
+        assert_eq!(icon, "✓");
+        assert_eq!(summary, "OpenAI session active.");
+    }
+
+    #[test]
+    fn auth_login_success_uses_profile_section_and_next_step() {
+        let response = auth_login_success_ui_response(Some("my_open_ai"), true);
+
+        assert_eq!(
+            response["ui"]["title"].as_str(),
+            Some("OpenAI login complete")
+        );
+        assert_eq!(
+            response["ui"]["sections"][0]["items"][0]["value"].as_str(),
+            Some("my_open_ai")
+        );
+        assert_eq!(
+            response["ui"]["sections"][1]["title"].as_str(),
+            Some("Next steps")
+        );
+        assert_eq!(
+            response["ui"]["sections"][1]["items"][0]["value"].as_str(),
+            Some("`cargo ai auth status`")
+        );
+    }
+
+    #[test]
+    fn auth_logout_success_uses_available_commands() {
+        let response = auth_logout_success_ui_response(false);
+
+        assert_eq!(response["ui"]["title"].as_str(), Some("Logged out"));
+        assert_eq!(
+            response["ui"]["sections"][1]["title"].as_str(),
+            Some("Available commands")
+        );
+        assert_eq!(
+            response["ui"]["sections"][1]["items"][0]["value"].as_str(),
+            Some("`cargo ai auth login openai`")
+        );
+        assert_eq!(
+            response["ui"]["sections"][1]["items"][1]["value"].as_str(),
+            Some("`cargo ai auth status`")
+        );
+    }
 }
 
 async fn run_logout(logout_m: &ArgMatches) -> bool {
@@ -318,7 +563,7 @@ async fn run_logout(logout_m: &ArgMatches) -> bool {
         let confirmed = match confirm(prompt) {
             Ok(confirmed) => confirmed,
             Err(error) => {
-                eprintln!("❌ {error}");
+                eprintln!("x {error}");
                 return false;
             }
         };
@@ -330,25 +575,21 @@ async fn run_logout(logout_m: &ArgMatches) -> bool {
 
     if global {
         if let Err(error) = run_codex_logout() {
-            eprintln!("❌ {error}");
+            eprintln!("x {error}");
             return false;
         }
     }
 
     if let Err(error) = openai_oauth::clear_local_session() {
-        eprintln!("❌ Failed to clear local OpenAI metadata: {error}");
+        eprintln!("x Failed to clear local OpenAI metadata: {error}");
         return false;
     }
     if let Err(error) = config_settings::set_openai_auth_locally_disabled(true) {
-        eprintln!("❌ Failed to persist local Cargo AI logout state: {error}");
+        eprintln!("x Failed to persist local Cargo AI logout state: {error}");
         return false;
     }
 
-    if global {
-        println!("✅ OpenAI logged out globally via Codex and logged out for Cargo AI.");
-    } else {
-        println!("✅ OpenAI logged out for Cargo AI only. Codex session remains signed in.");
-    }
+    ui::account_status::render_backend_ui(&auth_logout_success_ui_response(global));
     true
 }
 
@@ -358,7 +599,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         if let Some(login_openai_m) = login_m.subcommand_matches("openai") {
             run_login_openai(login_openai_m).await
         } else {
-            eprintln!("No auth login provider found. Try 'cargo ai auth login openai'.");
+            eprintln!("x No auth login provider found. Try 'cargo ai auth login openai'.");
             false
         }
     } else if let Some(status_m) = sub_m.subcommand_matches("status") {
@@ -367,7 +608,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         run_logout(logout_m).await
     } else {
         eprintln!(
-            "No auth subcommand found. Try 'cargo ai auth login openai', 'cargo ai auth status [--json]', or 'cargo ai auth logout [--global] [--yes]'."
+            "x No auth subcommand found. Try 'cargo ai auth login openai', 'cargo ai auth status [--json]', or 'cargo ai auth logout [--global] [--yes]'."
         );
         false
     }

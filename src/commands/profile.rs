@@ -1,5 +1,6 @@
 //! Runtime behavior for `cargo ai profile`.
 use clap::ArgMatches;
+use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, Read, Write};
 
@@ -8,6 +9,7 @@ use crate::config::loader::{config_path, find_profile, load_config};
 use crate::config::remover::remove_profile;
 use crate::config::schema::{Profile, ProfileAuthMode};
 use crate::credentials::store;
+use crate::ui;
 
 fn parse_auth_mode(raw: &str) -> Option<ProfileAuthMode> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -81,6 +83,128 @@ fn write_config(cfg: &crate::config::schema::Config) -> Result<(), String> {
         .map_err(|error| format!("failed to write '{}': {error}", path.display()))
 }
 
+fn profile_remove_success_ui_response(name: &str) -> Value {
+    json!({
+        "ui": {
+            "schema": "1.0",
+            "kind": "success",
+            "icon": "✓",
+            "title": "Profile removed",
+            "summary": format!("Profile `{name}` was removed."),
+            "sections": [
+                {
+                    "type": "kv",
+                    "title": "Available commands",
+                    "title_style": "plain",
+                    "layout": "aligned",
+                    "items": [
+                        {"label": "List profiles", "value": "`cargo ai profile list`"}
+                    ]
+                }
+            ]
+        }
+    })
+}
+
+fn profile_add_success_ui_response(name: &str, auth_mode: ProfileAuthMode) -> Value {
+    json!({
+        "ui": {
+            "schema": "1.0",
+            "kind": "success",
+            "icon": "✓",
+            "title": "Profile saved",
+            "summary": format!("Created profile `{name}`."),
+            "sections": [
+                {
+                    "type": "kv",
+                    "title": "Profile",
+                    "title_style": "plain",
+                    "layout": "aligned",
+                    "items": [
+                        {"label": "Name", "value": name},
+                        {"label": "Auth mode", "value": auth_mode.as_str()}
+                    ]
+                },
+                {
+                    "type": "kv",
+                    "title": "Available commands",
+                    "title_style": "plain",
+                    "layout": "aligned",
+                    "items": [
+                        {"label": "Show profile", "value": format!("`cargo ai profile show {name}`")}
+                    ]
+                }
+            ]
+        }
+    })
+}
+
+fn profile_set_success_ui_response(
+    name: &str,
+    metadata_changes: &[&str],
+    token_change: Option<&str>,
+    auth_mode: ProfileAuthMode,
+) -> Value {
+    let mut sections = Vec::new();
+
+    let mut change_items = Vec::new();
+    if !metadata_changes.is_empty() {
+        change_items.push(json!({
+            "label": "Metadata",
+            "value": metadata_changes.join(", ")
+        }));
+    }
+    if let Some(token_change) = token_change {
+        change_items.push(json!({
+            "label": "Token",
+            "value": token_change
+        }));
+    }
+    if !change_items.is_empty() {
+        sections.push(json!({
+            "type": "kv",
+            "title": "Changes",
+            "title_style": "plain",
+            "layout": "aligned",
+            "items": change_items
+        }));
+    }
+
+    if token_change.is_some() && auth_mode != ProfileAuthMode::ApiKey {
+        sections.push(json!({
+            "type": "kv",
+            "title": "Guidance",
+            "title_style": "plain",
+            "layout": "aligned",
+            "items": [
+                {"label": "Auth mode", "value": auth_mode.as_str()},
+                {"label": "Note", "value": "Set `--auth api_key` to use the stored token by default"}
+            ]
+        }));
+    }
+
+    sections.push(json!({
+        "type": "kv",
+        "title": "Available commands",
+        "title_style": "plain",
+        "layout": "aligned",
+        "items": [
+            {"label": "Show profile", "value": format!("`cargo ai profile show {name}`")}
+        ]
+    }));
+
+    json!({
+        "ui": {
+            "schema": "1.0",
+            "kind": "success",
+            "icon": "✓",
+            "title": "Profile updated",
+            "summary": format!("Updated profile `{name}`."),
+            "sections": sections
+        }
+    })
+}
+
 fn run_list() -> bool {
     if let Some(cfg) = load_config() {
         println!("Configured profiles:");
@@ -110,7 +234,7 @@ fn run_list() -> bool {
         }
         true
     } else {
-        eprintln!("❌ No config file found.");
+        eprintln!("x No config file found.");
         false
     }
 }
@@ -133,7 +257,7 @@ fn run_show(show_m: &ArgMatches) -> bool {
                     Ok(Some(_)) => true,
                     Ok(None) => profile.token.is_some(),
                     Err(error) => {
-                        eprintln!("⚠️ Failed to load profile token from credential store: {error}");
+                        eprintln!("! Failed to load profile token from credential store: {error}");
                         profile.token.is_some()
                     }
                 };
@@ -150,15 +274,15 @@ fn run_show(show_m: &ArgMatches) -> bool {
                 }
                 true
             } else {
-                eprintln!("❌ Profile '{}' not found.", name);
+                eprintln!("x Profile '{}' not found.", name);
                 false
             }
         } else {
-            eprintln!("❌ No config file found.");
+            eprintln!("x No config file found.");
             false
         }
     } else {
-        eprintln!("❌ Please provide a profile name. Example: cargo ai profile show openai-prod");
+        eprintln!("x Please provide a profile name. Example: cargo ai profile show openai-prod");
         false
     }
 }
@@ -199,31 +323,27 @@ fn run_add(add_m: &ArgMatches) -> bool {
         eprintln!("Failed to add profile: {error}");
         false
     } else {
-        println!(
-            "✅ Profile '{}' saved. Auth mode: '{}'.",
-            name,
-            auth_mode.as_str()
-        );
+        ui::account_status::render_backend_ui(&profile_add_success_ui_response(name, auth_mode));
         true
     }
 }
 
 fn run_set(set_m: &ArgMatches) -> bool {
     let Some(name) = set_m.get_one::<String>("name") else {
-        eprintln!("❌ Missing profile name.");
+        eprintln!("x Missing profile name.");
         return false;
     };
 
     let mut cfg = match load_config() {
         Some(cfg) => cfg,
         None => {
-            eprintln!("❌ No config file found.");
+            eprintln!("x No config file found.");
             return false;
         }
     };
 
     let Some(profile) = cfg.profile.iter_mut().find(|profile| profile.name == *name) else {
-        eprintln!("❌ Profile '{}' not found.", name);
+        eprintln!("x Profile '{}' not found.", name);
         return false;
     };
 
@@ -242,7 +362,7 @@ fn run_set(set_m: &ArgMatches) -> bool {
     if let Some(raw_mode) = set_m.get_one::<String>("auth") {
         let Some(mode) = parse_auth_mode(raw_mode) else {
             eprintln!(
-                "❌ Invalid auth mode '{}'. Use none|api_key|openai_account.",
+                "x Invalid auth mode '{}'. Use none|api_key|openai_account.",
                 raw_mode
             );
             return false;
@@ -275,7 +395,7 @@ fn run_set(set_m: &ArgMatches) -> bool {
     let mut token_change: Option<&str> = None;
     if set_m.get_flag("clear_token") {
         if let Err(error) = store::clear_profile_token(name) {
-            eprintln!("❌ Failed to clear token for profile '{}': {error}", name);
+            eprintln!("x Failed to clear token for profile '{}': {error}", name);
             return false;
         }
         token_change = Some("cleared");
@@ -286,12 +406,12 @@ fn run_set(set_m: &ArgMatches) -> bool {
         let token = match resolve_token_input(set_m) {
             Ok(token) => token,
             Err(error) => {
-                eprintln!("❌ Failed to read token input: {error}");
+                eprintln!("x Failed to read token input: {error}");
                 return false;
             }
         };
         if let Err(error) = store::store_profile_token(name, token.as_str()) {
-            eprintln!("❌ Failed to store token for profile '{}': {error}", name);
+            eprintln!("x Failed to store token for profile '{}': {error}", name);
             return false;
         }
         token_change = Some("updated");
@@ -299,30 +419,23 @@ fn run_set(set_m: &ArgMatches) -> bool {
 
     if !metadata_changes.is_empty() {
         if let Err(error) = write_config(&cfg) {
-            eprintln!("❌ Failed to persist profile updates: {error}");
+            eprintln!("x Failed to persist profile updates: {error}");
             return false;
         }
     }
 
-    println!("✅ Profile '{}' updated.", name);
-    if !metadata_changes.is_empty() {
-        println!("Metadata updates: {}", metadata_changes.join(", "));
-    }
-    if let Some(token_change) = token_change {
-        println!("Token: {token_change}");
-        let auth_mode = cfg
-            .profile
-            .iter()
-            .find(|profile| profile.name == *name)
-            .map(|profile| profile.auth_mode)
-            .unwrap_or(ProfileAuthMode::None);
-        if auth_mode != ProfileAuthMode::ApiKey {
-            println!(
-                "ℹ️ Profile auth mode is '{}'. Set `--auth api_key` to use stored API token by default.",
-                auth_mode.as_str()
-            );
-        }
-    }
+    let auth_mode = cfg
+        .profile
+        .iter()
+        .find(|profile| profile.name == *name)
+        .map(|profile| profile.auth_mode)
+        .unwrap_or(ProfileAuthMode::None);
+    ui::account_status::render_backend_ui(&profile_set_success_ui_response(
+        name,
+        metadata_changes.as_slice(),
+        token_change,
+        auth_mode,
+    ));
 
     true
 }
@@ -330,7 +443,7 @@ fn run_set(set_m: &ArgMatches) -> bool {
 fn run_remove(remove_m: &ArgMatches) -> bool {
     if let Some(name) = remove_m.get_one::<String>("name") {
         if !profile_exists(name) {
-            eprintln!("❌ Profile '{}' not found.", name);
+            eprintln!("x Profile '{}' not found.", name);
             return false;
         }
 
@@ -339,7 +452,7 @@ fn run_remove(remove_m: &ArgMatches) -> bool {
         )) {
             Ok(confirmed) => confirmed,
             Err(error) => {
-                eprintln!("❌ {error}");
+                eprintln!("x {error}");
                 return false;
             }
         };
@@ -353,11 +466,12 @@ fn run_remove(remove_m: &ArgMatches) -> bool {
             eprintln!("Failed to remove profile '{}': {error}", name);
             false
         } else {
+            ui::account_status::render_backend_ui(&profile_remove_success_ui_response(name));
             true
         }
     } else {
         eprintln!(
-            "❌ Please provide a profile name to remove. Example: cargo ai profile remove openai-prod"
+            "x Please provide a profile name to remove. Example: cargo ai profile remove openai-prod"
         );
         false
     }
@@ -377,7 +491,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         run_remove(remove_m)
     } else {
         eprintln!(
-            "❌ No profile subcommand found. Try 'cargo ai profile list', 'cargo ai profile show <name>', 'cargo ai profile add ...', or 'cargo ai profile set ...'."
+            "x No profile subcommand found. Try 'cargo ai profile list', 'cargo ai profile show <name>', 'cargo ai profile add ...', or 'cargo ai profile set ...'."
         );
         false
     }
@@ -385,7 +499,10 @@ pub fn run(sub_m: &ArgMatches) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_auth_mode;
+    use super::{
+        parse_auth_mode, profile_add_success_ui_response, profile_remove_success_ui_response,
+        profile_set_success_ui_response,
+    };
     use crate::config::schema::ProfileAuthMode;
 
     #[test]
@@ -397,5 +514,55 @@ mod tests {
             Some(ProfileAuthMode::OpenaiAccount)
         );
         assert_eq!(parse_auth_mode("wat"), None);
+    }
+
+    #[test]
+    fn profile_remove_success_includes_list_profiles_available_command() {
+        let response = profile_remove_success_ui_response("openai-prod");
+        assert_eq!(response["ui"]["title"].as_str(), Some("Profile removed"));
+        assert_eq!(
+            response["ui"]["sections"][0]["title"].as_str(),
+            Some("Available commands")
+        );
+        assert_eq!(
+            response["ui"]["sections"][0]["items"][0]["value"].as_str(),
+            Some("`cargo ai profile list`")
+        );
+    }
+
+    #[test]
+    fn profile_add_success_uses_available_commands() {
+        let response =
+            profile_add_success_ui_response("my_open_ai", ProfileAuthMode::OpenaiAccount);
+
+        assert_eq!(response["ui"]["title"].as_str(), Some("Profile saved"));
+        assert_eq!(
+            response["ui"]["sections"][1]["items"][0]["value"].as_str(),
+            Some("`cargo ai profile show my_open_ai`")
+        );
+    }
+
+    #[test]
+    fn profile_set_success_includes_guidance_when_token_updates_non_api_key_mode() {
+        let response = profile_set_success_ui_response(
+            "my_open_ai",
+            &["server", "model"],
+            Some("updated"),
+            ProfileAuthMode::OpenaiAccount,
+        );
+
+        assert_eq!(response["ui"]["title"].as_str(), Some("Profile updated"));
+        assert_eq!(
+            response["ui"]["sections"][0]["items"][0]["value"].as_str(),
+            Some("server, model")
+        );
+        assert_eq!(
+            response["ui"]["sections"][1]["title"].as_str(),
+            Some("Guidance")
+        );
+        assert_eq!(
+            response["ui"]["sections"][2]["items"][0]["value"].as_str(),
+            Some("`cargo ai profile show my_open_ai`")
+        );
     }
 }

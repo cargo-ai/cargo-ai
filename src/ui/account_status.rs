@@ -1,14 +1,43 @@
 use serde_json::Value;
 
+pub fn normalize_leading_glyph(message: &str) -> String {
+    if let Some(rest) = message.strip_prefix("✅ ") {
+        return format!("✓ {rest}");
+    }
+    if let Some(rest) = message.strip_prefix("⚠️ ") {
+        return format!("! {rest}");
+    }
+    if let Some(rest) = message.strip_prefix("❌ ") {
+        return format!("x {rest}");
+    }
+    if let Some(rest) = message.strip_prefix("ℹ️ ") {
+        return format!("i {rest}");
+    }
+
+    message.to_string()
+}
+
 pub fn render_backend_ui(response: &Value) -> bool {
-    let ui = match response.get("ui") {
-        Some(v) => v,
-        None => return false,
+    let Some(lines) = render_backend_ui_lines(response) else {
+        return false;
     };
 
+    for line in lines {
+        println!("{line}");
+    }
+
+    true
+}
+
+pub fn render_account_status_ui(response: &Value) -> bool {
+    render_backend_ui(response)
+}
+
+fn render_backend_ui_lines(response: &Value) -> Option<Vec<String>> {
+    let ui = response.get("ui")?;
     let schema = ui.get("schema").and_then(|v| v.as_str());
     if schema != Some("1.0") {
-        return false;
+        return None;
     }
 
     let kind = ui.get("kind").and_then(|v| v.as_str()).unwrap_or("info");
@@ -18,25 +47,30 @@ pub fn render_backend_ui(response: &Value) -> bool {
         .and_then(|v| v.as_str())
         .unwrap_or("Status response received.");
 
-    let kind_prefix = match kind {
-        "success" => "✅",
-        "error" => "⚠️",
-        "failure" => "❌",
-        _ => "ℹ️",
-    };
+    let kind_prefix = ui
+        .get("icon")
+        .and_then(|v| v.as_str())
+        .filter(|icon| !icon.trim().is_empty())
+        .unwrap_or_else(|| match kind {
+            "success" => "✓",
+            "error" => "!",
+            "failure" => "x",
+            _ => "i",
+        });
 
-    println!("{} {}", kind_prefix, title);
-    println!("{}", summary);
+    let mut lines = Vec::new();
+    lines.push(format!("{kind_prefix} {title}"));
+    push_multiline(&mut lines, summary);
 
     if let Some(variant) = ui.get("variant").and_then(|v| v.as_str()) {
         if !variant.trim().is_empty() {
-            println!("Variant: {}", variant);
+            lines.push(format!("Variant: {variant}"));
         }
     }
 
     if let Some(sections) = ui.get("sections").and_then(|v| v.as_array()) {
         for section in sections {
-            render_section(section);
+            render_section(&mut lines, section);
         }
     }
 
@@ -52,16 +86,17 @@ pub fn render_backend_ui(response: &Value) -> bool {
             }
 
             if !printed_header {
-                println!("\nActions:");
+                lines.push(String::new());
+                lines.push("Actions".to_string());
                 printed_header = true;
             }
 
             if !label.is_empty() && !command.is_empty() {
-                println!("- {}: {}", label, command);
+                lines.push(format!("- {label}: {command}"));
             } else if !label.is_empty() {
-                println!("- {}", label);
+                lines.push(format!("- {label}"));
             } else {
-                println!("- {}", command);
+                lines.push(format!("- {command}"));
             }
         }
     }
@@ -76,44 +111,79 @@ pub fn render_backend_ui(response: &Value) -> bool {
             };
 
             if !printed_header {
-                println!("\nNext steps:");
+                lines.push(String::new());
+                lines.push("Next steps".to_string());
                 printed_header = true;
             }
 
-            println!("- {}", text);
+            lines.push(format!("- {text}"));
         }
     }
 
-    true
+    Some(lines)
 }
 
-pub fn render_account_status_ui(response: &Value) -> bool {
-    render_backend_ui(response)
-}
-
-fn render_section(section: &Value) {
+fn render_section(lines: &mut Vec<String>, section: &Value) {
     let section_type = section.get("type").and_then(|v| v.as_str()).unwrap_or("");
     let title = section.get("title").and_then(|v| v.as_str()).unwrap_or("");
+    let title_style = section
+        .get("title_style")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     if !title.is_empty() {
-        println!("\n{}:", title);
+        lines.push(String::new());
+        if title_style == "plain" {
+            lines.push(title.to_string());
+        } else {
+            lines.push(format!("{title}:"));
+        }
     }
 
     match section_type {
         "kv" => {
             if let Some(items) = section.get("items").and_then(|v| v.as_array()) {
-                for item in items {
-                    let label = item.get("label").and_then(|v| v.as_str()).unwrap_or("");
-                    let value = item.get("value").map(value_to_string).unwrap_or_default();
+                let aligned_layout = section
+                    .get("layout")
+                    .and_then(|v| v.as_str())
+                    .map(|layout| layout == "aligned")
+                    .unwrap_or(false);
 
-                    if label.is_empty() && value.is_empty() {
-                        continue;
+                let rendered_items: Vec<(String, String)> = items
+                    .iter()
+                    .map(|item| {
+                        (
+                            item.get("label")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            item.get("value").map(value_to_string).unwrap_or_default(),
+                        )
+                    })
+                    .filter(|(label, value)| !(label.is_empty() && value.is_empty()))
+                    .collect();
+
+                if aligned_layout {
+                    let label_width = rendered_items
+                        .iter()
+                        .map(|(label, _)| label.len())
+                        .max()
+                        .unwrap_or(0);
+
+                    for (label, value) in rendered_items {
+                        if label.is_empty() {
+                            lines.push(format!("  {value}"));
+                        } else {
+                            lines.push(format!("  {label:<width$}  {value}", width = label_width));
+                        }
                     }
-
-                    if label.is_empty() {
-                        println!("- {}", value);
-                    } else {
-                        println!("- {}: {}", label, value);
+                } else {
+                    for (label, value) in rendered_items {
+                        if label.is_empty() {
+                            lines.push(format!("- {value}"));
+                        } else {
+                            lines.push(format!("- {label}: {value}"));
+                        }
                     }
                 }
             }
@@ -123,7 +193,7 @@ fn render_section(section: &Value) {
                 for item in items {
                     let value = value_to_string(item);
                     if !value.is_empty() {
-                        println!("- {}", value);
+                        lines.push(format!("- {value}"));
                     }
                 }
             }
@@ -131,7 +201,7 @@ fn render_section(section: &Value) {
         "notice" => {
             if let Some(message) = section.get("message").and_then(|v| v.as_str()) {
                 if !message.trim().is_empty() {
-                    println!("{}", message);
+                    push_multiline(lines, message);
                 }
             }
         }
@@ -140,10 +210,10 @@ fn render_section(section: &Value) {
                 match serde_json::to_string_pretty(data) {
                     Ok(pretty) => {
                         for line in pretty.lines() {
-                            println!("{}", line);
+                            lines.push(line.to_string());
                         }
                     }
-                    Err(_) => println!("{}", value_to_string(data)),
+                    Err(_) => lines.push(value_to_string(data)),
                 }
             }
         }
@@ -160,5 +230,119 @@ fn value_to_string(v: &Value) -> String {
         Value::Number(n) => n.to_string(),
         Value::String(s) => s.to_string(),
         Value::Array(_) | Value::Object(_) => serde_json::to_string(v).unwrap_or_default(),
+    }
+}
+
+fn push_multiline(lines: &mut Vec<String>, text: &str) {
+    for line in text.split('\n') {
+        lines.push(line.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_leading_glyph, render_backend_ui_lines};
+    use serde_json::json;
+
+    #[test]
+    fn renders_aligned_plain_sections_for_status_style_ui() {
+        let response = json!({
+            "ui": {
+                "schema": "1.0",
+                "kind": "success",
+                "icon": "✓",
+                "title": "Account status",
+                "summary": "Basic plan active.",
+                "sections": [
+                    {
+                        "type": "kv",
+                        "title": "Account",
+                        "title_style": "plain",
+                        "layout": "aligned",
+                        "items": [
+                            {"label": "Email", "value": "jane@example.com"},
+                            {"label": "Handle", "value": "demo_handle"}
+                        ]
+                    },
+                    {
+                        "type": "kv",
+                        "title": "Next steps",
+                        "title_style": "plain",
+                        "layout": "aligned",
+                        "items": [
+                            {"label": "Change handle", "value": "cargo ai account handle --set <handle>"},
+                            {"label": "List agents", "value": "cargo ai account agents list"}
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let lines = render_backend_ui_lines(&response).expect("expected rendered lines");
+        assert_eq!(lines[0], "✓ Account status");
+        assert_eq!(lines[1], "Basic plan active.");
+        assert!(lines.iter().any(|line| line == "Account"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "  Email   jane@example.com"));
+        assert!(lines.iter().any(|line| line == "  Handle  demo_handle"));
+        assert!(lines.iter().any(|line| line == "Next steps"));
+        assert!(lines
+            .iter()
+            .any(|line| { line == "  Change handle  cargo ai account handle --set <handle>" }));
+    }
+
+    #[test]
+    fn keeps_existing_bullet_kv_behavior_without_aligned_layout() {
+        let response = json!({
+            "ui": {
+                "schema": "1.0",
+                "kind": "success",
+                "title": "Mail preferences",
+                "summary": "All account emails are currently enabled.",
+                "sections": [
+                    {
+                        "type": "kv",
+                        "title": "Summary",
+                        "items": [
+                            {"label": "State", "value": "Enabled"}
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let lines = render_backend_ui_lines(&response).expect("expected rendered lines");
+        assert!(lines.iter().any(|line| line == "Summary:"));
+        assert!(lines.iter().any(|line| line == "- State: Enabled"));
+    }
+
+    #[test]
+    fn defaults_to_plain_glyphs_and_plain_next_steps_header() {
+        let response = json!({
+            "ui": {
+                "schema": "1.0",
+                "kind": "success",
+                "title": "Mail preferences",
+                "summary": "All account emails are currently enabled.",
+                "next_steps": [
+                    "Run `cargo ai account mail prefs --disable-all`."
+                ]
+            }
+        });
+
+        let lines = render_backend_ui_lines(&response).expect("expected rendered lines");
+        assert_eq!(lines[0], "✓ Mail preferences");
+        assert!(lines.iter().any(|line| line == "Next steps"));
+        assert!(!lines.iter().any(|line| line == "Next steps:"));
+    }
+
+    #[test]
+    fn normalize_leading_glyph_rewrites_decorative_prefixes() {
+        assert_eq!(normalize_leading_glyph("✅ Good"), "✓ Good");
+        assert_eq!(normalize_leading_glyph("⚠️ Heads up"), "! Heads up");
+        assert_eq!(normalize_leading_glyph("❌ Failed"), "x Failed");
+        assert_eq!(normalize_leading_glyph("ℹ️ Note"), "i Note");
+        assert_eq!(normalize_leading_glyph("plain"), "plain");
     }
 }

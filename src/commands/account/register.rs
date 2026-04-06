@@ -17,13 +17,13 @@ use super::helpers::{
 /// Registers an account email and persists the active email on success.
 pub async fn run(reg_m: &ArgMatches) -> bool {
     let Some(email) = reg_m.get_one::<String>("email") else {
-        eprintln!("❌ Missing email. Use `cargo ai account register <email>`.");
+        eprintln!("x Missing email. Use `cargo ai account register <email>`.");
         return false;
     };
 
     if let Err(e) = ensure_config_file_exists() {
         eprintln!(
-            "❌ Failed to initialize local config at '{}': {e}",
+            "x Failed to initialize local config at '{}': {e}",
             config_path().display()
         );
         return false;
@@ -43,7 +43,7 @@ pub async fn run(reg_m: &ArgMatches) -> bool {
                     if let Some(active_email) = extract_status_account_email(&status_response) {
                         if active_email.eq_ignore_ascii_case(email) {
                             println!(
-                                "✅ You are already signed in as '{}'. Registration is not needed.",
+                                "✓ You are already signed in as '{}'. Registration is not needed.",
                                 active_email
                             );
                             return true;
@@ -56,7 +56,7 @@ pub async fn run(reg_m: &ArgMatches) -> bool {
             if let Some(existing_email) = acct.email.as_ref() {
                 if !existing_email.eq_ignore_ascii_case(email) {
                     println!(
-                        "⚠️ Local account is currently configured as '{}'.",
+                        "! Local account is currently configured as '{}'.",
                         existing_email
                     );
                     println!(
@@ -68,13 +68,13 @@ pub async fn run(reg_m: &ArgMatches) -> bool {
                     );
                     print!("Continue and switch to '{}'? [y/N]: ", email);
                     if let Err(e) = io::stdout().flush() {
-                        eprintln!("⚠️ Failed to flush stdout: {e}");
+                        eprintln!("! Failed to flush stdout: {e}");
                         return false;
                     }
 
                     let mut input = String::new();
                     if let Err(e) = io::stdin().read_line(&mut input) {
-                        eprintln!("⚠️ Failed to read input: {e}");
+                        eprintln!("! Failed to read input: {e}");
                         return false;
                     }
 
@@ -105,7 +105,7 @@ pub async fn run(reg_m: &ArgMatches) -> bool {
                 .unwrap_or(false)
             {
                 if let Err(e) = set_account_email(email.to_string(), true) {
-                    eprintln!("⚠️ Failed to save account email to config: {e}");
+                    eprintln!("! Failed to save account email to config: {e}");
                 }
                 true
             } else {
@@ -113,7 +113,7 @@ pub async fn run(reg_m: &ArgMatches) -> bool {
             }
         }
         Err(e) => {
-            eprintln!("❌ Request failed: {e}");
+            eprintln!("x Request failed: {e}");
             false
         }
     }

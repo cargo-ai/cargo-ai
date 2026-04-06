@@ -376,7 +376,7 @@ mod tests {
         assert!(rendered.contains(r#"subcommand_matches("version")"#));
         assert!(rendered.contains(r#"subcommand_matches("inspect")"#));
         assert!(rendered.contains("print_agent_inspect(sub_m.get_flag(\"json\"));"));
-        assert!(rendered.contains("agent_version_status ="));
+        assert!(rendered.contains("Agent version status"));
         assert!(rendered.contains("generated_agent_provenance"));
         assert!(rendered.contains("generated_agent_inspect_value"));
         assert!(rendered.contains("generated_by_cargo_ai_version"));
