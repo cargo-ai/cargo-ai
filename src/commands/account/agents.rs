@@ -406,7 +406,9 @@ fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &Value) -
     let definition_json = match response.get("definition_json") {
         Some(value) => value,
         None => {
-            eprintln!("x Hatch could not continue because response did not include 'definition_json'.");
+            eprintln!(
+                "x Hatch could not continue because response did not include 'definition_json'."
+            );
             return false;
         }
     };
@@ -577,7 +579,9 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                 }
             }
         } else {
-            eprintln!("x Missing required input: provide --json, --json-file <FILE>, or positional FILE.");
+            eprintln!(
+                "x Missing required input: provide --json, --json-file <FILE>, or positional FILE."
+            );
             return false;
         };
 
