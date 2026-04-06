@@ -30,6 +30,7 @@ Implementation details may change underneath those surfaces, but changes that ma
 The next release is `0.2.0` because Cargo AI has evolved meaningfully since `0.1.0` in user-visible ways, including:
 
 - typed `runtime_vars` for invocation-scoped action and run-step control
+- structural action-only workers that can skip the initial model pass when the definition uses the empty-schema no-input shape
 - Ollama-compatible image generation for the existing `generate_image` run-step contract
 - additive parent/child workflow contract improvements such as named reusable inputs and child runtime-var forwarding
 - parallel top-level action execution as an explicit orchestration mode
