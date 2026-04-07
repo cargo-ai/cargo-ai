@@ -9,6 +9,12 @@ While Cargo AI is in the `0.y.z` range, the leftmost non-zero digit is the main 
 - `0.y.0` means meaningful product and contract evolution across one or more public surfaces.
 - `0.y.z` means smaller bug fixes, polish, documentation updates, and low-risk compatibility improvements that should not materially change how users author, hatch, run, or share agents.
 
+## How To Read Releases
+
+- A release such as `0.1.1` should feel like a smaller follow-up release, not a major expansion of what authored agents or the CLI can do.
+- A release such as `0.2.0` signals that Cargo AI gained meaningful new capability or compatibility surface, even though the product is still pre-`1.0.0`.
+- While Cargo AI remains pre-`1.0.0`, generated-agent provenance/version checks stay intentionally exact. After a meaningful upgrade, existing hatched agents may report `out_of_sync` until they are re-hatched with the newer Cargo AI.
+
 ## Public Compatibility Surfaces
 
 For Cargo AI, the compatibility surfaces that matter most are:
@@ -45,6 +51,8 @@ Cargo AI continues to recommend manual upgrades:
 ```bash
 cargo install cargo-ai --locked
 ```
+
+After a meaningful pre-`1.0.0` upgrade, re-hatch generated agents if their embedded version/provenance status reports `out_of_sync`.
 
 To check whether a newer crates.io version exists:
 
