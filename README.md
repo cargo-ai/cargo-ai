@@ -54,6 +54,10 @@ cargo install cargo-ai --locked
 cargo ai --help
 ```
 
+Cargo AI uses a product-oriented pre-`1.0.0` release policy: `0.y.0` means meaningful product/contract evolution, while `0.y.z` is reserved for smaller fixes and polish. See [VERSIONING.md](./VERSIONING.md) for the public versioning policy.
+
+Upgrades remain manual via `cargo install cargo-ai --locked`. After a meaningful pre-`1.0.0` upgrade such as `0.1.0 -> 0.2.0`, generated agents may report that they are out of sync with local Cargo AI metadata until they are re-hatched.
+
 ### 2. Choose your model setup
 
 **Option A: recommended if you use ChatGPT Plus or above**
@@ -854,6 +858,9 @@ cargo ai account agents hatch weather_test --owner-handle alice
 
 When you want deeper details, use these files:
 
+- Versioning and releases:
+  - [VERSIONING.md](./VERSIONING.md)
+  - [releases/0.2.0.md](./releases/0.2.0.md)
 - Examples:
   - [adder_test.json](./adder_test.json)
   - [weather_test.json](./weather_test.json)
