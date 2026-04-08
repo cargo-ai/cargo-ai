@@ -824,6 +824,31 @@ enum LoadedProfileKind {
     Default,
 }
 
+fn resolve_loaded_profile<'a>(
+    config: Option<&'a config::schema::Config>,
+    explicit_profile_name: Option<&str>,
+) -> Result<Option<(&'a config::schema::Profile, LoadedProfileKind)>, String> {
+    if let Some(profile_name) = explicit_profile_name {
+        let Some(config) = config else {
+            return Err(format!("Profile '{}' not found.", profile_name));
+        };
+
+        let Some(profile) = find_profile(config, profile_name) else {
+            return Err(format!("Profile '{}' not found.", profile_name));
+        };
+
+        return Ok(Some((profile, LoadedProfileKind::Explicit)));
+    }
+
+    Ok(config
+        .and_then(|cfg| {
+            cfg.default_profile
+                .as_deref()
+                .and_then(|name| find_profile(cfg, name))
+        })
+        .map(|profile| (profile, LoadedProfileKind::Default)))
+}
+
 fn profile_selection_messages(
     kind: LoadedProfileKind,
     profile_name: &str,
@@ -1953,11 +1978,9 @@ async fn main() {
     let mut loaded_profile_message: Option<(LoadedProfileKind, String)> = None;
     let mut use_openai_account_transport = false;
 
-    if let Some(profile_name) = cmd_args.get_one::<String>("profile") {
-        if let Some(profile) = config
-            .as_ref()
-            .and_then(|cfg| find_profile(cfg, profile_name))
-        {
+    let explicit_profile_name = cmd_args.get_one::<String>("profile").map(String::as_str);
+    match resolve_loaded_profile(config.as_ref(), explicit_profile_name) {
+        Ok(Some((profile, kind))) => {
             selected_profile = Some(apply_profile(
                 profile,
                 &mut server,
@@ -1965,27 +1988,12 @@ async fn main() {
                 &mut inference_timeout_in_sec,
                 &mut url,
             ));
-            loaded_profile_message = Some((LoadedProfileKind::Explicit, profile_name.to_string()));
-        } else if config.is_some() {
-            eprintln!("Profile '{}' not found.", profile_name);
-        } else {
-            eprintln!("No config file found.");
+            loaded_profile_message = Some((kind, profile.name.clone()));
         }
-    }
-
-    if server.is_empty() {
-        if let Some(profile) = config
-            .as_ref()
-            .and_then(|cfg| cfg.default_profile.as_deref().and_then(|name| find_profile(cfg, name)))
-        {
-            selected_profile = Some(apply_profile(
-                profile,
-                &mut server,
-                &mut model,
-                &mut inference_timeout_in_sec,
-                &mut url,
-            ));
-            loaded_profile_message = Some((LoadedProfileKind::Default, profile.name.clone()));
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("❌ {error}");
+            std::process::exit(1);
         }
     }
 
@@ -2333,6 +2341,82 @@ async fn main() {
     {
         eprintln!("❌ {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_loaded_profile, LoadedProfileKind};
+    use crate::config::schema::{Config, OpenAiAuth, Profile, ProfileAuthMode, WebResources};
+
+    fn profile(name: &str) -> Profile {
+        Profile {
+            name: name.to_string(),
+            server: "openai".to_string(),
+            model: "gpt-5.2".to_string(),
+            url: None,
+            token: None,
+            timeout_in_sec: 60,
+            description: None,
+            auth_mode: ProfileAuthMode::OpenaiAccount,
+        }
+    }
+
+    fn config(default_profile: Option<&str>, profiles: Vec<Profile>) -> Config {
+        Config {
+            profile: profiles,
+            cargo_ai_token: None,
+            default_profile: default_profile.map(str::to_string),
+            secret_store: None,
+            openai_auth: None::<OpenAiAuth>,
+            web_resources: None::<WebResources>,
+        }
+    }
+
+    #[test]
+    fn resolve_loaded_profile_uses_explicit_profile_when_present() {
+        let cfg = config(Some("default_openai"), vec![profile("default_openai"), profile("named")]);
+
+        let resolved =
+            resolve_loaded_profile(Some(&cfg), Some("named")).expect("explicit profile should resolve");
+
+        let Some((profile, kind)) = resolved else {
+            panic!("expected explicit profile");
+        };
+        assert_eq!(profile.name, "named");
+        assert!(matches!(kind, LoadedProfileKind::Explicit));
+    }
+
+    #[test]
+    fn resolve_loaded_profile_rejects_missing_explicit_profile_even_when_default_exists() {
+        let cfg = config(Some("default_openai"), vec![profile("default_openai")]);
+
+        let err = resolve_loaded_profile(Some(&cfg), Some("missing"))
+            .expect_err("missing explicit profile must fail");
+
+        assert_eq!(err, "Profile 'missing' not found.");
+    }
+
+    #[test]
+    fn resolve_loaded_profile_rejects_missing_explicit_profile_without_config() {
+        let err = resolve_loaded_profile(None, Some("missing"))
+            .expect_err("missing explicit profile must fail without config");
+
+        assert_eq!(err, "Profile 'missing' not found.");
+    }
+
+    #[test]
+    fn resolve_loaded_profile_uses_default_profile_when_explicit_profile_absent() {
+        let cfg = config(Some("default_openai"), vec![profile("default_openai")]);
+
+        let resolved =
+            resolve_loaded_profile(Some(&cfg), None).expect("default profile should resolve");
+
+        let Some((profile, kind)) = resolved else {
+            panic!("expected default profile");
+        };
+        assert_eq!(profile.name, "default_openai");
+        assert!(matches!(kind, LoadedProfileKind::Default));
     }
 }
 
