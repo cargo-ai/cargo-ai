@@ -392,6 +392,22 @@ mod tests {
     }
 
     #[test]
+    fn stamped_main_template_uses_standalone_version_guidance() {
+        let rendered = render_workspace_file_contents(
+            "src/main.rs",
+            "fn main() {\n    let cmd_args = args::build_cli();\n}\n",
+            "adder_agent",
+            CURRENT_CARGO_AI_VERSION,
+            "2026-03-03.r1",
+        );
+
+        assert!(rendered.contains("Standalone machine detected. Local Cargo AI metadata is not available on this machine."));
+        assert!(rendered.contains("Not checked (standalone machine)"));
+        assert!(rendered.contains("Inspect agent"));
+        assert!(!rendered.contains("Run `cargo ai version` on this machine"));
+    }
+
+    #[test]
     fn non_main_templates_do_not_get_provenance_block() {
         let rendered = render_workspace_file_contents(
             "src/args.rs",

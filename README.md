@@ -883,6 +883,7 @@ When you want deeper details, use these files:
 - Standalone recipients do not need Cargo AI installed if they run the binary with explicit runtime flags such as `--server`, `--model`, optional `--url`, and optional `--token`.
 - `--profile <name>` is strict for generated binaries: if the named profile is missing, the run fails closed instead of falling back to another profile or to profileless auth.
 - For the standalone OpenAI account path, run the generated binary with `--server openai --model <model>` and no `--token`; if a local Codex session is available, the binary reuses it automatically.
+- On machines without Cargo AI installed/configured, `./my_agent version` treats local sync comparison as not checked and points users to `./my_agent inspect` for embedded provenance.
 - Scheduling is not built into Cargo AI today. To run an agent on a schedule, use your operating system scheduler such as `cron` on macOS/Linux or Task Scheduler on Windows. We know scheduling matters and expect this area to expand over time.
 - Cargo AI recommends manual upgrade via:
 

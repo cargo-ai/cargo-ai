@@ -116,6 +116,11 @@ fn push_aligned_lines(lines: &mut Vec<String>, title: &str, items: &[(&str, Stri
 }
 
 #[allow(dead_code)]
+fn standalone_machine_next_steps() -> Vec<(&'static str, String)> {
+    vec![("Inspect agent", "`./agent inspect`".to_string())]
+}
+
+#[allow(dead_code)]
 fn print_agent_version_status() {
     let provenance = generated_agent_provenance();
     let generated_by_version = provenance
@@ -151,8 +156,8 @@ fn print_agent_version_status() {
     } else {
         (
             "!",
-            "Unknown",
-            "Local Cargo AI metadata is unavailable. Run `cargo ai version` on this machine, then re-run this command.".to_string(),
+            "Not checked (standalone machine)",
+            "Standalone machine detected. Local Cargo AI metadata is not available on this machine.".to_string(),
         )
     };
 
@@ -170,14 +175,14 @@ fn print_agent_version_status() {
                 "Local cargo-ai",
                 local_cargo_ai_version
                     .as_deref()
-                    .unwrap_or("unknown")
+                    .unwrap_or("not installed")
                     .to_string(),
             ),
             (
                 "Local template",
                 local_template_version
                     .as_deref()
-                    .unwrap_or("unknown")
+                    .unwrap_or("not available")
                     .to_string(),
             ),
         ],
@@ -187,6 +192,13 @@ fn print_agent_version_status() {
         "Status",
         &[("Sync", sync_label.to_string())],
     );
+    if status == __SYNC_STATUS_UNKNOWN__ {
+        push_aligned_lines(
+            &mut lines,
+            "Next steps",
+            &standalone_machine_next_steps(),
+        );
+    }
 
     for line in lines {
         println!("{line}");
