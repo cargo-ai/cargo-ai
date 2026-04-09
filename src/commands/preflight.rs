@@ -268,6 +268,10 @@ fn cli_override_descriptions(sub_m: &ArgMatches, include_token_override: bool) -
         overrides.push(format!("action_execution={action_execution}"));
     }
 
+    if let Some(output_mode) = sub_m.get_one::<String>("output_mode") {
+        overrides.push(format!("output_mode={output_mode}"));
+    }
+
     if include_token_override {
         overrides.push("token=(explicit)".to_string());
     }
@@ -294,6 +298,19 @@ fn effective_action_execution_for_run(
     action_execution_override: Option<crate::ActionExecutionMode>,
 ) -> crate::ActionExecutionMode {
     action_execution_override.unwrap_or_else(crate::action_execution)
+}
+
+fn resolved_output_mode_for_run(
+    sub_m: &ArgMatches,
+) -> Result<super::preflight_actions::RequestedActionOutputMode, String> {
+    match sub_m.get_one::<String>("output_mode").map(String::as_str) {
+        None | Some("auto") => Ok(super::preflight_actions::RequestedActionOutputMode::Auto),
+        Some("live") => Ok(super::preflight_actions::RequestedActionOutputMode::Live),
+        Some("append-only") => Ok(super::preflight_actions::RequestedActionOutputMode::AppendOnly),
+        Some(other) => Err(format!(
+            "Unsupported --output-mode '{other}'. Expected auto, live, or append-only."
+        )),
+    }
 }
 
 fn resolve_profile_api_token(profile: &SelectedProfile) -> Result<String, String> {
@@ -988,6 +1005,13 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             return false;
         }
     };
+    let requested_output_mode = match resolved_output_mode_for_run(sub_m) {
+        Ok(requested_output_mode) => requested_output_mode,
+        Err(error) => {
+            eprintln!("x {error}");
+            return false;
+        }
+    };
     let effective_action_execution = effective_action_execution_for_run(action_execution_override);
     let has_output_schema_properties = crate::has_output_schema_properties();
 
@@ -1018,6 +1042,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             &named_inputs,
             effective_action_execution,
             action_execution_override,
+            requested_output_mode,
             &action_provider_context,
             max_agent_depth,
             runtime_budget,
@@ -1302,6 +1327,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         &named_inputs,
         effective_action_execution,
         action_execution_override,
+        requested_output_mode,
         &action_provider_context,
         max_agent_depth,
         runtime_budget,
@@ -1328,10 +1354,11 @@ mod tests {
     use super::{
         cli_override_descriptions, effective_action_execution_for_run, profile_selection_messages,
         render_preflight_failure_lines, resolve_runtime_vars_from_specs,
-        resolved_action_execution_override_for_run, unknown_server_messages,
-        validate_structural_action_only_inputs, LoadedProfileKind,
+        resolved_action_execution_override_for_run, resolved_output_mode_for_run,
+        unknown_server_messages, validate_structural_action_only_inputs, LoadedProfileKind,
     };
     use crate::args::test_cli_command;
+    use crate::commands::preflight_actions::RequestedActionOutputMode;
     use crate::providers::ProviderKind;
     use serde_json::json;
 
@@ -1510,6 +1537,28 @@ mod tests {
     }
 
     #[test]
+    fn preflight_accepts_output_mode_override() {
+        let cmd = matches(&[
+            "cargo-ai",
+            "preflight",
+            "--output-mode",
+            "append-only",
+            "--input-text",
+            "Return 4",
+        ]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        assert_eq!(
+            preflight
+                .get_one::<String>("output_mode")
+                .map(String::as_str),
+            Some("append-only")
+        );
+    }
+
+    #[test]
     fn resolved_action_execution_override_for_run_reads_cli_override() {
         let cmd = matches(&[
             "cargo-ai",
@@ -1535,6 +1584,39 @@ mod tests {
         assert_eq!(
             effective_action_execution_for_run(Some(crate::ActionExecutionMode::Sequential)),
             crate::ActionExecutionMode::Sequential
+        );
+    }
+
+    #[test]
+    fn resolved_output_mode_for_run_defaults_to_auto() {
+        let cmd = matches(&["cargo-ai", "preflight", "--input-text", "Return 4"]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        assert_eq!(
+            resolved_output_mode_for_run(preflight).expect("output mode should resolve"),
+            RequestedActionOutputMode::Auto
+        );
+    }
+
+    #[test]
+    fn resolved_output_mode_for_run_reads_cli_override() {
+        let cmd = matches(&[
+            "cargo-ai",
+            "preflight",
+            "--output-mode",
+            "live",
+            "--input-text",
+            "Return 4",
+        ]);
+        let preflight = cmd
+            .subcommand_matches("preflight")
+            .expect("preflight subcommand should parse");
+
+        assert_eq!(
+            resolved_output_mode_for_run(preflight).expect("output mode should resolve"),
+            RequestedActionOutputMode::Live
         );
     }
 

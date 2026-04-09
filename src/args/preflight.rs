@@ -73,6 +73,13 @@ pub fn command() -> Command {
                 .value_parser(["sequential"]),
         )
         .arg(
+            Arg::new("output_mode")
+                .long("output-mode")
+                .value_name("MODE")
+                .help("Choose runtime output style: auto, live, or append-only")
+                .value_parser(["auto", "live", "append-only"]),
+        )
+        .arg(
             Arg::new("input_mode")
                 .long("input-mode")
                 .value_name("MODE")
@@ -174,6 +181,19 @@ mod tests {
         assert!(
             help.contains("Force top-level actions to run sequentially for this invocation tree")
         );
+    }
+
+    #[test]
+    fn help_describes_output_mode_override() {
+        let mut command = super::command();
+        let mut help = Vec::new();
+        command
+            .write_long_help(&mut help)
+            .expect("preflight help should render");
+        let help = String::from_utf8(help).expect("help should be utf8");
+
+        assert!(help.contains("--output-mode <MODE>"));
+        assert!(help.contains("Choose runtime output style: auto, live, or append-only"));
     }
 
     #[test]

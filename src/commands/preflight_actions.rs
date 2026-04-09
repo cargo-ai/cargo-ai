@@ -35,14 +35,22 @@ struct ActionOutput {
     live_refresh_stop: Arc<AtomicBool>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActionOutputMode {
     AppendOnly,
     Live,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequestedActionOutputMode {
+    Auto,
+    Live,
+    AppendOnly,
+}
+
 struct ActionOutputState {
     mode: ActionOutputMode,
+    startup_notice: Option<&'static str>,
     action_execution: crate::ActionExecutionMode,
     rendered_lines: usize,
     lanes: BTreeMap<usize, ActionLaneState>,
@@ -74,20 +82,28 @@ enum ActionLaneStatus {
 }
 
 impl ActionOutput {
-    fn new(action_execution: crate::ActionExecutionMode) -> Self {
-        Self::new_for_mode(
-            action_execution,
-            if should_use_live_action_dashboard() {
-                ActionOutputMode::Live
-            } else {
-                ActionOutputMode::AppendOnly
-            },
-        )
+    fn new(
+        action_execution: crate::ActionExecutionMode,
+        requested_mode: RequestedActionOutputMode,
+    ) -> Self {
+        let (mode, startup_notice) =
+            resolve_action_output_mode_for_capability(requested_mode, live_dashboard_supported());
+        Self::new_for_mode_with_notice(action_execution, mode, startup_notice)
     }
 
+    #[cfg(test)]
     fn new_for_mode(action_execution: crate::ActionExecutionMode, mode: ActionOutputMode) -> Self {
+        Self::new_for_mode_with_notice(action_execution, mode, None)
+    }
+
+    fn new_for_mode_with_notice(
+        action_execution: crate::ActionExecutionMode,
+        mode: ActionOutputMode,
+        startup_notice: Option<&'static str>,
+    ) -> Self {
         let inner = Arc::new(Mutex::new(ActionOutputState {
             mode,
+            startup_notice,
             action_execution,
             rendered_lines: 0,
             lanes: BTreeMap::new(),
@@ -103,6 +119,9 @@ impl ActionOutput {
 
     fn print_execution_header(&self) {
         self.with_state(|state| {
+            if let Some(notice) = state.startup_notice.take() {
+                println!("{notice}");
+            }
             if state.mode == ActionOutputMode::AppendOnly {
                 println!("{}", action_execution_header(state.action_execution));
             } else {
@@ -387,12 +406,40 @@ impl ActionLaneStatus {
     }
 }
 
-fn should_use_live_action_dashboard() -> bool {
+fn live_dashboard_supported() -> bool {
     io::stdout().is_terminal()
         && std::env::var("TERM")
             .map(|term| term != "dumb")
             .unwrap_or(true)
         && std::env::var_os("CI").is_none()
+}
+
+fn resolve_action_output_mode_for_capability(
+    requested_mode: RequestedActionOutputMode,
+    live_supported: bool,
+) -> (ActionOutputMode, Option<&'static str>) {
+    match requested_mode {
+        RequestedActionOutputMode::Auto => {
+            if live_supported {
+                (ActionOutputMode::Live, None)
+            } else {
+                (ActionOutputMode::AppendOnly, None)
+            }
+        }
+        RequestedActionOutputMode::Live => {
+            if live_supported {
+                (ActionOutputMode::Live, None)
+            } else {
+                (
+                    ActionOutputMode::AppendOnly,
+                    Some(
+                        "! Requested --output-mode live, but live output is unavailable here; using append-only output.",
+                    ),
+                )
+            }
+        }
+        RequestedActionOutputMode::AppendOnly => (ActionOutputMode::AppendOnly, None),
+    }
 }
 
 fn ensure_lane_state<'a>(
@@ -766,6 +813,7 @@ pub(crate) async fn apply_actions(
     named_inputs: &[crate::Input],
     action_execution: crate::ActionExecutionMode,
     action_execution_override: Option<crate::ActionExecutionMode>,
+    requested_output_mode: RequestedActionOutputMode,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
@@ -773,7 +821,7 @@ pub(crate) async fn apply_actions(
     ACTION_OUTPUT
         .scope(
             {
-                let output = ActionOutput::new(action_execution);
+                let output = ActionOutput::new(action_execution, requested_output_mode);
                 output.seed_using_line(provider_context.using_line().as_str());
                 output
             },
@@ -3360,10 +3408,11 @@ mod tests {
         action_completion_summary, action_execution_header, action_lane_prefix, apply_actions,
         child_input_args, configured_agent_action_runtime_budget, format_backend_error_message,
         format_backend_ui_message, insert_action_output_variable, matching_run_steps,
-        resolve_generate_image_step_profile_context, resolve_run_args, resolve_string_parts,
-        run_agent_step, run_completion_message_for_depth, run_exec_step, run_generate_image_step,
-        step_matches_platform, validate_agent_action_depth, ActionOutput, ActionOutputMode,
-        ActionProviderContext, StepExecutionOutcome, ACTION_OUTPUT,
+        resolve_action_output_mode_for_capability, resolve_generate_image_step_profile_context,
+        resolve_run_args, resolve_string_parts, run_agent_step, run_completion_message_for_depth,
+        run_exec_step, run_generate_image_step, step_matches_platform, validate_agent_action_depth,
+        ActionOutput, ActionOutputMode, ActionProviderContext, RequestedActionOutputMode,
+        StepExecutionOutcome, ACTION_OUTPUT,
     };
     use crate::credentials::openai_oauth;
     use crate::providers::ProviderKind;
@@ -6121,6 +6170,7 @@ auth_mode = "{auth_mode}"
             &[],
             crate::ActionExecutionMode::Sequential,
             None,
+            RequestedActionOutputMode::Auto,
             &provider_context(),
             5,
             runtime_budget,
@@ -6222,6 +6272,7 @@ auth_mode = "{auth_mode}"
             &[],
             crate::ActionExecutionMode::Sequential,
             None,
+            RequestedActionOutputMode::Auto,
             &provider_context(),
             5,
             runtime_budget,
@@ -6329,6 +6380,7 @@ auth_mode = "{auth_mode}"
             &[],
             crate::ActionExecutionMode::Parallel,
             None,
+            RequestedActionOutputMode::Auto,
             &provider_context,
             5,
             runtime_budget,
@@ -6436,6 +6488,7 @@ auth_mode = "{auth_mode}"
             &[],
             crate::ActionExecutionMode::Parallel,
             None,
+            RequestedActionOutputMode::Auto,
             &provider_context(),
             5,
             runtime_budget,
@@ -6564,6 +6617,7 @@ auth_mode = "{auth_mode}"
             &[],
             crate::ActionExecutionMode::Sequential,
             None,
+            RequestedActionOutputMode::Auto,
             &provider_context(),
             5,
             runtime_budget,
@@ -6717,6 +6771,7 @@ auth_mode = "{auth_mode}"
             &[],
             crate::ActionExecutionMode::Parallel,
             None,
+            RequestedActionOutputMode::Auto,
             &provider_context(),
             5,
             runtime_budget,
@@ -6813,6 +6868,7 @@ auth_mode = "{auth_mode}"
             &[],
             crate::ActionExecutionMode::Sequential,
             None,
+            RequestedActionOutputMode::Auto,
             &provider_context(),
             5,
             runtime_budget,
@@ -6889,6 +6945,7 @@ auth_mode = "{auth_mode}"
             &[],
             crate::ActionExecutionMode::Sequential,
             None,
+            RequestedActionOutputMode::Auto,
             &provider_context(),
             5,
             runtime_budget,
@@ -6958,6 +7015,7 @@ auth_mode = "{auth_mode}"
             &[],
             crate::ActionExecutionMode::Sequential,
             None,
+            RequestedActionOutputMode::Auto,
             &provider_context(),
             5,
             runtime_budget,
@@ -7039,5 +7097,42 @@ auth_mode = "{auth_mode}"
         assert!(!rendered.contains("❌ Request failed"));
         assert!(rendered.contains("Email sending is disabled for this account."));
         assert!(rendered.contains("Next steps:"));
+    }
+
+    #[test]
+    fn auto_output_mode_prefers_live_when_supported() {
+        assert_eq!(
+            resolve_action_output_mode_for_capability(RequestedActionOutputMode::Auto, true),
+            (ActionOutputMode::Live, None)
+        );
+    }
+
+    #[test]
+    fn auto_output_mode_uses_append_only_when_live_is_unsupported() {
+        assert_eq!(
+            resolve_action_output_mode_for_capability(RequestedActionOutputMode::Auto, false),
+            (ActionOutputMode::AppendOnly, None)
+        );
+    }
+
+    #[test]
+    fn explicit_live_output_mode_falls_back_with_notice_when_unsupported() {
+        assert_eq!(
+            resolve_action_output_mode_for_capability(RequestedActionOutputMode::Live, false),
+            (
+                ActionOutputMode::AppendOnly,
+                Some(
+                    "! Requested --output-mode live, but live output is unavailable here; using append-only output.",
+                ),
+            )
+        );
+    }
+
+    #[test]
+    fn explicit_append_only_output_mode_forces_append_only() {
+        assert_eq!(
+            resolve_action_output_mode_for_capability(RequestedActionOutputMode::AppendOnly, true,),
+            (ActionOutputMode::AppendOnly, None)
+        );
     }
 }

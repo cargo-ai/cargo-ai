@@ -52,14 +52,22 @@ struct ActionOutput {
     live_refresh_stop: Arc<AtomicBool>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActionOutputMode {
     AppendOnly,
     Live,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestedActionOutputMode {
+    Auto,
+    Live,
+    AppendOnly,
+}
+
 struct ActionOutputState {
     mode: ActionOutputMode,
+    startup_notice: Option<&'static str>,
     action_execution: ActionExecutionMode,
     rendered_lines: usize,
     lanes: BTreeMap<usize, ActionLaneState>,
@@ -91,20 +99,25 @@ enum ActionLaneStatus {
 }
 
 impl ActionOutput {
-    fn new(action_execution: ActionExecutionMode) -> Self {
-        Self::new_for_mode(
-            action_execution,
-            if should_use_live_action_dashboard() {
-                ActionOutputMode::Live
-            } else {
-                ActionOutputMode::AppendOnly
-            },
-        )
+    fn new(action_execution: ActionExecutionMode, requested_mode: RequestedActionOutputMode) -> Self {
+        let (mode, startup_notice) =
+            resolve_action_output_mode_for_capability(requested_mode, live_dashboard_supported());
+        Self::new_for_mode_with_notice(action_execution, mode, startup_notice)
     }
 
+    #[cfg(test)]
     fn new_for_mode(action_execution: ActionExecutionMode, mode: ActionOutputMode) -> Self {
+        Self::new_for_mode_with_notice(action_execution, mode, None)
+    }
+
+    fn new_for_mode_with_notice(
+        action_execution: ActionExecutionMode,
+        mode: ActionOutputMode,
+        startup_notice: Option<&'static str>,
+    ) -> Self {
         let inner = Arc::new(Mutex::new(ActionOutputState {
             mode,
+            startup_notice,
             action_execution,
             rendered_lines: 0,
             lanes: BTreeMap::new(),
@@ -120,6 +133,9 @@ impl ActionOutput {
 
     fn print_execution_header(&self) {
         self.with_state(|state| {
+            if let Some(notice) = state.startup_notice.take() {
+                println!("{notice}");
+            }
             if state.mode == ActionOutputMode::AppendOnly {
                 println!("{}", action_execution_header(state.action_execution));
             } else {
@@ -395,10 +411,38 @@ impl ActionLaneStatus {
     }
 }
 
-fn should_use_live_action_dashboard() -> bool {
+fn live_dashboard_supported() -> bool {
     io::stdout().is_terminal()
         && std::env::var("TERM").map(|term| term != "dumb").unwrap_or(true)
         && std::env::var_os("CI").is_none()
+}
+
+fn resolve_action_output_mode_for_capability(
+    requested_mode: RequestedActionOutputMode,
+    live_supported: bool,
+) -> (ActionOutputMode, Option<&'static str>) {
+    match requested_mode {
+        RequestedActionOutputMode::Auto => {
+            if live_supported {
+                (ActionOutputMode::Live, None)
+            } else {
+                (ActionOutputMode::AppendOnly, None)
+            }
+        }
+        RequestedActionOutputMode::Live => {
+            if live_supported {
+                (ActionOutputMode::Live, None)
+            } else {
+                (
+                    ActionOutputMode::AppendOnly,
+                    Some(
+                        "! Requested --output-mode live, but live output is unavailable here; using append-only output.",
+                    ),
+                )
+            }
+        }
+        RequestedActionOutputMode::AppendOnly => (ActionOutputMode::AppendOnly, None),
+    }
 }
 
 fn ensure_lane_state<'a>(
@@ -901,6 +945,10 @@ fn cli_override_descriptions(
 
     if let Some(action_execution) = matches.get_one::<String>("action_execution") {
         overrides.push(format!("action_execution={action_execution}"));
+    }
+
+    if let Some(output_mode) = matches.get_one::<String>("output_mode") {
+        overrides.push(format!("output_mode={output_mode}"));
     }
 
     if include_token_override {
@@ -1796,6 +1844,19 @@ fn effective_action_execution_for_run(
     action_execution_override.unwrap_or_else(action_execution)
 }
 
+fn resolved_output_mode_for_run(
+    cmd_args: &clap::ArgMatches,
+) -> Result<RequestedActionOutputMode, String> {
+    match cmd_args.get_one::<String>("output_mode").map(String::as_str) {
+        None | Some("auto") => Ok(RequestedActionOutputMode::Auto),
+        Some("live") => Ok(RequestedActionOutputMode::Live),
+        Some("append-only") => Ok(RequestedActionOutputMode::AppendOnly),
+        Some(other) => Err(format!(
+            "Unsupported --output-mode '{other}'. Expected auto, live, or append-only."
+        )),
+    }
+}
+
 fn validate_structural_action_only_inputs(
     has_output_schema_properties: bool,
     named_inputs: &[Input],
@@ -2097,6 +2158,13 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let requested_output_mode = match resolved_output_mode_for_run(&cmd_args) {
+        Ok(requested_output_mode) => requested_output_mode,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            std::process::exit(1);
+        }
+    };
     let effective_action_execution = effective_action_execution_for_run(action_execution_override);
     let has_output_schema_properties = has_output_schema_properties();
 
@@ -2144,6 +2212,7 @@ async fn main() {
                 &named_inputs,
                 effective_action_execution,
                 action_execution_override,
+                requested_output_mode,
                 config.as_ref(),
                 &action_provider_context,
                 max_agent_depth,
@@ -2332,6 +2401,7 @@ async fn main() {
             &named_inputs,
             effective_action_execution,
             action_execution_override,
+            requested_output_mode,
             config.as_ref(),
             &action_provider_context,
             max_agent_depth,
@@ -2346,7 +2416,10 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_loaded_profile, LoadedProfileKind};
+    use super::{
+        resolve_action_output_mode_for_capability, resolve_loaded_profile, ActionOutputMode,
+        LoadedProfileKind, RequestedActionOutputMode,
+    };
     use crate::config::schema::{Config, OpenAiAuth, Profile, ProfileAuthMode, WebResources};
 
     fn profile(name: &str) -> Profile {
@@ -2418,6 +2491,27 @@ mod tests {
         assert_eq!(profile.name, "default_openai");
         assert!(matches!(kind, LoadedProfileKind::Default));
     }
+
+    #[test]
+    fn auto_output_mode_prefers_live_when_supported() {
+        assert_eq!(
+            resolve_action_output_mode_for_capability(RequestedActionOutputMode::Auto, true),
+            (ActionOutputMode::Live, None)
+        );
+    }
+
+    #[test]
+    fn explicit_live_output_mode_falls_back_with_notice_when_unsupported() {
+        assert_eq!(
+            resolve_action_output_mode_for_capability(RequestedActionOutputMode::Live, false),
+            (
+                ActionOutputMode::AppendOnly,
+                Some(
+                    "! Requested --output-mode live, but live output is unavailable here; using append-only output.",
+                ),
+            )
+        );
+    }
 }
 
 async fn apply_actions(
@@ -2427,6 +2521,7 @@ async fn apply_actions(
     named_inputs: &[Input],
     action_execution: ActionExecutionMode,
     action_execution_override: Option<ActionExecutionMode>,
+    requested_output_mode: RequestedActionOutputMode,
     config: Option<&config::schema::Config>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
@@ -2435,7 +2530,7 @@ async fn apply_actions(
     ACTION_OUTPUT
         .scope(
             {
-                let output = ActionOutput::new(action_execution);
+                let output = ActionOutput::new(action_execution, requested_output_mode);
                 output.seed_using_line(provider_context.using_line().as_str());
                 output
             },
