@@ -268,8 +268,8 @@ fn cli_override_descriptions(sub_m: &ArgMatches, include_token_override: bool) -
         overrides.push(format!("action_execution={action_execution}"));
     }
 
-    if let Some(output_mode) = sub_m.get_one::<String>("output_mode") {
-        overrides.push(format!("output_mode={output_mode}"));
+    if let Some(render_mode) = sub_m.get_one::<String>("render_mode") {
+        overrides.push(format!("render_mode={render_mode}"));
     }
 
     if include_token_override {
@@ -300,15 +300,15 @@ fn effective_action_execution_for_run(
     action_execution_override.unwrap_or_else(crate::action_execution)
 }
 
-fn resolved_output_mode_for_run(
+fn resolved_render_mode_for_run(
     sub_m: &ArgMatches,
-) -> Result<super::preflight_actions::RequestedActionOutputMode, String> {
-    match sub_m.get_one::<String>("output_mode").map(String::as_str) {
-        None | Some("auto") => Ok(super::preflight_actions::RequestedActionOutputMode::Auto),
-        Some("live") => Ok(super::preflight_actions::RequestedActionOutputMode::Live),
-        Some("append-only") => Ok(super::preflight_actions::RequestedActionOutputMode::AppendOnly),
+) -> Result<super::preflight_actions::RequestedActionRenderMode, String> {
+    match sub_m.get_one::<String>("render_mode").map(String::as_str) {
+        None | Some("auto") => Ok(super::preflight_actions::RequestedActionRenderMode::Auto),
+        Some("live") => Ok(super::preflight_actions::RequestedActionRenderMode::Live),
+        Some("append-only") => Ok(super::preflight_actions::RequestedActionRenderMode::AppendOnly),
         Some(other) => Err(format!(
-            "Unsupported --output-mode '{other}'. Expected auto, live, or append-only."
+            "Unsupported --render-mode '{other}'. Expected auto, live, or append-only."
         )),
     }
 }
@@ -1005,8 +1005,8 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             return false;
         }
     };
-    let requested_output_mode = match resolved_output_mode_for_run(sub_m) {
-        Ok(requested_output_mode) => requested_output_mode,
+    let requested_render_mode = match resolved_render_mode_for_run(sub_m) {
+        Ok(requested_render_mode) => requested_render_mode,
         Err(error) => {
             eprintln!("x {error}");
             return false;
@@ -1042,7 +1042,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             &named_inputs,
             effective_action_execution,
             action_execution_override,
-            requested_output_mode,
+            requested_render_mode,
             &action_provider_context,
             max_agent_depth,
             runtime_budget,
@@ -1327,7 +1327,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         &named_inputs,
         effective_action_execution,
         action_execution_override,
-        requested_output_mode,
+        requested_render_mode,
         &action_provider_context,
         max_agent_depth,
         runtime_budget,
@@ -1354,11 +1354,11 @@ mod tests {
     use super::{
         cli_override_descriptions, effective_action_execution_for_run, profile_selection_messages,
         render_preflight_failure_lines, resolve_runtime_vars_from_specs,
-        resolved_action_execution_override_for_run, resolved_output_mode_for_run,
+        resolved_action_execution_override_for_run, resolved_render_mode_for_run,
         unknown_server_messages, validate_structural_action_only_inputs, LoadedProfileKind,
     };
     use crate::args::test_cli_command;
-    use crate::commands::preflight_actions::RequestedActionOutputMode;
+    use crate::commands::preflight_actions::RequestedActionRenderMode;
     use crate::providers::ProviderKind;
     use serde_json::json;
 
@@ -1537,11 +1537,11 @@ mod tests {
     }
 
     #[test]
-    fn preflight_accepts_output_mode_override() {
+    fn preflight_accepts_render_mode_override() {
         let cmd = matches(&[
             "cargo-ai",
             "preflight",
-            "--output-mode",
+            "--render-mode",
             "append-only",
             "--input-text",
             "Return 4",
@@ -1552,7 +1552,7 @@ mod tests {
 
         assert_eq!(
             preflight
-                .get_one::<String>("output_mode")
+                .get_one::<String>("render_mode")
                 .map(String::as_str),
             Some("append-only")
         );
@@ -1588,24 +1588,24 @@ mod tests {
     }
 
     #[test]
-    fn resolved_output_mode_for_run_defaults_to_auto() {
+    fn resolved_render_mode_for_run_defaults_to_auto() {
         let cmd = matches(&["cargo-ai", "preflight", "--input-text", "Return 4"]);
         let preflight = cmd
             .subcommand_matches("preflight")
             .expect("preflight subcommand should parse");
 
         assert_eq!(
-            resolved_output_mode_for_run(preflight).expect("output mode should resolve"),
-            RequestedActionOutputMode::Auto
+            resolved_render_mode_for_run(preflight).expect("render mode should resolve"),
+            RequestedActionRenderMode::Auto
         );
     }
 
     #[test]
-    fn resolved_output_mode_for_run_reads_cli_override() {
+    fn resolved_render_mode_for_run_reads_cli_override() {
         let cmd = matches(&[
             "cargo-ai",
             "preflight",
-            "--output-mode",
+            "--render-mode",
             "live",
             "--input-text",
             "Return 4",
@@ -1615,8 +1615,8 @@ mod tests {
             .expect("preflight subcommand should parse");
 
         assert_eq!(
-            resolved_output_mode_for_run(preflight).expect("output mode should resolve"),
-            RequestedActionOutputMode::Live
+            resolved_render_mode_for_run(preflight).expect("render mode should resolve"),
+            RequestedActionRenderMode::Live
         );
     }
 

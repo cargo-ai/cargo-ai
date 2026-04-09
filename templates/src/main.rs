@@ -59,7 +59,7 @@ enum ActionOutputMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RequestedActionOutputMode {
+enum RequestedActionRenderMode {
     Auto,
     Live,
     AppendOnly,
@@ -99,9 +99,9 @@ enum ActionLaneStatus {
 }
 
 impl ActionOutput {
-    fn new(action_execution: ActionExecutionMode, requested_mode: RequestedActionOutputMode) -> Self {
+    fn new(action_execution: ActionExecutionMode, requested_mode: RequestedActionRenderMode) -> Self {
         let (mode, startup_notice) =
-            resolve_action_output_mode_for_capability(requested_mode, live_dashboard_supported());
+            resolve_action_render_mode_for_capability(requested_mode, live_dashboard_supported());
         Self::new_for_mode_with_notice(action_execution, mode, startup_notice)
     }
 
@@ -417,31 +417,31 @@ fn live_dashboard_supported() -> bool {
         && std::env::var_os("CI").is_none()
 }
 
-fn resolve_action_output_mode_for_capability(
-    requested_mode: RequestedActionOutputMode,
+fn resolve_action_render_mode_for_capability(
+    requested_mode: RequestedActionRenderMode,
     live_supported: bool,
 ) -> (ActionOutputMode, Option<&'static str>) {
     match requested_mode {
-        RequestedActionOutputMode::Auto => {
+        RequestedActionRenderMode::Auto => {
             if live_supported {
                 (ActionOutputMode::Live, None)
             } else {
                 (ActionOutputMode::AppendOnly, None)
             }
         }
-        RequestedActionOutputMode::Live => {
+        RequestedActionRenderMode::Live => {
             if live_supported {
                 (ActionOutputMode::Live, None)
             } else {
                 (
                     ActionOutputMode::AppendOnly,
                     Some(
-                        "! Requested --output-mode live, but live output is unavailable here; using append-only output.",
+                        "! Requested --render-mode live, but live output is unavailable here; using append-only output.",
                     ),
                 )
             }
         }
-        RequestedActionOutputMode::AppendOnly => (ActionOutputMode::AppendOnly, None),
+        RequestedActionRenderMode::AppendOnly => (ActionOutputMode::AppendOnly, None),
     }
 }
 
@@ -947,8 +947,8 @@ fn cli_override_descriptions(
         overrides.push(format!("action_execution={action_execution}"));
     }
 
-    if let Some(output_mode) = matches.get_one::<String>("output_mode") {
-        overrides.push(format!("output_mode={output_mode}"));
+    if let Some(render_mode) = matches.get_one::<String>("render_mode") {
+        overrides.push(format!("render_mode={render_mode}"));
     }
 
     if include_token_override {
@@ -1844,15 +1844,15 @@ fn effective_action_execution_for_run(
     action_execution_override.unwrap_or_else(action_execution)
 }
 
-fn resolved_output_mode_for_run(
+fn resolved_render_mode_for_run(
     cmd_args: &clap::ArgMatches,
-) -> Result<RequestedActionOutputMode, String> {
-    match cmd_args.get_one::<String>("output_mode").map(String::as_str) {
-        None | Some("auto") => Ok(RequestedActionOutputMode::Auto),
-        Some("live") => Ok(RequestedActionOutputMode::Live),
-        Some("append-only") => Ok(RequestedActionOutputMode::AppendOnly),
+) -> Result<RequestedActionRenderMode, String> {
+    match cmd_args.get_one::<String>("render_mode").map(String::as_str) {
+        None | Some("auto") => Ok(RequestedActionRenderMode::Auto),
+        Some("live") => Ok(RequestedActionRenderMode::Live),
+        Some("append-only") => Ok(RequestedActionRenderMode::AppendOnly),
         Some(other) => Err(format!(
-            "Unsupported --output-mode '{other}'. Expected auto, live, or append-only."
+            "Unsupported --render-mode '{other}'. Expected auto, live, or append-only."
         )),
     }
 }
@@ -2158,8 +2158,8 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let requested_output_mode = match resolved_output_mode_for_run(&cmd_args) {
-        Ok(requested_output_mode) => requested_output_mode,
+    let requested_render_mode = match resolved_render_mode_for_run(&cmd_args) {
+        Ok(requested_render_mode) => requested_render_mode,
         Err(error) => {
             eprintln!("❌ {error}");
             std::process::exit(1);
@@ -2212,7 +2212,7 @@ async fn main() {
                 &named_inputs,
                 effective_action_execution,
                 action_execution_override,
-                requested_output_mode,
+                requested_render_mode,
                 config.as_ref(),
                 &action_provider_context,
                 max_agent_depth,
@@ -2401,7 +2401,7 @@ async fn main() {
             &named_inputs,
             effective_action_execution,
             action_execution_override,
-            requested_output_mode,
+            requested_render_mode,
             config.as_ref(),
             &action_provider_context,
             max_agent_depth,
@@ -2417,8 +2417,8 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_action_output_mode_for_capability, resolve_loaded_profile, ActionOutputMode,
-        LoadedProfileKind, RequestedActionOutputMode,
+        resolve_action_render_mode_for_capability, resolve_loaded_profile, ActionOutputMode,
+        LoadedProfileKind, RequestedActionRenderMode,
     };
     use crate::config::schema::{Config, OpenAiAuth, Profile, ProfileAuthMode, WebResources};
 
@@ -2493,21 +2493,21 @@ mod tests {
     }
 
     #[test]
-    fn auto_output_mode_prefers_live_when_supported() {
+    fn auto_render_mode_prefers_live_when_supported() {
         assert_eq!(
-            resolve_action_output_mode_for_capability(RequestedActionOutputMode::Auto, true),
+            resolve_action_render_mode_for_capability(RequestedActionRenderMode::Auto, true),
             (ActionOutputMode::Live, None)
         );
     }
 
     #[test]
-    fn explicit_live_output_mode_falls_back_with_notice_when_unsupported() {
+    fn explicit_live_render_mode_falls_back_with_notice_when_unsupported() {
         assert_eq!(
-            resolve_action_output_mode_for_capability(RequestedActionOutputMode::Live, false),
+            resolve_action_render_mode_for_capability(RequestedActionRenderMode::Live, false),
             (
                 ActionOutputMode::AppendOnly,
                 Some(
-                    "! Requested --output-mode live, but live output is unavailable here; using append-only output.",
+                    "! Requested --render-mode live, but live output is unavailable here; using append-only output.",
                 ),
             )
         );
@@ -2521,7 +2521,7 @@ async fn apply_actions(
     named_inputs: &[Input],
     action_execution: ActionExecutionMode,
     action_execution_override: Option<ActionExecutionMode>,
-    requested_output_mode: RequestedActionOutputMode,
+    requested_render_mode: RequestedActionRenderMode,
     config: Option<&config::schema::Config>,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
@@ -2530,7 +2530,7 @@ async fn apply_actions(
     ACTION_OUTPUT
         .scope(
             {
-                let output = ActionOutput::new(action_execution, requested_output_mode);
+                let output = ActionOutput::new(action_execution, requested_render_mode);
                 output.seed_using_line(provider_context.using_line().as_str());
                 output
             },

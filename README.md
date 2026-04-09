@@ -610,7 +610,7 @@ That only changes scheduling across top-level actions. Each individual action st
 
 Cargo AI prints one root `using:` line near run start that shows the effective `profile`, `auth`, `server`, and `model` for that invocation. It only adds `url=...` when the effective URL is custom or materially different from the standard transport. Cargo AI also prints one run-level mode header before actions start. When output is redirected, piped, or running in simpler terminals, it prefixes parent-visible action output with deterministic labels such as `[Action 1: first_action]`, long-running steps emit a step-start liveness line such as `step 2/2 generate_image started; waiting for provider response...`, and terminal lane summaries plus the root run footer include wall-clock durations such as `completed in 31s.` and `✅ Run complete in 32s.`. When attached directly to an interactive terminal, it switches to a compact live dashboard that groups each action by label, running or terminal status with elapsed time, terminal step marker/current step, and the last high-level lifecycle message only. Child-agent steps stay minimal in the parent view with start/completion or exit summaries instead of recursively inlining child detail.
 
-Use `--output-mode auto|live|append-only` to control that behavior explicitly:
+Use `--render-mode auto|live|append-only` to control that behavior explicitly:
 - `auto` preserves the current terminal-sensitive default
 - `append-only` forces incremental labeled output even in an interactive terminal
 - `live` forces the dashboard when supported and otherwise falls back to append-only with a short notice
@@ -885,7 +885,7 @@ When you want deeper details, use these files:
 
 - `cargo ai hatch --check` validates scaffold and compile behavior with `cargo check` without exporting a binary.
 - Generated binaries use your configured/default profile unless you override runtime flags.
-- Standalone recipients do not need Cargo AI installed if they run the binary with explicit runtime flags such as `--server`, `--model`, optional `--url`, optional `--token`, and optional `--output-mode`.
+- Standalone recipients do not need Cargo AI installed if they run the binary with explicit runtime flags such as `--server`, `--model`, optional `--url`, optional `--token`, and optional `--render-mode`.
 - `--profile <name>` is strict for generated binaries: if the named profile is missing, the run fails closed instead of falling back to another profile or to profileless auth.
 - For the standalone OpenAI account path, run the generated binary with `--server openai --model <model>` and no `--token`; if a local Codex session is available, the binary reuses it automatically.
 - On machines without Cargo AI installed/configured, `./my_agent version` treats local sync comparison as not checked and points users to `./my_agent inspect` for embedded provenance.

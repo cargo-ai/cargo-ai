@@ -97,9 +97,9 @@ pub fn build_cli() -> ArgMatches {
                 .value_parser(["sequential"])
         )
         .arg(
-            Arg::new("output_mode")
-                .long("output-mode")
-                .help("Choose runtime output style: auto, live, or append-only")
+            Arg::new("render_mode")
+                .long("render-mode")
+                .help("Terminal render mode for action progress (auto, live, append-only) [default: auto]")
                 .value_name("MODE")
                 .value_parser(["auto", "live", "append-only"])
         )

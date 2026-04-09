@@ -42,7 +42,7 @@ enum ActionOutputMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RequestedActionOutputMode {
+pub(crate) enum RequestedActionRenderMode {
     Auto,
     Live,
     AppendOnly,
@@ -84,10 +84,10 @@ enum ActionLaneStatus {
 impl ActionOutput {
     fn new(
         action_execution: crate::ActionExecutionMode,
-        requested_mode: RequestedActionOutputMode,
+        requested_mode: RequestedActionRenderMode,
     ) -> Self {
         let (mode, startup_notice) =
-            resolve_action_output_mode_for_capability(requested_mode, live_dashboard_supported());
+            resolve_action_render_mode_for_capability(requested_mode, live_dashboard_supported());
         Self::new_for_mode_with_notice(action_execution, mode, startup_notice)
     }
 
@@ -414,31 +414,31 @@ fn live_dashboard_supported() -> bool {
         && std::env::var_os("CI").is_none()
 }
 
-fn resolve_action_output_mode_for_capability(
-    requested_mode: RequestedActionOutputMode,
+fn resolve_action_render_mode_for_capability(
+    requested_mode: RequestedActionRenderMode,
     live_supported: bool,
 ) -> (ActionOutputMode, Option<&'static str>) {
     match requested_mode {
-        RequestedActionOutputMode::Auto => {
+        RequestedActionRenderMode::Auto => {
             if live_supported {
                 (ActionOutputMode::Live, None)
             } else {
                 (ActionOutputMode::AppendOnly, None)
             }
         }
-        RequestedActionOutputMode::Live => {
+        RequestedActionRenderMode::Live => {
             if live_supported {
                 (ActionOutputMode::Live, None)
             } else {
                 (
                     ActionOutputMode::AppendOnly,
                     Some(
-                        "! Requested --output-mode live, but live output is unavailable here; using append-only output.",
+                        "! Requested --render-mode live, but live output is unavailable here; using append-only output.",
                     ),
                 )
             }
         }
-        RequestedActionOutputMode::AppendOnly => (ActionOutputMode::AppendOnly, None),
+        RequestedActionRenderMode::AppendOnly => (ActionOutputMode::AppendOnly, None),
     }
 }
 
@@ -813,7 +813,7 @@ pub(crate) async fn apply_actions(
     named_inputs: &[crate::Input],
     action_execution: crate::ActionExecutionMode,
     action_execution_override: Option<crate::ActionExecutionMode>,
-    requested_output_mode: RequestedActionOutputMode,
+    requested_render_mode: RequestedActionRenderMode,
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
@@ -821,7 +821,7 @@ pub(crate) async fn apply_actions(
     ACTION_OUTPUT
         .scope(
             {
-                let output = ActionOutput::new(action_execution, requested_output_mode);
+                let output = ActionOutput::new(action_execution, requested_render_mode);
                 output.seed_using_line(provider_context.using_line().as_str());
                 output
             },
@@ -3408,10 +3408,11 @@ mod tests {
         action_completion_summary, action_execution_header, action_lane_prefix, apply_actions,
         child_input_args, configured_agent_action_runtime_budget, format_backend_error_message,
         format_backend_ui_message, insert_action_output_variable, matching_run_steps,
-        resolve_action_output_mode_for_capability, resolve_generate_image_step_profile_context,
-        resolve_run_args, resolve_string_parts, run_agent_step, run_completion_message_for_depth,
-        run_exec_step, run_generate_image_step, step_matches_platform, validate_agent_action_depth,
-        ActionOutput, ActionOutputMode, ActionProviderContext, RequestedActionOutputMode,
+        resolve_action_render_mode_for_capability as resolve_action_output_mode_for_capability,
+        resolve_generate_image_step_profile_context, resolve_run_args, resolve_string_parts,
+        run_agent_step, run_completion_message_for_depth, run_exec_step, run_generate_image_step,
+        step_matches_platform, validate_agent_action_depth, ActionOutput, ActionOutputMode,
+        ActionProviderContext, RequestedActionRenderMode as RequestedActionOutputMode,
         StepExecutionOutcome, ACTION_OUTPUT,
     };
     use crate::credentials::openai_oauth;
@@ -7100,7 +7101,7 @@ auth_mode = "{auth_mode}"
     }
 
     #[test]
-    fn auto_output_mode_prefers_live_when_supported() {
+    fn auto_render_mode_prefers_live_when_supported() {
         assert_eq!(
             resolve_action_output_mode_for_capability(RequestedActionOutputMode::Auto, true),
             (ActionOutputMode::Live, None)
@@ -7108,7 +7109,7 @@ auth_mode = "{auth_mode}"
     }
 
     #[test]
-    fn auto_output_mode_uses_append_only_when_live_is_unsupported() {
+    fn auto_render_mode_uses_append_only_when_live_is_unsupported() {
         assert_eq!(
             resolve_action_output_mode_for_capability(RequestedActionOutputMode::Auto, false),
             (ActionOutputMode::AppendOnly, None)
@@ -7116,20 +7117,20 @@ auth_mode = "{auth_mode}"
     }
 
     #[test]
-    fn explicit_live_output_mode_falls_back_with_notice_when_unsupported() {
+    fn explicit_live_render_mode_falls_back_with_notice_when_unsupported() {
         assert_eq!(
             resolve_action_output_mode_for_capability(RequestedActionOutputMode::Live, false),
             (
                 ActionOutputMode::AppendOnly,
                 Some(
-                    "! Requested --output-mode live, but live output is unavailable here; using append-only output.",
+                    "! Requested --render-mode live, but live output is unavailable here; using append-only output.",
                 ),
             )
         );
     }
 
     #[test]
-    fn explicit_append_only_output_mode_forces_append_only() {
+    fn explicit_append_only_render_mode_forces_append_only() {
         assert_eq!(
             resolve_action_output_mode_for_capability(RequestedActionOutputMode::AppendOnly, true,),
             (ActionOutputMode::AppendOnly, None)
