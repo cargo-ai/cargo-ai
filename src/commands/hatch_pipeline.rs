@@ -116,7 +116,6 @@ pub(crate) fn print_hatch_start(project_name: &str, mode: HatchMode) {
         },
         project_name
     );
-    println!("First run may take longer while the build template is prepared.");
     println!();
 }
 
@@ -198,15 +197,26 @@ where
         return false;
     }
 
-    print_hatch_progress(HatchProgressStep::PreparingBuildTemplate);
+    let mut template_preparation_started = false;
     let warmed_template =
-        match crate::agent_builder::template_cache::ensure_warmed_template(&build_target) {
+        match crate::agent_builder::template_cache::ensure_warmed_template_with_prepare_hook(
+            &build_target,
+            || {
+                template_preparation_started = true;
+                println!("First run may take longer while the build template is prepared.");
+                print_hatch_progress(HatchProgressStep::PreparingBuildTemplate);
+            },
+        ) {
             Ok(template) => template,
             Err(error) => {
                 println!("x Failed to prepare warmed template: {error}");
                 return false;
             }
         };
+
+    if !template_preparation_started {
+        print_hatch_progress(HatchProgressStep::PreparingBuildTemplate);
+    }
 
     let template_status = if warmed_template.created {
         TemplateSummaryStatus::Created
