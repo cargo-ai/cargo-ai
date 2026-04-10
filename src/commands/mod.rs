@@ -5,6 +5,7 @@ pub mod account;
 pub mod add;
 pub mod auth;
 pub mod credentials;
+pub mod definition_source;
 pub mod hatch;
 pub mod hatch_pipeline;
 pub mod init;

@@ -1502,7 +1502,9 @@ mod tests {
         );
         let rendered = lines.join("\n");
 
-        assert!(rendered.contains("Retry  `cargo ai run --config ./agent.json --profile my_open_ai`"));
+        assert!(
+            rendered.contains("Retry  `cargo ai run --config ./agent.json --profile my_open_ai`")
+        );
     }
 
     #[test]
