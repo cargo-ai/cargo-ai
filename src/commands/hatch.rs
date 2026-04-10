@@ -53,7 +53,7 @@ fn is_supported_project_name(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
 
-fn is_existing_json_file(path: &str) -> bool {
+pub(crate) fn is_existing_json_file(path: &str) -> bool {
     let p = Path::new(path);
     p.is_file()
         && p.extension()
@@ -62,7 +62,7 @@ fn is_existing_json_file(path: &str) -> bool {
             .unwrap_or(false)
 }
 
-fn looks_like_local_path_input(input: &str) -> bool {
+pub(crate) fn looks_like_local_path_input(input: &str) -> bool {
     input.starts_with("./")
         || input.starts_with("../")
         || input.starts_with("~/")
@@ -110,38 +110,13 @@ fn resolve_same_directory_json_fallback(name: &str, current_dir: &Path) -> Optio
     })
 }
 
-fn resolve_hatch_input_in_dir(
+pub(crate) fn resolve_local_config_path_in_dir(
     name_or_path: &str,
-    config_path: Option<&str>,
     current_dir: &Path,
-) -> Result<HatchResolution, String> {
-    if let Some(config_path) = config_path {
-        if !is_supported_project_name(name_or_path) {
-            return Err(format!(
-                "Agent name '{}' is invalid. Use only letters, numbers, '-' or '_'.",
-                name_or_path
-            ));
-        }
-
-        return Ok(HatchResolution {
-            project_name: name_or_path.to_string(),
-            config_source: HatchConfigSource::LocalPath {
-                path: config_path.to_string(),
-                from_positional_shorthand: false,
-            },
-        });
-    }
-
+) -> Result<Option<String>, String> {
     if looks_like_local_path_input(name_or_path) {
         if is_existing_json_file(name_or_path) {
-            let derived_project_name = derive_project_name_from_json_path(name_or_path)?;
-            return Ok(HatchResolution {
-                project_name: derived_project_name,
-                config_source: HatchConfigSource::LocalPath {
-                    path: name_or_path.to_string(),
-                    from_positional_shorthand: true,
-                },
-            });
+            return Ok(Some(name_or_path.to_string()));
         }
 
         let path = Path::new(name_or_path);
@@ -165,9 +140,50 @@ fn resolve_hatch_input_in_dir(
         ));
     }
 
-    if let Some(local_resolution) = resolve_same_directory_json_fallback(name_or_path, current_dir)
-    {
-        return Ok(local_resolution);
+    Ok(resolve_same_directory_json_fallback(name_or_path, current_dir).map(
+        |resolution| match resolution.config_source {
+            HatchConfigSource::LocalPath { path, .. } => path,
+            HatchConfigSource::RegistryName(_) => unreachable!("same-directory fallback is local"),
+        },
+    ))
+}
+
+fn resolve_hatch_input_in_dir(
+    name_or_path: &str,
+    config_path: Option<&str>,
+    current_dir: &Path,
+) -> Result<HatchResolution, String> {
+    if let Some(config_path) = config_path {
+        if !is_supported_project_name(name_or_path) {
+            return Err(format!(
+                "Agent name '{}' is invalid. Use only letters, numbers, '-' or '_'.",
+                name_or_path
+            ));
+        }
+
+        return Ok(HatchResolution {
+            project_name: name_or_path.to_string(),
+            config_source: HatchConfigSource::LocalPath {
+                path: config_path.to_string(),
+                from_positional_shorthand: false,
+            },
+        });
+    }
+
+    if let Some(local_path) = resolve_local_config_path_in_dir(name_or_path, current_dir)? {
+        let project_name = if looks_like_local_path_input(name_or_path) {
+            derive_project_name_from_json_path(&local_path)?
+        } else {
+            name_or_path.to_string()
+        };
+
+        return Ok(HatchResolution {
+            project_name,
+            config_source: HatchConfigSource::LocalPath {
+                path: local_path,
+                from_positional_shorthand: true,
+            },
+        });
     }
 
     Ok(HatchResolution {

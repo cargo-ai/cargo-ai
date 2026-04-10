@@ -138,12 +138,43 @@ mod tests {
     }
 
     #[test]
-    fn run_requires_config_flag() {
+    fn run_requires_name_or_config() {
         let err = cli_command("cargo-ai")
             .try_get_matches_from(["cargo-ai", "run"])
-            .expect_err("missing --config should fail parsing");
+            .expect_err("missing run target should fail parsing");
 
         assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn run_accepts_positional_name() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "run", "adder_test"])
+            .expect("run bare name should parse");
+
+        let run = matches
+            .subcommand_matches("run")
+            .expect("run subcommand should be available");
+        assert_eq!(
+            run.get_one::<String>("name").map(String::as_str),
+            Some("adder_test")
+        );
+        assert!(run.get_one::<String>("config").is_none());
+    }
+
+    #[test]
+    fn run_rejects_positional_name_with_config_flag() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "run",
+                "adder_test",
+                "--config",
+                "./adder_test.json",
+            ])
+            .expect_err("run should reject redundant positional and config inputs");
+
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[test]

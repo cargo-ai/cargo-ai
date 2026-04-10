@@ -116,8 +116,11 @@ cargo ai profile add ollama \
 ### 3. Run a sample agent directly
 
 ```bash
-cargo ai run --config ./adder_test.json --profile openai-account
+cargo ai run adder_test --profile openai-account
 ```
+
+You can also run a local definition with `cargo ai run ./adder_test.json` or
+`cargo ai run --config ./adder_test.json`.
 
 ### 4. Hatch the same sample as a standalone executable
 
@@ -209,7 +212,7 @@ A minimal agent looks like this:
 That JSON can run directly through Cargo AI:
 
 ```bash
-cargo ai run --config ./my_agent.json --profile openai-account
+cargo ai run ./my_agent.json --profile openai-account
 ```
 
 Or it can become a compiled local executable through:
