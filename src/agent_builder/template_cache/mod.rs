@@ -6,7 +6,7 @@ mod prune;
 
 use crate::agent_builder::build_target::BuildTarget;
 use key::{resolve_template_cache_key, TemplateCacheKey};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WarmedTemplate {
@@ -16,11 +16,36 @@ pub(crate) struct WarmedTemplate {
     pub pruned_parent_count: usize,
 }
 
-pub(crate) fn ensure_warmed_template(build_target: &BuildTarget) -> Result<WarmedTemplate, String> {
+pub(crate) fn ensure_warmed_template_with_prepare_hook<F>(
+    build_target: &BuildTarget,
+    on_prepare_start: F,
+) -> Result<WarmedTemplate, String>
+where
+    F: FnOnce(),
+{
+    ensure_warmed_template_with_prepare_hook_and_deps(
+        build_target,
+        on_prepare_start,
+        prepare::template_workspace_ready,
+        prepare::prepare_warmed_template_workspace,
+    )
+}
+
+fn ensure_warmed_template_with_prepare_hook_and_deps<F, G, H>(
+    build_target: &BuildTarget,
+    on_prepare_start: F,
+    template_workspace_ready: G,
+    prepare_warmed_template_workspace: H,
+) -> Result<WarmedTemplate, String>
+where
+    F: FnOnce(),
+    G: FnOnce(&Path) -> bool,
+    H: FnOnce(&Path, &BuildTarget) -> Result<(), String>,
+{
     let key = resolve_template_cache_key(build_target)?;
     let path = template_workspace_path(&key);
 
-    if prepare::template_workspace_ready(&path) {
+    if template_workspace_ready(&path) {
         return Ok(WarmedTemplate {
             pruned_parent_count: prune_stale_parents(&key),
             key,
@@ -29,7 +54,8 @@ pub(crate) fn ensure_warmed_template(build_target: &BuildTarget) -> Result<Warme
         });
     }
 
-    prepare::prepare_warmed_template_workspace(&path, build_target)?;
+    on_prepare_start();
+    prepare_warmed_template_workspace(&path, build_target)?;
 
     Ok(WarmedTemplate {
         pruned_parent_count: prune_stale_parents(&key),
@@ -56,8 +82,16 @@ fn prune_stale_parents(key: &TemplateCacheKey) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{template_workspace_path, TemplateCacheKey};
+    use super::{
+        ensure_warmed_template_with_prepare_hook_and_deps, template_workspace_path,
+        TemplateCacheKey,
+    };
+    use crate::agent_builder::build_target::BuildTarget;
     use std::path::PathBuf;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
 
     #[test]
     fn builds_nested_template_cache_path() {
@@ -73,5 +107,62 @@ mod tests {
             .join("aarch64-apple-darwin");
 
         assert!(path.ends_with(suffix));
+    }
+
+    #[test]
+    fn prepare_hook_runs_only_when_template_is_created() {
+        let build_target =
+            BuildTarget::from_cli(Some("aarch64-apple-darwin")).expect("target should resolve");
+        let hook_called = Arc::new(AtomicBool::new(false));
+        let prepare_called = Arc::new(AtomicBool::new(false));
+
+        let created = ensure_warmed_template_with_prepare_hook_and_deps(
+            &build_target,
+            {
+                let hook_called = Arc::clone(&hook_called);
+                move || {
+                    hook_called.store(true, Ordering::SeqCst);
+                }
+            },
+            |_| false,
+            {
+                let prepare_called = Arc::clone(&prepare_called);
+                move |_, _| {
+                    prepare_called.store(true, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        )
+        .expect("created template should succeed");
+
+        assert!(created.created);
+        assert!(hook_called.load(Ordering::SeqCst));
+        assert!(prepare_called.load(Ordering::SeqCst));
+
+        hook_called.store(false, Ordering::SeqCst);
+        prepare_called.store(false, Ordering::SeqCst);
+
+        let reused = ensure_warmed_template_with_prepare_hook_and_deps(
+            &build_target,
+            {
+                let hook_called = Arc::clone(&hook_called);
+                move || {
+                    hook_called.store(true, Ordering::SeqCst);
+                }
+            },
+            |_| true,
+            {
+                let prepare_called = Arc::clone(&prepare_called);
+                move |_, _| {
+                    prepare_called.store(true, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        )
+        .expect("reused template should succeed");
+
+        assert!(!reused.created);
+        assert!(!hook_called.load(Ordering::SeqCst));
+        assert!(!prepare_called.load(Ordering::SeqCst));
     }
 }

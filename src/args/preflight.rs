@@ -73,6 +73,15 @@ pub fn command() -> Command {
                 .value_parser(["sequential"]),
         )
         .arg(
+            Arg::new("render_mode")
+                .long("render-mode")
+                .value_name("MODE")
+                .help(
+                    "Terminal render mode for action progress (auto, live, append-only) [default: auto]",
+                )
+                .value_parser(["auto", "live", "append-only"]),
+        )
+        .arg(
             Arg::new("input_mode")
                 .long("input-mode")
                 .value_name("MODE")
@@ -174,6 +183,21 @@ mod tests {
         assert!(
             help.contains("Force top-level actions to run sequentially for this invocation tree")
         );
+    }
+
+    #[test]
+    fn help_describes_render_mode_override() {
+        let mut command = super::command();
+        let mut help = Vec::new();
+        command
+            .write_long_help(&mut help)
+            .expect("preflight help should render");
+        let help = String::from_utf8(help).expect("help should be utf8");
+
+        assert!(help.contains("--render-mode <MODE>"));
+        assert!(help.contains(
+            "Terminal render mode for action progress (auto, live, append-only) [default: auto]"
+        ));
     }
 
     #[test]

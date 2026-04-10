@@ -97,6 +97,13 @@ pub fn build_cli() -> ArgMatches {
                 .value_parser(["sequential"])
         )
         .arg(
+            Arg::new("render_mode")
+                .long("render-mode")
+                .help("Terminal render mode for action progress (auto, live, append-only) [default: auto]")
+                .value_name("MODE")
+                .value_parser(["auto", "live", "append-only"])
+        )
+        .arg(
             Arg::new("input_mode")
                 .long("input-mode")
                 .help("How runtime input flags combine with baked inputs: replace, append, or prepend")
