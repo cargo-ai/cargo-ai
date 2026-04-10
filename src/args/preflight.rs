@@ -1,11 +1,9 @@
 //! CLI parser definition for `cargo ai preflight`.
 use clap::{Arg, ArgAction, Command};
 
-/// Builds the `preflight` command schema.
-pub fn command() -> Command {
-    Command::new("preflight")
-        .about("Internal: test agent config file")
-        .hide(true)
+pub(crate) fn runtime_command(name: &'static str, about: &'static str) -> Command {
+    Command::new(name)
+        .about(about)
         .arg(
             Arg::new("profile")
                 .long("profile")
@@ -138,6 +136,11 @@ pub fn command() -> Command {
                 .action(ArgAction::Append)
                 .num_args(1),
         )
+}
+
+/// Builds the `preflight` command schema.
+pub fn command() -> Command {
+    runtime_command("preflight", "Internal: test agent config file").hide(true)
 }
 
 #[cfg(test)]

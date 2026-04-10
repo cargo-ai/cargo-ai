@@ -1,21 +1,10 @@
 use crate::config::schema::{default_secret_store_mode, Config};
-use std::env;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-pub fn cargo_home() -> PathBuf {
-    if let Ok(path) = env::var("CARGO_HOME") {
-        PathBuf::from(path)
-    } else {
-        dirs::home_dir()
-            .expect("could not find home directory")
-            .join(".cargo")
-    }
-}
-
 pub fn cargo_ai_root() -> PathBuf {
-    cargo_home().join(".cargo-ai")
+    crate::config::paths::cargo_ai_root()
 }
 
 pub fn config_path() -> PathBuf {

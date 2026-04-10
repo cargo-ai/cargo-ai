@@ -806,8 +806,38 @@ enum RefreshAccessError {
 }
 
 /// Applies configured action rules to model output and executes matching steps.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn apply_actions(
     output: &crate::Output,
+    actions: &[crate::Action],
+    runtime_vars: &serde_json::Map<String, serde_json::Value>,
+    named_inputs: &[crate::Input],
+    action_execution: crate::ActionExecutionMode,
+    action_execution_override: Option<crate::ActionExecutionMode>,
+    requested_render_mode: RequestedActionRenderMode,
+    provider_context: &ActionProviderContext,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+) -> Result<(), String> {
+    let output_data = serde_json::to_value(output)
+        .map_err(|error| format!("Failed to serialize output for action evaluation: {error}"))?;
+    apply_actions_with_data(
+        &output_data,
+        actions,
+        runtime_vars,
+        named_inputs,
+        action_execution,
+        action_execution_override,
+        requested_render_mode,
+        provider_context,
+        max_agent_depth,
+        runtime_budget,
+    )
+    .await
+}
+
+pub(crate) async fn apply_actions_with_data(
+    output: &serde_json::Value,
     actions: &[crate::Action],
     runtime_vars: &serde_json::Map<String, serde_json::Value>,
     named_inputs: &[crate::Input],
@@ -828,12 +858,12 @@ pub(crate) async fn apply_actions(
             async move {
                 let abort_signal = InvocationAbortSignal::new();
                 let invocation_started_at = Instant::now();
-                let data = match action_data_from_output(output, runtime_vars) {
+                let data = match action_data_from_output_value(output, runtime_vars) {
                     Ok(data) => data,
                     Err(error) => {
-                        eprintln!("❌ Failed to serialize output for action evaluation: {error}");
+                        eprintln!("❌ Failed to prepare output for action evaluation: {error}");
                         return Err(format!(
-                            "Failed to serialize output for action evaluation: {error}"
+                            "Failed to prepare output for action evaluation: {error}"
                         ));
                     }
                 };
@@ -1248,18 +1278,31 @@ async fn run_matching_action_steps(
     Ok(ActionExecutionResult::Completed(outcomes))
 }
 
+#[allow(dead_code)]
 fn action_data_from_output(
     output: &crate::Output,
     runtime_vars: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<serde_json::Value, serde_json::Error> {
-    let mut data = serde_json::to_value(output)?;
+    let output_data = serde_json::to_value(output)?;
+    action_data_from_output_value(&output_data, runtime_vars).map_err(serde_json::Error::io)
+}
+
+fn action_data_from_output_value(
+    output: &serde_json::Value,
+    runtime_vars: &serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, std::io::Error> {
+    let mut data = output.clone();
     if let Some(object) = data.as_object_mut() {
         object.insert(
             "runtime".to_string(),
             serde_json::Value::Object(runtime_vars.clone()),
         );
+        return Ok(data);
     }
-    Ok(data)
+
+    Err(std::io::Error::other(
+        "validated output must serialize to a top-level object",
+    ))
 }
 
 async fn run_exec_step(

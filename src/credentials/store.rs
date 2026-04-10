@@ -105,23 +105,12 @@ impl SecretSnapshot {
     }
 }
 
-fn resolve_credentials_path(cargo_home: Option<PathBuf>, home_dir: Option<PathBuf>) -> PathBuf {
-    if let Some(cargo_home) = cargo_home {
-        return cargo_home.join(".cargo-ai/credentials.toml");
-    }
-
-    if let Some(home_dir) = home_dir {
-        return home_dir.join(".cargo/.cargo-ai/credentials.toml");
-    }
-
-    PathBuf::from(".cargo/.cargo-ai/credentials.toml")
+fn resolve_credentials_path(cargo_ai_root: std::path::PathBuf) -> std::path::PathBuf {
+    cargo_ai_root.join("credentials.toml")
 }
 
 pub fn credentials_path() -> PathBuf {
-    resolve_credentials_path(
-        std::env::var_os("CARGO_HOME").map(PathBuf::from),
-        dirs::home_dir(),
-    )
+    resolve_credentials_path(crate::config::paths::cargo_ai_root())
 }
 
 pub fn configured_secret_store_mode() -> Option<SecretStoreMode> {

@@ -13,6 +13,7 @@ mod init;
 mod new;
 mod preflight;
 mod profile;
+mod run;
 mod version;
 
 fn cli_command(bin_name: &'static str) -> Command {
@@ -26,6 +27,7 @@ fn cli_command(bin_name: &'static str) -> Command {
                 .global(true)
                 .action(ArgAction::SetTrue),
         )
+        .subcommand(run::command())
         .subcommand(hatch::command())
         .subcommand(add::command())
         .subcommand(profile::command())
@@ -109,6 +111,7 @@ mod tests {
                 .expect("expected subcommand to exist")
         };
 
+        assert!(index_of("run") < index_of("hatch"));
         assert!(index_of("hatch") < index_of("profile"));
         assert!(index_of("hatch") < index_of("add"));
         assert!(index_of("add") < index_of("profile"));
@@ -127,10 +130,20 @@ mod tests {
             .expect("top-level help should render");
         let help = String::from_utf8(help).expect("help should be utf8");
 
+        assert!(help.contains("\n  run"));
         assert!(help.contains("\n  add"));
         assert!(!help.contains("\n  new"));
         assert!(!help.contains("\n  init"));
         assert!(help.contains("\n  hatch"));
+    }
+
+    #[test]
+    fn run_requires_config_flag() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "run"])
+            .expect_err("missing --config should fail parsing");
+
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]

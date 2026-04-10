@@ -8,7 +8,7 @@ Build AI-powered CLI tools from a single JSON definition.
 
 Define declarative agents in JSON, hatch native executables locally, and share them in minutes.
 
-Cargo AI is an open-source CLI for building auditable AI-powered CLI tools from a single JSON definition. Define inputs, schema, and actions once, hatch a native executable with `cargo ai hatch`, then inspect, run, and share it on your terms.
+Cargo AI is an open-source CLI for building auditable AI-powered CLI tools from a single JSON definition. Define inputs, schema, and actions once, run the JSON directly with `cargo ai run --config`, or hatch a native executable with `cargo ai hatch`, then inspect, run, and share it on your terms.
 
 ```bash
 cargo ai hatch agent_x
@@ -57,6 +57,8 @@ cargo ai --help
 Cargo AI uses a product-oriented pre-`1.0.0` release policy: `0.y.0` means meaningful product/contract evolution, while `0.y.z` is reserved for smaller fixes and polish. See [VERSIONING.md](./VERSIONING.md) for the public versioning policy.
 
 Upgrades remain manual via `cargo install cargo-ai --locked`. After a meaningful pre-`1.0.0` upgrade such as `0.1.0 -> 0.2.0`, generated agents may report that they are out of sync with local Cargo AI metadata until they are re-hatched.
+
+By default, Cargo AI stores config, credentials, and internal workspaces under `~/.cargo/.cargo-ai` (or `$CARGO_HOME/.cargo-ai`). Set `CARGO_AI_HOME` if you want Cargo AI to use a different root directory.
 
 ### 2. Choose your model setup
 
@@ -111,7 +113,13 @@ cargo ai profile add ollama \
   --default
 ```
 
-### 3. Hatch a sample agent
+### 3. Run a sample agent directly
+
+```bash
+cargo ai run --config ./adder_test.json --profile openai-account
+```
+
+### 4. Hatch the same sample as a standalone executable
 
 ```bash
 cargo ai hatch adder_test
@@ -120,7 +128,7 @@ cargo ai hatch adder_test
 
 On Windows, run `adder_test.exe` or just `adder_test`.
 
-### 4. Register an account
+### 5. Register an account
 
 Define agent email alerts with `cargo-ai.org` and manage your agents in one place. Keep them private, or share them instantly with anyone in the world.
 
@@ -198,7 +206,13 @@ A minimal agent looks like this:
 }
 ```
 
-That JSON becomes a compiled local executable through:
+That JSON can run directly through Cargo AI:
+
+```bash
+cargo ai run --config ./my_agent.json --profile openai-account
+```
+
+Or it can become a compiled local executable through:
 
 ```bash
 cargo ai hatch my_agent --config ./my_agent.json
@@ -798,7 +812,13 @@ In that case, the root model input list is replaced by the runtime text, but chi
 
 ## Build In Any Editor
 
-You can build a `cargo-ai` agent in any editor you want. If you want to check whether the definition is valid before exporting a binary, run:
+You can build a `cargo-ai` agent in any editor you want. If you want the fastest execution loop while editing, run the JSON directly:
+
+```bash
+cargo ai run --config ./my_agent.json --profile openai-account
+```
+
+If you want to check whether the definition is valid before exporting a binary, run:
 
 ```bash
 cargo ai hatch my_agent --config ./my_agent.json --check

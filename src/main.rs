@@ -10,6 +10,7 @@ mod config;
 mod credentials;
 mod infra_api;
 mod providers;
+mod runtime_definition;
 mod schema_version;
 mod ui;
 mod update_check;
@@ -56,7 +57,9 @@ async fn main() {
             update_check::maybe_run_background_check(skip_update_check_for_invocation).await;
         }
 
-        if let Some(sub_m) = cmd_args.subcommand_matches("preflight") {
+        if let Some(sub_m) = cmd_args.subcommand_matches("run") {
+            commands::run::run(sub_m).await
+        } else if let Some(sub_m) = cmd_args.subcommand_matches("preflight") {
             commands::preflight::run(sub_m).await
         } else if let Some(sub_m) = cmd_args.subcommand_matches("hatch") {
             commands::hatch::run(sub_m)

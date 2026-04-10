@@ -12,5 +12,6 @@ pub mod new;
 pub mod preflight;
 pub mod preflight_actions;
 pub mod profile;
+pub mod run;
 pub mod scaffold;
 pub mod version;

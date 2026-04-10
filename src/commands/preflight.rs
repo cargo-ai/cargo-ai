@@ -7,7 +7,7 @@ use crate::config::schema::ProfileAuthMode;
 use crate::credentials::{openai_oauth, store};
 use crate::providers::{
     provider_error_messages, validate_provider_content_parts, validate_provider_request,
-    ProviderKind,
+    ProviderKind, ValidatedResponse,
 };
 
 const AGENT_ACTION_MAX_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_MAX_DEPTH";
@@ -25,7 +25,7 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
         "Use `--server ollama` or `--server openai`.".to_string(),
         "Hint: Set `--server` explicitly or configure a default profile with a supported server."
             .to_string(),
-        "Example: cargo ai preflight --server ollama --model mistral --input-text \"What is 2 + 2?\""
+        "Example: cargo ai run --config ./agent.json --server ollama --model mistral --input-text \"What is 2 + 2?\""
             .to_string(),
     ]
 }
@@ -54,6 +54,55 @@ enum RuntimeInputMode {
     Replace,
     Append,
     Prepend,
+}
+
+pub(crate) trait InvocationDefinition {
+    fn named_inputs(&self) -> Vec<crate::Input>;
+    fn runtime_var_specs(&self) -> Vec<crate::RuntimeVarSpec>;
+    fn action_execution(&self) -> crate::ActionExecutionMode;
+    fn has_output_schema_properties(&self) -> bool;
+    fn json_schema_value(&self) -> serde_json::Value;
+    fn actions(&self) -> Vec<crate::Action>;
+    fn validate_provider_output(&self, raw: &str) -> Result<serde_json::Value, String>;
+}
+
+struct GeneratedInvocationDefinition;
+
+impl InvocationDefinition for GeneratedInvocationDefinition {
+    fn named_inputs(&self) -> Vec<crate::Input> {
+        crate::inputs()
+    }
+
+    fn runtime_var_specs(&self) -> Vec<crate::RuntimeVarSpec> {
+        crate::runtime_var_specs()
+    }
+
+    fn action_execution(&self) -> crate::ActionExecutionMode {
+        crate::action_execution()
+    }
+
+    fn has_output_schema_properties(&self) -> bool {
+        crate::has_output_schema_properties()
+    }
+
+    fn json_schema_value(&self) -> serde_json::Value {
+        crate::json_schema_value()
+    }
+
+    fn actions(&self) -> Vec<crate::Action> {
+        crate::actions()
+    }
+
+    fn validate_provider_output(&self, raw: &str) -> Result<serde_json::Value, String> {
+        let parsed = serde_json::from_str::<crate::Output>(raw).map_err(|_| {
+            "The provider returned output that could not be parsed as the expected JSON shape."
+                .to_string()
+        })?;
+        parsed.validate_response()?;
+        serde_json::to_value(parsed).map_err(|error| {
+            format!("Failed to serialize validated provider output for action execution: {error}")
+        })
+    }
 }
 
 fn profile_selection_messages(
@@ -191,7 +240,7 @@ fn render_preflight_failure_lines(
     detail_lines: &[String],
     next_steps: &[(&str, String)],
 ) -> Vec<String> {
-    let mut lines = vec!["x Preflight failed".to_string(), summary.to_string()];
+    let mut lines = vec!["x Run failed".to_string(), summary.to_string()];
 
     if let Some(context) = context {
         let items = preflight_context_items(context);
@@ -296,8 +345,9 @@ fn resolved_action_execution_override_for_run(
 
 fn effective_action_execution_for_run(
     action_execution_override: Option<crate::ActionExecutionMode>,
+    default_action_execution: crate::ActionExecutionMode,
 ) -> crate::ActionExecutionMode {
-    action_execution_override.unwrap_or_else(crate::action_execution)
+    action_execution_override.unwrap_or(default_action_execution)
 }
 
 fn resolved_render_mode_for_run(
@@ -476,8 +526,11 @@ fn collect_flagged_inputs(sub_m: &ArgMatches, id: &str) -> Vec<(usize, String)> 
     }
 }
 
-fn resolved_named_inputs_for_run(sub_m: &ArgMatches) -> Result<Vec<crate::Input>, String> {
-    let mut named_inputs = crate::inputs();
+fn resolved_named_inputs_for_run(
+    sub_m: &ArgMatches,
+    baked_inputs: &[crate::Input],
+) -> Result<Vec<crate::Input>, String> {
+    let mut named_inputs = baked_inputs.to_vec();
 
     for raw_assignment in sub_m
         .get_many::<String>("input_override")
@@ -632,16 +685,15 @@ fn validate_structural_action_only_inputs(
     )
 }
 
-fn empty_action_only_output() -> Result<crate::Output, String> {
-    serde_json::from_value(serde_json::json!({})).map_err(|error| {
-        format!("Internal error: failed to initialize action-only output placeholder: {error}")
-    })
+fn empty_action_only_output() -> serde_json::Value {
+    serde_json::json!({})
 }
 
 fn resolved_runtime_vars_for_run(
     sub_m: &ArgMatches,
+    runtime_var_specs: &[crate::RuntimeVarSpec],
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    resolve_runtime_vars_from_specs(sub_m, &crate::runtime_var_specs())
+    resolve_runtime_vars_from_specs(sub_m, runtime_var_specs)
 }
 
 fn resolve_runtime_vars_from_specs(
@@ -821,6 +873,14 @@ fn current_agent_runtime_timeout_message(
 /// Executes the preflight flow: resolve runtime settings, call provider, and
 /// run any configured post-response actions.
 pub async fn run(sub_m: &ArgMatches) -> bool {
+    let definition = GeneratedInvocationDefinition;
+    run_with_definition(sub_m, &definition).await
+}
+
+pub(crate) async fn run_with_definition(
+    sub_m: &ArgMatches,
+    definition: &dyn InvocationDefinition,
+) -> bool {
     // Begin: Argument assignments
     let mut server = String::new();
     let mut model = String::new();
@@ -977,7 +1037,13 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         inference_timeout_in_sec,
     };
 
-    let named_inputs = match resolved_named_inputs_for_run(sub_m) {
+    let named_inputs_template = definition.named_inputs();
+    let runtime_var_specs = definition.runtime_var_specs();
+    let default_action_execution = definition.action_execution();
+    let has_output_schema_properties = definition.has_output_schema_properties();
+    let actions = definition.actions();
+
+    let named_inputs = match resolved_named_inputs_for_run(sub_m, &named_inputs_template) {
         Ok(named_inputs) => named_inputs,
         Err(error) => {
             eprintln!("x {error}");
@@ -991,7 +1057,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             return false;
         }
     };
-    let runtime_vars = match resolved_runtime_vars_for_run(sub_m) {
+    let runtime_vars = match resolved_runtime_vars_for_run(sub_m, &runtime_var_specs) {
         Ok(runtime_vars) => runtime_vars,
         Err(error) => {
             eprintln!("x {error}");
@@ -1012,8 +1078,8 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             return false;
         }
     };
-    let effective_action_execution = effective_action_execution_for_run(action_execution_override);
-    let has_output_schema_properties = crate::has_output_schema_properties();
+    let effective_action_execution =
+        effective_action_execution_for_run(action_execution_override, default_action_execution);
 
     if let Err(error) = validate_structural_action_only_inputs(
         has_output_schema_properties,
@@ -1025,17 +1091,10 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     }
 
     if !has_output_schema_properties {
-        let output = match empty_action_only_output() {
-            Ok(output) => output,
-            Err(error) => {
-                eprintln!("x {error}");
-                return false;
-            }
-        };
-        let actions = crate::actions();
+        let output = empty_action_only_output();
         println!("{}", action_provider_context.using_line());
 
-        return match super::preflight_actions::apply_actions(
+        return match super::preflight_actions::apply_actions_with_data(
             &output,
             &actions,
             &runtime_vars,
@@ -1052,7 +1111,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             Ok(()) => true,
             Err(error) => {
                 print_preflight_failure(
-                    "Action execution failed during preflight.",
+                    "Action execution failed during run.",
                     Some(&action_provider_context),
                     &[error],
                     None,
@@ -1119,7 +1178,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 
     let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
 
-    let mut ai_cargo = crate::providers::AgentCargo::<crate::Output>::new(
+    let ai_cargo = crate::providers::AgentCargo::<serde_json::Value>::new(
         resolved_inputs,
         static_context.to_string(),
     );
@@ -1148,7 +1207,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                 &model,
                 &content_parts,
                 inference_timeout_in_sec,
-                crate::json_schema_value(),
+                definition.json_schema_value(),
             ),
         )
         .await
@@ -1168,7 +1227,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                     &details[1..],
                     &[(
                         "Retry request",
-                        "Check connectivity or credentials, then retry preflight.".to_string(),
+                        "Check connectivity or credentials, then retry the run.".to_string(),
                     )],
                 );
                 return false;
@@ -1192,19 +1251,12 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             }
         }
     } else if provider == ProviderKind::OpenAi {
-        let mut schema = crate::json_schema_value(); // this is a serde_json::Value (object)
-        if let Some(obj) = schema.as_object_mut() {
-            obj.insert(
-                "additionalProperties".into(),
-                serde_json::Value::Bool(false),
-            );
-        }
-
+        let schema = definition.json_schema_value();
         let fmt = serde_json::json!({
         "type": "json_schema",
         "json_schema": {
             "name": "Output",
-            "schema": schema,     // now with additionalProperties: false
+            "schema": schema,
             "strict": true
         }
         });
@@ -1250,7 +1302,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                     &details[1..],
                     &[(
                         "Retry request",
-                        "Check connectivity or credentials, then retry preflight.".to_string(),
+                        "Check connectivity or credentials, then retry the run.".to_string(),
                     )],
                 );
                 return false;
@@ -1275,52 +1327,29 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         };
     }
 
-    // Attempt to conform the LLM response to the Output schema
-    if !ai_cargo.set_response(response.clone()) {
-        print_preflight_failure(
-            "Provider output did not match the required JSON schema.",
-            Some(&action_provider_context),
-            &[String::from(
-                "The provider returned output that could not be parsed as the expected JSON shape.",
-            )],
-            Some("Raw output"),
-            &response
-                .lines()
-                .map(|line| line.to_string())
-                .collect::<Vec<_>>(),
-            &[(
-                "Retry request",
-                "Retry preflight after reviewing the provider output and selected inputs."
-                    .to_string(),
-            )],
-        );
-        return false; // Stop execution cleanly — do NOT continue to unwrap
-    }
-
-    let output = match ai_cargo.get_response() {
-        Some(o) => o,
-        None => {
+    let output = match definition.validate_provider_output(response.as_str()) {
+        Ok(output) => output,
+        Err(problem) => {
             print_preflight_failure(
-                "Response parsing failed unexpectedly after inference.",
+                "Provider output did not match the required JSON schema.",
                 Some(&action_provider_context),
-                &[String::from(
-                    "The provider response was expected but missing after schema validation.",
-                )],
+                &[problem],
                 Some("Raw output"),
                 &response
                     .lines()
                     .map(|line| line.to_string())
                     .collect::<Vec<_>>(),
-                &[],
+                &[(
+                    "Retry request",
+                    "Retry the run after reviewing the provider output and selected inputs."
+                        .to_string(),
+                )],
             );
             return false;
         }
     };
 
-    // Get Actions
-    let actions = crate::actions();
-    // println!("Actions {:?}", actions);
-    match super::preflight_actions::apply_actions(
+    match super::preflight_actions::apply_actions_with_data(
         &output,
         &actions,
         &runtime_vars,
@@ -1337,7 +1366,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         Ok(()) => true,
         Err(error) => {
             print_preflight_failure(
-                "Action execution failed during preflight.",
+                "Action execution failed during run.",
                 Some(&action_provider_context),
                 &[error],
                 None,
@@ -1367,7 +1396,8 @@ mod tests {
     }
 
     fn resolved_named_inputs(preflight: &clap::ArgMatches) -> Vec<crate::Input> {
-        super::resolved_named_inputs_for_run(preflight).expect("named inputs should resolve")
+        super::resolved_named_inputs_for_run(preflight, &crate::inputs())
+            .expect("named inputs should resolve")
     }
 
     fn matches(args: &[&str]) -> clap::ArgMatches {
@@ -1397,7 +1427,7 @@ mod tests {
         assert!(messages.iter().any(|line| line.contains("--server ollama")));
         assert!(messages
             .iter()
-            .any(|line| line.contains("cargo ai preflight --server ollama")));
+            .any(|line| line.contains("cargo ai run --config ./agent.json --server ollama")));
     }
 
     #[test]
@@ -1448,7 +1478,7 @@ mod tests {
         );
         let rendered = lines.join("\n");
 
-        assert!(rendered.contains("x Preflight failed"));
+        assert!(rendered.contains("x Run failed"));
         assert!(rendered.contains("Profile  my_open_ai"));
         assert!(rendered.contains("Auth     chatgpt_account"));
         assert!(rendered.contains("- Reason: missing /tmp/demo.pdf"));
@@ -1467,12 +1497,12 @@ mod tests {
             &[],
             &[(
                 "Retry",
-                "cargo ai preflight --profile my_open_ai".to_string(),
+                "cargo ai run --config ./agent.json --profile my_open_ai".to_string(),
             )],
         );
         let rendered = lines.join("\n");
 
-        assert!(rendered.contains("Retry  `cargo ai preflight --profile my_open_ai`"));
+        assert!(rendered.contains("Retry  `cargo ai run --config ./agent.json --profile my_open_ai`"));
     }
 
     #[test]
@@ -1582,7 +1612,10 @@ mod tests {
     #[test]
     fn effective_action_execution_for_run_prefers_runtime_override() {
         assert_eq!(
-            effective_action_execution_for_run(Some(crate::ActionExecutionMode::Sequential)),
+            effective_action_execution_for_run(
+                Some(crate::ActionExecutionMode::Sequential),
+                crate::ActionExecutionMode::Parallel,
+            ),
             crate::ActionExecutionMode::Sequential
         );
     }

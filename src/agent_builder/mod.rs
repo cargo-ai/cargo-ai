@@ -18,19 +18,7 @@ pub mod lock;
 
 // Handles warmed template cache resolution/building
 pub mod template_cache;
-use std::env;
 use std::path::PathBuf;
-
-/// Resolve Cargo’s home directory ($CARGO_HOME or default ~/.cargo)
-pub(crate) fn cargo_home() -> PathBuf {
-    if let Ok(path) = env::var("CARGO_HOME") {
-        PathBuf::from(path)
-    } else {
-        dirs::home_dir()
-            .expect("could not find home directory")
-            .join(".cargo")
-    }
-}
 
 /// Root for CargoAI’s agents inside Cargo home
 fn agents_workspace_root() -> PathBuf {
@@ -39,7 +27,7 @@ fn agents_workspace_root() -> PathBuf {
 
 /// Root for CargoAI internal files inside Cargo home
 pub(crate) fn cargo_ai_root() -> PathBuf {
-    cargo_home().join(".cargo-ai")
+    crate::config::paths::cargo_ai_root()
 }
 
 /// Root for warmed template workspaces inside CargoAI home.
