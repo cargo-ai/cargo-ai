@@ -290,7 +290,7 @@ You can also author a structural action-only worker by leaving `agent_schema.pro
       "run": [
         {
           "kind": "agent",
-          "agent": "./child_renderer",
+          "artifact": "./child_renderer",
           "inputs": [
             { "input": "menu_image" },
             { "type": "text", "text": "Create the launch image." }
@@ -597,7 +597,7 @@ Then expand into multiple action types:
       "run": [
         {
           "kind": "agent",
-          "agent": "./child_reporter",
+          "artifact": "./child_reporter",
           "inputs": [
             {
               "type": "text",
@@ -683,7 +683,7 @@ Then expand into a multi-step workflow:
     {
       "kind": "agent",
       "when": { "==": [ { "var": "save_status" }, "failed" ] },
-      "agent": "./child_reporter",
+      "artifact": "./child_reporter",
       "inputs": [
         {
           "type": "text",
@@ -705,7 +705,7 @@ Use `run` to sequence multiple side effects in order. `exec` steps can capture o
 
 `generate_image.model` is optional. If omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override. If neither the step nor the invocation provides a model, the run fails clearly instead of guessing. When the image step should use a different model from the main invocation, set `generate_image.model` explicitly as either a literal string or a single variable reference. Prefer a runtime-backed string such as `{ "var": "runtime.hero_image_model" }` when the operator should choose the image model at invocation time. Top-level string schema fields may also drive `generate_image.model`, but captured step variables may not.
 
-`generate_image` and child `agent` steps also accept an optional step-level `profile`. Use it when one step should resolve its provider/model/url/token context differently from the parent invocation. For `generate_image`, explicit `model` still wins, then the step-profile model, then the parent invocation model. That means a parent agent may stay on OpenAI while one `generate_image` step switches to an Ollama profile. For child `agent` steps, the resolved profile is forwarded to the child as `--profile <name>`.
+`generate_image` and child `agent` steps also accept an optional step-level `profile`. Use it when one step should resolve its provider/model/url/token context differently from the parent invocation. For `generate_image`, explicit `model` still wins, then the step-profile model, then the parent invocation model. That means a parent agent may stay on OpenAI while one `generate_image` step switches to an Ollama profile. For child `agent` steps, the resolved profile is forwarded to the child as `--profile <name>`. Use `artifact: "./child_reporter"` for a direct child executable or `artifact: "./child_reporter.json"` to run that child through Cargo AI.
 
 Cargo AI always prints one root `using:` line near run start. In append-only output, it also prints another action-prefixed `using:` line when a provider-backed or child-agent step changes the effective `profile`, `auth`, `server`, or `model`. Interactive live mode keeps the parent dashboard at the orchestration level and does not surface child or step-level `using:` lines there.
 
@@ -765,7 +765,7 @@ Example:
 ```json
 {
   "kind": "agent",
-  "agent": "./child_reporter",
+  "artifact": "./child_reporter",
   "profile": { "var": "runtime.child_profile" },
   "run_vars": {
     "year": { "var": "runtime.year" },

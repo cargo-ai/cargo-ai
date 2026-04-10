@@ -629,8 +629,8 @@ fn parse_run_step(value: &Value, path: &str) -> Result<crate::RunStep, String> {
             platforms,
         }),
         "agent" => {
-            let agent = required_non_empty_string(run_obj, "agent", path)?;
-            validate_child_agent_target(agent.as_str(), format!("{path}.agent").as_str())?;
+            let (agent, agent_path) = required_child_artifact(run_obj, path)?;
+            validate_child_agent_target(agent.as_str(), agent_path.as_str())?;
             let input_mode = optional_action_input_mode(run_obj, path)?;
             let inputs = optional_action_inputs(run_obj, path)?;
             if input_mode.is_some() && inputs.is_none() {
@@ -1235,6 +1235,41 @@ fn optional_owned_path(
         )?;
     }
     Ok(Some(raw_path))
+}
+
+fn required_child_artifact(
+    object: &Map<String, Value>,
+    path: &str,
+) -> Result<(String, String), String> {
+    let artifact_value = object.get("artifact");
+    let legacy_agent_value = object.get("agent");
+
+    if artifact_value.is_some() && legacy_agent_value.is_some() {
+        return Err(format!(
+            "{path}: specify only one of `artifact` or legacy `agent` for `kind: \"agent\"` steps"
+        ));
+    }
+
+    let (field_name, value) = if let Some(value) = artifact_value {
+        ("artifact", value)
+    } else if let Some(value) = legacy_agent_value {
+        ("agent", value)
+    } else {
+        return Err(format!("{path}.artifact: missing required field"));
+    };
+
+    let field_path = format!("{path}.{field_name}");
+    let artifact = value
+        .as_str()
+        .ok_or_else(|| format!("{field_path}: expected a string"))?
+        .trim()
+        .to_string();
+
+    if artifact.is_empty() {
+        return Err(format!("{field_path}: must be a non-empty string"));
+    }
+
+    Ok((artifact, field_path))
 }
 
 fn validate_child_agent_target(raw_agent: &str, path: &str) -> Result<(), String> {
@@ -1868,7 +1903,7 @@ mod tests {
             "run": [
               {
                 "kind": "agent",
-                "agent": "./summary_agent",
+                "artifact": "./summary_agent",
                 "input_mode": "append",
                 "inputs": [
                   { "type": "text", "text": "Summarize this." },
@@ -1921,7 +1956,7 @@ mod tests {
             "name": "invoke_child",
             "logic": { "==": [ { "var": "ok" }, true ] },
             "run": [
-              { "kind": "agent", "agent": "./childagent" }
+              { "kind": "agent", "artifact": "./childagent" }
             ]
           }
         ]"#,
@@ -1943,7 +1978,7 @@ mod tests {
             "name": "invoke_child",
             "logic": { "==": [ { "var": "ok" }, true ] },
             "run": [
-              { "kind": "agent", "agent": "childagent" }
+              { "kind": "agent", "artifact": "childagent" }
             ]
           }
         ]"#,
@@ -1964,7 +1999,7 @@ mod tests {
             "name": "invoke_child",
             "logic": { "==": [ { "var": "ok" }, true ] },
             "run": [
-              { "kind": "agent", "agent": "./agents/childagent" }
+              { "kind": "agent", "artifact": "./agents/childagent" }
             ]
           }
         ]"#,

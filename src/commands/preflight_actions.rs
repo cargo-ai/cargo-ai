@@ -8,7 +8,7 @@ use crate::infra_api;
 use jsonlogic::apply;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, IsTerminal, Write};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -79,6 +79,12 @@ enum ActionLaneStatus {
     Notice,
     LogicError,
     Skipped,
+}
+
+enum ChildArtifactInvocation {
+    DirectExecutable(PathBuf),
+    CargoSubcommand,
+    StandaloneCargoAi,
 }
 
 impl ActionOutput {
@@ -2084,26 +2090,17 @@ async fn run_agent_step(
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
-    let agent = step.agent.as_deref().ok_or_else(|| {
+    let artifact = step.agent.as_deref().ok_or_else(|| {
         format!(
-            "Action '{}' agent step is missing required `agent`.",
+            "Action '{}' agent step is missing required `artifact`.",
             action_name
         )
     })?;
 
     let current_depth = current_agent_action_depth();
     validate_agent_action_depth(current_depth, max_agent_depth, action_name)?;
-
-    validate_agent_step_target(agent, action_name)?;
-    let agent_path = Path::new(agent);
-    if !agent_path.exists() {
-        return Err(format!(
-            "Action '{}' agent step target '{}' was not found relative to the current working directory.",
-            action_name, agent
-        ));
-    }
-
-    let mut command = tokio::process::Command::new(agent_path);
+    let invocation = resolve_child_artifact_invocation(artifact, action_name)?;
+    let mut command = child_artifact_command(&invocation, artifact);
     if let Some(action_execution_override) = action_execution_override {
         command.arg("--action-execution");
         command.arg(match action_execution_override {
@@ -2166,7 +2163,7 @@ async fn run_agent_step(
 
     let remaining = remaining_runtime_duration(
         runtime_budget,
-        &format!("before starting child agent '{}'", agent),
+        &format!("before starting child agent '{}'", artifact),
     )
     .map_err(|context| {
         action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
@@ -2175,7 +2172,7 @@ async fn run_agent_step(
     let child = command.spawn().map_err(|error| {
         format!(
             "Action '{}' failed to start child agent '{}': {}",
-            action_name, agent, error
+            action_name, artifact, error
         )
     })?;
     let mut child = child;
@@ -2200,7 +2197,7 @@ async fn run_agent_step(
     print_action_line(
         action_index,
         action_name,
-        format!("child: started {}", agent).as_str(),
+        format!("child: started {}", artifact).as_str(),
     );
 
     let result = match tokio::time::timeout(remaining, child.wait()).await {
@@ -2223,7 +2220,7 @@ async fn run_agent_step(
             Err(format!(
                 "Action '{}' child agent '{}' exited with status {} at depth {}.",
                 action_name,
-                agent,
+                artifact,
                 status,
                 current_depth + 1
             ))
@@ -2231,7 +2228,7 @@ async fn run_agent_step(
         Ok(Err(error)) => Err(format!(
             "Action '{}' failed while waiting for child agent '{}' at depth {}: {}",
             action_name,
-            agent,
+            artifact,
             current_depth + 1,
             error
         )),
@@ -2243,20 +2240,75 @@ async fn run_agent_step(
             print_action_line(
                 action_index,
                 action_name,
-                format!("child: timed out {}", agent).as_str(),
+                format!("child: timed out {}", artifact).as_str(),
             );
             Err(action_runtime_timeout_message(
                 action_name,
                 runtime_budget,
                 &format!(
                     "while waiting for child agent '{}' at depth {}",
-                    agent,
+                    artifact,
                     current_depth + 1
                 ),
             ))
         }
     };
     result
+}
+
+fn resolve_child_artifact_invocation(
+    artifact: &str,
+    action_name: &str,
+) -> Result<ChildArtifactInvocation, String> {
+    validate_agent_step_target(artifact, action_name)?;
+    let artifact_path = Path::new(artifact);
+    if !artifact_path.exists() {
+        return Err(format!(
+            "Action '{}' agent step artifact '{}' was not found relative to the current working directory.",
+            action_name, artifact
+        ));
+    }
+
+    if !artifact_is_json_definition(artifact) {
+        return Ok(ChildArtifactInvocation::DirectExecutable(
+            artifact_path.to_path_buf(),
+        ));
+    }
+
+    let cargo_ai_exists = command_exists_on_path("cargo-ai");
+    if command_exists_on_path("cargo") && cargo_ai_exists {
+        return Ok(ChildArtifactInvocation::CargoSubcommand);
+    }
+    if cargo_ai_exists {
+        return Ok(ChildArtifactInvocation::StandaloneCargoAi);
+    }
+
+    Err(format!(
+        "Action '{}' agent step JSON artifact '{}' requires Cargo AI to be available as `cargo ai` or `cargo-ai` on PATH.",
+        action_name, artifact
+    ))
+}
+
+fn child_artifact_command(
+    invocation: &ChildArtifactInvocation,
+    artifact: &str,
+) -> tokio::process::Command {
+    match invocation {
+        ChildArtifactInvocation::DirectExecutable(path) => tokio::process::Command::new(path),
+        ChildArtifactInvocation::CargoSubcommand => {
+            let mut command = tokio::process::Command::new("cargo");
+            command.arg("ai");
+            command.arg("run");
+            command.arg(artifact);
+            command
+        }
+        ChildArtifactInvocation::StandaloneCargoAi => {
+            let mut command = tokio::process::Command::new("cargo-ai");
+            command.arg("run");
+            command.arg(artifact);
+            command
+        }
+    }
 }
 
 fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'static str> {
@@ -2852,6 +2904,53 @@ fn validate_agent_step_target(agent: &str, action_name: &str) -> Result<(), Stri
     }
 
     Ok(())
+}
+
+fn artifact_is_json_definition(artifact: &str) -> bool {
+    Path::new(artifact)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("json"))
+        .unwrap_or(false)
+}
+
+fn command_exists_on_path(command: &str) -> bool {
+    let Some(path_value) = std::env::var_os("PATH") else {
+        return false;
+    };
+
+    std::env::split_paths(&path_value).any(|directory| {
+        command_candidates_for_directory(&directory, command)
+            .into_iter()
+            .any(|candidate| candidate.is_file())
+    })
+}
+
+fn command_candidates_for_directory(directory: &Path, command: &str) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        if Path::new(command).extension().is_some() {
+            return vec![directory.join(command)];
+        }
+
+        let pathext = std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+        let candidates = pathext
+            .to_string_lossy()
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+            .map(|extension| directory.join(format!("{command}{extension}")))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            vec![directory.join(command)]
+        } else {
+            candidates
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        vec![directory.join(command)]
+    }
 }
 
 fn contains_explicit_path_separator(path: &str) -> bool {
@@ -3463,7 +3562,7 @@ mod tests {
     use serde_json::json;
     use std::ffi::OsString;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Mutex, MutexGuard};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3522,6 +3621,104 @@ mod tests {
 
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    struct TestPathCommands {
+        _guard: MutexGuard<'static, ()>,
+        original_path: Option<OsString>,
+        root: PathBuf,
+    }
+
+    impl TestPathCommands {
+        fn new() -> Self {
+            let guard = ENV_LOCK
+                .lock()
+                .expect("environment lock should not be poisoned");
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be valid")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("cargo-ai-path-test-{unique}"));
+            fs::create_dir_all(&root).expect("temp PATH dir should be created");
+
+            let original_path = std::env::var_os("PATH");
+            seed_passthrough_rustc(&root, original_path.as_ref());
+            std::env::set_var("PATH", &root);
+
+            Self {
+                _guard: guard,
+                original_path,
+                root,
+            }
+        }
+
+        fn write_command(&self, name: &str, body: &str) -> PathBuf {
+            #[cfg(windows)]
+            let command_name = format!("{name}.cmd");
+            #[cfg(not(windows))]
+            let command_name = name.to_string();
+
+            let command_path = self.root.join(command_name);
+            fs::write(&command_path, body).expect("test command should be written");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                let mut permissions = fs::metadata(&command_path)
+                    .expect("command metadata should load")
+                    .permissions();
+                permissions.set_mode(0o755);
+                fs::set_permissions(&command_path, permissions)
+                    .expect("test command should be executable");
+            }
+
+            command_path
+        }
+    }
+
+    impl Drop for TestPathCommands {
+        fn drop(&mut self) {
+            match &self.original_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn seed_passthrough_rustc(root: &Path, original_path: Option<&OsString>) {
+        let Some(rustc_path) = find_command_on_path(original_path, "rustc") else {
+            return;
+        };
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let _ = symlink(&rustc_path, root.join("rustc"));
+        }
+
+        #[cfg(windows)]
+        {
+            let _ = fs::copy(&rustc_path, root.join("rustc.exe"));
+        }
+    }
+
+    fn find_command_on_path(path: Option<&OsString>, command: &str) -> Option<PathBuf> {
+        let Some(path) = path else {
+            return None;
+        };
+
+        for directory in std::env::split_paths(path) {
+            for candidate in super::command_candidates_for_directory(&directory, command) {
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+
+        None
     }
 
     fn run_step(
@@ -5948,6 +6145,220 @@ auth_mode = "{auth_mode}"
             inherited_values.lines().collect::<Vec<_>>(),
             vec!["7", "600"]
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn json_artifact_prefers_cargo_ai_subcommand_when_available() {
+        use std::fs;
+
+        let test_path = TestPathCommands::new();
+        let output_path = std::env::temp_dir().join(format!(
+            "cai2078-json-artifact-cargo-args-{}.txt",
+            std::process::id()
+        ));
+        let cargo_script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+            output_path.display()
+        );
+        test_path.write_command("cargo", &cargo_script);
+        test_path.write_command("cargo-ai", "#!/bin/sh\nexit 99\n");
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let artifact_name = format!(".tmp-cai2078-json-child-{}.json", std::process::id());
+        let artifact_path = current_dir.join(&artifact_name);
+        fs::write(&artifact_path, "{}").expect("json child artifact should be written");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", artifact_name)),
+            run_vars: None,
+            input_overrides: None,
+            inputs: Some(vec![crate::ActionInput::Text {
+                text: vec![crate::RunArg::Literal("hello".to_string())],
+            }]),
+            input_mode: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_agent_step(
+            &step,
+            &json!({}),
+            &no_named_inputs(),
+            0,
+            "invoke_child",
+            Some(crate::ActionExecutionMode::Sequential),
+            5,
+            runtime_budget,
+        )
+        .await;
+
+        let _ = fs::remove_file(&artifact_path);
+        assert!(
+            result.is_ok(),
+            "json child artifact should succeed via cargo ai: {result:?}"
+        );
+
+        let args = fs::read_to_string(&output_path).expect("cargo args should be captured");
+        let _ = fs::remove_file(&output_path);
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec![
+                "ai",
+                "run",
+                format!("./{}", artifact_name).as_str(),
+                "--action-execution",
+                "sequential",
+                "--input-text",
+                "hello",
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn json_artifact_falls_back_to_standalone_cargo_ai() {
+        use std::fs;
+
+        let test_path = TestPathCommands::new();
+        let output_path = std::env::temp_dir().join(format!(
+            "cai2078-json-artifact-standalone-args-{}.txt",
+            std::process::id()
+        ));
+        let cargo_ai_script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+            output_path.display()
+        );
+        test_path.write_command("cargo-ai", &cargo_ai_script);
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let artifact_name = format!(".tmp-cai2078-json-standalone-{}.json", std::process::id());
+        let artifact_path = current_dir.join(&artifact_name);
+        fs::write(&artifact_path, "{}").expect("json child artifact should be written");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", artifact_name)),
+            run_vars: None,
+            input_overrides: None,
+            inputs: Some(vec![crate::ActionInput::Text {
+                text: vec![crate::RunArg::Literal("hello".to_string())],
+            }]),
+            input_mode: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_agent_step(
+            &step,
+            &json!({}),
+            &no_named_inputs(),
+            0,
+            "invoke_child",
+            None,
+            5,
+            runtime_budget,
+        )
+        .await;
+
+        let _ = fs::remove_file(&artifact_path);
+        assert!(
+            result.is_ok(),
+            "json child artifact should succeed via standalone cargo-ai: {result:?}"
+        );
+
+        let args = fs::read_to_string(&output_path).expect("cargo-ai args should be captured");
+        let _ = fs::remove_file(&output_path);
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec![
+                "run",
+                format!("./{}", artifact_name).as_str(),
+                "--input-text",
+                "hello"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn json_artifact_fails_when_cargo_ai_is_unavailable() {
+        use std::fs;
+
+        let _test_path = TestPathCommands::new();
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let artifact_name = format!(".tmp-cai2078-json-missing-{}.json", std::process::id());
+        let artifact_path = current_dir.join(&artifact_name);
+        fs::write(&artifact_path, "{}").expect("json child artifact should be written");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", artifact_name)),
+            run_vars: None,
+            input_overrides: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = run_agent_step(
+            &step,
+            &json!({}),
+            &no_named_inputs(),
+            0,
+            "invoke_child",
+            None,
+            5,
+            runtime_budget,
+        )
+        .await
+        .expect_err("json child artifact should fail when Cargo AI is unavailable");
+
+        let _ = fs::remove_file(&artifact_path);
+        assert!(error.contains("requires Cargo AI"));
+        assert!(error.contains("cargo ai"));
+        assert!(error.contains("cargo-ai"));
     }
 
     #[tokio::test]

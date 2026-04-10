@@ -98,6 +98,12 @@ enum ActionLaneStatus {
     Skipped,
 }
 
+enum ChildArtifactInvocation {
+    DirectExecutable(PathBuf),
+    CargoSubcommand,
+    StandaloneCargoAi,
+}
+
 impl ActionOutput {
     fn new(action_execution: ActionExecutionMode, requested_mode: RequestedActionRenderMode) -> Self {
         let (mode, startup_notice) =
@@ -3658,9 +3664,9 @@ async fn run_agent_step(
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
-    let agent = step.agent.as_deref().ok_or_else(|| {
+    let artifact = step.agent.as_deref().ok_or_else(|| {
         format!(
-            "Action '{}' agent step is missing required `agent`.",
+            "Action '{}' agent step is missing required `artifact`.",
             action_name
         )
     })?;
@@ -3668,16 +3674,8 @@ async fn run_agent_step(
     let current_depth = current_agent_action_depth();
     validate_agent_action_depth(current_depth, max_agent_depth, action_name)?;
 
-    validate_agent_step_target(agent, action_name)?;
-    let agent_path = Path::new(agent);
-    if !agent_path.exists() {
-        return Err(format!(
-            "Action '{}' agent step target '{}' was not found relative to the current working directory.",
-            action_name, agent
-        ));
-    }
-
-    let mut command = tokio::process::Command::new(agent_path);
+    let invocation = resolve_child_artifact_invocation(artifact, action_name)?;
+    let mut command = child_artifact_command(&invocation, artifact);
     if let Some(action_execution_override) = action_execution_override {
         command.arg("--action-execution");
         command.arg(match action_execution_override {
@@ -3738,7 +3736,7 @@ async fn run_agent_step(
 
     let remaining = remaining_runtime_duration(
         runtime_budget,
-        &format!("before starting child agent '{}'", agent),
+        &format!("before starting child agent '{}'", artifact),
     )
     .map_err(|context| {
         action_runtime_timeout_message(
@@ -3751,7 +3749,7 @@ async fn run_agent_step(
     let child = command.spawn().map_err(|error| {
         format!(
             "Action '{}' failed to start child agent '{}': {}",
-            action_name, agent, error
+            action_name, artifact, error
         )
     })?;
     let mut child = child;
@@ -3776,7 +3774,7 @@ async fn run_agent_step(
     print_action_line(
         action_index,
         action_name,
-        format!("child: started {}", agent).as_str(),
+        format!("child: started {}", artifact).as_str(),
     );
 
     let result = match tokio::time::timeout(remaining, child.wait()).await {
@@ -3799,7 +3797,7 @@ async fn run_agent_step(
             Err(format!(
                 "Action '{}' child agent '{}' exited with status {} at depth {}.",
                 action_name,
-                agent,
+                artifact,
                 status,
                 current_depth + 1
             ))
@@ -3807,7 +3805,7 @@ async fn run_agent_step(
         Ok(Err(error)) => Err(format!(
             "Action '{}' failed while waiting for child agent '{}' at depth {}: {}",
             action_name,
-            agent,
+            artifact,
             current_depth + 1,
             error
         )),
@@ -3819,16 +3817,71 @@ async fn run_agent_step(
             print_action_line(
                 action_index,
                 action_name,
-                format!("child: timed out {}", agent).as_str(),
+                format!("child: timed out {}", artifact).as_str(),
             );
             Err(action_runtime_timeout_message(
                 action_name,
                 runtime_budget,
-                &format!("while waiting for child agent '{}' at depth {}", agent, current_depth + 1),
+                &format!("while waiting for child agent '{}' at depth {}", artifact, current_depth + 1),
             ))
         }
     };
     result
+}
+
+fn resolve_child_artifact_invocation(
+    artifact: &str,
+    action_name: &str,
+) -> Result<ChildArtifactInvocation, String> {
+    validate_agent_step_target(artifact, action_name)?;
+    let artifact_path = Path::new(artifact);
+    if !artifact_path.exists() {
+        return Err(format!(
+            "Action '{}' agent step artifact '{}' was not found relative to the current working directory.",
+            action_name, artifact
+        ));
+    }
+
+    if !artifact_is_json_definition(artifact) {
+        return Ok(ChildArtifactInvocation::DirectExecutable(
+            artifact_path.to_path_buf(),
+        ));
+    }
+
+    let cargo_ai_exists = command_exists_on_path("cargo-ai");
+    if command_exists_on_path("cargo") && cargo_ai_exists {
+        return Ok(ChildArtifactInvocation::CargoSubcommand);
+    }
+    if cargo_ai_exists {
+        return Ok(ChildArtifactInvocation::StandaloneCargoAi);
+    }
+
+    Err(format!(
+        "Action '{}' agent step JSON artifact '{}' requires Cargo AI to be available as `cargo ai` or `cargo-ai` on PATH.",
+        action_name, artifact
+    ))
+}
+
+fn child_artifact_command(
+    invocation: &ChildArtifactInvocation,
+    artifact: &str,
+) -> tokio::process::Command {
+    match invocation {
+        ChildArtifactInvocation::DirectExecutable(path) => tokio::process::Command::new(path),
+        ChildArtifactInvocation::CargoSubcommand => {
+            let mut command = tokio::process::Command::new("cargo");
+            command.arg("ai");
+            command.arg("run");
+            command.arg(artifact);
+            command
+        }
+        ChildArtifactInvocation::StandaloneCargoAi => {
+            let mut command = tokio::process::Command::new("cargo-ai");
+            command.arg("run");
+            command.arg(artifact);
+            command
+        }
+    }
 }
 
 fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'static str> {
@@ -4765,9 +4818,16 @@ fn validate_agent_action_depth(
 
 fn validate_agent_step_target(agent: &str, action_name: &str) -> Result<(), String> {
     let agent_path = Path::new(agent);
+    if agent.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' agent step target '{}' must use explicit same-level './childagent' form.",
+            action_name, agent
+        ));
+    }
+
     if agent_path.is_absolute() {
         return Err(format!(
-            "Action '{}' agent step target '{}' must be an explicit relative path such as './child_agent'.",
+            "Action '{}' agent step target '{}' must use explicit same-level './childagent' form; absolute paths are not allowed.",
             action_name, agent
         ));
     }
@@ -4777,14 +4837,27 @@ fn validate_agent_step_target(agent: &str, action_name: &str) -> Result<(), Stri
         .any(|component| matches!(component, Component::ParentDir))
     {
         return Err(format!(
-            "Action '{}' agent step target '{}' must stay at the current level or below; parent traversal (`..`) is not allowed.",
+            "Action '{}' agent step target '{}' must use explicit same-level './childagent' form; parent traversal (`..`) is not allowed.",
             action_name, agent
         ));
     }
 
-    if !contains_explicit_path_separator(agent) {
+    if !agent.starts_with("./") {
+        let message = if contains_explicit_path_separator(agent) {
+            "must use explicit same-level './childagent' form; nested child-agent paths are not allowed."
+        } else {
+            "must use explicit same-level './childagent' form; bare child-agent names are not allowed."
+        };
         return Err(format!(
-            "Action '{}' agent step target '{}' must be an explicit relative path such as './child_agent'; bare executable names are not allowed because they may resolve through PATH.",
+            "Action '{}' agent step target '{}' {}",
+            action_name, agent, message
+        ));
+    }
+
+    let sibling = &agent[2..];
+    if sibling.is_empty() || !is_single_normal_path_component(sibling) {
+        return Err(format!(
+            "Action '{}' agent step target '{}' must stay at the same level; nested child-agent paths such as './agents/childagent' are not allowed.",
             action_name, agent
         ));
     }
@@ -4792,8 +4865,61 @@ fn validate_agent_step_target(agent: &str, action_name: &str) -> Result<(), Stri
     Ok(())
 }
 
+fn artifact_is_json_definition(artifact: &str) -> bool {
+    Path::new(artifact)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("json"))
+        .unwrap_or(false)
+}
+
+fn command_exists_on_path(command: &str) -> bool {
+    let Some(path_value) = std::env::var_os("PATH") else {
+        return false;
+    };
+
+    std::env::split_paths(&path_value).any(|directory| {
+        command_candidates_for_directory(&directory, command)
+            .into_iter()
+            .any(|candidate| candidate.is_file())
+    })
+}
+
+fn command_candidates_for_directory(directory: &Path, command: &str) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        if Path::new(command).extension().is_some() {
+            return vec![directory.join(command)];
+        }
+
+        let pathext = std::env::var_os("PATHEXT")
+            .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+        let candidates = pathext
+            .to_string_lossy()
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+            .map(|extension| directory.join(format!("{command}{extension}")))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            vec![directory.join(command)]
+        } else {
+            candidates
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        vec![directory.join(command)]
+    }
+}
+
 fn contains_explicit_path_separator(path: &str) -> bool {
     path.contains('/') || path.contains('\\')
+}
+
+fn is_single_normal_path_component(path: &str) -> bool {
+    let mut components = Path::new(path).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
 fn step_matches_platform(platforms: Option<&[String]>, current_platform: Option<&str>) -> bool {
