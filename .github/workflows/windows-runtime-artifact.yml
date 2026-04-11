@@ -1,0 +1,45 @@
+name: Windows Runtime Artifact
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+on:
+  push:
+    branches:
+      - develop
+  workflow_dispatch:
+
+jobs:
+  build_windows_runtime_artifact:
+    name: Build Windows Runtime Artifact
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build runtime-only Windows binary
+        run: cargo build --release --no-default-features --target x86_64-pc-windows-msvc
+
+      - name: Stage runtime artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist/windows-runtime" | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/cargo-ai.exe" "dist/windows-runtime/cargo-ai.exe" -Force
+
+      - name: Package runtime artifact zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/windows-runtime/cargo-ai.exe" -DestinationPath "dist/cargo-ai-windows-x86_64.zip" -Force
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-ai-windows-x86_64
+          path: dist/cargo-ai-windows-x86_64.zip
+          if-no-files-found: error
