@@ -35,32 +35,26 @@ A concise JSON definition keeps the agent easy to read, review, diff, and improv
 
 ## Quick Start
 
-### 0. Install Cargo
+### 0. Install Cargo AI
 
-Cargo AI requires Rust and Cargo. If you do not already have them, install Rust with `rustup` using the official guide for macOS, Linux, or Windows. This usually takes a few minutes.
+The preferred install path today is Cargo-based.
 
-Official install guide: [Install Rust](https://rust-lang.org/tools/install/)
+If you do not already have Rust and Cargo, install them with `rustup` first using the official guide:
 
-After installation, verify Cargo is available:
+- [Install Rust](https://rust-lang.org/tools/install/)
 
-```bash
-cargo --version
-```
-
-### 1. Install `cargo-ai`
+Then install Cargo AI:
 
 ```bash
 cargo install cargo-ai --locked
 cargo ai --help
 ```
 
-Cargo AI uses a product-oriented pre-`1.0.0` release policy: `0.y.0` means meaningful product/contract evolution, while `0.y.z` is reserved for smaller fixes and polish. See [VERSIONING.md](./VERSIONING.md) for the public versioning policy.
-
-Upgrades remain manual via `cargo install cargo-ai --locked`. After a meaningful pre-`1.0.0` upgrade such as `0.1.0 -> 0.2.0`, generated agents may report that they are out of sync with local Cargo AI metadata until they are re-hatched.
+Full install guidance, PATH details, and current platform posture live under [docs/install](./docs/install/README.md). The step-by-step Cargo workflow is here: [Install with Cargo](./docs/install/cargo.md).
 
 By default, Cargo AI stores config, credentials, and internal workspaces under `~/.cargo/.cargo-ai` (or `$CARGO_HOME/.cargo-ai`). Set `CARGO_AI_HOME` if you want Cargo AI to use a different root directory. See [Cargo AI Home](./docs/cargo-ai-home.md) for the full resolution order, stored state, and first-run behavior.
 
-### 2. Choose your model setup
+### 1. Choose your model setup
 
 **Option A: recommended if you use ChatGPT Plus or above**
 
@@ -113,7 +107,7 @@ cargo ai profile add ollama \
   --default
 ```
 
-### 3. Run a sample agent directly
+### 2. Run a sample agent directly
 
 ```bash
 cargo ai run adder_test --profile openai-account
@@ -122,7 +116,7 @@ cargo ai run adder_test --profile openai-account
 You can also run a local definition with `cargo ai run ./adder_test.json` or
 `cargo ai run --config ./adder_test.json`.
 
-### 4. Hatch the same sample as a standalone executable
+### 3. Hatch the same sample as a standalone executable
 
 ```bash
 cargo ai hatch adder_test
@@ -131,7 +125,7 @@ cargo ai hatch adder_test
 
 On Windows, run `adder_test.exe` or just `adder_test`.
 
-### 5. Register an account
+### 4. Register an account
 
 Define agent email alerts with `cargo-ai.org` and manage your agents in one place. Keep them private, or share them instantly with anyone in the world.
 
