@@ -72,8 +72,8 @@ async fn main() {
             commands::run::run(sub_m).await
         } else if let Some(sub_m) = cmd_args.subcommand_matches("preflight") {
             commands::preflight::run(sub_m).await
-        } else if let Some(sub_m) = cmd_args.subcommand_matches("hatch") {
-            commands::hatch::run(sub_m)
+        } else if let Some(command_succeeded) = try_run_hatch(&cmd_args) {
+            command_succeeded
         } else if let Some(sub_m) = cmd_args.subcommand_matches("add") {
             commands::add::run(sub_m)
         } else if let Some(sub_m) = cmd_args.subcommand_matches("init") {
@@ -97,6 +97,18 @@ async fn main() {
     if !command_succeeded {
         process::exit(1);
     }
+}
+
+#[cfg(feature = "developer-tools")]
+fn try_run_hatch(cmd_args: &clap::ArgMatches) -> Option<bool> {
+    cmd_args
+        .subcommand_matches("hatch")
+        .map(crate::commands::hatch::run)
+}
+
+#[cfg(not(feature = "developer-tools"))]
+fn try_run_hatch(_cmd_args: &clap::ArgMatches) -> Option<bool> {
+    None
 }
 
 fn cargo_ai_home_initialization_notice(

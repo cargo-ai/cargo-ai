@@ -16,6 +16,10 @@ use super::helpers::{
     refresh_access_token_for_retry, RefreshAccessError, INFRA_BASE_URL,
 };
 
+fn developer_tools_enabled() -> bool {
+    cfg!(feature = "developer-tools")
+}
+
 #[derive(Clone, Debug)]
 struct AccountHatchCommand {
     source_name: String,
@@ -214,6 +218,20 @@ fn account_agent_selector_suffix(source: &AccountAgentSourceDetails) -> String {
 fn account_pull_success_ui_response(source: &AccountAgentSourceDetails, file_path: &Path) -> Value {
     let selector_suffix = account_agent_selector_suffix(source);
     let file_display = display_path(file_path);
+    let mut available_commands = vec![json!({
+        "label": "Print JSON",
+        "value": format!("`cargo ai account agents pull {} --stdout{}`", source.agent, selector_suffix)
+    })];
+
+    if developer_tools_enabled() {
+        available_commands.insert(
+            0,
+            json!({
+                "label": "Hatch agent",
+                "value": format!("`cargo ai account hatch {}{}`", source.agent, selector_suffix)
+            }),
+        );
+    }
 
     json!({
         "ui": {
@@ -248,16 +266,7 @@ fn account_pull_success_ui_response(source: &AccountAgentSourceDetails, file_pat
                     "title": "Available commands",
                     "title_style": "plain",
                     "layout": "aligned",
-                    "items": [
-                        {
-                            "label": "Hatch agent",
-                            "value": format!("`cargo ai account hatch {}{}`", source.agent, selector_suffix)
-                        },
-                        {
-                            "label": "Print JSON",
-                            "value": format!("`cargo ai account agents pull {} --stdout{}`", source.agent, selector_suffix)
-                        }
-                    ]
+                    "items": available_commands
                 }
             ]
         }
@@ -625,13 +634,50 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             stdout: pull_m.get_flag("stdout"),
             force: pull_m.get_flag("force"),
         }
-    } else if let Some(hatch_m) = agents_m.subcommand_matches("hatch") {
-        match parse_hatch_command(hatch_m) {
-            Ok(hatch) => AgentsCommand::Hatch(hatch),
-            Err(error) => {
-                eprintln!("x {}", error);
-                return false;
+    } else if developer_tools_enabled() {
+        if let Some(hatch_m) = agents_m.subcommand_matches("hatch") {
+            match parse_hatch_command(hatch_m) {
+                Ok(hatch) => AgentsCommand::Hatch(hatch),
+                Err(error) => {
+                    eprintln!("x {}", error);
+                    return false;
+                }
             }
+        } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
+            let Some(name) = visibility_m.get_one::<String>("name") else {
+                eprintln!("x Missing agent name. Provide --name <NAME>.");
+                return false;
+            };
+            AgentsCommand::Visibility {
+                name: name.to_string(),
+                definition_path: visibility_m
+                    .get_one::<String>("definition_path")
+                    .map(|s| s.to_string()),
+                is_public: visibility_m.get_flag("public"),
+                public_from: visibility_m
+                    .get_one::<String>("public_from")
+                    .map(|s| s.to_string()),
+                public_until: visibility_m
+                    .get_one::<String>("public_until")
+                    .map(|s| s.to_string()),
+            }
+        } else if let Some(archive_m) = agents_m.subcommand_matches("archive") {
+            let Some(name) = archive_m.get_one::<String>("name") else {
+                eprintln!("x Missing agent name. Provide --name <NAME>.");
+                return false;
+            };
+            AgentsCommand::Archive {
+                name: name.to_string(),
+                definition_path: archive_m
+                    .get_one::<String>("definition_path")
+                    .map(|s| s.to_string()),
+                is_archived: archive_m.get_flag("archive"),
+            }
+        } else {
+            println!(
+                "No agents subcommand found. Try 'cargo ai account agents list|push|pull|hatch|visibility|archive'."
+            );
+            return false;
         }
     } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
         let Some(name) = visibility_m.get_one::<String>("name") else {
@@ -665,7 +711,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         }
     } else {
         println!(
-            "No agents subcommand found. Try 'cargo ai account agents list|push|pull|hatch|visibility|archive'."
+            "No agents subcommand found. Try 'cargo ai account agents list|push|pull|visibility|archive'."
         );
         return false;
     };
@@ -1267,18 +1313,28 @@ mod tests {
             response["ui"]["sections"][2]["title"].as_str(),
             Some("Available commands")
         );
-        assert_eq!(
-            next_step_items[0]["value"].as_str(),
-            Some(
-                "`cargo ai account hatch weather_test --owner-handle shared --definition-path /agents/public`"
-            )
-        );
-        assert_eq!(
-            next_step_items[1]["value"].as_str(),
-            Some(
-                "`cargo ai account agents pull weather_test --stdout --owner-handle shared --definition-path /agents/public`"
-            )
-        );
+        if super::developer_tools_enabled() {
+            assert_eq!(
+                next_step_items[0]["value"].as_str(),
+                Some(
+                    "`cargo ai account hatch weather_test --owner-handle shared --definition-path /agents/public`"
+                )
+            );
+            assert_eq!(
+                next_step_items[1]["value"].as_str(),
+                Some(
+                    "`cargo ai account agents pull weather_test --stdout --owner-handle shared --definition-path /agents/public`"
+                )
+            );
+        } else {
+            assert_eq!(next_step_items.len(), 1);
+            assert_eq!(
+                next_step_items[0]["value"].as_str(),
+                Some(
+                    "`cargo ai account agents pull weather_test --stdout --owner-handle shared --definition-path /agents/public`"
+                )
+            );
+        }
     }
 
     #[test]

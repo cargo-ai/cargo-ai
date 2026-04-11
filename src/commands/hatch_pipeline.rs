@@ -15,6 +15,7 @@ pub(crate) enum HatchMode {
     Check,
 }
 
+#[cfg_attr(not(feature = "developer-tools"), allow(dead_code))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum HatchSource {
     Registry {

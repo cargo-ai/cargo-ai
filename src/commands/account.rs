@@ -24,13 +24,24 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         mail::run(mail_m).await
     } else if let Some(handle_m) = sub_m.subcommand_matches("handle") {
         handle::run(handle_m).await
-    } else if let Some(hatch_m) = sub_m.subcommand_matches("hatch") {
-        agents::run_hatch(hatch_m).await
+    } else if cfg!(feature = "developer-tools") {
+        if let Some(hatch_m) = sub_m.subcommand_matches("hatch") {
+            return agents::run_hatch(hatch_m).await;
+        }
+
+        if let Some(agents_m) = sub_m.subcommand_matches("agents") {
+            return agents::run(agents_m).await;
+        }
+
+        eprintln!(
+            "No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', 'cargo ai account mail test [--subject <text>] [--text <text>]', 'cargo ai account mail prefs [--disable-all|--enable-all]', 'cargo ai account handle [--set <handle>]', 'cargo ai account hatch <name>', or 'cargo ai account agents <list|push|pull|hatch|visibility|archive>'."
+        );
+        false
     } else if let Some(agents_m) = sub_m.subcommand_matches("agents") {
         agents::run(agents_m).await
     } else {
         eprintln!(
-            "No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', 'cargo ai account mail test [--subject <text>] [--text <text>]', 'cargo ai account mail prefs [--disable-all|--enable-all]', 'cargo ai account handle [--set <handle>]', 'cargo ai account hatch <name>', or 'cargo ai account agents <list|push|pull|hatch|visibility|archive>'."
+            "No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', 'cargo ai account mail test [--subject <text>] [--text <text>]', 'cargo ai account mail prefs [--disable-all|--enable-all]', 'cargo ai account handle [--set <handle>]', or 'cargo ai account agents <list|push|pull|visibility|archive>'."
         );
         false
     }

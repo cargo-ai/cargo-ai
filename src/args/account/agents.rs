@@ -1,6 +1,7 @@
 //! CLI parser definitions for `cargo ai account agents`.
 use clap::{Arg, ArgGroup, Command};
 
+#[cfg(feature = "developer-tools")]
 pub(crate) fn hatch_command() -> Command {
     Command::new("hatch")
         .about("Build an executable from an account agent definition")
@@ -80,7 +81,7 @@ pub(crate) fn hatch_command() -> Command {
 
 /// Builds the `agents` account subcommand schema.
 pub fn command() -> Command {
-    Command::new("agents")
+    let command = Command::new("agents")
         .about("Manage account agents")
         .subcommand(
             Command::new("list")
@@ -238,7 +239,6 @@ pub fn command() -> Command {
                     "Notes:\n  - Name can be provided as positional NAME or via --name.\n  - Default output: ./<name>.json (when --json-file is omitted and --stdout is not set).\n  - --force applies only when writing to a file.",
                 ),
         )
-        .subcommand(hatch_command())
         .subcommand(
             Command::new("visibility")
                 .about("Set public visibility for an agent")
@@ -336,5 +336,10 @@ pub fn command() -> Command {
                         .conflicts_with("archive")
                         .action(clap::ArgAction::SetTrue),
                 ),
-        )
+        );
+
+    #[cfg(feature = "developer-tools")]
+    let command = command.subcommand(hatch_command());
+
+    command
 }

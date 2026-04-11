@@ -8,6 +8,7 @@ mod account;
 mod add;
 mod auth;
 mod credentials;
+#[cfg(feature = "developer-tools")]
 mod hatch;
 mod init;
 mod new;
@@ -16,8 +17,13 @@ mod profile;
 mod run;
 mod version;
 
+#[cfg(test)]
+fn developer_tools_enabled() -> bool {
+    cfg!(feature = "developer-tools")
+}
+
 fn cli_command(bin_name: &'static str) -> Command {
-    Command::new("cargo-ai")
+    let command = Command::new("cargo-ai")
         .bin_name(bin_name)
         .version(env!("CARGO_PKG_VERSION"))
         .arg(
@@ -27,8 +33,12 @@ fn cli_command(bin_name: &'static str) -> Command {
                 .global(true)
                 .action(ArgAction::SetTrue),
         )
-        .subcommand(run::command())
-        .subcommand(hatch::command())
+        .subcommand(run::command());
+
+    #[cfg(feature = "developer-tools")]
+    let command = command.subcommand(hatch::command());
+
+    command
         .subcommand(add::command())
         .subcommand(profile::command())
         .subcommand(auth::command())
@@ -64,7 +74,7 @@ pub(crate) fn test_cli_command(bin_name: &'static str) -> Command {
 
 #[cfg(test)]
 mod tests {
-    use super::cli_command;
+    use super::{cli_command, developer_tools_enabled};
     use clap::error::ErrorKind;
 
     #[test]
@@ -111,9 +121,11 @@ mod tests {
                 .expect("expected subcommand to exist")
         };
 
-        assert!(index_of("run") < index_of("hatch"));
-        assert!(index_of("hatch") < index_of("profile"));
-        assert!(index_of("hatch") < index_of("add"));
+        if developer_tools_enabled() {
+            assert!(index_of("run") < index_of("hatch"));
+            assert!(index_of("hatch") < index_of("profile"));
+            assert!(index_of("hatch") < index_of("add"));
+        }
         assert!(index_of("add") < index_of("profile"));
         assert!(index_of("profile") < index_of("auth"));
         assert!(index_of("auth") < index_of("credentials"));
@@ -134,7 +146,11 @@ mod tests {
         assert!(help.contains("\n  add"));
         assert!(!help.contains("\n  new"));
         assert!(!help.contains("\n  init"));
-        assert!(help.contains("\n  hatch"));
+        if developer_tools_enabled() {
+            assert!(help.contains("\n  hatch"));
+        } else {
+            assert!(!help.contains("\n  hatch"));
+        }
     }
 
     #[test]
@@ -222,7 +238,7 @@ mod tests {
         assert!(matches.get_flag("no_update_check"));
 
         let matches = cli_command("cargo-ai")
-            .try_get_matches_from(["cargo-ai", "hatch", "demo", "--no-update-check"])
+            .try_get_matches_from(["cargo-ai", "run", "demo", "--no-update-check"])
             .expect("global no-update-check after subcommand should parse");
         assert!(matches.get_flag("no_update_check"));
     }
@@ -291,6 +307,7 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn hatch_check_flag_parses() {
         let matches = cli_command("cargo-ai")
@@ -304,6 +321,7 @@ mod tests {
         assert!(hatch_matches.get_flag("check"));
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn hatch_force_flag_parses_long_and_short() {
         let long_matches = cli_command("cargo-ai")
@@ -323,6 +341,7 @@ mod tests {
         assert!(short_hatch.get_flag("force"));
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn hatch_keep_project_flag_parses() {
         let matches = cli_command("cargo-ai")
@@ -336,6 +355,7 @@ mod tests {
         assert!(hatch_matches.get_flag("keep_project"));
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn hatch_target_flag_parses() {
         let matches = cli_command("cargo-ai")
@@ -360,6 +380,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn hatch_output_dir_flag_parses() {
         let matches = cli_command("cargo-ai")
@@ -384,6 +405,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn account_agents_hatch_parses_agent_output_dir_check_force_keep_project_and_target_flags() {
         let matches = cli_command("cargo-ai")
@@ -444,6 +466,7 @@ mod tests {
         assert!(hatch_matches.get_flag("keep_project"));
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn account_hatch_alias_parses_agent_output_dir_check_force_keep_project_and_target_flags() {
         let matches = cli_command("cargo-ai")
@@ -546,6 +569,7 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn account_agents_hatch_supports_short_force_flag() {
         let matches = cli_command("cargo-ai")
@@ -568,6 +592,7 @@ mod tests {
         assert!(hatch_matches.get_flag("force"));
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn account_hatch_alias_supports_short_force_flag() {
         let matches = cli_command("cargo-ai")
@@ -582,6 +607,7 @@ mod tests {
         assert!(hatch_matches.get_flag("force"));
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn account_agents_hatch_rejects_removed_name_flag() {
         let err = cli_command("cargo-ai")
@@ -598,6 +624,7 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn account_agents_hatch_rejects_local_name_flag() {
         let err = cli_command("cargo-ai")
@@ -640,28 +667,31 @@ mod tests {
             Some("/team/ops")
         );
 
-        let hatch_matches = cli_command("cargo-ai")
-            .try_get_matches_from([
-                "cargo-ai",
-                "account",
-                "agents",
-                "hatch",
-                "weather_test",
-                "--definition-path",
-                "/team/ops",
-            ])
-            .expect("account agents hatch --definition-path should parse");
-        let hatch = hatch_matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("agents"))
-            .and_then(|m| m.subcommand_matches("hatch"))
-            .expect("hatch subcommand should be available");
-        assert_eq!(
-            hatch
-                .get_one::<String>("definition_path")
-                .map(String::as_str),
-            Some("/team/ops")
-        );
+        #[cfg(feature = "developer-tools")]
+        {
+            let hatch_matches = cli_command("cargo-ai")
+                .try_get_matches_from([
+                    "cargo-ai",
+                    "account",
+                    "agents",
+                    "hatch",
+                    "weather_test",
+                    "--definition-path",
+                    "/team/ops",
+                ])
+                .expect("account agents hatch --definition-path should parse");
+            let hatch = hatch_matches
+                .subcommand_matches("account")
+                .and_then(|m| m.subcommand_matches("agents"))
+                .and_then(|m| m.subcommand_matches("hatch"))
+                .expect("hatch subcommand should be available");
+            assert_eq!(
+                hatch
+                    .get_one::<String>("definition_path")
+                    .map(String::as_str),
+                Some("/team/ops")
+            );
+        }
 
         let push_matches = cli_command("cargo-ai")
             .try_get_matches_from([
@@ -739,6 +769,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn account_agents_hatch_rejects_old_path_flag() {
         let err = cli_command("cargo-ai")
@@ -1001,5 +1032,35 @@ mod tests {
             .expect_err("legacy --token flag should be rejected for profile add");
 
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[cfg(not(feature = "developer-tools"))]
+    #[test]
+    fn runtime_only_build_rejects_hatch_subcommand() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "hatch", "adder_test"])
+            .expect_err("runtime-only build should reject hatch");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[cfg(not(feature = "developer-tools"))]
+    #[test]
+    fn runtime_only_build_rejects_account_hatch_alias() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "account", "hatch", "weather_test"])
+            .expect_err("runtime-only build should reject account hatch alias");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[cfg(not(feature = "developer-tools"))]
+    #[test]
+    fn runtime_only_build_rejects_account_agents_hatch() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "account", "agents", "hatch", "weather_test"])
+            .expect_err("runtime-only build should reject account agents hatch");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     }
 }
