@@ -526,6 +526,139 @@ mod tests {
     }
 
     #[test]
+    fn account_agents_run_parses_runtime_flags_and_source_selectors() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "run",
+                "weather_test",
+                "--owner-handle",
+                "alice",
+                "--definition-path",
+                "/team/ops",
+                "--profile",
+                "my_profile",
+                "--input-text",
+                "hello",
+                "--run-var",
+                "month=04",
+            ])
+            .expect("account agents run should parse");
+
+        let run_matches = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("agents"))
+            .and_then(|m| m.subcommand_matches("run"))
+            .expect("account agents run should be available");
+
+        assert_eq!(
+            run_matches.get_one::<String>("name").map(String::as_str),
+            Some("weather_test")
+        );
+        assert_eq!(
+            run_matches
+                .get_one::<String>("owner_handle")
+                .map(String::as_str),
+            Some("alice")
+        );
+        assert_eq!(
+            run_matches
+                .get_one::<String>("definition_path")
+                .map(String::as_str),
+            Some("/team/ops")
+        );
+        assert_eq!(
+            run_matches.get_one::<String>("profile").map(String::as_str),
+            Some("my_profile")
+        );
+        assert_eq!(
+            run_matches
+                .get_many::<String>("input_text")
+                .expect("input text should parse")
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["hello"]
+        );
+        assert_eq!(
+            run_matches
+                .get_many::<String>("run_var")
+                .expect("run vars should parse")
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["month=04"]
+        );
+    }
+
+    #[test]
+    fn account_run_alias_parses_runtime_flags_and_source_selectors() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "run",
+                "weather_test",
+                "--owner-handle",
+                "alice",
+                "--definition-path",
+                "/team/ops",
+                "--server",
+                "ollama",
+                "--model",
+                "mistral",
+            ])
+            .expect("account run alias should parse");
+
+        let run_matches = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("run"))
+            .expect("account run alias should be available");
+
+        assert_eq!(
+            run_matches.get_one::<String>("name").map(String::as_str),
+            Some("weather_test")
+        );
+        assert_eq!(
+            run_matches
+                .get_one::<String>("owner_handle")
+                .map(String::as_str),
+            Some("alice")
+        );
+        assert_eq!(
+            run_matches
+                .get_one::<String>("definition_path")
+                .map(String::as_str),
+            Some("/team/ops")
+        );
+        assert_eq!(
+            run_matches.get_one::<String>("server").map(String::as_str),
+            Some("ollama")
+        );
+        assert_eq!(
+            run_matches.get_one::<String>("model").map(String::as_str),
+            Some("mistral")
+        );
+    }
+
+    #[test]
+    fn account_agents_run_rejects_hatch_only_agent_flag() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "run",
+                "weather_test",
+                "--agent",
+                "weather_remote",
+            ])
+            .expect_err("--agent should be rejected for account agents run");
+
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
     fn credentials_store_set_parses_mode_and_flags() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from([
@@ -663,6 +796,32 @@ mod tests {
             .expect("pull subcommand should be available");
         assert_eq!(
             pull.get_one::<String>("definition_path")
+                .map(String::as_str),
+            Some("/team/ops")
+        );
+
+        let run_matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "run",
+                "weather_test",
+                "--definition-path",
+                "/team/ops",
+                "--server",
+                "ollama",
+                "--model",
+                "mistral",
+            ])
+            .expect("account agents run --definition-path should parse");
+        let run = run_matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("agents"))
+            .and_then(|m| m.subcommand_matches("run"))
+            .expect("run subcommand should be available");
+        assert_eq!(
+            run.get_one::<String>("definition_path")
                 .map(String::as_str),
             Some("/team/ops")
         );
@@ -1062,5 +1221,51 @@ mod tests {
             .expect_err("runtime-only build should reject account agents hatch");
 
         assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[cfg(not(feature = "developer-tools"))]
+    #[test]
+    fn runtime_only_build_accepts_account_run_alias() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "run",
+                "weather_test",
+                "--server",
+                "ollama",
+                "--model",
+                "mistral",
+            ])
+            .expect("runtime-only build should accept account run alias");
+
+        assert!(matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("run"))
+            .is_some());
+    }
+
+    #[cfg(not(feature = "developer-tools"))]
+    #[test]
+    fn runtime_only_build_accepts_account_agents_run() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "agents",
+                "run",
+                "weather_test",
+                "--server",
+                "ollama",
+                "--model",
+                "mistral",
+            ])
+            .expect("runtime-only build should accept account agents run");
+
+        assert!(matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("agents"))
+            .and_then(|m| m.subcommand_matches("run"))
+            .is_some());
     }
 }

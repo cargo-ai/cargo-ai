@@ -1,6 +1,39 @@
 //! CLI parser definitions for `cargo ai account agents`.
 use clap::{Arg, ArgGroup, Command};
 
+pub(crate) fn run_command() -> Command {
+    crate::args::preflight::runtime_command(
+        "run",
+        "Run an account agent definition through the interpreted runtime",
+    )
+    .arg(
+        Arg::new("name")
+            .help("Account agent name")
+            .required(true)
+            .value_name("NAME")
+            .num_args(1),
+    )
+    .arg(
+        Arg::new("owner_handle")
+            .long("owner-handle")
+            .help("Owner handle to run from (omit to run your own)")
+            .required(false)
+            .value_name("HANDLE")
+            .num_args(1),
+    )
+    .arg(
+        Arg::new("definition_path")
+            .long("definition-path")
+            .help("Account-side definition namespace path to read from (defaults to '/'; not a local filesystem path).")
+            .required(false)
+            .value_name("PATH")
+            .num_args(1),
+    )
+    .after_help(
+        "Notes:\n  - NAME is the remote/account agent name.\n  - Use --owner-handle to run a public agent from another handle.\n  - --definition-path selects account-side definition namespace path (defaults to '/'; not local filesystem path).\n  - Interpreted account run accepts the same runtime invocation flags as `cargo ai run`.\n  - Hatch/export flags like --check, --target, --output-dir, --keep-project, --force, and --agent are not supported here.",
+    )
+}
+
 #[cfg(feature = "developer-tools")]
 pub(crate) fn hatch_command() -> Command {
     Command::new("hatch")
@@ -239,6 +272,7 @@ pub fn command() -> Command {
                     "Notes:\n  - Name can be provided as positional NAME or via --name.\n  - Default output: ./<name>.json (when --json-file is omitted and --stdout is not set).\n  - --force applies only when writing to a file.",
                 ),
         )
+        .subcommand(run_command())
         .subcommand(
             Command::new("visibility")
                 .about("Set public visibility for an agent")

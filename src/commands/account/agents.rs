@@ -33,6 +33,13 @@ struct AccountHatchCommand {
     output_dir: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug)]
+struct AccountRunCommand {
+    source_name: String,
+    owner_handle: Option<String>,
+    definition_path: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AccountAgentSourceDetails {
     owner: String,
@@ -63,25 +70,62 @@ fn looks_like_local_path_input(input: &str) -> bool {
         || input.contains('\\')
 }
 
-fn validate_account_hatch_name(name: &str) -> Result<String, String> {
+fn validate_account_identifier(
+    name: &str,
+    missing_message: &str,
+    path_like_message: impl FnOnce(&str) -> String,
+    invalid_message: impl FnOnce(&str) -> String,
+) -> Result<String, String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
-        return Err("Missing account hatch name. Provide positional NAME.".to_string());
+        return Err(missing_message.to_string());
     }
     if looks_like_local_path_input(trimmed) || trimmed.ends_with(".json") {
-        return Err(format!(
-            "Account hatch name '{}' looks like a path or .json file. Use positional NAME only for the local output/workspace name, use --agent <AGENT> for a different remote source, and use --output-dir <DIR> for export location.",
-            trimmed
-        ));
+        return Err(path_like_message(trimmed));
     }
     if !is_supported_local_hatch_name(trimmed) {
-        return Err(format!(
-            "Account hatch name '{}' is invalid. Use only letters, numbers, '-' or '_'.",
-            trimmed
-        ));
+        return Err(invalid_message(trimmed));
     }
 
     Ok(trimmed.to_string())
+}
+
+fn validate_account_hatch_name(name: &str) -> Result<String, String> {
+    validate_account_identifier(
+        name,
+        "Missing account hatch name. Provide positional NAME.",
+        |trimmed| {
+            format!(
+                "Account hatch name '{}' looks like a path or .json file. Use positional NAME only for the local output/workspace name, use --agent <AGENT> for a different remote source, and use --output-dir <DIR> for export location.",
+                trimmed
+            )
+        },
+        |trimmed| {
+            format!(
+                "Account hatch name '{}' is invalid. Use only letters, numbers, '-' or '_'.",
+                trimmed
+            )
+        },
+    )
+}
+
+fn validate_account_run_name(name: &str) -> Result<String, String> {
+    validate_account_identifier(
+        name,
+        "Missing account run name. Provide positional NAME.",
+        |trimmed| {
+            format!(
+                "Account run name '{}' looks like a path or .json file. Use positional NAME only for the remote account agent name, and use --definition-path <PATH> for the account-side namespace path.",
+                trimmed
+            )
+        },
+        |trimmed| {
+            format!(
+                "Account run name '{}' is invalid. Use only letters, numbers, '-' or '_'.",
+                trimmed
+            )
+        },
+    )
 }
 
 fn resolve_account_hatch_names(
@@ -96,6 +140,23 @@ fn resolve_account_hatch_names(
     };
 
     Ok((source_name, local_name))
+}
+
+fn parse_run_command(run_m: &ArgMatches) -> Result<AccountRunCommand, String> {
+    let name = run_m
+        .get_one::<String>("name")
+        .map(String::as_str)
+        .ok_or_else(|| "Missing account run name. Provide positional NAME.".to_string())?;
+
+    Ok(AccountRunCommand {
+        source_name: validate_account_run_name(name)?,
+        owner_handle: run_m
+            .get_one::<String>("owner_handle")
+            .map(|s| s.to_string()),
+        definition_path: run_m
+            .get_one::<String>("definition_path")
+            .map(|s| s.to_string()),
+    })
 }
 
 fn parse_hatch_command(hatch_m: &ArgMatches) -> Result<AccountHatchCommand, String> {
@@ -134,12 +195,27 @@ async fn request_hatch_pull(
     access_token: &str,
     hatch: &AccountHatchCommand,
 ) -> Result<Value, String> {
+    request_agent_pull(
+        access_token,
+        hatch.source_name.as_str(),
+        hatch.owner_handle.as_deref(),
+        hatch.definition_path.as_deref(),
+    )
+    .await
+}
+
+async fn request_agent_pull(
+    access_token: &str,
+    source_name: &str,
+    owner_handle: Option<&str>,
+    definition_path: Option<&str>,
+) -> Result<Value, String> {
     infra_api::account::agents::pull_agent(
         INFRA_BASE_URL,
         access_token,
-        &hatch.source_name,
-        hatch.owner_handle.as_deref(),
-        hatch.definition_path.as_deref(),
+        source_name,
+        owner_handle,
+        definition_path,
     )
     .await
     .map_err(|error| format!("{error:?}"))
@@ -218,14 +294,20 @@ fn account_agent_selector_suffix(source: &AccountAgentSourceDetails) -> String {
 fn account_pull_success_ui_response(source: &AccountAgentSourceDetails, file_path: &Path) -> Value {
     let selector_suffix = account_agent_selector_suffix(source);
     let file_display = display_path(file_path);
-    let mut available_commands = vec![json!({
+    let mut available_commands = vec![
+        json!({
+            "label": "Run agent",
+            "value": format!("`cargo ai account run {}{}`", source.agent, selector_suffix)
+        }),
+        json!({
         "label": "Print JSON",
         "value": format!("`cargo ai account agents pull {} --stdout{}`", source.agent, selector_suffix)
-    })];
+        }),
+    ];
 
     if developer_tools_enabled() {
         available_commands.insert(
-            0,
+            1,
             json!({
                 "label": "Hatch agent",
                 "value": format!("`cargo ai account hatch {}{}`", source.agent, selector_suffix)
@@ -400,32 +482,36 @@ fn account_hatch_presentation(
     }
 }
 
-fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &Value) -> bool {
-    let is_pull_success = response
+fn is_account_pull_success(response: &Value) -> bool {
+    response
         .get("type")
         .and_then(|v| v.as_str())
         .map(|t| t == "account_agents_pull_succeeded")
-        .unwrap_or(false);
+        .unwrap_or(false)
+}
 
-    if !is_pull_success {
+fn pulled_definition_json_string(response: &Value, continuation_label: &str) -> Result<String, String> {
+    let definition_json = response.get("definition_json").ok_or_else(|| {
+        format!(
+            "{continuation_label} could not continue because response did not include 'definition_json'."
+        )
+    })?;
+
+    serde_json::to_string(definition_json).map_err(|error| {
+        format!("Failed to serialize pulled definition JSON: {error}")
+    })
+}
+
+fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &Value) -> bool {
+    if !is_account_pull_success(response) {
         render_account_agents_response(response);
         return false;
     }
 
-    let definition_json = match response.get("definition_json") {
-        Some(value) => value,
-        None => {
-            eprintln!(
-                "x Hatch could not continue because response did not include 'definition_json'."
-            );
-            return false;
-        }
-    };
-
-    let definition_json_str = match serde_json::to_string_pretty(definition_json) {
-        Ok(pretty) => pretty,
+    let definition_json_str = match pulled_definition_json_string(response, "Hatch") {
+        Ok(raw) => raw,
         Err(error) => {
-            eprintln!("x Failed to serialize pulled definition JSON: {error}");
+            eprintln!("x {error}");
             return false;
         }
     };
@@ -444,8 +530,39 @@ fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &Value) -
     crate::commands::hatch_pipeline::run_hatch_pipeline(request)
 }
 
+async fn continue_run_from_response(run_m: &ArgMatches, response: &Value) -> bool {
+    if !is_account_pull_success(response) {
+        render_account_agents_response(response);
+        return false;
+    }
+
+    let definition_json_str = match pulled_definition_json_string(response, "Account run") {
+        Ok(raw) => raw,
+        Err(error) => {
+            eprintln!("x {error}");
+            return false;
+        }
+    };
+
+    let definition = match crate::runtime_definition::RuntimeAgentDefinition::from_str(
+        definition_json_str.as_str(),
+    ) {
+        Ok(definition) => definition,
+        Err(error) => {
+            eprintln!("x Account run could not continue because pulled definition JSON is invalid: {error}");
+            return false;
+        }
+    };
+
+    crate::commands::preflight::run_with_definition(run_m, &definition).await
+}
+
 /// Executes account-agent operations (list/push/pull/hatch/visibility/archive).
 pub async fn run(agents_m: &ArgMatches) -> bool {
+    if let Some(run_m) = agents_m.subcommand_matches("run") {
+        return run_account_agent(run_m).await;
+    }
+
     enum AgentsCommand {
         List {
             owner_handle: Option<String>,
@@ -675,7 +792,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             }
         } else {
             println!(
-                "No agents subcommand found. Try 'cargo ai account agents list|push|pull|hatch|visibility|archive'."
+                "No agents subcommand found. Try 'cargo ai account agents list|push|pull|run|hatch|visibility|archive'."
             );
             return false;
         }
@@ -711,7 +828,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         }
     } else {
         println!(
-            "No agents subcommand found. Try 'cargo ai account agents list|push|pull|visibility|archive'."
+            "No agents subcommand found. Try 'cargo ai account agents list|push|pull|run|visibility|archive'."
         );
         return false;
     };
@@ -1212,12 +1329,110 @@ pub async fn run_hatch(hatch_m: &ArgMatches) -> bool {
     continue_hatch_from_response(&hatch, &response)
 }
 
+pub async fn run_account_agent(run_m: &ArgMatches) -> bool {
+    let run_command = match parse_run_command(run_m) {
+        Ok(run_command) => run_command,
+        Err(error) => {
+            eprintln!("x {}", error);
+            return false;
+        }
+    };
+
+    let auth = match load_account_auth() {
+        Ok(auth) => auth,
+        Err(message) => {
+            eprintln!("{}", ui::account_status::normalize_leading_glyph(&message));
+            return false;
+        }
+    };
+    let access_token_owned = auth.access_token;
+    let refresh_token = auth.refresh_token;
+
+    let mut response = match request_agent_pull(
+        access_token_owned.as_str(),
+        run_command.source_name.as_str(),
+        run_command.owner_handle.as_deref(),
+        run_command.definition_path.as_deref(),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("x Request failed: {error}");
+            return false;
+        }
+    };
+
+    let is_expired_error = response
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(|t| t == "access_token_expired")
+        .unwrap_or(false);
+
+    if is_expired_error {
+        match refresh_access_token_for_retry(access_token_owned.as_str(), refresh_token.as_deref())
+            .await
+        {
+            Err(RefreshAccessError::MissingRefreshToken) => {
+                eprintln!("! Access token expired, and no refresh token exists in credential store. Run `cargo ai account status` or re-confirm account.");
+                if !ui::account_status::render_backend_ui(&response) {
+                    match serde_json::to_string_pretty(&response) {
+                        Ok(pretty) => println!("{pretty}"),
+                        Err(_) => println!("{response:?}"),
+                    }
+                }
+                return false;
+            }
+            Err(RefreshAccessError::RequestFailed(error)) => {
+                eprintln!("x Request failed while refreshing session: {error}");
+                return false;
+            }
+            Err(RefreshAccessError::MissingRefreshedToken(refresh_response)) => {
+                eprintln!("! Session refresh did not return a new access token. Cannot retry account run.");
+                if !ui::account_status::render_backend_ui(&refresh_response) {
+                    match serde_json::to_string_pretty(&refresh_response) {
+                        Ok(pretty) => println!("{pretty}"),
+                        Err(_) => println!("{refresh_response:?}"),
+                    }
+                }
+                return false;
+            }
+            Ok((retry_access_token, refreshed_expires_in)) => {
+                if let Some(rt) = refresh_token.as_deref() {
+                    persist_refreshed_access_token(
+                        retry_access_token.as_str(),
+                        rt,
+                        refreshed_expires_in,
+                    );
+                }
+
+                response = match request_agent_pull(
+                    retry_access_token.as_str(),
+                    run_command.source_name.as_str(),
+                    run_command.owner_handle.as_deref(),
+                    run_command.definition_path.as_deref(),
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(error) => {
+                        eprintln!("x Request failed after session refresh: {error}");
+                        return false;
+                    }
+                };
+            }
+        }
+    }
+
+    continue_run_from_response(run_m, &response).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         account_agent_selector_suffix, account_agent_source_details,
         account_pull_success_ui_response, hatch_mode_from_check_flag, resolve_account_hatch_names,
-        restyle_agents_list_ui, AccountAgentSourceDetails,
+        restyle_agents_list_ui, validate_account_run_name, AccountAgentSourceDetails,
     };
     use serde_json::json;
     use std::path::Path;
@@ -1258,6 +1473,13 @@ mod tests {
         let err = resolve_account_hatch_names("weather_test", Some("weather.test.v2"))
             .expect_err("invalid remote source override should fail");
         assert!(err.contains("invalid"));
+    }
+
+    #[test]
+    fn account_run_name_rejects_path_like_name() {
+        let err = validate_account_run_name("./weather_test")
+            .expect_err("path-like account run name should fail");
+        assert!(err.contains("looks like a path"));
     }
 
     #[test]
@@ -1317,19 +1539,31 @@ mod tests {
             assert_eq!(
                 next_step_items[0]["value"].as_str(),
                 Some(
-                    "`cargo ai account hatch weather_test --owner-handle shared --definition-path /agents/public`"
+                    "`cargo ai account run weather_test --owner-handle shared --definition-path /agents/public`"
                 )
             );
             assert_eq!(
                 next_step_items[1]["value"].as_str(),
                 Some(
+                    "`cargo ai account hatch weather_test --owner-handle shared --definition-path /agents/public`"
+                )
+            );
+            assert_eq!(
+                next_step_items[2]["value"].as_str(),
+                Some(
                     "`cargo ai account agents pull weather_test --stdout --owner-handle shared --definition-path /agents/public`"
                 )
             );
         } else {
-            assert_eq!(next_step_items.len(), 1);
+            assert_eq!(next_step_items.len(), 2);
             assert_eq!(
                 next_step_items[0]["value"].as_str(),
+                Some(
+                    "`cargo ai account run weather_test --owner-handle shared --definition-path /agents/public`"
+                )
+            );
+            assert_eq!(
+                next_step_items[1]["value"].as_str(),
                 Some(
                     "`cargo ai account agents pull weather_test --stdout --owner-handle shared --definition-path /agents/public`"
                 )

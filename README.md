@@ -859,6 +859,7 @@ Cargo AI works best when the definition stays small, understandable, and easy to
 After registration, you can use Cargo AI as more than a local hatching tool:
 
 - store and retrieve agent definitions through your account
+- run hosted definitions directly through the interpreted runtime
 - hatch from your own hosted definitions
 - hatch public definitions from another owner's handle
 - use account-aware email workflows
@@ -866,8 +867,14 @@ After registration, you can use Cargo AI as more than a local hatching tool:
 Examples:
 
 ```bash
+# Run your own hosted definition directly
+cargo ai account run weather_test --profile my_profile
+
 # Hatch your own hosted definition
 cargo ai account hatch weather_test
+
+# Run a public definition from another handle
+cargo ai account agents run weather_test --owner-handle alice --profile my_profile
 
 # Validate scaffold and compile path without exporting a binary
 cargo ai account hatch weather_test --check

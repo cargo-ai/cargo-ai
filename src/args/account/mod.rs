@@ -44,6 +44,7 @@ pub fn command() -> Command {
                         .num_args(1),
                 ),
         )
+        .subcommand(agents::run_command())
         .subcommand(agents::command());
 
     #[cfg(feature = "developer-tools")]
