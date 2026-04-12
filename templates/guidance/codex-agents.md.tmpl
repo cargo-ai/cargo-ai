@@ -61,6 +61,13 @@ Use these for positioning, onboarding flow, and public examples:
 
 If these conflict with the local `.cargo-ai/guidance/` bundle, follow the local bundle for authoring behavior and validation rules.
 
+For account-hosted definitions, remember the current split:
+- direct interpreted run:
+  - `cargo ai account run <name>`
+  - `cargo ai account agents run <name> --owner-handle <handle>`
+- frozen/export path:
+  - `cargo ai account hatch <name>`
+
 ## Working Defaults
 
 - Prefer canonical `cargo ai hatch <agent-name> --config <config.json>` commands.

@@ -142,10 +142,11 @@ If you want a specific public handle, set it here. Otherwise, `cargo-ai.org` ass
 cargo ai account handle --set your-handle
 ```
 
-Once registered, you can push an agent definition to your account repository and hatch it locally:
+Once registered, you can push an agent definition to your account repository and then either run it directly through Cargo AI or hatch it locally:
 
 ```bash
 cargo ai account agents push adder_test.json --name adder_test
+cargo ai account run adder_test --profile openai-account
 cargo ai account agents hatch adder_test
 ```
 
