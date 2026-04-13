@@ -1,32 +1,29 @@
 //! Runtime behavior for `cargo ai hatch`.
 use clap::ArgMatches;
-use std::env;
 use std::path::{Path, PathBuf};
 
-enum HatchConfigSource {
-    LocalPath {
-        path: String,
-        #[cfg_attr(not(test), allow(dead_code))]
-        from_positional_shorthand: bool,
-    },
-    RegistryName(String),
-}
+use super::definition_source::{
+    current_lookup_dir, load_definition_contents, looks_like_local_path_input,
+    read_definition_json_from_stdin, resolve_definition_source_in_dir, AgentDefinitionSource,
+};
 
 struct HatchResolution {
     project_name: String,
-    config_source: HatchConfigSource,
+    source: AgentDefinitionSource,
 }
 
 fn presentation_from_resolution(
     resolution: &HatchResolution,
 ) -> super::hatch_pipeline::HatchPresentation {
-    let source = match &resolution.config_source {
-        HatchConfigSource::LocalPath { path, .. } => {
+    let source = match &resolution.source {
+        AgentDefinitionSource::LocalPath(path) => {
             super::hatch_pipeline::HatchSource::LocalFile { path: path.clone() }
         }
-        HatchConfigSource::RegistryName(name) => {
+        AgentDefinitionSource::RegistryName(name) => {
             super::hatch_pipeline::HatchSource::Registry { name: name.clone() }
         }
+        AgentDefinitionSource::InlineJson(_) => super::hatch_pipeline::HatchSource::InlineJson,
+        AgentDefinitionSource::StdinJson(_) => super::hatch_pipeline::HatchSource::StdinJson,
     };
 
     super::hatch_pipeline::HatchPresentation { source }
@@ -53,27 +50,6 @@ fn is_supported_project_name(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
 
-fn is_existing_json_file(path: &str) -> bool {
-    let p = Path::new(path);
-    p.is_file()
-        && p.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("json"))
-            .unwrap_or(false)
-}
-
-fn looks_like_local_path_input(input: &str) -> bool {
-    input.starts_with("./")
-        || input.starts_with("../")
-        || input.starts_with("~/")
-        || input.contains('/')
-        || input.contains('\\')
-        || input
-            .rsplit_once('.')
-            .map(|(_, ext)| ext.eq_ignore_ascii_case("json"))
-            .unwrap_or(false)
-}
-
 fn derive_project_name_from_json_path(path: &str) -> Result<String, String> {
     let stem = Path::new(path)
         .file_stem()
@@ -95,27 +71,18 @@ fn derive_project_name_from_json_path(path: &str) -> Result<String, String> {
     Ok(stem.to_string())
 }
 
-fn resolve_same_directory_json_fallback(name: &str, current_dir: &Path) -> Option<HatchResolution> {
-    let candidate = current_dir.join(format!("{name}.json"));
-    if !candidate.is_file() {
-        return None;
-    }
-
-    Some(HatchResolution {
-        project_name: name.to_string(),
-        config_source: HatchConfigSource::LocalPath {
-            path: candidate.to_string_lossy().to_string(),
-            from_positional_shorthand: true,
-        },
-    })
-}
-
 fn resolve_hatch_input_in_dir(
     name_or_path: &str,
     config_path: Option<&str>,
+    inline_json: Option<&str>,
+    stdin_json: Option<&str>,
     current_dir: &Path,
 ) -> Result<HatchResolution, String> {
-    if let Some(config_path) = config_path {
+    if let Some(source) = config_path
+        .map(|path| AgentDefinitionSource::LocalPath(path.to_string()))
+        .or_else(|| inline_json.map(|json| AgentDefinitionSource::InlineJson(json.to_string())))
+        .or_else(|| stdin_json.map(|json| AgentDefinitionSource::StdinJson(json.to_string())))
+    {
         if !is_supported_project_name(name_or_path) {
             return Err(format!(
                 "Agent name '{}' is invalid. Use only letters, numbers, '-' or '_'.",
@@ -125,65 +92,40 @@ fn resolve_hatch_input_in_dir(
 
         return Ok(HatchResolution {
             project_name: name_or_path.to_string(),
-            config_source: HatchConfigSource::LocalPath {
-                path: config_path.to_string(),
-                from_positional_shorthand: false,
-            },
+            source,
         });
     }
 
-    if looks_like_local_path_input(name_or_path) {
-        if is_existing_json_file(name_or_path) {
-            let derived_project_name = derive_project_name_from_json_path(name_or_path)?;
-            return Ok(HatchResolution {
-                project_name: derived_project_name,
-                config_source: HatchConfigSource::LocalPath {
-                    path: name_or_path.to_string(),
-                    from_positional_shorthand: true,
-                },
-            });
+    let source = resolve_definition_source_in_dir(name_or_path, current_dir, "hatch")?;
+    let project_name = match &source {
+        AgentDefinitionSource::LocalPath(local_path)
+            if looks_like_local_path_input(name_or_path) =>
+        {
+            derive_project_name_from_json_path(local_path)?
         }
-
-        let path = Path::new(name_or_path);
-        if !path.exists() {
-            return Err(format!(
-                "Local config path '{}' was not found. Use an existing .json file, or use `cargo ai hatch <name>` for a registry template.",
-                name_or_path
-            ));
-        }
-
-        if !path.is_file() {
-            return Err(format!(
-                "Local config path '{}' is not a file. Provide a .json file path, or use `cargo ai hatch <name>` for a registry template.",
-                name_or_path
-            ));
-        }
-
-        return Err(format!(
-            "Local config path '{}' must point to a .json file. Use `cargo ai hatch <name> --config <path-to-json>` for explicit naming.",
-            name_or_path
-        ));
-    }
-
-    if let Some(local_resolution) = resolve_same_directory_json_fallback(name_or_path, current_dir)
-    {
-        return Ok(local_resolution);
-    }
+        _ => name_or_path.to_string(),
+    };
 
     Ok(HatchResolution {
-        project_name: name_or_path.to_string(),
-        config_source: HatchConfigSource::RegistryName(name_or_path.to_string()),
+        project_name,
+        source,
     })
 }
 
 fn resolve_hatch_input(
     name_or_path: &str,
     config_path: Option<&str>,
+    inline_json: Option<&str>,
+    stdin_json: Option<&str>,
 ) -> Result<HatchResolution, String> {
-    let current_dir = env::current_dir().map_err(|error| {
-        format!("Unable to resolve the current directory for local hatch lookup: {error}")
-    })?;
-    resolve_hatch_input_in_dir(name_or_path, config_path, &current_dir)
+    let current_dir = current_lookup_dir("hatch")?;
+    resolve_hatch_input_in_dir(
+        name_or_path,
+        config_path,
+        inline_json,
+        stdin_json,
+        &current_dir,
+    )
 }
 
 /// Executes the `hatch` command flow from parsed CLI arguments.
@@ -211,9 +153,22 @@ pub fn run(sub_m: &ArgMatches) -> bool {
             return false;
         }
     };
+    let stdin_json = if sub_m.get_flag("stdin") {
+        match read_definition_json_from_stdin() {
+            Ok(json) => Some(json),
+            Err(error) => {
+                eprintln!("x {error}");
+                return false;
+            }
+        }
+    } else {
+        None
+    };
     let resolution = match resolve_hatch_input(
         name_or_path,
         sub_m.get_one::<String>("config").map(String::as_str),
+        sub_m.get_one::<String>("json").map(String::as_str),
+        stdin_json.as_deref(),
     ) {
         Ok(resolution) => resolution,
         Err(error) => {
@@ -230,32 +185,11 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         super::hatch_pipeline::HatchProgressStep::PreparingDefinition,
     );
 
-    let file_contents = match resolution.config_source {
-        HatchConfigSource::LocalPath {
-            path,
-            from_positional_shorthand: _,
-        } => match super::hatch_pipeline::read_local_config(&path) {
-            Ok(contents) => contents,
-            Err(e) => {
-                println!("x Failed to read local config file '{}'.", path);
-                println!("Reason: {e}");
-                println!("Hint: Ensure the path is valid and points to a UTF-8 JSON file.");
-                return false;
-            }
-        },
-        HatchConfigSource::RegistryName(registry_name) => {
-            match super::hatch_pipeline::fetch_from_registry(&registry_name) {
-                Ok(contents) => contents,
-                Err(e) => {
-                    println!(
-                        "x Failed to fetch agent configuration for '{}' from Cargo-AI registry.",
-                        registry_name
-                    );
-                    println!("Reason: {e}");
-                    println!("Hint: Ensure the agent name exists in the Cargo-AI registry or provide --config <path-to-json>.");
-                    return false;
-                }
-            }
+    let file_contents = match load_definition_contents(&resolution.source) {
+        Ok(contents) => contents,
+        Err(error) => {
+            println!("x {error}");
+            return false;
         }
     };
 
@@ -277,8 +211,9 @@ pub fn run(sub_m: &ArgMatches) -> bool {
 mod tests {
     use super::{
         mode_from_check_flag, resolve_hatch_input, resolve_hatch_input_in_dir,
-        resolve_local_output_dir, HatchConfigSource,
+        resolve_local_output_dir,
     };
+    use crate::commands::definition_source::AgentDefinitionSource;
     use crate::commands::hatch_pipeline::HatchMode;
     use clap::{Arg, ArgMatches, Command};
     use std::fs;
@@ -336,20 +271,14 @@ mod tests {
             .expect("test file should be writable");
 
         let resolution =
-            resolve_hatch_input(&config_path, None).expect("resolution should succeed");
+            resolve_hatch_input(&config_path, None, None, None).expect("resolution should succeed");
         assert!(resolution
             .project_name
             .starts_with("cargo-ai-hatch-test-adder_test-"));
-        match resolution.config_source {
-            HatchConfigSource::LocalPath {
-                path,
-                from_positional_shorthand,
-            } => {
-                assert_eq!(path, config_path);
-                assert!(from_positional_shorthand);
-            }
-            HatchConfigSource::RegistryName(_) => panic!("expected local path resolution"),
-        }
+        assert_eq!(
+            resolution.source,
+            AgentDefinitionSource::LocalPath(config_path.clone())
+        );
 
         let _ = fs::remove_file(config_path);
     }
@@ -360,7 +289,7 @@ mod tests {
         fs::write(&config_path, r#"{"version":"2026-03-03.r1"}"#)
             .expect("test file should be writable");
 
-        let err = match resolve_hatch_input(&config_path, None) {
+        let err = match resolve_hatch_input(&config_path, None, None, None) {
             Ok(_) => panic!("resolution should fail"),
             Err(err) => err,
         };
@@ -372,30 +301,56 @@ mod tests {
 
     #[test]
     fn explicit_config_keeps_positional_name() {
-        let resolution = resolve_hatch_input("adder_custom", Some("./adder.json"))
+        let resolution = resolve_hatch_input("adder_custom", Some("./adder.json"), None, None)
             .expect("resolution should succeed");
         assert_eq!(resolution.project_name, "adder_custom");
-        match resolution.config_source {
-            HatchConfigSource::LocalPath {
-                path,
-                from_positional_shorthand,
-            } => {
-                assert_eq!(path, "./adder.json");
-                assert!(!from_positional_shorthand);
-            }
-            HatchConfigSource::RegistryName(_) => panic!("expected local path resolution"),
-        }
+        assert_eq!(
+            resolution.source,
+            AgentDefinitionSource::LocalPath("./adder.json".to_string())
+        );
+    }
+
+    #[test]
+    fn explicit_inline_json_keeps_positional_name() {
+        let resolution = resolve_hatch_input(
+            "adder_custom",
+            None,
+            Some(r#"{"version":"2026-03-03.r1"}"#),
+            None,
+        )
+        .expect("inline json resolution should succeed");
+        assert_eq!(resolution.project_name, "adder_custom");
+        assert_eq!(
+            resolution.source,
+            AgentDefinitionSource::InlineJson(r#"{"version":"2026-03-03.r1"}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn explicit_stdin_json_keeps_positional_name() {
+        let resolution = resolve_hatch_input(
+            "adder_custom",
+            None,
+            None,
+            Some(r#"{"version":"2026-03-03.r1"}"#),
+        )
+        .expect("stdin json resolution should succeed");
+        assert_eq!(resolution.project_name, "adder_custom");
+        assert_eq!(
+            resolution.source,
+            AgentDefinitionSource::StdinJson(r#"{"version":"2026-03-03.r1"}"#.to_string())
+        );
     }
 
     #[test]
     fn default_resolution_uses_registry_name() {
-        let resolution =
-            resolve_hatch_input("adder_registry", None).expect("resolution should succeed");
+        let resolution = resolve_hatch_input("adder_registry", None, None, None)
+            .expect("resolution should succeed");
         assert_eq!(resolution.project_name, "adder_registry");
-        match resolution.config_source {
-            HatchConfigSource::RegistryName(name) => assert_eq!(name, "adder_registry"),
-            HatchConfigSource::LocalPath { .. } => panic!("expected registry resolution"),
-        }
+        assert_eq!(
+            resolution.source,
+            AgentDefinitionSource::RegistryName("adder_registry".to_string())
+        );
     }
 
     #[test]
@@ -406,19 +361,13 @@ mod tests {
         fs::write(&local_config, r#"{"version":"2026-03-03.r1"}"#)
             .expect("local config should be writable");
 
-        let resolution = resolve_hatch_input_in_dir("adder_test", None, &temp_dir)
+        let resolution = resolve_hatch_input_in_dir("adder_test", None, None, None, &temp_dir)
             .expect("resolution should succeed");
         assert_eq!(resolution.project_name, "adder_test");
-        match resolution.config_source {
-            HatchConfigSource::LocalPath {
-                path,
-                from_positional_shorthand,
-            } => {
-                assert_eq!(path, local_config.to_string_lossy().to_string());
-                assert!(from_positional_shorthand);
-            }
-            HatchConfigSource::RegistryName(_) => panic!("expected local path resolution"),
-        }
+        assert_eq!(
+            resolution.source,
+            AgentDefinitionSource::LocalPath(local_config.to_string_lossy().to_string())
+        );
 
         remove_temp_dir_if_present(&temp_dir);
     }
@@ -428,20 +377,20 @@ mod tests {
         let temp_dir = temp_dir_path("registry-fallback");
         fs::create_dir_all(&temp_dir).expect("temp dir should be writable");
 
-        let resolution = resolve_hatch_input_in_dir("adder_test", None, &temp_dir)
+        let resolution = resolve_hatch_input_in_dir("adder_test", None, None, None, &temp_dir)
             .expect("resolution should succeed");
         assert_eq!(resolution.project_name, "adder_test");
-        match resolution.config_source {
-            HatchConfigSource::RegistryName(name) => assert_eq!(name, "adder_test"),
-            HatchConfigSource::LocalPath { .. } => panic!("expected registry resolution"),
-        }
+        assert_eq!(
+            resolution.source,
+            AgentDefinitionSource::RegistryName("adder_test".to_string())
+        );
 
         remove_temp_dir_if_present(&temp_dir);
     }
 
     #[test]
     fn local_intent_path_without_json_fails_fast() {
-        let err = match resolve_hatch_input("~/Developer/cargo-ai/adder_test", None) {
+        let err = match resolve_hatch_input("~/Developer/cargo-ai/adder_test", None, None, None) {
             Ok(_) => panic!("resolution should fail"),
             Err(err) => err,
         };
@@ -451,7 +400,7 @@ mod tests {
 
     #[test]
     fn missing_json_shorthand_fails_fast() {
-        let err = match resolve_hatch_input("missing_agent_config.json", None) {
+        let err = match resolve_hatch_input("missing_agent_config.json", None, None, None) {
             Ok(_) => panic!("resolution should fail"),
             Err(err) => err,
         };

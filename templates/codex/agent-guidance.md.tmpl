@@ -22,6 +22,12 @@ This project is scaffolded for Cargo-AI agent development. Keep edits determinis
 - `.cargo-ai/docs/hatch-check-loop.md`
 - `.cargo-ai/examples/invalid/agent-logic-invalid-var.json` (intentionally invalid for fail-fast validation demonstrations)
 
+## Hosted Account Flows
+- When the user is asking about a definition already stored in their Cargo AI account, mention the direct interpreted run path:
+  - `cargo ai account run <name>`
+  - `cargo ai account agents run <name> --owner-handle <handle>`
+- Keep `cargo ai account hatch <name>` as the frozen/export path for hosted definitions.
+
 ## Codex-Specific Guidance
 - Use canonical `--config` commands; do not rely on shorthand command forms.
 - Keep changes focused on the target agent config and supporting docs.

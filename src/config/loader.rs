@@ -2,25 +2,12 @@ use crate::config::schema::{Config, Profile};
 use std::fs;
 use std::path::PathBuf;
 
-fn resolve_config_path(cargo_home: Option<PathBuf>, home_dir: Option<PathBuf>) -> PathBuf {
-    if let Some(cargo_home) = cargo_home {
-        return cargo_home.join(".cargo-ai/config.toml");
-    }
-
-    if let Some(home_dir) = home_dir {
-        return home_dir.join(".cargo/.cargo-ai/config.toml");
-    }
-
-    // Last-resort fallback for constrained environments where neither CARGO_HOME nor
-    // HOME can be resolved. This avoids panic and keeps path behavior deterministic.
-    PathBuf::from(".cargo/.cargo-ai/config.toml")
+fn resolve_config_path(cargo_ai_root: PathBuf) -> PathBuf {
+    cargo_ai_root.join("config.toml")
 }
 
 pub fn config_path() -> PathBuf {
-    resolve_config_path(
-        std::env::var_os("CARGO_HOME").map(PathBuf::from),
-        dirs::home_dir(),
-    )
+    resolve_config_path(crate::config::paths::cargo_ai_root())
 }
 
 pub fn load_config() -> Option<Config> {
@@ -43,29 +30,9 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn prefers_cargo_home_when_present() {
-        let path = resolve_config_path(
-            Some(PathBuf::from("/tmp/cargo-home")),
-            Some(PathBuf::from("/Users/example")),
-        );
+    fn joins_config_file_under_resolved_root() {
+        let path = resolve_config_path(PathBuf::from("/tmp/cargo-ai-home"));
 
-        assert_eq!(path, PathBuf::from("/tmp/cargo-home/.cargo-ai/config.toml"));
-    }
-
-    #[test]
-    fn falls_back_to_home_dir_when_cargo_home_missing() {
-        let path = resolve_config_path(None, Some(PathBuf::from("/Users/example")));
-
-        assert_eq!(
-            path,
-            PathBuf::from("/Users/example/.cargo/.cargo-ai/config.toml")
-        );
-    }
-
-    #[test]
-    fn falls_back_to_relative_path_when_no_home_context_exists() {
-        let path = resolve_config_path(None, None);
-
-        assert_eq!(path, PathBuf::from(".cargo/.cargo-ai/config.toml"));
+        assert_eq!(path, PathBuf::from("/tmp/cargo-ai-home/config.toml"));
     }
 }

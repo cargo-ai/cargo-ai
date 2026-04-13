@@ -1,0 +1,91 @@
+name: Windows Runtime Artifact
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  WINDOWS_PREVIEW_TAG: windows-preview
+  WINDOWS_PREVIEW_TITLE: Windows Preview (Unsigned)
+
+on:
+  push:
+    branches:
+      - develop
+      - CAI-2078-interpreted-run-mode-and-packaged-cargo-ai-distribution
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build_windows_runtime_artifact:
+    name: Build Windows Runtime Artifact
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build runtime-only Windows binary
+        run: cargo build --release --no-default-features --target x86_64-pc-windows-msvc
+
+      - name: Stage runtime artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist/windows-runtime" | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/cargo-ai.exe" "dist/windows-runtime/cargo-ai.exe" -Force
+
+      - name: Package runtime artifact zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/windows-runtime/cargo-ai.exe" -DestinationPath "dist/cargo-ai-windows-x86_64.zip" -Force
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-ai-windows-x86_64
+          path: dist/cargo-ai-windows-x86_64.zip
+          if-no-files-found: error
+
+      - name: Update rolling preview tag
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -fa "$WINDOWS_PREVIEW_TAG" -m "$WINDOWS_PREVIEW_TITLE (${GITHUB_SHA})" "$GITHUB_SHA"
+          git push --force origin "refs/tags/$WINDOWS_PREVIEW_TAG"
+
+      - name: Prepare prerelease notes
+        shell: bash
+        run: |
+          cat > dist/windows-preview-notes.md <<EOF
+          # Windows Preview (Unsigned)
+
+          This is a rolling unsigned Windows preview build of Cargo AI.
+
+          - Commit: \`${GITHUB_SHA}\`
+          - Branch: \`${GITHUB_REF_NAME}\`
+          - Workflow run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          Windows may show Unknown Publisher or SmartScreen warnings until signing is added.
+          EOF
+
+      - name: Publish rolling prerelease asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          asset="dist/cargo-ai-windows-x86_64.zip"
+          notes="dist/windows-preview-notes.md"
+
+          if gh release view "$WINDOWS_PREVIEW_TAG" >/dev/null 2>&1; then
+            gh release edit "$WINDOWS_PREVIEW_TAG" --title "$WINDOWS_PREVIEW_TITLE" --notes-file "$notes"
+            gh release upload "$WINDOWS_PREVIEW_TAG" "$asset" --clobber
+          else
+            gh release create "$WINDOWS_PREVIEW_TAG" "$asset" --title "$WINDOWS_PREVIEW_TITLE" --notes-file "$notes" --prerelease
+          fi

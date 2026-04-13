@@ -20,7 +20,15 @@ struct CredentialsFile {
     profile_tokens: BTreeMap<String, String>,
 }
 
-fn resolve_credentials_path(cargo_home: Option<PathBuf>, home_dir: Option<PathBuf>) -> PathBuf {
+fn resolve_credentials_path(
+    cargo_ai_home: Option<PathBuf>,
+    cargo_home: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(cargo_ai_home) = cargo_ai_home {
+        return cargo_ai_home.join("credentials.toml");
+    }
+
     if let Some(cargo_home) = cargo_home {
         return cargo_home.join(".cargo-ai/credentials.toml");
     }
@@ -34,6 +42,7 @@ fn resolve_credentials_path(cargo_home: Option<PathBuf>, home_dir: Option<PathBu
 
 fn credentials_path() -> PathBuf {
     resolve_credentials_path(
+        std::env::var_os("CARGO_AI_HOME").map(PathBuf::from),
         std::env::var_os("CARGO_HOME").map(PathBuf::from),
         dirs::home_dir(),
     )

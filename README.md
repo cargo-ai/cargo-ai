@@ -8,7 +8,7 @@ Build AI-powered CLI tools from a single JSON definition.
 
 Define declarative agents in JSON, hatch native executables locally, and share them in minutes.
 
-Cargo AI is an open-source CLI for building auditable AI-powered CLI tools from a single JSON definition. Define inputs, schema, and actions once, hatch a native executable with `cargo ai hatch`, then inspect, run, and share it on your terms.
+Cargo AI is an open-source CLI for building auditable AI-powered CLI tools from a single JSON definition. Define inputs, schema, and actions once, run the JSON directly with `cargo ai run --config`, or hatch a native executable with `cargo ai hatch`, then inspect, run, and share it on your terms.
 
 ```bash
 cargo ai hatch agent_x
@@ -35,30 +35,26 @@ A concise JSON definition keeps the agent easy to read, review, diff, and improv
 
 ## Quick Start
 
-### 0. Install Cargo
+### 0. Install Cargo AI
 
-Cargo AI requires Rust and Cargo. If you do not already have them, install Rust with `rustup` using the official guide for macOS, Linux, or Windows. This usually takes a few minutes.
+The preferred install path today is Cargo-based.
 
-Official install guide: [Install Rust](https://rust-lang.org/tools/install/)
+If you do not already have Rust and Cargo, install them with `rustup` first using the official guide:
 
-After installation, verify Cargo is available:
+- [Install Rust](https://rust-lang.org/tools/install/)
 
-```bash
-cargo --version
-```
-
-### 1. Install `cargo-ai`
+Then install Cargo AI:
 
 ```bash
 cargo install cargo-ai --locked
 cargo ai --help
 ```
 
-Cargo AI uses a product-oriented pre-`1.0.0` release policy: `0.y.0` means meaningful product/contract evolution, while `0.y.z` is reserved for smaller fixes and polish. See [VERSIONING.md](./VERSIONING.md) for the public versioning policy.
+Full install guidance, PATH details, and current platform posture live under [docs/install](./docs/install/README.md). The step-by-step Cargo workflow is here: [Install with Cargo](./docs/install/cargo.md).
 
-Upgrades remain manual via `cargo install cargo-ai --locked`. After a meaningful pre-`1.0.0` upgrade such as `0.1.0 -> 0.2.0`, generated agents may report that they are out of sync with local Cargo AI metadata until they are re-hatched.
+By default, Cargo AI stores config, credentials, and internal workspaces under `~/.cargo/.cargo-ai` (or `$CARGO_HOME/.cargo-ai`). Set `CARGO_AI_HOME` if you want Cargo AI to use a different root directory. See [Cargo AI Home](./docs/cargo-ai-home.md) for the full resolution order, stored state, and first-run behavior.
 
-### 2. Choose your model setup
+### 1. Choose your model setup
 
 **Option A: recommended if you use ChatGPT Plus or above**
 
@@ -111,7 +107,18 @@ cargo ai profile add ollama \
   --default
 ```
 
-### 3. Hatch a sample agent
+### 2. Run a sample agent directly
+
+```bash
+cargo ai run adder_test --profile openai-account
+```
+
+You can also run a local definition with `cargo ai run ./adder_test.json` or
+`cargo ai run --config ./adder_test.json`. For inline or scripted flows, you
+can also use `cargo ai run --json '<agent-definition-json>'` or
+`cat ./adder_test.json | cargo ai run --stdin`.
+
+### 3. Hatch the same sample as a standalone executable
 
 ```bash
 cargo ai hatch adder_test
@@ -137,10 +144,11 @@ If you want a specific public handle, set it here. Otherwise, `cargo-ai.org` ass
 cargo ai account handle --set your-handle
 ```
 
-Once registered, you can push an agent definition to your account repository and hatch it locally:
+Once registered, you can push an agent definition to your account repository and then either run it directly through Cargo AI or hatch it locally:
 
 ```bash
 cargo ai account agents push adder_test.json --name adder_test
+cargo ai account run adder_test --profile openai-account
 cargo ai account agents hatch adder_test
 ```
 
@@ -198,11 +206,24 @@ A minimal agent looks like this:
 }
 ```
 
-That JSON becomes a compiled local executable through:
+That JSON can run directly through Cargo AI:
+
+```bash
+cargo ai run ./my_agent.json --profile openai-account
+```
+
+Or it can become a compiled local executable through:
 
 ```bash
 cargo ai hatch my_agent --config ./my_agent.json
 ./my_agent
+```
+
+Inline and stdin definition sources work there too:
+
+```bash
+cargo ai hatch my_agent --json '<agent-definition-json>'
+cat ./my_agent.json | cargo ai hatch my_agent --stdin
 ```
 
 For Windows users, run `my_agent.exe` or just `my_agent`.
@@ -273,7 +294,7 @@ You can also author a structural action-only worker by leaving `agent_schema.pro
       "run": [
         {
           "kind": "agent",
-          "agent": "./child_renderer",
+          "artifact": "./child_renderer",
           "inputs": [
             { "input": "menu_image" },
             { "type": "text", "text": "Create the launch image." }
@@ -580,7 +601,7 @@ Then expand into multiple action types:
       "run": [
         {
           "kind": "agent",
-          "agent": "./child_reporter",
+          "artifact": "./child_reporter",
           "inputs": [
             {
               "type": "text",
@@ -608,7 +629,7 @@ Top-level actions run `sequential`ly by default. If you want matching top-level 
 
 That only changes scheduling across top-level actions. Each individual action still keeps its own `run` list in order, and a hard failure in one top-level action no longer prevents later eligible top-level actions from running. Cargo AI aggregates those top-level hard failures after all eligible actions finish.
 
-Cargo AI prints one root `using:` line near run start that shows the effective `profile`, `auth`, `server`, and `model` for that invocation. It only adds `url=...` when the effective URL is custom or materially different from the standard transport. Cargo AI also prints one run-level mode header before actions start. When output is redirected, piped, or running in simpler terminals, it prefixes parent-visible action output with deterministic labels such as `[Action 1: first_action]`, long-running steps emit a step-start liveness line such as `step 2/2 generate_image started; waiting for provider response...`, and terminal lane summaries plus the root run footer include wall-clock durations such as `completed in 31s.` and `✅ Run complete in 32s.`. When attached directly to an interactive terminal, it switches to a compact live dashboard that groups each action by label, running or terminal status with elapsed time, terminal step marker/current step, and the last high-level lifecycle message only. Child-agent steps stay minimal in the parent view with start/completion or exit summaries instead of recursively inlining child detail.
+Cargo AI prints one root `using:` line near run start that shows the effective `profile`, `auth`, `server`, and `model` for that invocation. When a profile seeds the invocation, it also prints `loaded profile: ...`, and when CLI flags replace profile-sourced values, it prints `applied overrides: ...` before the final `using:` line. It only adds `url=...` when the effective URL is custom or materially different from the standard transport. Cargo AI also prints one run-level mode header before actions start. When output is redirected, piped, or running in simpler terminals, it prefixes parent-visible action output with deterministic labels such as `[Action 1: first_action]`, long-running steps emit a step-start liveness line such as `step 2/2 generate_image started; waiting for provider response...`, and terminal lane summaries plus the root run footer include wall-clock durations such as `completed · 31s` and `Run complete · 32s total`. Short runs now stay millisecond-aware instead of collapsing to `0s`. The root completion footer is separated from action lanes by a blank line so it reads as a run-level summary instead of another action row. When attached directly to an interactive terminal, it switches to a compact live dashboard that groups each action by label, running or terminal status with elapsed time, terminal step marker/current step, and the last high-level lifecycle message only. Child-agent steps stay minimal in the parent view with start/completion or exit summaries instead of recursively inlining child detail.
 
 Use `--render-mode auto|live|append-only` to control that behavior explicitly:
 - `auto` preserves the current terminal-sensitive default
@@ -666,7 +687,7 @@ Then expand into a multi-step workflow:
     {
       "kind": "agent",
       "when": { "==": [ { "var": "save_status" }, "failed" ] },
-      "agent": "./child_reporter",
+      "artifact": "./child_reporter",
       "inputs": [
         {
           "type": "text",
@@ -688,7 +709,7 @@ Use `run` to sequence multiple side effects in order. `exec` steps can capture o
 
 `generate_image.model` is optional. If omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override. If neither the step nor the invocation provides a model, the run fails clearly instead of guessing. When the image step should use a different model from the main invocation, set `generate_image.model` explicitly as either a literal string or a single variable reference. Prefer a runtime-backed string such as `{ "var": "runtime.hero_image_model" }` when the operator should choose the image model at invocation time. Top-level string schema fields may also drive `generate_image.model`, but captured step variables may not.
 
-`generate_image` and child `agent` steps also accept an optional step-level `profile`. Use it when one step should resolve its provider/model/url/token context differently from the parent invocation. For `generate_image`, explicit `model` still wins, then the step-profile model, then the parent invocation model. That means a parent agent may stay on OpenAI while one `generate_image` step switches to an Ollama profile. For child `agent` steps, the resolved profile is forwarded to the child as `--profile <name>`.
+`generate_image` and child `agent` steps also accept an optional step-level `profile`. Use it when one step should resolve its provider/model/url/token context differently from the parent invocation. For `generate_image`, explicit `model` still wins, then the step-profile model, then the parent invocation model. That means a parent agent may stay on OpenAI while one `generate_image` step switches to an Ollama profile. For child `agent` steps, the resolved profile is forwarded to the child as `--profile <name>`. Use `artifact: "./child_reporter"` for a direct child executable or `artifact: "./child_reporter.json"` to run that child through Cargo AI.
 
 Cargo AI always prints one root `using:` line near run start. In append-only output, it also prints another action-prefixed `using:` line when a provider-backed or child-agent step changes the effective `profile`, `auth`, `server`, or `model`. Interactive live mode keeps the parent dashboard at the orchestration level and does not surface child or step-level `using:` lines there.
 
@@ -748,7 +769,7 @@ Example:
 ```json
 {
   "kind": "agent",
-  "agent": "./child_reporter",
+  "artifact": "./child_reporter",
   "profile": { "var": "runtime.child_profile" },
   "run_vars": {
     "year": { "var": "runtime.year" },
@@ -798,10 +819,33 @@ In that case, the root model input list is replaced by the runtime text, but chi
 
 ## Build In Any Editor
 
-You can build a `cargo-ai` agent in any editor you want. If you want to check whether the definition is valid before exporting a binary, run:
+You can build a `cargo-ai` agent in any editor you want. If you want the fastest execution loop while editing, run the JSON directly:
+
+```bash
+cargo ai run --config ./my_agent.json --profile openai-account
+```
+
+The supported definition-source options are:
+
+```bash
+cargo ai run ./my_agent.json --profile openai-account
+cargo ai run --config ./my_agent.json --profile openai-account
+cargo ai run --json '<agent-definition-json>' --profile openai-account
+cat ./my_agent.json | cargo ai run --stdin --profile openai-account
+```
+
+If you want to check whether the definition is valid before exporting a binary, run:
 
 ```bash
 cargo ai hatch my_agent --config ./my_agent.json --check
+```
+
+Those same definition-source options also work with hatch:
+
+```bash
+cargo ai hatch my_agent --config ./my_agent.json --check
+cargo ai hatch my_agent --json '<agent-definition-json>' --check
+cat ./my_agent.json | cargo ai hatch my_agent --stdin --check
 ```
 
 If your config file already matches the agent name, the shorthand works too:
@@ -842,6 +886,7 @@ Cargo AI works best when the definition stays small, understandable, and easy to
 After registration, you can use Cargo AI as more than a local hatching tool:
 
 - store and retrieve agent definitions through your account
+- run hosted definitions directly through the interpreted runtime
 - hatch from your own hosted definitions
 - hatch public definitions from another owner's handle
 - use account-aware email workflows
@@ -849,8 +894,14 @@ After registration, you can use Cargo AI as more than a local hatching tool:
 Examples:
 
 ```bash
+# Run your own hosted definition directly
+cargo ai account run weather_test --profile my_profile
+
 # Hatch your own hosted definition
 cargo ai account hatch weather_test
+
+# Run a public definition from another handle
+cargo ai account agents run weather_test --owner-handle alice --profile my_profile
 
 # Validate scaffold and compile path without exporting a binary
 cargo ai account hatch weather_test --check

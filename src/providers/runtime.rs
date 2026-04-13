@@ -17,10 +17,17 @@ pub(crate) trait ValidatedResponse {
     fn validate_response(&self) -> Result<(), String>;
 }
 
+impl ValidatedResponse for serde_json::Value {
+    fn validate_response(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub struct Cargo<T: for<'de> Deserialize<'de> + Serialize + Clone + ValidatedResponse> {
     inputs: Vec<ContentPart>,
     context: String,
+    #[cfg_attr(not(test), allow(dead_code))]
     response: Option<T>,
 } // TODO: Hints
 
@@ -50,6 +57,7 @@ impl<T: for<'de> Deserialize<'de> + Serialize + Clone + ValidatedResponse> Cargo
         content_parts
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_response(&mut self, response: String) -> bool {
         match serde_json::from_str::<T>(&response) {
             Ok(response) => match response.validate_response() {
@@ -70,6 +78,7 @@ impl<T: for<'de> Deserialize<'de> + Serialize + Clone + ValidatedResponse> Cargo
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn get_response(&self) -> Option<T> {
         self.response.clone()
     }

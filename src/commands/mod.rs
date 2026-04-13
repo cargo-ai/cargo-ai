@@ -5,12 +5,15 @@ pub mod account;
 pub mod add;
 pub mod auth;
 pub mod credentials;
+pub mod definition_source;
+#[cfg(feature = "developer-tools")]
 pub mod hatch;
 pub mod hatch_pipeline;
 pub mod init;
 pub mod new;
-pub mod preflight;
-pub mod preflight_actions;
 pub mod profile;
+pub mod run;
+pub mod runtime;
+pub mod runtime_actions;
 pub mod scaffold;
 pub mod version;

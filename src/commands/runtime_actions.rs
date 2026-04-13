@@ -1,4 +1,4 @@
-//! Action execution helpers for preflight/test flows.
+//! Action execution helpers for interpreted runtime flows.
 use crate::config::adder::set_account_tokens;
 use crate::config::loader::{config_path, find_profile, load_config};
 use crate::config::schema::ProfileAuthMode;
@@ -8,7 +8,7 @@ use crate::infra_api;
 use jsonlogic::apply;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, IsTerminal, Write};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,7 +30,7 @@ tokio::task_local! {
 }
 
 #[derive(Clone)]
-struct ActionOutput {
+pub(crate) struct ActionOutput {
     inner: Arc<Mutex<ActionOutputState>>,
     live_refresh_stop: Arc<AtomicBool>,
 }
@@ -52,6 +52,9 @@ struct ActionOutputState {
     mode: ActionOutputMode,
     startup_notice: Option<&'static str>,
     action_execution: crate::ActionExecutionMode,
+    run_started_at: Instant,
+    run_finished_after: Option<Duration>,
+    header_rendered: bool,
     rendered_lines: usize,
     lanes: BTreeMap<usize, ActionLaneState>,
     last_using_line: Option<String>,
@@ -81,30 +84,41 @@ enum ActionLaneStatus {
     Skipped,
 }
 
+enum ChildArtifactInvocation {
+    DirectExecutable(PathBuf),
+    CargoSubcommand,
+    StandaloneCargoAi,
+}
+
 impl ActionOutput {
-    fn new(
+    pub(crate) fn new(
         action_execution: crate::ActionExecutionMode,
         requested_mode: RequestedActionRenderMode,
+        run_started_at: Instant,
     ) -> Self {
         let (mode, startup_notice) =
             resolve_action_render_mode_for_capability(requested_mode, live_dashboard_supported());
-        Self::new_for_mode_with_notice(action_execution, mode, startup_notice)
+        Self::new_for_mode_with_notice(action_execution, mode, startup_notice, run_started_at)
     }
 
     #[cfg(test)]
     fn new_for_mode(action_execution: crate::ActionExecutionMode, mode: ActionOutputMode) -> Self {
-        Self::new_for_mode_with_notice(action_execution, mode, None)
+        Self::new_for_mode_with_notice(action_execution, mode, None, Instant::now())
     }
 
     fn new_for_mode_with_notice(
         action_execution: crate::ActionExecutionMode,
         mode: ActionOutputMode,
         startup_notice: Option<&'static str>,
+        run_started_at: Instant,
     ) -> Self {
         let inner = Arc::new(Mutex::new(ActionOutputState {
             mode,
             startup_notice,
             action_execution,
+            run_started_at,
+            run_finished_after: None,
+            header_rendered: false,
             rendered_lines: 0,
             lanes: BTreeMap::new(),
             last_using_line: None,
@@ -117,20 +131,24 @@ impl ActionOutput {
         }
     }
 
-    fn print_execution_header(&self) {
+    pub(crate) fn print_execution_header(&self) {
         self.with_state(|state| {
             if let Some(notice) = state.startup_notice.take() {
                 println!("{notice}");
             }
             if state.mode == ActionOutputMode::AppendOnly {
+                if state.header_rendered {
+                    return;
+                }
                 println!("{}", action_execution_header(state.action_execution));
             } else {
                 render_live_dashboard(state);
             }
+            state.header_rendered = true;
         });
     }
 
-    fn seed_using_line(&self, using_line: &str) {
+    pub(crate) fn seed_using_line(&self, using_line: &str) {
         self.with_state(|state| {
             state.last_using_line = Some(using_line.to_string());
         });
@@ -224,10 +242,10 @@ impl ActionOutput {
                 lane.step_started_at = None;
                 lane.lane_finished_after =
                     lane.lane_started_at.map(|started_at| started_at.elapsed());
-                lane.last_message = Some(format!("{}.", summary));
+                lane.last_message = Some(summary.to_string());
                 if append_only {
                     Some(format!(
-                        "{} in {}.",
+                        "{} · {}",
                         summary,
                         format_elapsed_duration(
                             lane.lane_finished_after
@@ -265,7 +283,7 @@ impl ActionOutput {
                 push_lane_output_message(lane, error);
                 if append_only {
                     Some(format!(
-                        "failed in {}.",
+                        "failed · {}",
                         format_elapsed_duration(
                             lane.lane_finished_after
                                 .unwrap_or_else(|| Duration::from_secs(0))
@@ -302,7 +320,7 @@ impl ActionOutput {
                 push_lane_output_message(lane, error);
                 if append_only {
                     Some(format!(
-                        "abort requested in {}: {}",
+                        "abort requested · {}: {}",
                         format_elapsed_duration(
                             lane.lane_finished_after
                                 .unwrap_or_else(|| Duration::from_secs(0))
@@ -344,6 +362,7 @@ impl ActionOutput {
         self.live_refresh_stop.store(true, Ordering::Relaxed);
         self.with_state(|state| {
             if state.mode == ActionOutputMode::Live {
+                state.run_finished_after = Some(state.run_started_at.elapsed());
                 render_live_dashboard(state);
                 let _ = writeln!(io::stdout());
                 let _ = io::stdout().flush();
@@ -371,7 +390,13 @@ impl ActionOutput {
 
 impl ActionOutputState {
     fn snapshot_lines(&self) -> Vec<String> {
-        let mut lines = vec![action_execution_header(self.action_execution).to_string()];
+        let mut lines = vec![run_header_line(
+            self.action_execution,
+            match self.mode {
+                ActionOutputMode::AppendOnly => None,
+                ActionOutputMode::Live => self.run_elapsed_duration(),
+            },
+        )];
 
         for (lane_index, lane) in &self.lanes {
             lines.push(String::new());
@@ -381,13 +406,17 @@ impl ActionOutputState {
                 lane_status_label(lane)
             ));
             lines.push(format!("  step: {}", lane_step_label(lane)));
-            lines.push(format!(
-                "  last: {}",
-                lane.last_message.as_deref().unwrap_or("-")
-            ));
+            if let Some(last_message) = lane_last_message(lane) {
+                lines.push(format!("  last: {last_message}"));
+            }
         }
 
         lines
+    }
+
+    fn run_elapsed_duration(&self) -> Option<Duration> {
+        self.run_finished_after
+            .or_else(|| Some(self.run_started_at.elapsed()))
     }
 }
 
@@ -512,6 +541,7 @@ fn maybe_spawn_live_action_refresh(
     handle.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await;
 
         loop {
             interval.tick().await;
@@ -523,11 +553,7 @@ fn maybe_spawn_live_action_refresh(
             if state.mode != ActionOutputMode::Live {
                 break;
             }
-            if state.lanes.values().any(|lane| {
-                lane.status == ActionLaneStatus::Running && lane.step_started_at.is_some()
-            }) {
-                render_live_dashboard(&mut state);
-            }
+            render_live_dashboard(&mut state);
         }
     });
 }
@@ -574,11 +600,21 @@ fn push_lane_output_message(lane: &mut ActionLaneState, message: &str) {
 fn lane_step_label(lane: &ActionLaneState) -> String {
     match lane.status {
         ActionLaneStatus::Completed => "✓ done".to_string(),
-        ActionLaneStatus::Failed | ActionLaneStatus::LogicError => "✗ failed".to_string(),
+        ActionLaneStatus::Failed | ActionLaneStatus::LogicError => "x failed".to_string(),
         ActionLaneStatus::Aborted => "! aborted".to_string(),
         ActionLaneStatus::Skipped => "skipped".to_string(),
         _ => lane.current_step.clone().unwrap_or_else(|| "-".to_string()),
     }
+}
+
+fn lane_last_message(lane: &ActionLaneState) -> Option<&str> {
+    let message = lane.last_message.as_deref()?;
+
+    if lane.status == ActionLaneStatus::Completed && matches!(message, "completed" | "completed.") {
+        return None;
+    }
+
+    Some(message)
 }
 
 fn lane_status_label(lane: &ActionLaneState) -> String {
@@ -608,8 +644,58 @@ fn lane_elapsed_duration(lane: &ActionLaneState) -> Option<Duration> {
         .or_else(|| lane.lane_started_at.map(|started_at| started_at.elapsed()))
 }
 
+fn run_header_line(
+    action_execution: crate::ActionExecutionMode,
+    elapsed: Option<Duration>,
+) -> String {
+    match elapsed {
+        Some(elapsed) => format!(
+            "{} · {}",
+            action_execution_header(action_execution),
+            format_elapsed_duration(elapsed)
+        ),
+        None => action_execution_header(action_execution).to_string(),
+    }
+}
+
 fn format_elapsed_duration(duration: Duration) -> String {
-    format!("{}s", duration.as_secs())
+    let elapsed_ms = duration.as_millis();
+
+    if elapsed_ms < 1_000 {
+        return format!("{elapsed_ms}ms");
+    }
+
+    if elapsed_ms < 10_000 {
+        if elapsed_ms % 1_000 == 0 {
+            return format!("{}s", duration.as_secs());
+        }
+        return format!("{:.1}s", duration.as_secs_f64());
+    }
+
+    let total_secs = duration.as_secs();
+    if total_secs < 60 {
+        return format!("{total_secs}s");
+    }
+
+    let hours = total_secs / 3_600;
+    let minutes = (total_secs % 3_600) / 60;
+    let seconds = total_secs % 60;
+
+    if hours > 0 {
+        if seconds == 0 {
+            if minutes == 0 {
+                return format!("{hours}h");
+            }
+            return format!("{hours}h {minutes}m");
+        }
+        return format!("{hours}h {minutes}m {seconds}s");
+    }
+
+    if seconds == 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{minutes}m {seconds}s")
+    }
 }
 
 fn waiting_message_for_step_kind(step_kind: &str) -> &'static str {
@@ -806,6 +892,7 @@ enum RefreshAccessError {
 }
 
 /// Applies configured action rules to model output and executes matching steps.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn apply_actions(
     output: &crate::Output,
     actions: &[crate::Action],
@@ -818,22 +905,63 @@ pub(crate) async fn apply_actions(
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<(), String> {
+    let output_data = serde_json::to_value(output)
+        .map_err(|error| format!("Failed to serialize output for action evaluation: {error}"))?;
+    apply_actions_with_data(
+        &output_data,
+        actions,
+        runtime_vars,
+        named_inputs,
+        action_execution,
+        action_execution_override,
+        requested_render_mode,
+        provider_context,
+        max_agent_depth,
+        runtime_budget,
+        Instant::now(),
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn apply_actions_with_data(
+    output: &serde_json::Value,
+    actions: &[crate::Action],
+    runtime_vars: &serde_json::Map<String, serde_json::Value>,
+    named_inputs: &[crate::Input],
+    action_execution: crate::ActionExecutionMode,
+    action_execution_override: Option<crate::ActionExecutionMode>,
+    requested_render_mode: RequestedActionRenderMode,
+    provider_context: &ActionProviderContext,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+    full_run_started_at: Instant,
+    prepared_output: Option<ActionOutput>,
+) -> Result<(), String> {
     ACTION_OUTPUT
         .scope(
             {
-                let output = ActionOutput::new(action_execution, requested_render_mode);
-                output.seed_using_line(provider_context.using_line().as_str());
-                output
+                match prepared_output {
+                    Some(output) => output,
+                    None => {
+                        let output = ActionOutput::new(
+                            action_execution,
+                            requested_render_mode,
+                            full_run_started_at,
+                        );
+                        output.seed_using_line(provider_context.using_line().as_str());
+                        output
+                    }
+                }
             },
             async move {
                 let abort_signal = InvocationAbortSignal::new();
-                let invocation_started_at = Instant::now();
-                let data = match action_data_from_output(output, runtime_vars) {
+                let data = match action_data_from_output_value(output, runtime_vars) {
                     Ok(data) => data,
                     Err(error) => {
-                        eprintln!("❌ Failed to serialize output for action evaluation: {error}");
+                        eprintln!("❌ Failed to prepare output for action evaluation: {error}");
                         return Err(format!(
-                            "Failed to serialize output for action evaluation: {error}"
+                            "Failed to prepare output for action evaluation: {error}"
                         ));
                     }
                 };
@@ -877,13 +1005,13 @@ pub(crate) async fn apply_actions(
                     return Err(format!(
                         "{}\n{}",
                         format_abort_summary(&abort),
-                        root_run_abort_message(invocation_started_at.elapsed())
+                        root_run_abort_message(full_run_started_at.elapsed())
                     ));
                 }
 
-                if let Some(message) = root_run_completion_message(invocation_started_at.elapsed())
-                {
+                if let Some(message) = root_run_completion_message(full_run_started_at.elapsed()) {
                     if top_level_failures.is_empty() {
+                        println!();
                         println!("{message}");
                     }
                 }
@@ -894,7 +1022,7 @@ pub(crate) async fn apply_actions(
                     Err(format!(
                         "{}\n{}",
                         format_top_level_action_failures(&top_level_failures),
-                        root_run_failure_message(invocation_started_at.elapsed())
+                        root_run_failure_message(full_run_started_at.elapsed())
                     ))
                 }
             },
@@ -1248,18 +1376,31 @@ async fn run_matching_action_steps(
     Ok(ActionExecutionResult::Completed(outcomes))
 }
 
+#[allow(dead_code)]
 fn action_data_from_output(
     output: &crate::Output,
     runtime_vars: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<serde_json::Value, serde_json::Error> {
-    let mut data = serde_json::to_value(output)?;
+    let output_data = serde_json::to_value(output)?;
+    action_data_from_output_value(&output_data, runtime_vars).map_err(serde_json::Error::io)
+}
+
+fn action_data_from_output_value(
+    output: &serde_json::Value,
+    runtime_vars: &serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, std::io::Error> {
+    let mut data = output.clone();
     if let Some(object) = data.as_object_mut() {
         object.insert(
             "runtime".to_string(),
             serde_json::Value::Object(runtime_vars.clone()),
         );
+        return Ok(data);
     }
-    Ok(data)
+
+    Err(std::io::Error::other(
+        "validated output must serialize to a top-level object",
+    ))
 }
 
 async fn run_exec_step(
@@ -2041,26 +2182,17 @@ async fn run_agent_step(
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
-    let agent = step.agent.as_deref().ok_or_else(|| {
+    let artifact = step.agent.as_deref().ok_or_else(|| {
         format!(
-            "Action '{}' agent step is missing required `agent`.",
+            "Action '{}' agent step is missing required `artifact`.",
             action_name
         )
     })?;
 
     let current_depth = current_agent_action_depth();
     validate_agent_action_depth(current_depth, max_agent_depth, action_name)?;
-
-    validate_agent_step_target(agent, action_name)?;
-    let agent_path = Path::new(agent);
-    if !agent_path.exists() {
-        return Err(format!(
-            "Action '{}' agent step target '{}' was not found relative to the current working directory.",
-            action_name, agent
-        ));
-    }
-
-    let mut command = tokio::process::Command::new(agent_path);
+    let invocation = resolve_child_artifact_invocation(artifact, action_name)?;
+    let mut command = child_artifact_command(&invocation, artifact);
     if let Some(action_execution_override) = action_execution_override {
         command.arg("--action-execution");
         command.arg(match action_execution_override {
@@ -2123,7 +2255,7 @@ async fn run_agent_step(
 
     let remaining = remaining_runtime_duration(
         runtime_budget,
-        &format!("before starting child agent '{}'", agent),
+        &format!("before starting child agent '{}'", artifact),
     )
     .map_err(|context| {
         action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
@@ -2132,7 +2264,7 @@ async fn run_agent_step(
     let child = command.spawn().map_err(|error| {
         format!(
             "Action '{}' failed to start child agent '{}': {}",
-            action_name, agent, error
+            action_name, artifact, error
         )
     })?;
     let mut child = child;
@@ -2157,7 +2289,7 @@ async fn run_agent_step(
     print_action_line(
         action_index,
         action_name,
-        format!("child: started {}", agent).as_str(),
+        format!("child: started {}", artifact).as_str(),
     );
 
     let result = match tokio::time::timeout(remaining, child.wait()).await {
@@ -2180,7 +2312,7 @@ async fn run_agent_step(
             Err(format!(
                 "Action '{}' child agent '{}' exited with status {} at depth {}.",
                 action_name,
-                agent,
+                artifact,
                 status,
                 current_depth + 1
             ))
@@ -2188,7 +2320,7 @@ async fn run_agent_step(
         Ok(Err(error)) => Err(format!(
             "Action '{}' failed while waiting for child agent '{}' at depth {}: {}",
             action_name,
-            agent,
+            artifact,
             current_depth + 1,
             error
         )),
@@ -2200,20 +2332,75 @@ async fn run_agent_step(
             print_action_line(
                 action_index,
                 action_name,
-                format!("child: timed out {}", agent).as_str(),
+                format!("child: timed out {}", artifact).as_str(),
             );
             Err(action_runtime_timeout_message(
                 action_name,
                 runtime_budget,
                 &format!(
                     "while waiting for child agent '{}' at depth {}",
-                    agent,
+                    artifact,
                     current_depth + 1
                 ),
             ))
         }
     };
     result
+}
+
+fn resolve_child_artifact_invocation(
+    artifact: &str,
+    action_name: &str,
+) -> Result<ChildArtifactInvocation, String> {
+    validate_agent_step_target(artifact, action_name)?;
+    let artifact_path = Path::new(artifact);
+    if !artifact_path.exists() {
+        return Err(format!(
+            "Action '{}' agent step artifact '{}' was not found relative to the current working directory.",
+            action_name, artifact
+        ));
+    }
+
+    if !artifact_is_json_definition(artifact) {
+        return Ok(ChildArtifactInvocation::DirectExecutable(
+            artifact_path.to_path_buf(),
+        ));
+    }
+
+    let cargo_ai_exists = command_exists_on_path("cargo-ai");
+    if command_exists_on_path("cargo") && cargo_ai_exists {
+        return Ok(ChildArtifactInvocation::CargoSubcommand);
+    }
+    if cargo_ai_exists {
+        return Ok(ChildArtifactInvocation::StandaloneCargoAi);
+    }
+
+    Err(format!(
+        "Action '{}' agent step JSON artifact '{}' requires Cargo AI to be available as `cargo ai` or `cargo-ai` on PATH.",
+        action_name, artifact
+    ))
+}
+
+fn child_artifact_command(
+    invocation: &ChildArtifactInvocation,
+    artifact: &str,
+) -> tokio::process::Command {
+    match invocation {
+        ChildArtifactInvocation::DirectExecutable(path) => tokio::process::Command::new(path),
+        ChildArtifactInvocation::CargoSubcommand => {
+            let mut command = tokio::process::Command::new("cargo");
+            command.arg("ai");
+            command.arg("run");
+            command.arg(artifact);
+            command
+        }
+        ChildArtifactInvocation::StandaloneCargoAi => {
+            let mut command = tokio::process::Command::new("cargo-ai");
+            command.arg("run");
+            command.arg(artifact);
+            command
+        }
+    }
 }
 
 fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'static str> {
@@ -2258,7 +2445,7 @@ fn format_abort_summary(abort: &InvocationAbortRecord) -> String {
 fn run_completion_message_for_depth(depth: u32, elapsed: Duration) -> Option<String> {
     if depth == 0 {
         Some(format!(
-            "✅ Run complete in {}.",
+            "Run complete · {} total",
             format_elapsed_duration(elapsed)
         ))
     } else {
@@ -2271,11 +2458,11 @@ fn root_run_completion_message(elapsed: Duration) -> Option<String> {
 }
 
 fn root_run_failure_message(elapsed: Duration) -> String {
-    format!("❌ Run failed in {}.", format_elapsed_duration(elapsed))
+    format!("x Run failed · {} total", format_elapsed_duration(elapsed))
 }
 
 fn root_run_abort_message(elapsed: Duration) -> String {
-    format!("❌ Run aborted in {}.", format_elapsed_duration(elapsed))
+    format!("! Run aborted · {} total", format_elapsed_duration(elapsed))
 }
 
 fn current_action_output() -> Option<ActionOutput> {
@@ -2326,8 +2513,8 @@ fn note_action_stopped_by_abort(action_index: usize, action_name: &str) {
 
 fn action_execution_header(action_execution: crate::ActionExecutionMode) -> &'static str {
     match action_execution {
-        crate::ActionExecutionMode::Sequential => "Action execution: sequential",
-        crate::ActionExecutionMode::Parallel => "Action execution: parallel",
+        crate::ActionExecutionMode::Sequential => "run: sequential",
+        crate::ActionExecutionMode::Parallel => "run: parallel",
     }
 }
 
@@ -2809,6 +2996,53 @@ fn validate_agent_step_target(agent: &str, action_name: &str) -> Result<(), Stri
     }
 
     Ok(())
+}
+
+fn artifact_is_json_definition(artifact: &str) -> bool {
+    Path::new(artifact)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("json"))
+        .unwrap_or(false)
+}
+
+fn command_exists_on_path(command: &str) -> bool {
+    let Some(path_value) = std::env::var_os("PATH") else {
+        return false;
+    };
+
+    std::env::split_paths(&path_value).any(|directory| {
+        command_candidates_for_directory(&directory, command)
+            .into_iter()
+            .any(|candidate| candidate.is_file())
+    })
+}
+
+fn command_candidates_for_directory(directory: &Path, command: &str) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        if Path::new(command).extension().is_some() {
+            return vec![directory.join(command)];
+        }
+
+        let pathext = std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+        let candidates = pathext
+            .to_string_lossy()
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+            .map(|extension| directory.join(format!("{command}{extension}")))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            vec![directory.join(command)]
+        } else {
+            candidates
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        vec![directory.join(command)]
+    }
 }
 
 fn contains_explicit_path_separator(path: &str) -> bool {
@@ -3407,22 +3641,24 @@ mod tests {
     use super::{
         action_completion_summary, action_execution_header, action_lane_prefix, apply_actions,
         child_input_args, configured_agent_action_runtime_budget, format_backend_error_message,
-        format_backend_ui_message, insert_action_output_variable, matching_run_steps,
+        format_backend_ui_message, format_elapsed_duration, insert_action_output_variable,
+        matching_run_steps,
         resolve_action_render_mode_for_capability as resolve_action_output_mode_for_capability,
         resolve_generate_image_step_profile_context, resolve_run_args, resolve_string_parts,
         run_agent_step, run_completion_message_for_depth, run_exec_step, run_generate_image_step,
-        step_matches_platform, validate_agent_action_depth, ActionOutput, ActionOutputMode,
-        ActionProviderContext, RequestedActionRenderMode as RequestedActionOutputMode,
-        StepExecutionOutcome, ACTION_OUTPUT,
+        run_header_line, step_matches_platform, validate_agent_action_depth, ActionOutput,
+        ActionOutputMode, ActionProviderContext,
+        RequestedActionRenderMode as RequestedActionOutputMode, StepExecutionOutcome,
+        ACTION_OUTPUT,
     };
     use crate::credentials::openai_oauth;
     use crate::providers::ProviderKind;
     use serde_json::json;
     use std::ffi::OsString;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Mutex, MutexGuard};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -3442,7 +3678,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("system time should be valid")
                 .as_nanos();
-            let root = std::env::temp_dir().join(format!("cargo-ai-preflight-actions-{unique}"));
+            let root = std::env::temp_dir().join(format!("cargo-ai-runtime-actions-{unique}"));
             let config_path = root.join(".cargo-ai").join("config.toml");
             fs::create_dir_all(
                 config_path
@@ -3479,6 +3715,104 @@ mod tests {
 
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    struct TestPathCommands {
+        _guard: MutexGuard<'static, ()>,
+        original_path: Option<OsString>,
+        root: PathBuf,
+    }
+
+    impl TestPathCommands {
+        fn new() -> Self {
+            let guard = ENV_LOCK
+                .lock()
+                .expect("environment lock should not be poisoned");
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be valid")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("cargo-ai-path-test-{unique}"));
+            fs::create_dir_all(&root).expect("temp PATH dir should be created");
+
+            let original_path = std::env::var_os("PATH");
+            seed_passthrough_rustc(&root, original_path.as_ref());
+            std::env::set_var("PATH", &root);
+
+            Self {
+                _guard: guard,
+                original_path,
+                root,
+            }
+        }
+
+        fn write_command(&self, name: &str, body: &str) -> PathBuf {
+            #[cfg(windows)]
+            let command_name = format!("{name}.cmd");
+            #[cfg(not(windows))]
+            let command_name = name.to_string();
+
+            let command_path = self.root.join(command_name);
+            fs::write(&command_path, body).expect("test command should be written");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                let mut permissions = fs::metadata(&command_path)
+                    .expect("command metadata should load")
+                    .permissions();
+                permissions.set_mode(0o755);
+                fs::set_permissions(&command_path, permissions)
+                    .expect("test command should be executable");
+            }
+
+            command_path
+        }
+    }
+
+    impl Drop for TestPathCommands {
+        fn drop(&mut self) {
+            match &self.original_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn seed_passthrough_rustc(root: &Path, original_path: Option<&OsString>) {
+        let Some(rustc_path) = find_command_on_path(original_path, "rustc") else {
+            return;
+        };
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let _ = symlink(&rustc_path, root.join("rustc"));
+        }
+
+        #[cfg(windows)]
+        {
+            let _ = fs::copy(&rustc_path, root.join("rustc.exe"));
+        }
+    }
+
+    fn find_command_on_path(path: Option<&OsString>, command: &str) -> Option<PathBuf> {
+        let Some(path) = path else {
+            return None;
+        };
+
+        for directory in std::env::split_paths(path) {
+            for candidate in super::command_candidates_for_directory(&directory, command) {
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+
+        None
     }
 
     fn run_step(
@@ -4266,7 +4600,7 @@ auth_mode = "{auth_mode}"
     fn run_completion_message_for_depth_prints_for_root_runs_only() {
         assert_eq!(
             run_completion_message_for_depth(0, std::time::Duration::from_secs(32)),
-            Some("✅ Run complete in 32s.".to_string())
+            Some("Run complete · 32s total".to_string())
         );
         assert_eq!(
             run_completion_message_for_depth(1, std::time::Duration::from_secs(32)),
@@ -4278,11 +4612,42 @@ auth_mode = "{auth_mode}"
     fn action_execution_header_uses_effective_mode() {
         assert_eq!(
             action_execution_header(crate::ActionExecutionMode::Sequential),
-            "Action execution: sequential"
+            "run: sequential"
         );
         assert_eq!(
             action_execution_header(crate::ActionExecutionMode::Parallel),
-            "Action execution: parallel"
+            "run: parallel"
+        );
+    }
+
+    #[test]
+    fn run_header_line_uses_elapsed_when_present() {
+        assert_eq!(
+            run_header_line(
+                crate::ActionExecutionMode::Sequential,
+                Some(std::time::Duration::from_millis(9_800))
+            ),
+            "run: sequential · 9.8s"
+        );
+    }
+
+    #[test]
+    fn format_elapsed_duration_is_millisecond_aware() {
+        assert_eq!(
+            format_elapsed_duration(std::time::Duration::from_millis(428)),
+            "428ms"
+        );
+        assert_eq!(
+            format_elapsed_duration(std::time::Duration::from_millis(1_500)),
+            "1.5s"
+        );
+        assert_eq!(
+            format_elapsed_duration(std::time::Duration::from_secs(17)),
+            "17s"
+        );
+        assert_eq!(
+            format_elapsed_duration(std::time::Duration::from_secs(72)),
+            "1m 12s"
         );
     }
 
@@ -4314,7 +4679,7 @@ auth_mode = "{auth_mode}"
         );
 
         let snapshot = output.snapshot_lines_for_test();
-        assert_eq!(snapshot[0], "Action execution: parallel");
+        assert!(snapshot[0].starts_with("run: parallel · "));
         assert!(snapshot
             .iter()
             .any(|line| line.starts_with("[Action 1: generate_images] running · ")));
@@ -4325,6 +4690,20 @@ auth_mode = "{auth_mode}"
             .iter()
             .any(|line| line == "  last: wrote generated image to './artifacts/hero.png'."));
         assert!(!snapshot.iter().any(|line| line == "  output:"));
+    }
+
+    #[test]
+    fn live_dashboard_snapshot_shows_run_elapsed_before_actions_start() {
+        let output = ActionOutput::new_for_mode_with_notice(
+            crate::ActionExecutionMode::Sequential,
+            ActionOutputMode::Live,
+            None,
+            Instant::now() - std::time::Duration::from_secs(4),
+        );
+
+        let snapshot = output.snapshot_lines_for_test();
+        assert!(snapshot[0].starts_with("run: sequential · "));
+        assert_ne!(snapshot[0], "run: sequential");
     }
 
     #[test]
@@ -4364,7 +4743,8 @@ auth_mode = "{auth_mode}"
             .iter()
             .any(|line| line.starts_with("[Action 1: generate_images] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
-        assert!(snapshot.iter().any(|line| line == "  last: completed."));
+        assert!(!snapshot.iter().any(|line| line == "  last: completed"));
+        assert!(!snapshot.iter().any(|line| line == "  last: completed."));
     }
 
     #[test]
@@ -4381,7 +4761,7 @@ auth_mode = "{auth_mode}"
         assert!(snapshot
             .iter()
             .any(|line| line.starts_with("[Action 2: child_summary] failed · ")));
-        assert!(snapshot.iter().any(|line| line == "  step: ✗ failed"));
+        assert!(snapshot.iter().any(|line| line == "  step: x failed"));
         assert!(snapshot
             .iter()
             .any(|line| line == "  last: failed: child exited with status 1"));
@@ -4575,7 +4955,8 @@ auth_mode = "{auth_mode}"
             .iter()
             .any(|line| line.starts_with("[Action 1: raw_exec] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
-        assert!(snapshot.iter().any(|line| line == "  last: completed."));
+        assert!(!snapshot.iter().any(|line| line == "  last: completed"));
+        assert!(!snapshot.iter().any(|line| line == "  last: completed."));
         assert!(!snapshot.iter().any(|line| line == "  output:"));
         assert!(!snapshot.iter().any(|line| line.contains("alpha")));
         assert!(!snapshot.iter().any(|line| line.contains("beta")));
@@ -5521,7 +5902,8 @@ auth_mode = "{auth_mode}"
             .iter()
             .any(|line| line.starts_with("[Action 1: child_summary] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
-        assert!(snapshot.iter().any(|line| line == "  last: completed."));
+        assert!(!snapshot.iter().any(|line| line == "  last: completed"));
+        assert!(!snapshot.iter().any(|line| line == "  last: completed."));
         assert!(!snapshot.iter().any(|line| line == "  output:"));
         assert!(!snapshot
             .iter()
@@ -5905,6 +6287,220 @@ auth_mode = "{auth_mode}"
             inherited_values.lines().collect::<Vec<_>>(),
             vec!["7", "600"]
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn json_artifact_prefers_cargo_ai_subcommand_when_available() {
+        use std::fs;
+
+        let test_path = TestPathCommands::new();
+        let output_path = std::env::temp_dir().join(format!(
+            "cai2078-json-artifact-cargo-args-{}.txt",
+            std::process::id()
+        ));
+        let cargo_script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+            output_path.display()
+        );
+        test_path.write_command("cargo", &cargo_script);
+        test_path.write_command("cargo-ai", "#!/bin/sh\nexit 99\n");
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let artifact_name = format!(".tmp-cai2078-json-child-{}.json", std::process::id());
+        let artifact_path = current_dir.join(&artifact_name);
+        fs::write(&artifact_path, "{}").expect("json child artifact should be written");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", artifact_name)),
+            run_vars: None,
+            input_overrides: None,
+            inputs: Some(vec![crate::ActionInput::Text {
+                text: vec![crate::RunArg::Literal("hello".to_string())],
+            }]),
+            input_mode: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_agent_step(
+            &step,
+            &json!({}),
+            &no_named_inputs(),
+            0,
+            "invoke_child",
+            Some(crate::ActionExecutionMode::Sequential),
+            5,
+            runtime_budget,
+        )
+        .await;
+
+        let _ = fs::remove_file(&artifact_path);
+        assert!(
+            result.is_ok(),
+            "json child artifact should succeed via cargo ai: {result:?}"
+        );
+
+        let args = fs::read_to_string(&output_path).expect("cargo args should be captured");
+        let _ = fs::remove_file(&output_path);
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec![
+                "ai",
+                "run",
+                format!("./{}", artifact_name).as_str(),
+                "--action-execution",
+                "sequential",
+                "--input-text",
+                "hello",
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn json_artifact_falls_back_to_standalone_cargo_ai() {
+        use std::fs;
+
+        let test_path = TestPathCommands::new();
+        let output_path = std::env::temp_dir().join(format!(
+            "cai2078-json-artifact-standalone-args-{}.txt",
+            std::process::id()
+        ));
+        let cargo_ai_script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+            output_path.display()
+        );
+        test_path.write_command("cargo-ai", &cargo_ai_script);
+
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let artifact_name = format!(".tmp-cai2078-json-standalone-{}.json", std::process::id());
+        let artifact_path = current_dir.join(&artifact_name);
+        fs::write(&artifact_path, "{}").expect("json child artifact should be written");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", artifact_name)),
+            run_vars: None,
+            input_overrides: None,
+            inputs: Some(vec![crate::ActionInput::Text {
+                text: vec![crate::RunArg::Literal("hello".to_string())],
+            }]),
+            input_mode: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_agent_step(
+            &step,
+            &json!({}),
+            &no_named_inputs(),
+            0,
+            "invoke_child",
+            None,
+            5,
+            runtime_budget,
+        )
+        .await;
+
+        let _ = fs::remove_file(&artifact_path);
+        assert!(
+            result.is_ok(),
+            "json child artifact should succeed via standalone cargo-ai: {result:?}"
+        );
+
+        let args = fs::read_to_string(&output_path).expect("cargo-ai args should be captured");
+        let _ = fs::remove_file(&output_path);
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec![
+                "run",
+                format!("./{}", artifact_name).as_str(),
+                "--input-text",
+                "hello"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn json_artifact_fails_when_cargo_ai_is_unavailable() {
+        use std::fs;
+
+        let _test_path = TestPathCommands::new();
+        let current_dir = std::env::current_dir().expect("current dir should resolve");
+        let artifact_name = format!(".tmp-cai2078-json-missing-{}.json", std::process::id());
+        let artifact_path = current_dir.join(&artifact_name);
+        fs::write(&artifact_path, "{}").expect("json child artifact should be written");
+
+        let step = crate::RunStep {
+            kind: "agent".to_string(),
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: Some(format!("./{}", artifact_name)),
+            run_vars: None,
+            input_overrides: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = run_agent_step(
+            &step,
+            &json!({}),
+            &no_named_inputs(),
+            0,
+            "invoke_child",
+            None,
+            5,
+            runtime_budget,
+        )
+        .await
+        .expect_err("json child artifact should fail when Cargo AI is unavailable");
+
+        let _ = fs::remove_file(&artifact_path);
+        assert!(error.contains("requires Cargo AI"));
+        assert!(error.contains("cargo ai"));
+        assert!(error.contains("cargo-ai"));
     }
 
     #[tokio::test]

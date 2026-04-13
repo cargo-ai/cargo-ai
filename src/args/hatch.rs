@@ -1,13 +1,19 @@
 //! CLI parser definition for `cargo ai hatch`.
-use clap::{Arg, Command};
+use clap::{Arg, ArgAction, ArgGroup, Command};
 
 /// Builds the `hatch` command schema.
 pub fn command() -> Command {
     Command::new("hatch")
-        .about("Hatch a new AI agent from a JSON config")
+        .about("Hatch a new AI agent from an agent definition JSON source")
+        .group(
+            ArgGroup::new("explicit_definition_source")
+                .args(["config", "json", "stdin"]),
+        )
         .arg(
             Arg::new("name")
-                .help("Agent name or local .json config path (shorthand)")
+                .help(
+                    "Agent name (or local .json config path shorthand when no explicit definition source flag is used)",
+                )
                 .required(true),
         )
         .arg(
@@ -21,9 +27,22 @@ pub fn command() -> Command {
             Arg::new("config")
                 .long("config")
                 .short('c')
-                .help("Local path to the agent .json configuration file")
+                .help("Path to agent definition JSON file")
                 .value_name("FILE")
                 .num_args(1),
+        )
+        .arg(
+            Arg::new("json")
+                .long("json")
+                .help("Agent definition JSON (raw JSON string)")
+                .value_name("JSON")
+                .num_args(1),
+        )
+        .arg(
+            Arg::new("stdin")
+                .long("stdin")
+                .help("Read agent definition JSON from stdin")
+                .action(ArgAction::SetTrue),
         )
         .arg(
             Arg::new("target")
@@ -56,4 +75,26 @@ pub fn command() -> Command {
                 .required(false)
                 .action(clap::ArgAction::SetTrue),
         )
+        .after_help(
+            "Definition sources:\n  - NAME by itself: agent name, registry name, or local .json shorthand\n  - --config <FILE>: agent definition JSON file\n  - --json <JSON>: raw agent definition JSON string\n  - --stdin: read agent definition JSON from stdin\n\nWhen --config, --json, or --stdin is used, positional NAME is always the local output/project name.",
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn help_describes_definition_source_flags() {
+        let mut command = super::command();
+        let mut help = Vec::new();
+        command
+            .write_long_help(&mut help)
+            .expect("hatch help should render");
+        let help = String::from_utf8(help).expect("help should be utf8");
+
+        assert!(help.contains("--config <FILE>"));
+        assert!(help.contains("--json <JSON>"));
+        assert!(help.contains("--stdin"));
+        assert!(help.contains("Definition sources:"));
+        assert!(help.contains("When --config, --json, or --stdin is used"));
+    }
 }

@@ -842,6 +842,12 @@ fn parse_actions(
                             "`text` is only supported for `email_me` actions",
                         ));
                     }
+                    if run_obj.contains_key("artifact") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.artifact"),
+                            "`artifact` is only supported for `agent` actions",
+                        ));
+                    }
                     if run_obj.contains_key("agent") {
                         return Err(BuildError::config(
                             format!("{run_path}.agent"),
@@ -947,6 +953,12 @@ fn parse_actions(
                         return Err(BuildError::config(
                             format!("{run_path}.args"),
                             "`args` is not supported for `email_me` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("artifact") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.artifact"),
+                            "`artifact` is not supported for `email_me` actions",
                         ));
                     }
                     if run_obj.contains_key("agent") {
@@ -1072,10 +1084,7 @@ fn parse_actions(
                         ));
                     }
 
-                    let agent = get_required_string(run_obj, "agent", &run_path)?
-                        .trim()
-                        .to_string();
-                    let agent_path = format!("{run_path}.agent");
+                    let (agent, agent_path) = resolve_child_artifact_field(run_obj, &run_path)?;
                     validate_child_agent_target(&agent, &agent_path)?;
                     let profile =
                         parse_optional_profile_field(run_obj, &run_path, action_field_types)?;
@@ -1161,6 +1170,12 @@ fn parse_actions(
                         return Err(BuildError::config(
                             format!("{run_path}.text"),
                             "`text` is not supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("artifact") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.artifact"),
+                            "`artifact` is not supported for `generate_image` actions",
                         ));
                     }
                     if run_obj.contains_key("agent") {
@@ -3003,6 +3018,48 @@ fn get_required_string<'a>(
         .ok_or_else(|| BuildError::config(path, "expected a string"))
 }
 
+fn resolve_child_artifact_field(
+    obj: &Map<String, Value>,
+    parent_path: &str,
+) -> Result<(String, String), BuildError> {
+    let artifact_value = obj.get("artifact");
+    let legacy_agent_value = obj.get("agent");
+
+    if artifact_value.is_some() && legacy_agent_value.is_some() {
+        return Err(BuildError::config(
+            parent_path,
+            "specify only one of `artifact` or legacy `agent` for `kind: \"agent\"` steps",
+        ));
+    }
+
+    let (field_name, value) = if let Some(value) = artifact_value {
+        ("artifact", value)
+    } else if let Some(value) = legacy_agent_value {
+        ("agent", value)
+    } else {
+        return Err(BuildError::config(
+            format!("{parent_path}.artifact"),
+            "missing required field `artifact`",
+        ));
+    };
+
+    let field_path = format!("{parent_path}.{field_name}");
+    let artifact = value
+        .as_str()
+        .ok_or_else(|| BuildError::config(&field_path, "expected a string"))?
+        .trim()
+        .to_string();
+
+    if artifact.is_empty() {
+        return Err(BuildError::config(
+            &field_path,
+            "must be a non-empty string",
+        ));
+    }
+
+    Ok((artifact, field_path))
+}
+
 fn get_required_array<'a>(
     obj: &'a Map<String, Value>,
     key: &str,
@@ -4075,7 +4132,7 @@ mod tests {
             "name": "invoke_child",
             "logic": {{ "==": [ {{ "var": "ok" }}, true ] }},
             "run": [
-                {{ "kind": "agent", "agent": {encoded_target} }}
+                {{ "kind": "agent", "artifact": {encoded_target} }}
             ]
         }}
     ]
@@ -4185,7 +4242,7 @@ mod tests {
                 },
                 {
                     "kind": "agent",
-                    "agent": "./childagent",
+                    "artifact": "./childagent",
                     "profile": { "var": "runtime.child_profile" }
                 }
             ]
