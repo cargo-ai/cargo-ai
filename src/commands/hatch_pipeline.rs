@@ -24,6 +24,8 @@ pub(crate) enum HatchSource {
     LocalFile {
         path: String,
     },
+    InlineJson,
+    StdinJson,
     Account {
         owner: String,
         agent: String,
@@ -446,6 +448,18 @@ fn summary_line(summary: &HatchRunSummary) -> String {
                 summary.project_name
             )
         }
+        (HatchMode::Build, HatchSource::InlineJson) => {
+            format!(
+                "Built local agent `{}` from inline JSON definition.",
+                summary.project_name
+            )
+        }
+        (HatchMode::Build, HatchSource::StdinJson) => {
+            format!(
+                "Built local agent `{}` from stdin definition.",
+                summary.project_name
+            )
+        }
         (HatchMode::Build, HatchSource::Account { agent, .. }) => format!(
             "Built local agent `{}` from account definition `{}`.",
             summary.project_name, agent
@@ -456,6 +470,18 @@ fn summary_line(summary: &HatchRunSummary) -> String {
         (HatchMode::Check, HatchSource::LocalFile { .. }) => {
             format!(
                 "Checked local agent `{}` from local definition.",
+                summary.project_name
+            )
+        }
+        (HatchMode::Check, HatchSource::InlineJson) => {
+            format!(
+                "Checked local agent `{}` from inline JSON definition.",
+                summary.project_name
+            )
+        }
+        (HatchMode::Check, HatchSource::StdinJson) => {
+            format!(
+                "Checked local agent `{}` from stdin definition.",
                 summary.project_name
             )
         }
@@ -474,6 +500,14 @@ fn source_items(summary: &HatchRunSummary) -> Vec<(&'static str, String)> {
         HatchSource::LocalFile { path } => vec![
             ("Type", "Local file".to_string()),
             ("File", path.clone()),
+            ("Agent", summary.project_name.clone()),
+        ],
+        HatchSource::InlineJson => vec![
+            ("Type", "Inline JSON".to_string()),
+            ("Agent", summary.project_name.clone()),
+        ],
+        HatchSource::StdinJson => vec![
+            ("Type", "stdin".to_string()),
             ("Agent", summary.project_name.clone()),
         ],
         HatchSource::Account { owner, agent, path } => vec![
@@ -712,6 +746,24 @@ mod tests {
         assert!(rendered.contains("Workspace  Preserved"));
         assert!(!rendered.contains("\nOutput\n"));
         assert!(!rendered.contains("\nNext steps\n"));
+    }
+
+    #[test]
+    fn renders_inline_json_build_summary_lines() {
+        let lines = render_hatch_success_lines(&HatchRunSummary {
+            project_name: "weather_test".to_string(),
+            mode: HatchMode::Build,
+            source: HatchSource::InlineJson,
+            build_target: "aarch64-apple-darwin".to_string(),
+            binary_path: Some(PathBuf::from("./weather_test")),
+            template_status: TemplateSummaryStatus::Reused,
+            workspace_status: WorkspaceSummaryStatus::Removed,
+        });
+
+        let rendered = lines.join("\n");
+        assert!(rendered.contains("Built local agent `weather_test` from inline JSON definition."));
+        assert!(rendered.contains("Type   Inline JSON"));
+        assert!(rendered.contains("Agent  weather_test"));
     }
 
     #[test]

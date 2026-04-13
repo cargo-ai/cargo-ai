@@ -114,7 +114,9 @@ cargo ai run adder_test --profile openai-account
 ```
 
 You can also run a local definition with `cargo ai run ./adder_test.json` or
-`cargo ai run --config ./adder_test.json`.
+`cargo ai run --config ./adder_test.json`. For inline or scripted flows, you
+can also use `cargo ai run --json '<agent-definition-json>'` or
+`cat ./adder_test.json | cargo ai run --stdin`.
 
 ### 3. Hatch the same sample as a standalone executable
 
@@ -215,6 +217,13 @@ Or it can become a compiled local executable through:
 ```bash
 cargo ai hatch my_agent --config ./my_agent.json
 ./my_agent
+```
+
+Inline and stdin definition sources work there too:
+
+```bash
+cargo ai hatch my_agent --json '<agent-definition-json>'
+cat ./my_agent.json | cargo ai hatch my_agent --stdin
 ```
 
 For Windows users, run `my_agent.exe` or just `my_agent`.
@@ -816,10 +825,27 @@ You can build a `cargo-ai` agent in any editor you want. If you want the fastest
 cargo ai run --config ./my_agent.json --profile openai-account
 ```
 
+The supported definition-source options are:
+
+```bash
+cargo ai run ./my_agent.json --profile openai-account
+cargo ai run --config ./my_agent.json --profile openai-account
+cargo ai run --json '<agent-definition-json>' --profile openai-account
+cat ./my_agent.json | cargo ai run --stdin --profile openai-account
+```
+
 If you want to check whether the definition is valid before exporting a binary, run:
 
 ```bash
 cargo ai hatch my_agent --config ./my_agent.json --check
+```
+
+Those same definition-source options also work with hatch:
+
+```bash
+cargo ai hatch my_agent --config ./my_agent.json --check
+cargo ai hatch my_agent --json '<agent-definition-json>' --check
+cat ./my_agent.json | cargo ai hatch my_agent --stdin --check
 ```
 
 If your config file already matches the agent name, the shorthand works too:

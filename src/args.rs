@@ -157,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn run_requires_name_or_config() {
+    fn run_requires_definition_source() {
         let err = cli_command("cargo-ai")
             .try_get_matches_from(["cargo-ai", "run"])
             .expect_err("missing run target should fail parsing");
@@ -182,6 +182,35 @@ mod tests {
     }
 
     #[test]
+    fn run_accepts_inline_json() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "run", "--json", "{}"])
+            .expect("run --json should parse");
+
+        let run = matches
+            .subcommand_matches("run")
+            .expect("run subcommand should be available");
+        assert_eq!(
+            run.get_one::<String>("json").map(String::as_str),
+            Some("{}")
+        );
+        assert!(!run.get_flag("stdin"));
+    }
+
+    #[test]
+    fn run_accepts_stdin_flag() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "run", "--stdin"])
+            .expect("run --stdin should parse");
+
+        let run = matches
+            .subcommand_matches("run")
+            .expect("run subcommand should be available");
+        assert!(run.get_flag("stdin"));
+        assert!(run.get_one::<String>("json").is_none());
+    }
+
+    #[test]
     fn run_rejects_positional_name_with_config_flag() {
         let err = cli_command("cargo-ai")
             .try_get_matches_from([
@@ -192,6 +221,15 @@ mod tests {
                 "./adder_test.json",
             ])
             .expect_err("run should reject redundant positional and config inputs");
+
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn run_rejects_inline_json_with_stdin() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "run", "--json", "{}", "--stdin"])
+            .expect_err("run should reject redundant inline and stdin sources");
 
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
@@ -406,6 +444,63 @@ mod tests {
                 .map(String::as_str),
             Some("./dist")
         );
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn hatch_accepts_inline_json_with_output_name() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "hatch", "adder_inline", "--json", "{}"])
+            .expect("hatch --json should parse");
+
+        let hatch_matches = matches
+            .subcommand_matches("hatch")
+            .expect("hatch subcommand should be available");
+        assert_eq!(
+            hatch_matches.get_one::<String>("name").map(String::as_str),
+            Some("adder_inline")
+        );
+        assert_eq!(
+            hatch_matches.get_one::<String>("json").map(String::as_str),
+            Some("{}")
+        );
+        assert!(!hatch_matches.get_flag("stdin"));
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn hatch_accepts_stdin_with_output_name() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "hatch", "adder_inline", "--stdin"])
+            .expect("hatch --stdin should parse");
+
+        let hatch_matches = matches
+            .subcommand_matches("hatch")
+            .expect("hatch subcommand should be available");
+        assert_eq!(
+            hatch_matches.get_one::<String>("name").map(String::as_str),
+            Some("adder_inline")
+        );
+        assert!(hatch_matches.get_flag("stdin"));
+        assert!(hatch_matches.get_one::<String>("json").is_none());
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn hatch_rejects_multiple_explicit_definition_sources() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "hatch",
+                "adder_inline",
+                "--config",
+                "./adder.json",
+                "--json",
+                "{}",
+            ])
+            .expect_err("hatch should reject redundant explicit definition sources");
+
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[cfg(feature = "developer-tools")]

@@ -1,11 +1,14 @@
 //! Shared helpers for resolving agent definitions from local files or the registry.
 use std::env;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum AgentDefinitionSource {
     LocalPath(String),
     RegistryName(String),
+    InlineJson(String),
+    StdinJson(String),
 }
 
 pub(crate) fn current_lookup_dir(lookup_context: &str) -> Result<PathBuf, String> {
@@ -104,6 +107,22 @@ pub(crate) fn resolve_definition_source(
     resolve_definition_source_in_dir(name_or_path, current_dir.as_path(), registry_hint_command)
 }
 
+fn validate_stdin_definition_contents(contents: String) -> Result<String, String> {
+    if contents.trim().is_empty() {
+        return Err("No agent definition JSON was received from stdin.".to_string());
+    }
+
+    Ok(contents)
+}
+
+pub(crate) fn read_definition_json_from_stdin() -> Result<String, String> {
+    let mut contents = String::new();
+    io::stdin()
+        .read_to_string(&mut contents)
+        .map_err(|error| format!("Failed to read agent definition JSON from stdin: {error}"))?;
+    validate_stdin_definition_contents(contents)
+}
+
 pub(crate) fn load_definition_contents(source: &AgentDefinitionSource) -> Result<String, String> {
     match source {
         AgentDefinitionSource::LocalPath(path) => super::hatch_pipeline::read_local_config(path)
@@ -121,6 +140,9 @@ pub(crate) fn load_definition_contents(source: &AgentDefinitionSource) -> Result
                 )
             })
         }
+        AgentDefinitionSource::InlineJson(json) | AgentDefinitionSource::StdinJson(json) => {
+            Ok(json.clone())
+        }
     }
 }
 
@@ -128,7 +150,7 @@ pub(crate) fn load_definition_contents(source: &AgentDefinitionSource) -> Result
 mod tests {
     use super::{
         resolve_definition_source_in_dir, resolve_local_definition_path_in_dir,
-        AgentDefinitionSource,
+        validate_stdin_definition_contents, AgentDefinitionSource,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -209,5 +231,31 @@ mod tests {
         assert!(error.contains("Local config path"));
         assert!(error.contains("was not found"));
         remove_temp_dir_if_present(&temp_dir);
+    }
+
+    #[test]
+    fn stdin_definition_rejects_empty_input() {
+        let error = validate_stdin_definition_contents("   \n\t".to_string())
+            .expect_err("whitespace-only stdin should be rejected");
+
+        assert_eq!(error, "No agent definition JSON was received from stdin.");
+    }
+
+    #[test]
+    fn inline_and_stdin_definition_contents_round_trip() {
+        assert_eq!(
+            super::load_definition_contents(&AgentDefinitionSource::InlineJson(
+                "{\"version\":\"2026-03-03.r1\"}".to_string()
+            ))
+            .expect("inline json should round trip"),
+            "{\"version\":\"2026-03-03.r1\"}"
+        );
+        assert_eq!(
+            super::load_definition_contents(&AgentDefinitionSource::StdinJson(
+                "{\"version\":\"2026-03-03.r1\"}".to_string()
+            ))
+            .expect("stdin json should round trip"),
+            "{\"version\":\"2026-03-03.r1\"}"
+        );
     }
 }
