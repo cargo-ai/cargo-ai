@@ -2265,6 +2265,21 @@ async fn main() {
     };
     let effective_action_execution = effective_action_execution_for_run(action_execution_override);
     let has_output_schema_properties = has_output_schema_properties();
+    let action_provider_context = ActionProviderContext {
+        provider,
+        profile_name: selected_profile.as_ref().map(|profile| profile.name.clone()),
+        auth_mode: resolved_invocation_auth_mode(
+            provider,
+            selected_profile.as_ref(),
+            has_explicit_token_override,
+            use_openai_account_transport,
+        )
+        .to_string(),
+        model: model.clone(),
+        url: url.clone(),
+        token: token.clone(),
+        inference_timeout_in_sec,
+    };
 
     if let Err(error) =
         validate_structural_action_only_inputs(
@@ -2286,21 +2301,6 @@ async fn main() {
             }
         };
         let actions = actions();
-        let action_provider_context = ActionProviderContext {
-            provider,
-            profile_name: selected_profile.as_ref().map(|profile| profile.name.clone()),
-            auth_mode: resolved_invocation_auth_mode(
-                provider,
-                selected_profile.as_ref(),
-                has_explicit_token_override,
-                use_openai_account_transport,
-            )
-            .to_string(),
-            model: model.clone(),
-            url: url.clone(),
-            token: token.clone(),
-            inference_timeout_in_sec,
-        };
         let action_output = ActionOutput::new(
             effective_action_execution,
             requested_render_mode,
@@ -2364,22 +2364,6 @@ async fn main() {
         }
         std::process::exit(1);
     }
-
-    let action_provider_context = ActionProviderContext {
-        provider,
-        profile_name: selected_profile.as_ref().map(|profile| profile.name.clone()),
-        auth_mode: resolved_invocation_auth_mode(
-            provider,
-            selected_profile.as_ref(),
-            has_explicit_token_override,
-            use_openai_account_transport,
-        )
-        .to_string(),
-        model: model.clone(),
-        url: url.clone(),
-        token: token.clone(),
-        inference_timeout_in_sec,
-    };
     println!("{}", action_provider_context.using_line());
 
     let static_context =
