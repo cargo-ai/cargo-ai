@@ -111,16 +111,16 @@ fn profile_selection_messages(
     overrides: &[String],
 ) -> Vec<String> {
     let base_message = match kind {
-        LoadedProfileKind::Explicit => format!("Using profile '{}'", profile_name),
-        LoadedProfileKind::Default => format!("Using default profile '{}'", profile_name),
+        LoadedProfileKind::Explicit => format!("loaded profile: {}", profile_name),
+        LoadedProfileKind::Default => format!("loaded profile: {} (default)", profile_name),
     };
 
     if overrides.is_empty() {
         vec![base_message]
     } else {
         vec![
-            format!("{base_message} as fallback."),
-            format!("CLI overrides: {}", overrides.join(", ")),
+            base_message,
+            format!("applied overrides: {}", overrides.join(", ")),
         ]
     }
 }
@@ -1439,18 +1439,18 @@ mod tests {
     }
 
     #[test]
-    fn profile_selection_messages_show_fallback_and_overrides() {
+    fn profile_selection_messages_show_loaded_profile_and_overrides() {
         let messages = profile_selection_messages(
             LoadedProfileKind::Default,
             "my_open_ai",
             &["server=ollama".to_string(), "model=mistral".to_string()],
         );
 
+        assert_eq!(messages[0], "loaded profile: my_open_ai (default)");
         assert_eq!(
-            messages[0],
-            "Using default profile 'my_open_ai' as fallback."
+            messages[1],
+            "applied overrides: server=ollama, model=mistral"
         );
-        assert_eq!(messages[1], "CLI overrides: server=ollama, model=mistral");
     }
 
     #[test]

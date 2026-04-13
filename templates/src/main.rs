@@ -242,10 +242,10 @@ impl ActionOutput {
                 lane.lane_finished_after = lane
                     .lane_started_at
                     .map(|started_at| started_at.elapsed());
-                lane.last_message = Some(format!("{}.", summary));
+                lane.last_message = Some(summary.to_string());
                 if append_only {
                     Some(format!(
-                        "{} in {}.",
+                        "{} · {}",
                         summary,
                         format_elapsed_duration(
                             lane.lane_finished_after.unwrap_or_else(|| Duration::from_secs(0))
@@ -283,7 +283,7 @@ impl ActionOutput {
                 push_lane_output_message(lane, error);
                 if append_only {
                     Some(format!(
-                        "failed in {}.",
+                        "failed · {}",
                         format_elapsed_duration(
                             lane.lane_finished_after.unwrap_or_else(|| Duration::from_secs(0))
                         )
@@ -320,7 +320,7 @@ impl ActionOutput {
                 push_lane_output_message(lane, error);
                 if append_only {
                     Some(format!(
-                        "abort requested in {}: {}",
+                        "abort requested · {}: {}",
                         format_elapsed_duration(
                             lane.lane_finished_after.unwrap_or_else(|| Duration::from_secs(0))
                         ),
@@ -392,10 +392,9 @@ impl ActionOutputState {
                 lane_status_label(lane)
             ));
             lines.push(format!("  step: {}", lane_step_label(lane)));
-            lines.push(format!(
-                "  last: {}",
-                lane.last_message.as_deref().unwrap_or("-")
-            ));
+            if let Some(last_message) = lane_last_message(lane) {
+                lines.push(format!("  last: {last_message}"));
+            }
         }
 
         lines
@@ -583,7 +582,7 @@ fn push_lane_output_message(lane: &mut ActionLaneState, message: &str) {
 fn lane_step_label(lane: &ActionLaneState) -> String {
     match lane.status {
         ActionLaneStatus::Completed => "✓ done".to_string(),
-        ActionLaneStatus::Failed | ActionLaneStatus::LogicError => "✗ failed".to_string(),
+        ActionLaneStatus::Failed | ActionLaneStatus::LogicError => "x failed".to_string(),
         ActionLaneStatus::Aborted => "! aborted".to_string(),
         ActionLaneStatus::Skipped => "skipped".to_string(),
         _ => lane
@@ -591,6 +590,18 @@ fn lane_step_label(lane: &ActionLaneState) -> String {
             .clone()
             .unwrap_or_else(|| "-".to_string()),
     }
+}
+
+fn lane_last_message(lane: &ActionLaneState) -> Option<&str> {
+    let message = lane.last_message.as_deref()?;
+
+    if lane.status == ActionLaneStatus::Completed
+        && matches!(message, "completed" | "completed.")
+    {
+        return None;
+    }
+
+    Some(message)
 }
 
 fn lane_status_label(lane: &ActionLaneState) -> String {
@@ -621,7 +632,43 @@ fn lane_elapsed_duration(lane: &ActionLaneState) -> Option<Duration> {
 }
 
 fn format_elapsed_duration(duration: Duration) -> String {
-    format!("{}s", duration.as_secs())
+    let elapsed_ms = duration.as_millis();
+
+    if elapsed_ms < 1_000 {
+        return format!("{elapsed_ms}ms");
+    }
+
+    if elapsed_ms < 10_000 {
+        if elapsed_ms % 1_000 == 0 {
+            return format!("{}s", duration.as_secs());
+        }
+        return format!("{:.1}s", duration.as_secs_f64());
+    }
+
+    let total_secs = duration.as_secs();
+    if total_secs < 60 {
+        return format!("{total_secs}s");
+    }
+
+    let hours = total_secs / 3_600;
+    let minutes = (total_secs % 3_600) / 60;
+    let seconds = total_secs % 60;
+
+    if hours > 0 {
+        if seconds == 0 {
+            if minutes == 0 {
+                return format!("{hours}h");
+            }
+            return format!("{hours}h {minutes}m");
+        }
+        return format!("{hours}h {minutes}m {seconds}s");
+    }
+
+    if seconds == 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{minutes}m {seconds}s")
+    }
 }
 
 fn waiting_message_for_step_kind(step_kind: &str) -> &'static str {
@@ -905,16 +952,16 @@ fn profile_selection_messages(
     overrides: &[String],
 ) -> Vec<String> {
     let base_message = match kind {
-        LoadedProfileKind::Explicit => format!("Using profile '{}'", profile_name),
-        LoadedProfileKind::Default => format!("Using default profile '{}'", profile_name),
+        LoadedProfileKind::Explicit => format!("loaded profile: {}", profile_name),
+        LoadedProfileKind::Default => format!("loaded profile: {} (default)", profile_name),
     };
 
     if overrides.is_empty() {
         vec![base_message]
     } else {
         vec![
-            format!("{base_message} as fallback."),
-            format!("CLI overrides: {}", overrides.join(", ")),
+            base_message,
+            format!("applied overrides: {}", overrides.join(", ")),
         ]
     }
 }
@@ -3924,10 +3971,7 @@ fn format_abort_summary(abort: &InvocationAbortRecord) -> String {
 
 fn run_completion_message_for_depth(depth: u32, elapsed: Duration) -> Option<String> {
     if depth == 0 {
-        Some(format!(
-            "✅ Run complete in {}.",
-            format_elapsed_duration(elapsed)
-        ))
+        Some(format!("✓ Run complete · {} total", format_elapsed_duration(elapsed)))
     } else {
         None
     }
@@ -3938,11 +3982,11 @@ fn root_run_completion_message(elapsed: Duration) -> Option<String> {
 }
 
 fn root_run_failure_message(elapsed: Duration) -> String {
-    format!("❌ Run failed in {}.", format_elapsed_duration(elapsed))
+    format!("x Run failed · {} total", format_elapsed_duration(elapsed))
 }
 
 fn root_run_abort_message(elapsed: Duration) -> String {
-    format!("❌ Run aborted in {}.", format_elapsed_duration(elapsed))
+    format!("! Run aborted · {} total", format_elapsed_duration(elapsed))
 }
 
 fn current_action_output() -> Option<ActionOutput> {
@@ -3987,8 +4031,8 @@ fn note_action_stopped_by_abort(action_index: usize, action_name: &str) {
 
 fn action_execution_header(action_execution: ActionExecutionMode) -> &'static str {
     match action_execution {
-        ActionExecutionMode::Sequential => "Action execution: sequential",
-        ActionExecutionMode::Parallel => "Action execution: parallel",
+        ActionExecutionMode::Sequential => "run: sequential",
+        ActionExecutionMode::Parallel => "run: parallel",
     }
 }
 

@@ -230,10 +230,10 @@ impl ActionOutput {
                 lane.step_started_at = None;
                 lane.lane_finished_after =
                     lane.lane_started_at.map(|started_at| started_at.elapsed());
-                lane.last_message = Some(format!("{}.", summary));
+                lane.last_message = Some(summary.to_string());
                 if append_only {
                     Some(format!(
-                        "{} in {}.",
+                        "{} · {}",
                         summary,
                         format_elapsed_duration(
                             lane.lane_finished_after
@@ -271,7 +271,7 @@ impl ActionOutput {
                 push_lane_output_message(lane, error);
                 if append_only {
                     Some(format!(
-                        "failed in {}.",
+                        "failed · {}",
                         format_elapsed_duration(
                             lane.lane_finished_after
                                 .unwrap_or_else(|| Duration::from_secs(0))
@@ -308,7 +308,7 @@ impl ActionOutput {
                 push_lane_output_message(lane, error);
                 if append_only {
                     Some(format!(
-                        "abort requested in {}: {}",
+                        "abort requested · {}: {}",
                         format_elapsed_duration(
                             lane.lane_finished_after
                                 .unwrap_or_else(|| Duration::from_secs(0))
@@ -387,10 +387,9 @@ impl ActionOutputState {
                 lane_status_label(lane)
             ));
             lines.push(format!("  step: {}", lane_step_label(lane)));
-            lines.push(format!(
-                "  last: {}",
-                lane.last_message.as_deref().unwrap_or("-")
-            ));
+            if let Some(last_message) = lane_last_message(lane) {
+                lines.push(format!("  last: {last_message}"));
+            }
         }
 
         lines
@@ -580,11 +579,21 @@ fn push_lane_output_message(lane: &mut ActionLaneState, message: &str) {
 fn lane_step_label(lane: &ActionLaneState) -> String {
     match lane.status {
         ActionLaneStatus::Completed => "✓ done".to_string(),
-        ActionLaneStatus::Failed | ActionLaneStatus::LogicError => "✗ failed".to_string(),
+        ActionLaneStatus::Failed | ActionLaneStatus::LogicError => "x failed".to_string(),
         ActionLaneStatus::Aborted => "! aborted".to_string(),
         ActionLaneStatus::Skipped => "skipped".to_string(),
         _ => lane.current_step.clone().unwrap_or_else(|| "-".to_string()),
     }
+}
+
+fn lane_last_message(lane: &ActionLaneState) -> Option<&str> {
+    let message = lane.last_message.as_deref()?;
+
+    if lane.status == ActionLaneStatus::Completed && matches!(message, "completed" | "completed.") {
+        return None;
+    }
+
+    Some(message)
 }
 
 fn lane_status_label(lane: &ActionLaneState) -> String {
@@ -615,7 +624,43 @@ fn lane_elapsed_duration(lane: &ActionLaneState) -> Option<Duration> {
 }
 
 fn format_elapsed_duration(duration: Duration) -> String {
-    format!("{}s", duration.as_secs())
+    let elapsed_ms = duration.as_millis();
+
+    if elapsed_ms < 1_000 {
+        return format!("{elapsed_ms}ms");
+    }
+
+    if elapsed_ms < 10_000 {
+        if elapsed_ms % 1_000 == 0 {
+            return format!("{}s", duration.as_secs());
+        }
+        return format!("{:.1}s", duration.as_secs_f64());
+    }
+
+    let total_secs = duration.as_secs();
+    if total_secs < 60 {
+        return format!("{total_secs}s");
+    }
+
+    let hours = total_secs / 3_600;
+    let minutes = (total_secs % 3_600) / 60;
+    let seconds = total_secs % 60;
+
+    if hours > 0 {
+        if seconds == 0 {
+            if minutes == 0 {
+                return format!("{hours}h");
+            }
+            return format!("{hours}h {minutes}m");
+        }
+        return format!("{hours}h {minutes}m {seconds}s");
+    }
+
+    if seconds == 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{minutes}m {seconds}s")
+    }
 }
 
 fn waiting_message_for_step_kind(step_kind: &str) -> &'static str {
@@ -2353,7 +2398,7 @@ fn format_abort_summary(abort: &InvocationAbortRecord) -> String {
 fn run_completion_message_for_depth(depth: u32, elapsed: Duration) -> Option<String> {
     if depth == 0 {
         Some(format!(
-            "✅ Run complete in {}.",
+            "✓ Run complete · {} total",
             format_elapsed_duration(elapsed)
         ))
     } else {
@@ -2366,11 +2411,11 @@ fn root_run_completion_message(elapsed: Duration) -> Option<String> {
 }
 
 fn root_run_failure_message(elapsed: Duration) -> String {
-    format!("❌ Run failed in {}.", format_elapsed_duration(elapsed))
+    format!("x Run failed · {} total", format_elapsed_duration(elapsed))
 }
 
 fn root_run_abort_message(elapsed: Duration) -> String {
-    format!("❌ Run aborted in {}.", format_elapsed_duration(elapsed))
+    format!("! Run aborted · {} total", format_elapsed_duration(elapsed))
 }
 
 fn current_action_output() -> Option<ActionOutput> {
@@ -2421,8 +2466,8 @@ fn note_action_stopped_by_abort(action_index: usize, action_name: &str) {
 
 fn action_execution_header(action_execution: crate::ActionExecutionMode) -> &'static str {
     match action_execution {
-        crate::ActionExecutionMode::Sequential => "Action execution: sequential",
-        crate::ActionExecutionMode::Parallel => "Action execution: parallel",
+        crate::ActionExecutionMode::Sequential => "run: sequential",
+        crate::ActionExecutionMode::Parallel => "run: parallel",
     }
 }
 
@@ -3549,7 +3594,8 @@ mod tests {
     use super::{
         action_completion_summary, action_execution_header, action_lane_prefix, apply_actions,
         child_input_args, configured_agent_action_runtime_budget, format_backend_error_message,
-        format_backend_ui_message, insert_action_output_variable, matching_run_steps,
+        format_backend_ui_message, format_elapsed_duration, insert_action_output_variable,
+        matching_run_steps,
         resolve_action_render_mode_for_capability as resolve_action_output_mode_for_capability,
         resolve_generate_image_step_profile_context, resolve_run_args, resolve_string_parts,
         run_agent_step, run_completion_message_for_depth, run_exec_step, run_generate_image_step,
@@ -4506,7 +4552,7 @@ auth_mode = "{auth_mode}"
     fn run_completion_message_for_depth_prints_for_root_runs_only() {
         assert_eq!(
             run_completion_message_for_depth(0, std::time::Duration::from_secs(32)),
-            Some("✅ Run complete in 32s.".to_string())
+            Some("✓ Run complete · 32s total".to_string())
         );
         assert_eq!(
             run_completion_message_for_depth(1, std::time::Duration::from_secs(32)),
@@ -4518,11 +4564,31 @@ auth_mode = "{auth_mode}"
     fn action_execution_header_uses_effective_mode() {
         assert_eq!(
             action_execution_header(crate::ActionExecutionMode::Sequential),
-            "Action execution: sequential"
+            "run: sequential"
         );
         assert_eq!(
             action_execution_header(crate::ActionExecutionMode::Parallel),
-            "Action execution: parallel"
+            "run: parallel"
+        );
+    }
+
+    #[test]
+    fn format_elapsed_duration_is_millisecond_aware() {
+        assert_eq!(
+            format_elapsed_duration(std::time::Duration::from_millis(428)),
+            "428ms"
+        );
+        assert_eq!(
+            format_elapsed_duration(std::time::Duration::from_millis(1_500)),
+            "1.5s"
+        );
+        assert_eq!(
+            format_elapsed_duration(std::time::Duration::from_secs(17)),
+            "17s"
+        );
+        assert_eq!(
+            format_elapsed_duration(std::time::Duration::from_secs(72)),
+            "1m 12s"
         );
     }
 
@@ -4554,7 +4620,7 @@ auth_mode = "{auth_mode}"
         );
 
         let snapshot = output.snapshot_lines_for_test();
-        assert_eq!(snapshot[0], "Action execution: parallel");
+        assert_eq!(snapshot[0], "run: parallel");
         assert!(snapshot
             .iter()
             .any(|line| line.starts_with("[Action 1: generate_images] running · ")));
@@ -4604,7 +4670,8 @@ auth_mode = "{auth_mode}"
             .iter()
             .any(|line| line.starts_with("[Action 1: generate_images] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
-        assert!(snapshot.iter().any(|line| line == "  last: completed."));
+        assert!(!snapshot.iter().any(|line| line == "  last: completed"));
+        assert!(!snapshot.iter().any(|line| line == "  last: completed."));
     }
 
     #[test]
@@ -4621,7 +4688,7 @@ auth_mode = "{auth_mode}"
         assert!(snapshot
             .iter()
             .any(|line| line.starts_with("[Action 2: child_summary] failed · ")));
-        assert!(snapshot.iter().any(|line| line == "  step: ✗ failed"));
+        assert!(snapshot.iter().any(|line| line == "  step: x failed"));
         assert!(snapshot
             .iter()
             .any(|line| line == "  last: failed: child exited with status 1"));
@@ -4815,7 +4882,8 @@ auth_mode = "{auth_mode}"
             .iter()
             .any(|line| line.starts_with("[Action 1: raw_exec] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
-        assert!(snapshot.iter().any(|line| line == "  last: completed."));
+        assert!(!snapshot.iter().any(|line| line == "  last: completed"));
+        assert!(!snapshot.iter().any(|line| line == "  last: completed."));
         assert!(!snapshot.iter().any(|line| line == "  output:"));
         assert!(!snapshot.iter().any(|line| line.contains("alpha")));
         assert!(!snapshot.iter().any(|line| line.contains("beta")));
@@ -5761,7 +5829,8 @@ auth_mode = "{auth_mode}"
             .iter()
             .any(|line| line.starts_with("[Action 1: child_summary] completed · ")));
         assert!(snapshot.iter().any(|line| line == "  step: ✓ done"));
-        assert!(snapshot.iter().any(|line| line == "  last: completed."));
+        assert!(!snapshot.iter().any(|line| line == "  last: completed"));
+        assert!(!snapshot.iter().any(|line| line == "  last: completed."));
         assert!(!snapshot.iter().any(|line| line == "  output:"));
         assert!(!snapshot
             .iter()
