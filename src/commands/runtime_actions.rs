@@ -1010,6 +1010,7 @@ pub(crate) async fn apply_actions_with_data(
 
                 if let Some(message) = root_run_completion_message(full_run_started_at.elapsed()) {
                     if top_level_failures.is_empty() {
+                        println!();
                         println!("{message}");
                     }
                 }
@@ -2443,7 +2444,7 @@ fn format_abort_summary(abort: &InvocationAbortRecord) -> String {
 fn run_completion_message_for_depth(depth: u32, elapsed: Duration) -> Option<String> {
     if depth == 0 {
         Some(format!(
-            "✓ Run complete · {} total",
+            "Run complete · {} total",
             format_elapsed_duration(elapsed)
         ))
     } else {
@@ -4598,7 +4599,7 @@ auth_mode = "{auth_mode}"
     fn run_completion_message_for_depth_prints_for_root_runs_only() {
         assert_eq!(
             run_completion_message_for_depth(0, std::time::Duration::from_secs(32)),
-            Some("✓ Run complete · 32s total".to_string())
+            Some("Run complete · 32s total".to_string())
         );
         assert_eq!(
             run_completion_message_for_depth(1, std::time::Duration::from_secs(32)),

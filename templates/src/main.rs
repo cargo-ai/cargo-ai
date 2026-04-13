@@ -2715,6 +2715,7 @@ async fn apply_actions(
 
             if let Some(message) = root_run_completion_message(full_run_started_at.elapsed()) {
                 if top_level_failures.is_empty() {
+                    println!();
                     println!("{message}");
                 }
             }
@@ -4035,7 +4036,7 @@ fn format_abort_summary(abort: &InvocationAbortRecord) -> String {
 
 fn run_completion_message_for_depth(depth: u32, elapsed: Duration) -> Option<String> {
     if depth == 0 {
-        Some(format!("✓ Run complete · {} total", format_elapsed_duration(elapsed)))
+        Some(format!("Run complete · {} total", format_elapsed_duration(elapsed)))
     } else {
         None
     }
