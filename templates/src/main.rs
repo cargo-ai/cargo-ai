@@ -69,6 +69,8 @@ struct ActionOutputState {
     mode: ActionOutputMode,
     startup_notice: Option<&'static str>,
     action_execution: ActionExecutionMode,
+    run_started_at: Instant,
+    run_finished_after: Option<Duration>,
     rendered_lines: usize,
     lanes: BTreeMap<usize, ActionLaneState>,
     last_using_line: Option<String>,
@@ -105,26 +107,33 @@ enum ChildArtifactInvocation {
 }
 
 impl ActionOutput {
-    fn new(action_execution: ActionExecutionMode, requested_mode: RequestedActionRenderMode) -> Self {
+    fn new(
+        action_execution: ActionExecutionMode,
+        requested_mode: RequestedActionRenderMode,
+        run_started_at: Instant,
+    ) -> Self {
         let (mode, startup_notice) =
             resolve_action_render_mode_for_capability(requested_mode, live_dashboard_supported());
-        Self::new_for_mode_with_notice(action_execution, mode, startup_notice)
+        Self::new_for_mode_with_notice(action_execution, mode, startup_notice, run_started_at)
     }
 
     #[cfg(test)]
     fn new_for_mode(action_execution: ActionExecutionMode, mode: ActionOutputMode) -> Self {
-        Self::new_for_mode_with_notice(action_execution, mode, None)
+        Self::new_for_mode_with_notice(action_execution, mode, None, Instant::now())
     }
 
     fn new_for_mode_with_notice(
         action_execution: ActionExecutionMode,
         mode: ActionOutputMode,
         startup_notice: Option<&'static str>,
+        run_started_at: Instant,
     ) -> Self {
         let inner = Arc::new(Mutex::new(ActionOutputState {
             mode,
             startup_notice,
             action_execution,
+            run_started_at,
+            run_finished_after: None,
             rendered_lines: 0,
             lanes: BTreeMap::new(),
             last_using_line: None,
@@ -363,6 +372,7 @@ impl ActionOutput {
         self.live_refresh_stop.store(true, Ordering::Relaxed);
         self.with_state(|state| {
             if state.mode == ActionOutputMode::Live {
+                state.run_finished_after = Some(state.run_started_at.elapsed());
                 render_live_dashboard(state);
                 let _ = writeln!(io::stdout());
                 let _ = io::stdout().flush();
@@ -382,7 +392,13 @@ impl ActionOutput {
 
 impl ActionOutputState {
     fn snapshot_lines(&self) -> Vec<String> {
-        let mut lines = vec![action_execution_header(self.action_execution).to_string()];
+        let mut lines = vec![run_header_line(
+            self.action_execution,
+            match self.mode {
+                ActionOutputMode::AppendOnly => None,
+                ActionOutputMode::Live => self.run_elapsed_duration(),
+            },
+        )];
 
         for (lane_index, lane) in &self.lanes {
             lines.push(String::new());
@@ -398,6 +414,11 @@ impl ActionOutputState {
         }
 
         lines
+    }
+
+    fn run_elapsed_duration(&self) -> Option<Duration> {
+        self.run_finished_after
+            .or_else(|| Some(self.run_started_at.elapsed()))
     }
 }
 
@@ -629,6 +650,17 @@ fn lane_status_label(lane: &ActionLaneState) -> String {
 fn lane_elapsed_duration(lane: &ActionLaneState) -> Option<Duration> {
     lane.lane_finished_after
         .or_else(|| lane.lane_started_at.map(|started_at| started_at.elapsed()))
+}
+
+fn run_header_line(action_execution: ActionExecutionMode, elapsed: Option<Duration>) -> String {
+    match elapsed {
+        Some(elapsed) => format!(
+            "{} · {}",
+            action_execution_header(action_execution),
+            format_elapsed_duration(elapsed)
+        ),
+        None => action_execution_header(action_execution).to_string(),
+    }
 }
 
 fn format_elapsed_duration(duration: Duration) -> String {
@@ -2100,6 +2132,7 @@ async fn main() {
     let mut selected_profile: Option<SelectedProfile> = None;
     let mut loaded_profile_message: Option<(LoadedProfileKind, String)> = None;
     let mut use_openai_account_transport = false;
+    let full_run_started_at = Instant::now();
 
     let explicit_profile_name = cmd_args.get_one::<String>("profile").map(String::as_str);
     match resolve_loaded_profile(config.as_ref(), explicit_profile_name) {
@@ -2279,6 +2312,7 @@ async fn main() {
                 &action_provider_context,
                 max_agent_depth,
                 runtime_budget,
+                full_run_started_at,
             )
             .await
         {
@@ -2468,6 +2502,7 @@ async fn main() {
             &action_provider_context,
             max_agent_depth,
             runtime_budget,
+            full_run_started_at,
         )
         .await
     {
@@ -2588,11 +2623,13 @@ async fn apply_actions(
     provider_context: &ActionProviderContext,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
+    full_run_started_at: Instant,
 ) -> Result<(), String> {
     ACTION_OUTPUT
         .scope(
             {
-                let output = ActionOutput::new(action_execution, requested_render_mode);
+                let output =
+                    ActionOutput::new(action_execution, requested_render_mode, full_run_started_at);
                 output.seed_using_line(provider_context.using_line().as_str());
                 output
             },
@@ -2604,7 +2641,6 @@ async fn apply_actions(
             })?;
             let current_platform = current_action_platform();
             let named_input_lookup = named_input_lookup(named_inputs);
-            let invocation_started_at = Instant::now();
             print_action_execution_header(action_execution);
             let top_level_failures = match action_execution {
                 ActionExecutionMode::Sequential => {
@@ -2645,11 +2681,11 @@ async fn apply_actions(
                 return Err(format!(
                     "{}\n{}",
                     format_abort_summary(&abort),
-                    root_run_abort_message(invocation_started_at.elapsed())
+                    root_run_abort_message(full_run_started_at.elapsed())
                 ));
             }
 
-            if let Some(message) = root_run_completion_message(invocation_started_at.elapsed()) {
+            if let Some(message) = root_run_completion_message(full_run_started_at.elapsed()) {
                 if top_level_failures.is_empty() {
                     println!("{message}");
                 }
@@ -2661,7 +2697,7 @@ async fn apply_actions(
                 Err(format!(
                     "{}\n{}",
                     format_top_level_action_failures(&top_level_failures),
-                    root_run_failure_message(invocation_started_at.elapsed())
+                    root_run_failure_message(full_run_started_at.elapsed())
                 ))
             }
             },

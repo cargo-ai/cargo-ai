@@ -835,6 +835,8 @@ pub(crate) async fn run_with_definition(
     sub_m: &ArgMatches,
     definition: &dyn InvocationDefinition,
 ) -> bool {
+    let full_run_started_at = std::time::Instant::now();
+
     // Begin: Argument assignments
     let mut server = String::new();
     let mut model = String::new();
@@ -1059,6 +1061,7 @@ pub(crate) async fn run_with_definition(
             &action_provider_context,
             max_agent_depth,
             runtime_budget,
+            full_run_started_at,
         )
         .await
         {
@@ -1314,6 +1317,7 @@ pub(crate) async fn run_with_definition(
         &action_provider_context,
         max_agent_depth,
         runtime_budget,
+        full_run_started_at,
     )
     .await
     {
