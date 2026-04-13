@@ -541,6 +541,7 @@ fn maybe_spawn_live_action_refresh(
     handle.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await;
 
         loop {
             interval.tick().await;
