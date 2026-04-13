@@ -490,16 +490,18 @@ fn is_account_pull_success(response: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn pulled_definition_json_string(response: &Value, continuation_label: &str) -> Result<String, String> {
+fn pulled_definition_json_string(
+    response: &Value,
+    continuation_label: &str,
+) -> Result<String, String> {
     let definition_json = response.get("definition_json").ok_or_else(|| {
         format!(
             "{continuation_label} could not continue because response did not include 'definition_json'."
         )
     })?;
 
-    serde_json::to_string(definition_json).map_err(|error| {
-        format!("Failed to serialize pulled definition JSON: {error}")
-    })
+    serde_json::to_string(definition_json)
+        .map_err(|error| format!("Failed to serialize pulled definition JSON: {error}"))
 }
 
 fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &Value) -> bool {
@@ -554,7 +556,7 @@ async fn continue_run_from_response(run_m: &ArgMatches, response: &Value) -> boo
         }
     };
 
-    crate::commands::preflight::run_with_definition(run_m, &definition).await
+    crate::commands::runtime::run_with_definition(run_m, &definition).await
 }
 
 /// Executes account-agent operations (list/push/pull/hatch/visibility/archive).

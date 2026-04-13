@@ -1,4 +1,4 @@
-//! CLI parser definition for `cargo ai preflight`.
+//! Shared runtime CLI flag builder for interpreted execution commands.
 use clap::{Arg, ArgAction, Command};
 
 pub(crate) fn runtime_command(name: &'static str, about: &'static str) -> Command {
@@ -138,20 +138,15 @@ pub(crate) fn runtime_command(name: &'static str, about: &'static str) -> Comman
         )
 }
 
-/// Builds the `preflight` command schema.
-pub fn command() -> Command {
-    runtime_command("preflight", "Internal: test agent config file").hide(true)
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
     fn help_describes_input_file_as_supported_file_path() {
-        let mut command = super::command();
+        let mut command = super::runtime_command("runtime-test", "Runtime test command");
         let mut help = Vec::new();
         command
             .write_long_help(&mut help)
-            .expect("preflight help should render");
+            .expect("runtime help should render");
         let help = String::from_utf8(help).expect("help should be utf8");
 
         assert!(help.contains("Local supported file path to provide to the agent at runtime"));
@@ -160,11 +155,11 @@ mod tests {
 
     #[test]
     fn help_describes_input_mode_values() {
-        let mut command = super::command();
+        let mut command = super::runtime_command("runtime-test", "Runtime test command");
         let mut help = Vec::new();
         command
             .write_long_help(&mut help)
-            .expect("preflight help should render");
+            .expect("runtime help should render");
         let help = String::from_utf8(help).expect("help should be utf8");
 
         assert!(help.contains("--input-mode <MODE>"));
@@ -175,11 +170,11 @@ mod tests {
 
     #[test]
     fn help_describes_action_execution_override() {
-        let mut command = super::command();
+        let mut command = super::runtime_command("runtime-test", "Runtime test command");
         let mut help = Vec::new();
         command
             .write_long_help(&mut help)
-            .expect("preflight help should render");
+            .expect("runtime help should render");
         let help = String::from_utf8(help).expect("help should be utf8");
 
         assert!(help.contains("--action-execution <MODE>"));
@@ -190,11 +185,11 @@ mod tests {
 
     #[test]
     fn help_describes_render_mode_override() {
-        let mut command = super::command();
+        let mut command = super::runtime_command("runtime-test", "Runtime test command");
         let mut help = Vec::new();
         command
             .write_long_help(&mut help)
-            .expect("preflight help should render");
+            .expect("runtime help should render");
         let help = String::from_utf8(help).expect("help should be utf8");
 
         assert!(help.contains("--render-mode <MODE>"));
@@ -205,11 +200,11 @@ mod tests {
 
     #[test]
     fn help_describes_run_var_assignments() {
-        let mut command = super::command();
+        let mut command = super::runtime_command("runtime-test", "Runtime test command");
         let mut help = Vec::new();
         command
             .write_long_help(&mut help)
-            .expect("preflight help should render");
+            .expect("runtime help should render");
         let help = String::from_utf8(help).expect("help should be utf8");
 
         assert!(help.contains("--run-var <NAME=VALUE>"));
@@ -220,11 +215,11 @@ mod tests {
 
     #[test]
     fn help_describes_input_override_assignments() {
-        let mut command = super::command();
+        let mut command = super::runtime_command("runtime-test", "Runtime test command");
         let mut help = Vec::new();
         command
             .write_long_help(&mut help)
-            .expect("preflight help should render");
+            .expect("runtime help should render");
         let help = String::from_utf8(help).expect("help should be utf8");
 
         assert!(help.contains("--input-override <NAME=VALUE>"));

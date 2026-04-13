@@ -719,7 +719,7 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
         "Use `--server ollama` or `--server openai`.".to_string(),
         "Hint: Set `--server` explicitly or configure a default profile with a supported server."
             .to_string(),
-        "Example: cargo ai preflight --server ollama --model mistral --input-text \"What is 2 + 2?\""
+        "Example: cargo ai run --server ollama --model mistral --input-text \"What is 2 + 2?\""
             .to_string(),
     ]
 }

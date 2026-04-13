@@ -2,7 +2,7 @@
 use clap::{Arg, ArgGroup, Command};
 
 pub(crate) fn run_command() -> Command {
-    crate::args::preflight::runtime_command(
+    crate::args::runtime_common::runtime_command(
         "run",
         "Run an account agent definition through the interpreted runtime",
     )

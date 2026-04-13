@@ -1,4 +1,4 @@
-//! Action execution helpers for preflight/test flows.
+//! Action execution helpers for interpreted runtime flows.
 use crate::config::adder::set_account_tokens;
 use crate::config::loader::{config_path, find_profile, load_config};
 use crate::config::schema::ProfileAuthMode;
@@ -3630,7 +3630,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("system time should be valid")
                 .as_nanos();
-            let root = std::env::temp_dir().join(format!("cargo-ai-preflight-actions-{unique}"));
+            let root = std::env::temp_dir().join(format!("cargo-ai-runtime-actions-{unique}"));
             let config_path = root.join(".cargo-ai").join("config.toml");
             fs::create_dir_all(
                 config_path

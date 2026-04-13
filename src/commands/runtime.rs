@@ -1,4 +1,4 @@
-//! Runtime behavior for `cargo ai preflight`.
+//! Shared interpreted runtime behavior for Cargo AI commands.
 use clap::ArgMatches;
 use std::time::Duration;
 
@@ -7,7 +7,7 @@ use crate::config::schema::ProfileAuthMode;
 use crate::credentials::{openai_oauth, store};
 use crate::providers::{
     provider_error_messages, validate_provider_content_parts, validate_provider_request,
-    ProviderKind, ValidatedResponse,
+    ProviderKind,
 };
 
 const AGENT_ACTION_MAX_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_MAX_DEPTH";
@@ -64,45 +64,6 @@ pub(crate) trait InvocationDefinition {
     fn json_schema_value(&self) -> serde_json::Value;
     fn actions(&self) -> Vec<crate::Action>;
     fn validate_provider_output(&self, raw: &str) -> Result<serde_json::Value, String>;
-}
-
-struct GeneratedInvocationDefinition;
-
-impl InvocationDefinition for GeneratedInvocationDefinition {
-    fn named_inputs(&self) -> Vec<crate::Input> {
-        crate::inputs()
-    }
-
-    fn runtime_var_specs(&self) -> Vec<crate::RuntimeVarSpec> {
-        crate::runtime_var_specs()
-    }
-
-    fn action_execution(&self) -> crate::ActionExecutionMode {
-        crate::action_execution()
-    }
-
-    fn has_output_schema_properties(&self) -> bool {
-        crate::has_output_schema_properties()
-    }
-
-    fn json_schema_value(&self) -> serde_json::Value {
-        crate::json_schema_value()
-    }
-
-    fn actions(&self) -> Vec<crate::Action> {
-        crate::actions()
-    }
-
-    fn validate_provider_output(&self, raw: &str) -> Result<serde_json::Value, String> {
-        let parsed = serde_json::from_str::<crate::Output>(raw).map_err(|_| {
-            "The provider returned output that could not be parsed as the expected JSON shape."
-                .to_string()
-        })?;
-        parsed.validate_response()?;
-        serde_json::to_value(parsed).map_err(|error| {
-            format!("Failed to serialize validated provider output for action execution: {error}")
-        })
-    }
 }
 
 fn profile_selection_messages(
@@ -205,8 +166,8 @@ fn push_plain_section(lines: &mut Vec<String>, title: &str, items: &[String]) {
     lines.extend(rendered_items);
 }
 
-fn preflight_context_items(
-    context: &super::preflight_actions::ActionProviderContext,
+fn runtime_context_items(
+    context: &super::runtime_actions::ActionProviderContext,
 ) -> Vec<(&'static str, String)> {
     let mut items = vec![
         (
@@ -232,9 +193,9 @@ fn preflight_context_items(
     items
 }
 
-fn render_preflight_failure_lines(
+fn render_runtime_failure_lines(
     summary: &str,
-    context: Option<&super::preflight_actions::ActionProviderContext>,
+    context: Option<&super::runtime_actions::ActionProviderContext>,
     problems: &[String],
     detail_title: Option<&str>,
     detail_lines: &[String],
@@ -243,7 +204,7 @@ fn render_preflight_failure_lines(
     let mut lines = vec!["x Run failed".to_string(), summary.to_string()];
 
     if let Some(context) = context {
-        let items = preflight_context_items(context);
+        let items = runtime_context_items(context);
         push_aligned_section(&mut lines, "Context", &items);
     }
 
@@ -266,15 +227,15 @@ fn format_recovery_value(value: &str) -> String {
     }
 }
 
-fn print_preflight_failure(
+fn print_runtime_failure(
     summary: &str,
-    context: Option<&super::preflight_actions::ActionProviderContext>,
+    context: Option<&super::runtime_actions::ActionProviderContext>,
     problems: &[String],
     detail_title: Option<&str>,
     detail_lines: &[String],
     next_steps: &[(&str, String)],
 ) {
-    for line in render_preflight_failure_lines(
+    for line in render_runtime_failure_lines(
         summary,
         context,
         problems,
@@ -352,11 +313,11 @@ fn effective_action_execution_for_run(
 
 fn resolved_render_mode_for_run(
     sub_m: &ArgMatches,
-) -> Result<super::preflight_actions::RequestedActionRenderMode, String> {
+) -> Result<super::runtime_actions::RequestedActionRenderMode, String> {
     match sub_m.get_one::<String>("render_mode").map(String::as_str) {
-        None | Some("auto") => Ok(super::preflight_actions::RequestedActionRenderMode::Auto),
-        Some("live") => Ok(super::preflight_actions::RequestedActionRenderMode::Live),
-        Some("append-only") => Ok(super::preflight_actions::RequestedActionRenderMode::AppendOnly),
+        None | Some("auto") => Ok(super::runtime_actions::RequestedActionRenderMode::Auto),
+        Some("live") => Ok(super::runtime_actions::RequestedActionRenderMode::Live),
+        Some("append-only") => Ok(super::runtime_actions::RequestedActionRenderMode::AppendOnly),
         Some(other) => Err(format!(
             "Unsupported --render-mode '{other}'. Expected auto, live, or append-only."
         )),
@@ -833,7 +794,7 @@ fn configured_agent_action_max_depth(cli_override: Option<u32>) -> u32 {
 }
 
 fn remaining_runtime_duration(
-    runtime_budget: super::preflight_actions::InvocationRuntimeBudget,
+    runtime_budget: super::runtime_actions::InvocationRuntimeBudget,
     exhausted_context: &str,
 ) -> Result<Duration, String> {
     let now_ms = std::time::SystemTime::now()
@@ -852,7 +813,7 @@ fn remaining_runtime_duration(
 }
 
 fn current_agent_runtime_timeout_message(
-    runtime_budget: super::preflight_actions::InvocationRuntimeBudget,
+    runtime_budget: super::runtime_actions::InvocationRuntimeBudget,
     context: &str,
 ) -> String {
     let now_ms = std::time::SystemTime::now()
@@ -868,13 +829,6 @@ fn current_agent_runtime_timeout_message(
         "Current agent exceeded max-runtime-in-sec {} after {} seconds {}.",
         runtime_budget.max_runtime_secs, elapsed_secs, context
     )
-}
-
-/// Executes the preflight flow: resolve runtime settings, call provider, and
-/// run any configured post-response actions.
-pub async fn run(sub_m: &ArgMatches) -> bool {
-    let definition = GeneratedInvocationDefinition;
-    run_with_definition(sub_m, &definition).await
 }
 
 pub(crate) async fn run_with_definition(
@@ -964,7 +918,7 @@ pub(crate) async fn run_with_definition(
 
     let max_agent_depth =
         configured_agent_action_max_depth(sub_m.get_one::<u32>("max_agent_depth").copied());
-    let runtime_budget = super::preflight_actions::configured_agent_action_runtime_budget(
+    let runtime_budget = super::runtime_actions::configured_agent_action_runtime_budget(
         sub_m.get_one::<u64>("max_runtime_in_sec").copied(),
     );
 
@@ -1019,7 +973,7 @@ pub(crate) async fn run_with_definition(
         }
     }
 
-    let action_provider_context = super::preflight_actions::ActionProviderContext {
+    let action_provider_context = super::runtime_actions::ActionProviderContext {
         provider,
         profile_name: selected_profile
             .as_ref()
@@ -1094,7 +1048,7 @@ pub(crate) async fn run_with_definition(
         let output = empty_action_only_output();
         println!("{}", action_provider_context.using_line());
 
-        return match super::preflight_actions::apply_actions_with_data(
+        return match super::runtime_actions::apply_actions_with_data(
             &output,
             &actions,
             &runtime_vars,
@@ -1110,7 +1064,7 @@ pub(crate) async fn run_with_definition(
         {
             Ok(()) => true,
             Err(error) => {
-                print_preflight_failure(
+                print_runtime_failure(
                     "Action execution failed during run.",
                     Some(&action_provider_context),
                     &[error],
@@ -1124,7 +1078,7 @@ pub(crate) async fn run_with_definition(
     }
 
     if let Err(validation_issues) = validate_provider_request(provider, &model, &url, &token) {
-        print_preflight_failure(
+        print_runtime_failure(
             "Provider request settings are incomplete or invalid.",
             Some(&action_provider_context),
             &validation_issues,
@@ -1143,7 +1097,7 @@ pub(crate) async fn run_with_definition(
     let resolved_inputs = match crate::providers::resolve_provider_inputs(&selected_inputs).await {
         Ok(resolved_inputs) => resolved_inputs,
         Err(error) => {
-            print_preflight_failure(
+            print_runtime_failure(
                 "Runtime inputs could not be resolved.",
                 Some(&action_provider_context),
                 &[format!("Reason: {error}")],
@@ -1161,7 +1115,7 @@ pub(crate) async fn run_with_definition(
     if let Err(validation_issues) =
         validate_provider_content_parts(provider, &url, &resolved_inputs)
     {
-        print_preflight_failure(
+        print_runtime_failure(
             "Resolved inputs are not valid for the provider request.",
             Some(&action_provider_context),
             &validation_issues,
@@ -1219,7 +1173,7 @@ pub(crate) async fn run_with_definition(
                     .first()
                     .map(|line| normalize_cli_issue(line))
                     .unwrap_or_else(|| "Issue communicating with the AI server.".to_string());
-                print_preflight_failure(
+                print_runtime_failure(
                     summary.as_str(),
                     Some(&action_provider_context),
                     &[],
@@ -1233,7 +1187,7 @@ pub(crate) async fn run_with_definition(
                 return false;
             }
             Err(_) => {
-                print_preflight_failure(
+                print_runtime_failure(
                     "The provider did not return a response before the runtime budget expired.",
                     Some(&action_provider_context),
                     &[current_agent_runtime_timeout_message(
@@ -1294,7 +1248,7 @@ pub(crate) async fn run_with_definition(
                     .first()
                     .map(|line| normalize_cli_issue(line))
                     .unwrap_or_else(|| "Issue communicating with the AI server.".to_string());
-                print_preflight_failure(
+                print_runtime_failure(
                     summary.as_str(),
                     Some(&action_provider_context),
                     &[],
@@ -1308,7 +1262,7 @@ pub(crate) async fn run_with_definition(
                 return false;
             }
             Err(_) => {
-                print_preflight_failure(
+                print_runtime_failure(
                     "The provider did not return a response before the runtime budget expired.",
                     Some(&action_provider_context),
                     &[current_agent_runtime_timeout_message(
@@ -1330,7 +1284,7 @@ pub(crate) async fn run_with_definition(
     let output = match definition.validate_provider_output(response.as_str()) {
         Ok(output) => output,
         Err(problem) => {
-            print_preflight_failure(
+            print_runtime_failure(
                 "Provider output did not match the required JSON schema.",
                 Some(&action_provider_context),
                 &[problem],
@@ -1349,7 +1303,7 @@ pub(crate) async fn run_with_definition(
         }
     };
 
-    match super::preflight_actions::apply_actions_with_data(
+    match super::runtime_actions::apply_actions_with_data(
         &output,
         &actions,
         &runtime_vars,
@@ -1365,7 +1319,7 @@ pub(crate) async fn run_with_definition(
     {
         Ok(()) => true,
         Err(error) => {
-            print_preflight_failure(
+            print_runtime_failure(
                 "Action execution failed during run.",
                 Some(&action_provider_context),
                 &[error],
@@ -1382,26 +1336,30 @@ pub(crate) async fn run_with_definition(
 mod tests {
     use super::{
         cli_override_descriptions, effective_action_execution_for_run, profile_selection_messages,
-        render_preflight_failure_lines, resolve_runtime_vars_from_specs,
+        render_runtime_failure_lines, resolve_runtime_vars_from_specs,
         resolved_action_execution_override_for_run, resolved_render_mode_for_run,
         unknown_server_messages, validate_structural_action_only_inputs, LoadedProfileKind,
     };
-    use crate::args::test_cli_command;
-    use crate::commands::preflight_actions::RequestedActionRenderMode;
+    use crate::commands::runtime_actions::RequestedActionRenderMode;
     use crate::providers::ProviderKind;
+    use clap::Command;
     use serde_json::json;
 
     fn input_debug_strings(inputs: &[crate::Input]) -> Vec<String> {
         inputs.iter().map(|input| format!("{input:?}")).collect()
     }
 
-    fn resolved_named_inputs(preflight: &clap::ArgMatches) -> Vec<crate::Input> {
-        super::resolved_named_inputs_for_run(preflight, &crate::inputs())
+    fn resolved_named_inputs(runtime_m: &clap::ArgMatches) -> Vec<crate::Input> {
+        super::resolved_named_inputs_for_run(runtime_m, &crate::inputs())
             .expect("named inputs should resolve")
     }
 
     fn matches(args: &[&str]) -> clap::ArgMatches {
-        test_cli_command("cargo-ai")
+        Command::new("cargo-ai")
+            .subcommand(crate::args::runtime_common::runtime_command(
+                "run",
+                "Runtime test command",
+            ))
             .try_get_matches_from(args)
             .expect("cargo-ai args should parse")
     }
@@ -1416,6 +1374,30 @@ mod tests {
             field_type,
             default_value,
         }
+    }
+
+    fn test_runtime_definition() -> crate::runtime_definition::RuntimeAgentDefinition {
+        crate::runtime_definition::RuntimeAgentDefinition::from_str(
+            r#"{
+                "version": "2026-03-03.r1",
+                "inputs": [{ "type": "text", "text": "Return an answer." }],
+                "agent_schema": {
+                    "type": "object",
+                    "properties": {
+                        "answer": { "type": "string" }
+                    },
+                    "required": ["answer"]
+                },
+                "actions": [
+                    {
+                        "name": "print",
+                        "logic": { "==": [{ "var": "answer" }, "ok"] },
+                        "run": [{ "kind": "exec", "program": "echo", "args": ["ok"] }]
+                    }
+                ]
+            }"#,
+        )
+        .expect("test runtime definition should parse")
     }
 
     #[test]
@@ -1454,8 +1436,8 @@ mod tests {
     }
 
     #[test]
-    fn render_preflight_failure_lines_include_context_and_recovery() {
-        let context = crate::commands::preflight_actions::ActionProviderContext {
+    fn render_runtime_failure_lines_include_context_and_recovery() {
+        let context = crate::commands::runtime_actions::ActionProviderContext {
             provider: ProviderKind::OpenAi,
             profile_name: Some("my_open_ai".to_string()),
             auth_mode: "chatgpt_account".to_string(),
@@ -1465,7 +1447,7 @@ mod tests {
             inference_timeout_in_sec: 60,
         };
 
-        let lines = render_preflight_failure_lines(
+        let lines = render_runtime_failure_lines(
             "Runtime inputs could not be resolved.",
             Some(&context),
             &[String::from("Reason: missing /tmp/demo.pdf")],
@@ -1488,8 +1470,8 @@ mod tests {
     }
 
     #[test]
-    fn render_preflight_failure_lines_backtick_command_recovery_values() {
-        let lines = render_preflight_failure_lines(
+    fn render_runtime_failure_lines_backtick_command_recovery_values() {
+        let lines = render_runtime_failure_lines(
             "Provider output did not match the required schema.",
             None,
             &[String::from("Reason: invalid JSON body")],
@@ -1511,7 +1493,7 @@ mod tests {
     fn cli_override_descriptions_capture_runtime_overrides() {
         let cmd = matches(&[
             "cargo-ai",
-            "preflight",
+            "run",
             "--server",
             "Ollama",
             "--model",
@@ -1527,11 +1509,11 @@ mod tests {
             "--input-text",
             "Return 4",
         ]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
-        let overrides = cli_override_descriptions(preflight, false);
+        let overrides = cli_override_descriptions(runtime_m, false);
 
         assert_eq!(
             overrides,
@@ -1547,21 +1529,21 @@ mod tests {
     }
 
     #[test]
-    fn preflight_accepts_action_execution_override() {
+    fn runtime_command_accepts_action_execution_override() {
         let cmd = matches(&[
             "cargo-ai",
-            "preflight",
+            "run",
             "--action-execution",
             "sequential",
             "--input-text",
             "Return 4",
         ]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
         assert_eq!(
-            preflight
+            runtime_m
                 .get_one::<String>("action_execution")
                 .map(String::as_str),
             Some("sequential")
@@ -1569,21 +1551,21 @@ mod tests {
     }
 
     #[test]
-    fn preflight_accepts_render_mode_override() {
+    fn runtime_command_accepts_render_mode_override() {
         let cmd = matches(&[
             "cargo-ai",
-            "preflight",
+            "run",
             "--render-mode",
             "append-only",
             "--input-text",
             "Return 4",
         ]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
         assert_eq!(
-            preflight
+            runtime_m
                 .get_one::<String>("render_mode")
                 .map(String::as_str),
             Some("append-only")
@@ -1594,18 +1576,18 @@ mod tests {
     fn resolved_action_execution_override_for_run_reads_cli_override() {
         let cmd = matches(&[
             "cargo-ai",
-            "preflight",
+            "run",
             "--action-execution",
             "sequential",
             "--input-text",
             "Return 4",
         ]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
         assert_eq!(
-            resolved_action_execution_override_for_run(preflight)
+            resolved_action_execution_override_for_run(runtime_m)
                 .expect("action execution override should resolve"),
             Some(crate::ActionExecutionMode::Sequential)
         );
@@ -1624,13 +1606,13 @@ mod tests {
 
     #[test]
     fn resolved_render_mode_for_run_defaults_to_auto() {
-        let cmd = matches(&["cargo-ai", "preflight", "--input-text", "Return 4"]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let cmd = matches(&["cargo-ai", "run", "--input-text", "Return 4"]);
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
         assert_eq!(
-            resolved_render_mode_for_run(preflight).expect("render mode should resolve"),
+            resolved_render_mode_for_run(runtime_m).expect("render mode should resolve"),
             RequestedActionRenderMode::Auto
         );
     }
@@ -1639,78 +1621,78 @@ mod tests {
     fn resolved_render_mode_for_run_reads_cli_override() {
         let cmd = matches(&[
             "cargo-ai",
-            "preflight",
+            "run",
             "--render-mode",
             "live",
             "--input-text",
             "Return 4",
         ]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
         assert_eq!(
-            resolved_render_mode_for_run(preflight).expect("render mode should resolve"),
+            resolved_render_mode_for_run(runtime_m).expect("render mode should resolve"),
             RequestedActionRenderMode::Live
         );
     }
 
     #[test]
-    fn preflight_accepts_max_agent_depth_override() {
+    fn runtime_command_accepts_max_agent_depth_override() {
         let cmd = matches(&[
             "cargo-ai",
-            "preflight",
+            "run",
             "--max-agent-depth",
             "4",
             "--input-text",
             "Return 4",
         ]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
         assert_eq!(
-            preflight.get_one::<u32>("max_agent_depth").copied(),
+            runtime_m.get_one::<u32>("max_agent_depth").copied(),
             Some(4)
         );
     }
 
     #[test]
-    fn preflight_accepts_max_runtime_override() {
+    fn runtime_command_accepts_max_runtime_override() {
         let cmd = matches(&[
             "cargo-ai",
-            "preflight",
+            "run",
             "--max-runtime-in-sec",
             "240",
             "--input-text",
             "Return 4",
         ]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
         assert_eq!(
-            preflight.get_one::<u64>("max_runtime_in_sec").copied(),
+            runtime_m.get_one::<u64>("max_runtime_in_sec").copied(),
             Some(240)
         );
     }
 
     #[test]
-    fn preflight_accepts_legacy_timeout_alias() {
+    fn runtime_command_accepts_legacy_timeout_alias() {
         let cmd = matches(&[
             "cargo-ai",
-            "preflight",
+            "run",
             "--timeout_in_sec",
             "45",
             "--input-text",
             "Return 4",
         ]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
         assert_eq!(
-            preflight
+            runtime_m
                 .get_one::<u64>("inference_timeout_in_sec")
                 .copied(),
             Some(45)
@@ -1721,7 +1703,7 @@ mod tests {
     fn runtime_input_overrides_preserve_file_order() {
         let cmd = matches(&[
             "cargo-ai",
-            "preflight",
+            "run",
             "--input-text",
             "hello",
             "--input-file",
@@ -1729,11 +1711,11 @@ mod tests {
             "--input-url",
             "https://example.com",
         ]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
-        let overrides = super::runtime_input_overrides(preflight);
+        let overrides = super::runtime_input_overrides(runtime_m);
         assert_eq!(overrides.len(), 3);
         assert_eq!(overrides[0].kind, crate::InputKind::Text);
         assert_eq!(overrides[0].value.as_deref(), Some("hello"));
@@ -1824,18 +1806,18 @@ mod tests {
     fn resolved_inputs_for_run_defaults_to_replace_mode() {
         let cmd = matches(&[
             "cargo-ai",
-            "preflight",
+            "run",
             "--input-text",
             "hello",
             "--input-file",
             "./report.pdf",
         ]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
-        let named_inputs = resolved_named_inputs(preflight);
-        let selected_inputs = super::resolved_inputs_for_run(preflight, &named_inputs)
+        let named_inputs = resolved_named_inputs(runtime_m);
+        let selected_inputs = super::resolved_inputs_for_run(runtime_m, &named_inputs)
             .expect("replace mode should resolve");
 
         assert_eq!(selected_inputs.len(), 2);
@@ -1851,7 +1833,7 @@ mod tests {
         let baked_debug = input_debug_strings(&baked_inputs);
         let cmd = matches(&[
             "cargo-ai",
-            "preflight",
+            "run",
             "--input-mode",
             "append",
             "--input-file",
@@ -1859,12 +1841,12 @@ mod tests {
             "--input-text",
             "hello",
         ]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
-        let named_inputs = resolved_named_inputs(preflight);
-        let selected_inputs = super::resolved_inputs_for_run(preflight, &named_inputs)
+        let named_inputs = resolved_named_inputs(runtime_m);
+        let selected_inputs = super::resolved_inputs_for_run(runtime_m, &named_inputs)
             .expect("append mode should resolve");
 
         assert_eq!(selected_inputs.len(), baked_inputs.len() + 2);
@@ -1896,7 +1878,7 @@ mod tests {
         let baked_debug = input_debug_strings(&baked_inputs);
         let cmd = matches(&[
             "cargo-ai",
-            "preflight",
+            "run",
             "--input-mode",
             "prepend",
             "--input-url",
@@ -1904,12 +1886,12 @@ mod tests {
             "--input-image",
             "./image.png",
         ]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
-        let named_inputs = resolved_named_inputs(preflight);
-        let selected_inputs = super::resolved_inputs_for_run(preflight, &named_inputs)
+        let named_inputs = resolved_named_inputs(runtime_m);
+        let selected_inputs = super::resolved_inputs_for_run(runtime_m, &named_inputs)
             .expect("prepend mode should resolve");
 
         assert_eq!(selected_inputs.len(), baked_inputs.len() + 2);
@@ -1925,13 +1907,13 @@ mod tests {
 
     #[test]
     fn resolved_inputs_for_run_rejects_input_mode_without_runtime_inputs() {
-        let cmd = matches(&["cargo-ai", "preflight", "--input-mode", "append"]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let cmd = matches(&["cargo-ai", "run", "--input-mode", "append"]);
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
-        let named_inputs = resolved_named_inputs(preflight);
-        let error = super::resolved_inputs_for_run(preflight, &named_inputs)
+        let named_inputs = resolved_named_inputs(runtime_m);
+        let error = super::resolved_inputs_for_run(runtime_m, &named_inputs)
             .expect_err("missing runtime inputs should fail");
 
         assert!(error.contains("--input-mode requires at least one runtime input flag"));
@@ -1941,7 +1923,7 @@ mod tests {
     fn resolve_runtime_vars_from_specs_parses_declared_types_and_defaults() {
         let cmd = matches(&[
             "cargo-ai",
-            "preflight",
+            "run",
             "--run-var",
             "subject=Quarterly Review",
             "--run-var",
@@ -1951,12 +1933,12 @@ mod tests {
             "--run-var",
             "score_threshold=0.85",
         ]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
         let runtime_vars = resolve_runtime_vars_from_specs(
-            preflight,
+            runtime_m,
             &[
                 runtime_var_spec("subject", crate::RuntimeVarType::String, None),
                 runtime_var_spec("generate_images", crate::RuntimeVarType::Boolean, None),
@@ -1981,13 +1963,13 @@ mod tests {
 
     #[test]
     fn resolve_runtime_vars_from_specs_uses_defaults_when_cli_value_is_missing() {
-        let cmd = matches(&["cargo-ai", "preflight"]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let cmd = matches(&["cargo-ai", "run"]);
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
         let runtime_vars = resolve_runtime_vars_from_specs(
-            preflight,
+            runtime_m,
             &[runtime_var_spec(
                 "generate_images",
                 crate::RuntimeVarType::Boolean,
@@ -2003,18 +1985,18 @@ mod tests {
     fn resolve_runtime_vars_from_specs_rejects_duplicates() {
         let cmd = matches(&[
             "cargo-ai",
-            "preflight",
+            "run",
             "--run-var",
             "subject=alpha",
             "--run-var",
             "subject=beta",
         ]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
         let error = resolve_runtime_vars_from_specs(
-            preflight,
+            runtime_m,
             &[runtime_var_spec(
                 "subject",
                 crate::RuntimeVarType::String,
@@ -2028,12 +2010,12 @@ mod tests {
 
     #[test]
     fn resolve_runtime_vars_from_specs_rejects_undeclared_names() {
-        let cmd = matches(&["cargo-ai", "preflight", "--run-var", "subject=alpha"]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let cmd = matches(&["cargo-ai", "run", "--run-var", "subject=alpha"]);
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
-        let error = resolve_runtime_vars_from_specs(preflight, &[])
+        let error = resolve_runtime_vars_from_specs(runtime_m, &[])
             .expect_err("undeclared runtime vars should fail");
 
         assert!(error.contains("is not declared in runtime_vars"));
@@ -2041,13 +2023,13 @@ mod tests {
 
     #[test]
     fn resolve_runtime_vars_from_specs_requires_missing_non_defaulted_vars() {
-        let cmd = matches(&["cargo-ai", "preflight"]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let cmd = matches(&["cargo-ai", "run"]);
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
         let error = resolve_runtime_vars_from_specs(
-            preflight,
+            runtime_m,
             &[runtime_var_spec(
                 "subject",
                 crate::RuntimeVarType::String,
@@ -2061,13 +2043,13 @@ mod tests {
 
     #[test]
     fn resolve_runtime_vars_from_specs_rejects_invalid_boolean_value() {
-        let cmd = matches(&["cargo-ai", "preflight", "--run-var", "generate_images=yes"]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let cmd = matches(&["cargo-ai", "run", "--run-var", "generate_images=yes"]);
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
         let error = resolve_runtime_vars_from_specs(
-            preflight,
+            runtime_m,
             &[runtime_var_spec(
                 "generate_images",
                 crate::RuntimeVarType::Boolean,
@@ -2081,13 +2063,13 @@ mod tests {
 
     #[test]
     fn resolve_runtime_vars_from_specs_rejects_empty_non_string_values() {
-        let cmd = matches(&["cargo-ai", "preflight", "--run-var", "retry_count="]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let cmd = matches(&["cargo-ai", "run", "--run-var", "retry_count="]);
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
         let error = resolve_runtime_vars_from_specs(
-            preflight,
+            runtime_m,
             &[runtime_var_spec(
                 "retry_count",
                 crate::RuntimeVarType::Integer,
@@ -2161,9 +2143,10 @@ mod tests {
 
     #[tokio::test]
     async fn run_fails_closed_on_unknown_server() {
+        let definition = test_runtime_definition();
         let cmd = matches(&[
             "cargo-ai",
-            "preflight",
+            "run",
             "--server",
             "wat",
             "--model",
@@ -2171,18 +2154,19 @@ mod tests {
             "--input-text",
             "What is 2 + 2?",
         ]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
-        assert!(!super::run(preflight).await);
+        assert!(!super::run_with_definition(runtime_m, &definition).await);
     }
 
     #[tokio::test]
     async fn run_fails_closed_on_missing_openai_token() {
+        let definition = test_runtime_definition();
         let cmd = matches(&[
             "cargo-ai",
-            "preflight",
+            "run",
             "--server",
             "openai",
             "--model",
@@ -2192,10 +2176,10 @@ mod tests {
             "--input-text",
             "Return 4",
         ]);
-        let preflight = cmd
-            .subcommand_matches("preflight")
-            .expect("preflight subcommand should parse");
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
 
-        assert!(!super::run(preflight).await);
+        assert!(!super::run_with_definition(runtime_m, &definition).await);
     }
 }

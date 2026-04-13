@@ -172,7 +172,7 @@ impl RuntimeAgentDefinition {
     }
 }
 
-impl crate::commands::preflight::InvocationDefinition for RuntimeAgentDefinition {
+impl crate::commands::runtime::InvocationDefinition for RuntimeAgentDefinition {
     fn named_inputs(&self) -> Vec<crate::Input> {
         self.named_inputs()
     }

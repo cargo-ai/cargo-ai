@@ -12,9 +12,9 @@ mod credentials;
 mod hatch;
 mod init;
 mod new;
-mod preflight;
 mod profile;
 mod run;
+pub(crate) mod runtime_common;
 mod version;
 
 #[cfg(test)]
@@ -45,7 +45,6 @@ fn cli_command(bin_name: &'static str) -> Command {
         .subcommand(credentials::command())
         .subcommand(account::command())
         .subcommand(version::command())
-        .subcommand(preflight::command())
         .subcommand(new::command())
         .subcommand(init::command())
 }
@@ -65,11 +64,6 @@ pub fn build_cli() -> ArgMatches {
     }
 
     cli_command(bin_name).get_matches_from(args)
-}
-
-#[cfg(test)]
-pub(crate) fn test_cli_command(bin_name: &'static str) -> Command {
-    cli_command(bin_name)
 }
 
 #[cfg(test)]
@@ -151,6 +145,15 @@ mod tests {
         } else {
             assert!(!help.contains("\n  hatch"));
         }
+    }
+
+    #[test]
+    fn preflight_subcommand_is_removed() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "preflight"])
+            .expect_err("preflight should no longer parse");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     }
 
     #[test]
@@ -821,8 +824,7 @@ mod tests {
             .and_then(|m| m.subcommand_matches("run"))
             .expect("run subcommand should be available");
         assert_eq!(
-            run.get_one::<String>("definition_path")
-                .map(String::as_str),
+            run.get_one::<String>("definition_path").map(String::as_str),
             Some("/team/ops")
         );
 

@@ -73,7 +73,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         }
     };
 
-    super::preflight::run_with_definition(sub_m, &definition).await
+    super::runtime::run_with_definition(sub_m, &definition).await
 }
 
 #[cfg(test)]

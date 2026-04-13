@@ -3,7 +3,7 @@ use clap::{Arg, Command};
 
 /// Builds the `run` command schema.
 pub fn command() -> Command {
-    super::preflight::runtime_command("run", "Run an agent JSON definition without hatching")
+    super::runtime_common::runtime_command("run", "Run an agent JSON definition without hatching")
         .arg(
             Arg::new("name")
                 .help("Agent name or local .json config path (shorthand)")

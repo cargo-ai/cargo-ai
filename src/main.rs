@@ -70,8 +70,6 @@ async fn main() {
 
         if let Some(sub_m) = cmd_args.subcommand_matches("run") {
             commands::run::run(sub_m).await
-        } else if let Some(sub_m) = cmd_args.subcommand_matches("preflight") {
-            commands::preflight::run(sub_m).await
         } else if let Some(command_succeeded) = try_run_hatch(&cmd_args) {
             command_succeeded
         } else if let Some(sub_m) = cmd_args.subcommand_matches("add") {
