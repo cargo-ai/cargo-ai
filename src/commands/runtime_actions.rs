@@ -30,7 +30,7 @@ tokio::task_local! {
 }
 
 #[derive(Clone)]
-struct ActionOutput {
+pub(crate) struct ActionOutput {
     inner: Arc<Mutex<ActionOutputState>>,
     live_refresh_stop: Arc<AtomicBool>,
 }
@@ -54,6 +54,7 @@ struct ActionOutputState {
     action_execution: crate::ActionExecutionMode,
     run_started_at: Instant,
     run_finished_after: Option<Duration>,
+    header_rendered: bool,
     rendered_lines: usize,
     lanes: BTreeMap<usize, ActionLaneState>,
     last_using_line: Option<String>,
@@ -90,7 +91,7 @@ enum ChildArtifactInvocation {
 }
 
 impl ActionOutput {
-    fn new(
+    pub(crate) fn new(
         action_execution: crate::ActionExecutionMode,
         requested_mode: RequestedActionRenderMode,
         run_started_at: Instant,
@@ -117,6 +118,7 @@ impl ActionOutput {
             action_execution,
             run_started_at,
             run_finished_after: None,
+            header_rendered: false,
             rendered_lines: 0,
             lanes: BTreeMap::new(),
             last_using_line: None,
@@ -129,20 +131,24 @@ impl ActionOutput {
         }
     }
 
-    fn print_execution_header(&self) {
+    pub(crate) fn print_execution_header(&self) {
         self.with_state(|state| {
             if let Some(notice) = state.startup_notice.take() {
                 println!("{notice}");
             }
             if state.mode == ActionOutputMode::AppendOnly {
+                if state.header_rendered {
+                    return;
+                }
                 println!("{}", action_execution_header(state.action_execution));
             } else {
                 render_live_dashboard(state);
             }
+            state.header_rendered = true;
         });
     }
 
-    fn seed_using_line(&self, using_line: &str) {
+    pub(crate) fn seed_using_line(&self, using_line: &str) {
         self.with_state(|state| {
             state.last_using_line = Some(using_line.to_string());
         });
@@ -546,11 +552,7 @@ fn maybe_spawn_live_action_refresh(
             if state.mode != ActionOutputMode::Live {
                 break;
             }
-            if state.lanes.values().any(|lane| {
-                lane.status == ActionLaneStatus::Running && lane.step_started_at.is_some()
-            }) {
-                render_live_dashboard(&mut state);
-            }
+            render_live_dashboard(&mut state);
         }
     });
 }
@@ -916,6 +918,7 @@ pub(crate) async fn apply_actions(
         max_agent_depth,
         runtime_budget,
         Instant::now(),
+        None,
     )
     .await
 }
@@ -932,14 +935,23 @@ pub(crate) async fn apply_actions_with_data(
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
     full_run_started_at: Instant,
+    prepared_output: Option<ActionOutput>,
 ) -> Result<(), String> {
     ACTION_OUTPUT
         .scope(
             {
-                let output =
-                    ActionOutput::new(action_execution, requested_render_mode, full_run_started_at);
-                output.seed_using_line(provider_context.using_line().as_str());
-                output
+                match prepared_output {
+                    Some(output) => output,
+                    None => {
+                        let output = ActionOutput::new(
+                            action_execution,
+                            requested_render_mode,
+                            full_run_started_at,
+                        );
+                        output.seed_using_line(provider_context.using_line().as_str());
+                        output
+                    }
+                }
             },
             async move {
                 let abort_signal = InvocationAbortSignal::new();
@@ -3644,7 +3656,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, MutexGuard};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -4676,6 +4688,20 @@ auth_mode = "{auth_mode}"
             .iter()
             .any(|line| line == "  last: wrote generated image to './artifacts/hero.png'."));
         assert!(!snapshot.iter().any(|line| line == "  output:"));
+    }
+
+    #[test]
+    fn live_dashboard_snapshot_shows_run_elapsed_before_actions_start() {
+        let output = ActionOutput::new_for_mode_with_notice(
+            crate::ActionExecutionMode::Sequential,
+            ActionOutputMode::Live,
+            None,
+            Instant::now() - std::time::Duration::from_secs(4),
+        );
+
+        let snapshot = output.snapshot_lines_for_test();
+        assert!(snapshot[0].starts_with("run: sequential · "));
+        assert_ne!(snapshot[0], "run: sequential");
     }
 
     #[test]

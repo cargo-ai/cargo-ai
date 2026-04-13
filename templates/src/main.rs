@@ -71,6 +71,7 @@ struct ActionOutputState {
     action_execution: ActionExecutionMode,
     run_started_at: Instant,
     run_finished_after: Option<Duration>,
+    header_rendered: bool,
     rendered_lines: usize,
     lanes: BTreeMap<usize, ActionLaneState>,
     last_using_line: Option<String>,
@@ -134,6 +135,7 @@ impl ActionOutput {
             action_execution,
             run_started_at,
             run_finished_after: None,
+            header_rendered: false,
             rendered_lines: 0,
             lanes: BTreeMap::new(),
             last_using_line: None,
@@ -152,10 +154,14 @@ impl ActionOutput {
                 println!("{notice}");
             }
             if state.mode == ActionOutputMode::AppendOnly {
+                if state.header_rendered {
+                    return;
+                }
                 println!("{}", action_execution_header(state.action_execution));
             } else {
                 render_live_dashboard(state);
             }
+            state.header_rendered = true;
         });
     }
 
@@ -549,11 +555,7 @@ fn maybe_spawn_live_action_refresh(
             if state.mode != ActionOutputMode::Live {
                 break;
             }
-            if state.lanes.values().any(|lane| {
-                lane.status == ActionLaneStatus::Running && lane.step_started_at.is_some()
-            }) {
-                render_live_dashboard(&mut state);
-            }
+            render_live_dashboard(&mut state);
         }
     });
 }
@@ -2298,7 +2300,14 @@ async fn main() {
             token: token.clone(),
             inference_timeout_in_sec,
         };
+        let action_output = ActionOutput::new(
+            effective_action_execution,
+            requested_render_mode,
+            full_run_started_at,
+        );
+        action_output.seed_using_line(action_provider_context.using_line().as_str());
         println!("{}", action_provider_context.using_line());
+        action_output.print_execution_header();
         if let Err(error) =
             apply_actions(
                 &output,
@@ -2313,6 +2322,7 @@ async fn main() {
                 max_agent_depth,
                 runtime_budget,
                 full_run_started_at,
+                Some(action_output),
             )
             .await
         {
@@ -2328,6 +2338,13 @@ async fn main() {
         }
         std::process::exit(1);
     }
+
+    let action_output = ActionOutput::new(
+        effective_action_execution,
+        requested_render_mode,
+        full_run_started_at,
+    );
+    action_output.seed_using_line(action_provider_context.using_line().as_str());
 
     let resolved_inputs = match crate::providers::resolve_provider_inputs(&selected_inputs).await {
         Ok(resolved_inputs) => resolved_inputs,
@@ -2489,6 +2506,7 @@ async fn main() {
     };
 
     let actions = actions();
+    action_output.print_execution_header();
     if let Err(error) =
         apply_actions(
             &output,
@@ -2503,6 +2521,7 @@ async fn main() {
             max_agent_depth,
             runtime_budget,
             full_run_started_at,
+            Some(action_output),
         )
         .await
     {
@@ -2624,14 +2643,23 @@ async fn apply_actions(
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
     full_run_started_at: Instant,
+    prepared_output: Option<ActionOutput>,
 ) -> Result<(), String> {
     ACTION_OUTPUT
         .scope(
             {
-                let output =
-                    ActionOutput::new(action_execution, requested_render_mode, full_run_started_at);
-                output.seed_using_line(provider_context.using_line().as_str());
-                output
+                match prepared_output {
+                    Some(output) => output,
+                    None => {
+                        let output = ActionOutput::new(
+                            action_execution,
+                            requested_render_mode,
+                            full_run_started_at,
+                        );
+                        output.seed_using_line(provider_context.using_line().as_str());
+                        output
+                    }
+                }
             },
             async move {
             let abort_signal = InvocationAbortSignal::new();

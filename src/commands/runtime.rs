@@ -1036,6 +1036,12 @@ pub(crate) async fn run_with_definition(
     };
     let effective_action_execution =
         effective_action_execution_for_run(action_execution_override, default_action_execution);
+    let action_output = super::runtime_actions::ActionOutput::new(
+        effective_action_execution,
+        requested_render_mode,
+        full_run_started_at,
+    );
+    action_output.seed_using_line(action_provider_context.using_line().as_str());
 
     if let Err(error) = validate_structural_action_only_inputs(
         has_output_schema_properties,
@@ -1049,6 +1055,7 @@ pub(crate) async fn run_with_definition(
     if !has_output_schema_properties {
         let output = empty_action_only_output();
         println!("{}", action_provider_context.using_line());
+        action_output.print_execution_header();
 
         return match super::runtime_actions::apply_actions_with_data(
             &output,
@@ -1062,6 +1069,7 @@ pub(crate) async fn run_with_definition(
             max_agent_depth,
             runtime_budget,
             full_run_started_at,
+            Some(action_output),
         )
         .await
         {
@@ -1132,6 +1140,7 @@ pub(crate) async fn run_with_definition(
         return false;
     }
     println!("{}", action_provider_context.using_line());
+    action_output.print_execution_header();
 
     let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
 
@@ -1318,6 +1327,7 @@ pub(crate) async fn run_with_definition(
         max_agent_depth,
         runtime_budget,
         full_run_started_at,
+        Some(action_output),
     )
     .await
     {
