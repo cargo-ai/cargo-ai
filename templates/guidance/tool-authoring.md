@@ -24,10 +24,8 @@ If the project boundary is missing, bootstrap it first:
    - `cargo ai new <path>`
 2. Existing folder:
    - `cargo ai init`
-
-If the user also wants Codex guidance in the same step, use:
-- `cargo ai new <path> --template codex`
-- `cargo ai init --template codex`
+3. If the user wants Codex guidance too:
+   - `cargo ai add guidance --style codex`
 
 Current minimum project metadata:
 

@@ -78,6 +78,7 @@ Check for:
 
 Check for:
 - expecting `cargo ai add guidance` or `cargo ai add tool` to create `.cargo-ai/project.toml`; use `cargo ai init` or `cargo ai new <path>` first
+- expecting `cargo ai init/new` to install the Codex guidance bundle automatically; run `cargo ai add guidance --style codex` after bootstrap when you want `AGENTS.md` plus `.cargo-ai/guidance/`
 - forgetting that `cargo ai init/new` defaults to `--vcs git`
 - seeing a Git setup failure and missing the suggestion to either install Git or rerun with `--vcs none`
 

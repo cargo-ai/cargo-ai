@@ -32,9 +32,6 @@ fn print_success(report: &super::scaffold::ScaffoldReport) {
             display_path(&report.gitignore_path)
         );
     }
-    if let Some(template_path) = &report.template_output_path {
-        println!("Template:  {}", display_path(template_path));
-    }
     let vcs_status = match report.git_setup {
         super::scaffold::GitSetup::Skipped => "none".to_string(),
         _ => report.git_setup.to_string(),
@@ -56,13 +53,6 @@ fn run_impl(sub_m: &ArgMatches) -> Result<(), String> {
         .get_one::<String>("path")
         .ok_or_else(|| "Missing path. Use `cargo ai init [path]`.".to_string())?;
 
-    let template = match super::scaffold::ProjectTemplate::from_cli(
-        sub_m.get_one::<String>("template").map(String::as_str),
-    ) {
-        Ok(template) => template,
-        Err(error) => return Err(error),
-    };
-
     let vcs_mode = match super::scaffold::VcsMode::from_cli(
         sub_m.get_one::<String>("vcs").map(String::as_str),
     ) {
@@ -70,7 +60,7 @@ fn run_impl(sub_m: &ArgMatches) -> Result<(), String> {
         Err(error) => return Err(error),
     };
 
-    match super::scaffold::scaffold_init(Path::new(path), template, vcs_mode) {
+    match super::scaffold::scaffold_init(Path::new(path), vcs_mode) {
         Ok(report) => {
             print_success(&report);
             Ok(())

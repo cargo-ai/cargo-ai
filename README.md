@@ -861,14 +861,15 @@ When the file checks cleanly, use the Codex workflow below for the fastest itera
 If you want the fastest authoring loop, start in a new folder and let Codex build the agent definition with you.
 
 ```bash
-cargo ai new my-agent --template codex
+cargo ai new my-agent
 cd my-agent
+cargo ai add guidance --style codex
 codex
 ```
 
-This creates the Cargo AI project boundary plus `AGENTS.md` and helper files under `.cargo-ai/guidance/` so Codex knows the Cargo AI contract.
+This creates the Cargo AI project boundary first, then installs `AGENTS.md` plus the helper files under `.cargo-ai/guidance/` so Codex knows the Cargo AI contract.
 
-If you already have a folder, use `cargo ai init --template codex` instead.
+If you already have a folder, use `cargo ai init` first, then `cargo ai add guidance --style codex`.
 
 Then tell Codex: `I want to build a Cargo AI agent.` Describe what the agent should do, what inputs it should accept, what structured output it should return, and any follow-up actions you want.
 
@@ -889,12 +890,13 @@ Cargo AI can also scaffold project-local tools that agents call through `kind: "
 This is the current local workflow:
 
 ```bash
-cargo ai new my-tool-project --template codex
+cargo ai new my-tool-project
 cd my-tool-project
+cargo ai add guidance --style codex
 cargo ai add tool hello_tool
 ```
 
-If you are already inside an existing folder, run `cargo ai init --template codex` first.
+If you are already inside an existing folder, run `cargo ai init` first. Add `cargo ai add guidance --style codex` when you want the Codex guidance bundle.
 
 That creates:
 
@@ -903,7 +905,7 @@ That creates:
 - `.gitignore`
   - generated artifact ignore rules when VCS is enabled
 - `AGENTS.md` plus `.cargo-ai/guidance/`
-  - Codex guidance when you use `--template codex`
+  - Codex guidance when you run `cargo ai add guidance --style codex`
 - `tools/hello_tool/`
   - normal Rust source for the tool crate
 - `.cargo-ai/tools/hello_tool/tool.json`

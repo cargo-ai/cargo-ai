@@ -12,14 +12,6 @@ pub fn command() -> Command {
                 .default_value("."),
         )
         .arg(
-            Arg::new("template")
-                .long("template")
-                .help("Starter template overlay to apply")
-                .value_name("TEMPLATE")
-                .value_parser(["codex", "claude"])
-                .num_args(1),
-        )
-        .arg(
             Arg::new("vcs")
                 .long("vcs")
                 .help("Version control setup to initialize")

@@ -1083,21 +1083,12 @@ mod tests {
             init.get_one::<String>("vcs").map(String::as_str),
             Some("git")
         );
-        assert!(init.get_one::<String>("template").is_none());
     }
 
     #[test]
-    fn new_requires_path_and_parses_template_vcs() {
+    fn new_requires_path_and_parses_vcs() {
         let matches = cli_command("cargo-ai")
-            .try_get_matches_from([
-                "cargo-ai",
-                "new",
-                "sample-agent",
-                "--template",
-                "codex",
-                "--vcs",
-                "none",
-            ])
+            .try_get_matches_from(["cargo-ai", "new", "sample-agent", "--vcs", "none"])
             .expect("new should parse");
 
         let new = matches
@@ -1107,10 +1098,6 @@ mod tests {
         assert_eq!(
             new.get_one::<String>("path").map(String::as_str),
             Some("sample-agent")
-        );
-        assert_eq!(
-            new.get_one::<String>("template").map(String::as_str),
-            Some("codex")
         );
         assert_eq!(
             new.get_one::<String>("vcs").map(String::as_str),
