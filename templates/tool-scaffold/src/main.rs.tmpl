@@ -1,0 +1,6 @@
+fn main() {
+    if let Err(error) = __TOOL_MODULE__::run(std::env::args().nth(1).as_deref()) {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}

@@ -521,7 +521,7 @@ fn rejects_unsupported_action_kind_with_actionable_path() {
         .to_string();
 
     assert!(err.contains("$.actions[0].run[0].kind"));
-    assert!(err.contains("supported: `exec`, `email_me`, `agent`, `generate_image`"));
+    assert!(err.contains("supported: `exec`, `email_me`, `agent`, `tool`, `generate_image`"));
 }
 
 #[test]
@@ -633,7 +633,7 @@ fn rejects_generate_image_output_variable() {
         .to_string();
 
     assert!(err.contains("$.actions[0].run[0].output_variable"));
-    assert!(err.contains("not supported for `generate_image`"));
+    assert!(err.contains("`output_variable` is only supported for `exec` and `tool` actions"));
 }
 
 #[test]

@@ -1,0 +1,184 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::BTreeMap;
+use std::fmt;
+use std::io;
+
+const PROTOCOL_VERSION: u32 = 1;
+const TOOL_NAME: &str = "__TOOL_NAME__";
+const TOOL_DESCRIPTION: &str = "Minimal Cargo AI tool scaffold.";
+
+pub fn run(command: Option<&str>) -> Result<(), ToolError> {
+    match command {
+        Some("describe") => {
+            let stdout = io::stdout();
+            serde_json::to_writer_pretty(stdout.lock(), &describe_document())?;
+            println!();
+            Ok(())
+        }
+        Some("invoke") => {
+            let stdin = io::stdin();
+            let request: InvokeRequest = serde_json::from_reader(stdin.lock())?;
+            let response = invoke(request)?;
+            let stdout = io::stdout();
+            serde_json::to_writer(stdout.lock(), &response)?;
+            println!();
+            Ok(())
+        }
+        Some(other) => Err(ToolError(format!(
+            "Unsupported command '{other}'. Use 'describe' or 'invoke'."
+        ))),
+        None => Err(ToolError(
+            "Missing command. Use 'describe' or 'invoke'.".to_string(),
+        )),
+    }
+}
+
+fn describe_document() -> DescribeDocument {
+    DescribeDocument {
+        protocol_version: PROTOCOL_VERSION,
+        name: TOOL_NAME.to_string(),
+        description: TOOL_DESCRIPTION.to_string(),
+        params: BTreeMap::new(),
+        result: ResultSpec {
+            kind: "string".to_string(),
+            nullable: true,
+            description: "Optional compact result such as an output path or summary.".to_string(),
+        },
+        resource_profile: ResourceProfile {
+            network: AccessLevel::None,
+            filesystem_read: AccessLevel::None,
+            filesystem_write: AccessLevel::None,
+            subprocess: AccessLevel::None,
+            env_read: AccessLevel::None,
+            credential_access: AccessLevel::None,
+        },
+        self_test: SelfTestSpec {
+            supported: false,
+            safe: false,
+            description: "Optional conformance hook. Not implemented in the MVP scaffold."
+                .to_string(),
+        },
+        examples: Examples {
+            minimal_invoke: InvokeRequest {
+                protocol_version: PROTOCOL_VERSION,
+                params: BTreeMap::new(),
+            },
+            full_invoke: InvokeRequest {
+                protocol_version: PROTOCOL_VERSION,
+                params: BTreeMap::new(),
+            },
+        },
+    }
+}
+
+fn invoke(request: InvokeRequest) -> Result<InvokeResponse, ToolError> {
+    if request.protocol_version != PROTOCOL_VERSION {
+        return Err(ToolError(format!(
+            "Unsupported protocol_version {}. Expected {}.",
+            request.protocol_version, PROTOCOL_VERSION
+        )));
+    }
+
+    let _params = request.params;
+
+    Ok(InvokeResponse {
+        protocol_version: PROTOCOL_VERSION,
+        result: None,
+    })
+}
+
+#[derive(Debug)]
+pub struct ToolError(String);
+
+impl fmt::Display for ToolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<io::Error> for ToolError {
+    fn from(error: io::Error) -> Self {
+        Self(error.to_string())
+    }
+}
+
+impl From<serde_json::Error> for ToolError {
+    fn from(error: serde_json::Error) -> Self {
+        Self(error.to_string())
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct DescribeDocument {
+    protocol_version: u32,
+    name: String,
+    description: String,
+    params: BTreeMap<String, ParamSpec>,
+    result: ResultSpec,
+    resource_profile: ResourceProfile,
+    self_test: SelfTestSpec,
+    examples: Examples,
+}
+
+#[derive(Debug, Serialize)]
+struct ParamSpec {
+    #[serde(rename = "type")]
+    kind: String,
+    required: bool,
+    description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResultSpec {
+    #[serde(rename = "type")]
+    kind: String,
+    nullable: bool,
+    description: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ResourceProfile {
+    network: AccessLevel,
+    filesystem_read: AccessLevel,
+    filesystem_write: AccessLevel,
+    subprocess: AccessLevel,
+    env_read: AccessLevel,
+    credential_access: AccessLevel,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AccessLevel {
+    None,
+    Optional,
+    Required,
+}
+
+#[derive(Debug, Serialize)]
+struct SelfTestSpec {
+    supported: bool,
+    safe: bool,
+    description: String,
+}
+
+#[derive(Debug, Serialize)]
+struct Examples {
+    minimal_invoke: InvokeRequest,
+    full_invoke: InvokeRequest,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct InvokeRequest {
+    protocol_version: u32,
+    #[serde(default)]
+    params: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct InvokeResponse {
+    protocol_version: u32,
+    result: Option<String>,
+}

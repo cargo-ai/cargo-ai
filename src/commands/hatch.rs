@@ -12,6 +12,31 @@ struct HatchResolution {
     source: AgentDefinitionSource,
 }
 
+fn project_root_for_hatch_source(source: &AgentDefinitionSource) -> Option<PathBuf> {
+    match source {
+        AgentDefinitionSource::LocalPath(path) => {
+            crate::commands::tools::maybe_find_project_root(Path::new(path))
+        }
+        AgentDefinitionSource::RegistryName(_)
+        | AgentDefinitionSource::InlineJson(_)
+        | AgentDefinitionSource::StdinJson(_) => current_lookup_dir("hatch")
+            .ok()
+            .and_then(|dir| crate::commands::tools::maybe_find_project_root(dir.as_path())),
+    }
+}
+
+fn current_hatch_platform_label() -> Option<&'static str> {
+    if cfg!(target_os = "macos") {
+        Some("macos")
+    } else if cfg!(target_os = "linux") {
+        Some("linux")
+    } else if cfg!(target_os = "windows") {
+        Some("windows")
+    } else {
+        None
+    }
+}
+
 fn presentation_from_resolution(
     resolution: &HatchResolution,
 ) -> super::hatch_pipeline::HatchPresentation {
@@ -193,7 +218,36 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         }
     };
 
-    let request = super::hatch_pipeline::HatchRequest::new(
+    let resolved_tools = if sub_m.get_flag("ignore_tools") {
+        Vec::new()
+    } else {
+        let definition = match crate::runtime_definition::RuntimeAgentDefinition::from_str(
+            file_contents.as_str(),
+        ) {
+            Ok(definition) => definition,
+            Err(error) => {
+                println!("x {error}");
+                return false;
+            }
+        };
+        let resolver = crate::commands::tools::ToolResolver::new(
+            project_root_for_hatch_source(&resolution.source),
+            build_target.cache_key_target(),
+        );
+        match crate::commands::tools::audit_actions_for_tools(
+            &definition.actions(),
+            &resolver,
+            current_hatch_platform_label(),
+        ) {
+            Ok(resolved_tools) => resolved_tools,
+            Err(error) => {
+                println!("x {error}");
+                return false;
+            }
+        }
+    };
+
+    let request = super::hatch_pipeline::HatchRequest::new_with_tools(
         new_project_name,
         file_contents,
         hatch_mode,
@@ -202,6 +256,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         build_target,
         output_dir,
         presentation,
+        resolved_tools,
     );
 
     super::hatch_pipeline::run_hatch_pipeline(request)

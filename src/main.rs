@@ -74,6 +74,8 @@ async fn main() {
             command_succeeded
         } else if let Some(sub_m) = cmd_args.subcommand_matches("add") {
             commands::add::run(sub_m)
+        } else if let Some(sub_m) = cmd_args.subcommand_matches("tools") {
+            commands::tools::run(sub_m)
         } else if let Some(sub_m) = cmd_args.subcommand_matches("init") {
             commands::init::run(sub_m)
         } else if let Some(sub_m) = cmd_args.subcommand_matches("new") {

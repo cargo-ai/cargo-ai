@@ -15,6 +15,7 @@ mod new;
 mod profile;
 mod run;
 pub(crate) mod runtime_common;
+mod tools;
 mod version;
 
 #[cfg(test)]
@@ -40,6 +41,7 @@ fn cli_command(bin_name: &'static str) -> Command {
 
     command
         .subcommand(add::command())
+        .subcommand(tools::command())
         .subcommand(profile::command())
         .subcommand(auth::command())
         .subcommand(credentials::command())
@@ -120,7 +122,8 @@ mod tests {
             assert!(index_of("hatch") < index_of("profile"));
             assert!(index_of("hatch") < index_of("add"));
         }
-        assert!(index_of("add") < index_of("profile"));
+        assert!(index_of("add") < index_of("tools"));
+        assert!(index_of("tools") < index_of("profile"));
         assert!(index_of("profile") < index_of("auth"));
         assert!(index_of("auth") < index_of("credentials"));
         assert!(index_of("credentials") < index_of("account"));
@@ -138,6 +141,7 @@ mod tests {
 
         assert!(help.contains("\n  run"));
         assert!(help.contains("\n  add"));
+        assert!(help.contains("\n  tools"));
         assert!(!help.contains("\n  new"));
         assert!(!help.contains("\n  init"));
         if developer_tools_enabled() {
@@ -250,6 +254,23 @@ mod tests {
                 .get_one::<String>("style")
                 .map(String::as_str),
             Some("codex")
+        );
+    }
+
+    #[test]
+    fn add_tool_name_parses() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "add", "tool", "render_cover_image"])
+            .expect("add tool should parse");
+
+        let tool_matches = matches
+            .subcommand_matches("add")
+            .and_then(|m| m.subcommand_matches("tool"))
+            .expect("tool subcommand should be available");
+
+        assert_eq!(
+            tool_matches.get_one::<String>("name").map(String::as_str),
+            Some("render_cover_image")
         );
     }
 

@@ -1,5 +1,7 @@
 //! Shared interpreted runtime behavior for Cargo AI commands.
 use clap::ArgMatches;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::loader::{find_profile, load_config};
@@ -835,6 +837,14 @@ pub(crate) async fn run_with_definition(
     sub_m: &ArgMatches,
     definition: &dyn InvocationDefinition,
 ) -> bool {
+    run_with_definition_in_context(sub_m, definition, None).await
+}
+
+pub(crate) async fn run_with_definition_in_context(
+    sub_m: &ArgMatches,
+    definition: &dyn InvocationDefinition,
+    project_root: Option<PathBuf>,
+) -> bool {
     let full_run_started_at = std::time::Instant::now();
 
     // Begin: Argument assignments
@@ -975,6 +985,28 @@ pub(crate) async fn run_with_definition(
         }
     }
 
+    let named_inputs_template = definition.named_inputs();
+    let runtime_var_specs = definition.runtime_var_specs();
+    let default_action_execution = definition.action_execution();
+    let has_output_schema_properties = definition.has_output_schema_properties();
+    let actions = definition.actions();
+    let ignore_tools = sub_m.get_flag("ignore_tools");
+    let tool_resolver = Arc::new(crate::commands::tools::ToolResolver::new(
+        project_root,
+        crate::cargo_ai_metadata::current_build_target(),
+    ));
+
+    if !ignore_tools {
+        if let Err(error) = crate::commands::tools::audit_actions_for_tools(
+            &actions,
+            tool_resolver.as_ref(),
+            runtime_current_platform_label(),
+        ) {
+            eprintln!("x {error}");
+            return false;
+        }
+    }
+
     let action_provider_context = super::runtime_actions::ActionProviderContext {
         provider,
         profile_name: selected_profile
@@ -991,13 +1023,8 @@ pub(crate) async fn run_with_definition(
         url: url.clone(),
         token: token.clone(),
         inference_timeout_in_sec,
+        tool_resolver: Some(tool_resolver),
     };
-
-    let named_inputs_template = definition.named_inputs();
-    let runtime_var_specs = definition.runtime_var_specs();
-    let default_action_execution = definition.action_execution();
-    let has_output_schema_properties = definition.has_output_schema_properties();
-    let actions = definition.actions();
 
     let named_inputs = match resolved_named_inputs_for_run(sub_m, &named_inputs_template) {
         Ok(named_inputs) => named_inputs,
@@ -1346,6 +1373,18 @@ pub(crate) async fn run_with_definition(
     }
 }
 
+fn runtime_current_platform_label() -> Option<&'static str> {
+    if cfg!(target_os = "macos") {
+        Some("macos")
+    } else if cfg!(target_os = "linux") {
+        Some("linux")
+    } else if cfg!(target_os = "windows") {
+        Some("windows")
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1459,6 +1498,7 @@ mod tests {
             url: "https://api.openai.com/v1/responses".to_string(),
             token: "secret".to_string(),
             inference_timeout_in_sec: 60,
+            tool_resolver: None,
         };
 
         let lines = render_runtime_failure_lines(
@@ -2172,7 +2212,7 @@ mod tests {
             .subcommand_matches("run")
             .expect("run subcommand should parse");
 
-        assert!(!super::run_with_definition(runtime_m, &definition).await);
+        assert!(!super::run_with_definition_in_context(runtime_m, &definition, None).await);
     }
 
     #[tokio::test]
@@ -2194,6 +2234,6 @@ mod tests {
             .subcommand_matches("run")
             .expect("run subcommand should parse");
 
-        assert!(!super::run_with_definition(runtime_m, &definition).await);
+        assert!(!super::run_with_definition_in_context(runtime_m, &definition, None).await);
     }
 }

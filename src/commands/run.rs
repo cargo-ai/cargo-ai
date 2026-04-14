@@ -1,6 +1,6 @@
 //! Runtime behavior for `cargo ai run`.
 use clap::ArgMatches;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::definition_source::{
     load_definition_contents, read_definition_json_from_stdin, resolve_definition_source,
@@ -78,6 +78,19 @@ fn load_run_definition_from_source(
     }
 }
 
+fn project_root_for_definition_source(source: &AgentDefinitionSource) -> Option<PathBuf> {
+    match source {
+        AgentDefinitionSource::LocalPath(path) => {
+            crate::commands::tools::maybe_find_project_root(Path::new(path))
+        }
+        AgentDefinitionSource::RegistryName(_)
+        | AgentDefinitionSource::InlineJson(_)
+        | AgentDefinitionSource::StdinJson(_) => std::env::current_dir()
+            .ok()
+            .and_then(|dir| crate::commands::tools::maybe_find_project_root(dir.as_path())),
+    }
+}
+
 /// Executes the interpreted runtime flow from a local or registry JSON definition.
 pub async fn run(sub_m: &ArgMatches) -> bool {
     let definition_source = match resolve_run_definition_source(sub_m) {
@@ -95,8 +108,9 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             return false;
         }
     };
+    let project_root = project_root_for_definition_source(&definition_source);
 
-    super::runtime::run_with_definition(sub_m, &definition).await
+    super::runtime::run_with_definition_in_context(sub_m, &definition, project_root).await
 }
 
 #[cfg(test)]

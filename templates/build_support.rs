@@ -141,6 +141,12 @@ enum ActionRunVarValueSpec {
 }
 
 #[derive(Debug, Clone)]
+enum ToolParamValue {
+    Literal(Value),
+    Variable(String),
+}
+
+#[derive(Debug, Clone)]
 struct RunStep {
     kind: String,
     program: Option<String>,
@@ -157,10 +163,13 @@ struct RunStep {
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
     agent: Option<String>,
+    tool_name: Option<String>,
+    tool_params: BTreeMap<String, ToolParamValue>,
     run_vars: Option<Vec<ActionRunVarSpec>>,
     input_overrides: Option<Vec<ActionInputOverrideSpec>>,
     inputs: Option<Vec<ActionInputSpec>>,
     input_mode: Option<ActionInputMode>,
+    ignore_tools: bool,
     platforms: Option<Vec<String>>,
 }
 
@@ -911,10 +920,13 @@ fn parse_actions(
                         subject: None,
                         text: None,
                         agent: None,
+                        tool_name: None,
+                        tool_params: BTreeMap::new(),
                         run_vars: None,
                         input_overrides: None,
                         inputs: None,
                         input_mode: None,
+                        ignore_tools: false,
                         platforms,
                     }
                 }
@@ -1027,10 +1039,13 @@ fn parse_actions(
                         subject: Some(subject),
                         text: Some(text),
                         agent: None,
+                        tool_name: None,
+                        tool_params: BTreeMap::new(),
                         run_vars: None,
                         input_overrides: None,
                         inputs: None,
                         input_mode: None,
+                        ignore_tools: false,
                         platforms,
                     }
                 }
@@ -1080,7 +1095,19 @@ fn parse_actions(
                     if run_obj.contains_key("output_variable") {
                         return Err(BuildError::config(
                             format!("{run_path}.output_variable"),
-                            "`output_variable` is only supported for `exec` actions",
+                            "`output_variable` is only supported for `exec` and `tool` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("name") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.name"),
+                            "`name` is only supported for `tool` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("params") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.params"),
+                            "`params` is only supported for `tool` actions",
                         ));
                     }
 
@@ -1097,6 +1124,9 @@ fn parse_actions(
                         named_input_kinds,
                     )?;
                     let input_mode = parse_optional_action_input_mode(run_obj, &run_path)?;
+                    let ignore_tools =
+                        parse_optional_boolean_field(run_obj, "ignore_tools", &run_path)?
+                            .unwrap_or(false);
 
                     let inputs = match run_obj.get("inputs") {
                         Some(input_value) => {
@@ -1140,10 +1170,142 @@ fn parse_actions(
                         subject: None,
                         text: None,
                         agent: Some(agent),
+                        tool_name: None,
+                        tool_params: BTreeMap::new(),
                         run_vars,
                         input_overrides,
                         inputs,
                         input_mode,
+                        ignore_tools,
+                        platforms,
+                    }
+                }
+                "tool" => {
+                    if run_obj.contains_key("profile") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.profile"),
+                            "`profile` is only supported for `agent` and `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("model") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.model"),
+                            "`model` is only supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("prompt") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.prompt"),
+                            "`prompt` is only supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("path") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.path"),
+                            "`path` is only supported for `generate_image` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("subject") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.subject"),
+                            "`subject` is only supported for `email_me` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("text") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.text"),
+                            "`text` is only supported for `email_me` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("program") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.program"),
+                            "`program` is only supported for `exec` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("args") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.args"),
+                            "`args` is only supported for `exec` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("artifact") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.artifact"),
+                            "`artifact` is only supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("agent") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.agent"),
+                            "`agent` is only supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("inputs") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.inputs"),
+                            "`inputs` is only supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("input_overrides") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.input_overrides"),
+                            "`input_overrides` is only supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("run_vars") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.run_vars"),
+                            "`run_vars` is only supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("input_mode") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.input_mode"),
+                            "`input_mode` is only supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("ignore_tools") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.ignore_tools"),
+                            "`ignore_tools` is only supported for `agent` actions",
+                        ));
+                    }
+
+                    let output_variable = parse_optional_capture_variable(
+                        run_obj,
+                        "output_variable",
+                        &run_path,
+                        schema_field_types,
+                        &captured_variable_names,
+                    )?;
+                    let tool_name = parse_required_tool_name(run_obj, &run_path)?;
+                    let tool_params =
+                        parse_optional_tool_params(run_obj, &run_path, &available_field_types)?;
+
+                    RunStep {
+                        kind,
+                        program: None,
+                        model: None,
+                        profile: None,
+                        output_variable,
+                        status_variable,
+                        error_variable,
+                        failure_mode,
+                        when,
+                        args: Vec::new(),
+                        prompt: None,
+                        path: None,
+                        subject: None,
+                        text: None,
+                        agent: None,
+                        tool_name: Some(tool_name),
+                        tool_params,
+                        run_vars: None,
+                        input_overrides: None,
+                        inputs: None,
+                        input_mode: None,
+                        ignore_tools: false,
                         platforms,
                     }
                 }
@@ -1205,13 +1367,31 @@ fn parse_actions(
                     if run_obj.contains_key("output_variable") {
                         return Err(BuildError::config(
                             format!("{run_path}.output_variable"),
-                            "`output_variable` is not supported for `generate_image` actions",
+                            "`output_variable` is only supported for `exec` and `tool` actions",
                         ));
                     }
                     if run_obj.contains_key("input_mode") {
                         return Err(BuildError::config(
                             format!("{run_path}.input_mode"),
                             "`input_mode` is only supported for `agent` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("name") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.name"),
+                            "`name` is only supported for `tool` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("params") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.params"),
+                            "`params` is only supported for `tool` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("ignore_tools") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.ignore_tools"),
+                            "`ignore_tools` is only supported for `agent` actions",
                         ));
                     }
 
@@ -1261,10 +1441,13 @@ fn parse_actions(
                         subject: None,
                         text: None,
                         agent: None,
+                        tool_name: None,
+                        tool_params: BTreeMap::new(),
                         run_vars: None,
                         input_overrides: None,
                         inputs: None,
                         input_mode: None,
+                        ignore_tools: false,
                         platforms,
                     }
                 }
@@ -1272,7 +1455,7 @@ fn parse_actions(
                     return Err(BuildError::config(
                         format!("{run_path}.kind"),
                         format!(
-                            "unsupported kind `{kind}` (supported: `exec`, `email_me`, `agent`, `generate_image`)"
+                            "unsupported kind `{kind}` (supported: `exec`, `email_me`, `agent`, `tool`, `generate_image`)"
                         ),
                     ));
                 }
@@ -1343,6 +1526,115 @@ fn parse_optional_capture_variable(
     }
 
     Ok(Some(normalized.to_string()))
+}
+
+fn parse_optional_boolean_field(
+    run_obj: &Map<String, Value>,
+    field_name: &str,
+    run_path: &str,
+) -> Result<Option<bool>, BuildError> {
+    let Some(value) = run_obj.get(field_name) else {
+        return Ok(None);
+    };
+
+    value
+        .as_bool()
+        .ok_or_else(|| BuildError::config(format!("{run_path}.{field_name}"), "expected a boolean"))
+        .map(Some)
+}
+
+fn parse_required_tool_name(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+) -> Result<String, BuildError> {
+    let name_path = format!("{run_path}.name");
+    let name = get_required_string(run_obj, "name", run_path)?;
+    validate_tool_name(name, &name_path)?;
+    Ok(name.to_string())
+}
+
+fn parse_optional_tool_params(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<BTreeMap<String, ToolParamValue>, BuildError> {
+    let Some(value) = run_obj.get("params") else {
+        return Ok(BTreeMap::new());
+    };
+
+    let params_path = format!("{run_path}.params");
+    let params = expect_object(value, &params_path)?;
+    let mut parsed = BTreeMap::new();
+    for (name, value) in params {
+        let param_path = format!("{params_path}.{name}");
+        validate_tool_name(name, &param_path)?;
+        parsed.insert(
+            name.clone(),
+            parse_tool_param_value(value, &param_path, schema_field_types)?,
+        );
+    }
+    Ok(parsed)
+}
+
+fn parse_tool_param_value(
+    value: &Value,
+    path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+) -> Result<ToolParamValue, BuildError> {
+    match value {
+        Value::String(_) | Value::Bool(_) => Ok(ToolParamValue::Literal(value.clone())),
+        Value::Number(number) if number.is_i64() || number.is_u64() || number.is_f64() => {
+            Ok(ToolParamValue::Literal(value.clone()))
+        }
+        Value::Object(map) => {
+            if map.len() != 1 {
+                return Err(BuildError::config(
+                    path,
+                    "expected a scalar literal or an object with exactly one key (`var`)",
+                ));
+            }
+
+            let Some((key, variable_value)) = map.iter().next() else {
+                return Err(BuildError::config(
+                    path,
+                    "expected a scalar literal or an object with exactly one key (`var`)",
+                ));
+            };
+
+            if key != "var" {
+                return Err(BuildError::config(
+                    path,
+                    format!("unsupported tool param object key `{key}` (supported: `var`)"),
+                ));
+            }
+
+            let variable_path = format!("{path}.var");
+            let variable_name = variable_value.as_str().ok_or_else(|| {
+                BuildError::config(&variable_path, "expected `var` to be a string field name")
+            })?;
+            let normalized_name = variable_name.trim();
+            validate_variable_lookup_name(normalized_name, &variable_path)?;
+            let field_type = resolve_var_field_type(
+                &Value::String(normalized_name.to_string()),
+                schema_field_types,
+                &variable_path,
+            )?;
+            if field_type == FieldType::Array {
+                return Err(BuildError::config(
+                    &variable_path,
+                    format!(
+                        "array-valued field `{normalized_name}` cannot be used as a tool param variable in this story"
+                    ),
+                ));
+            }
+
+            Ok(ToolParamValue::Variable(normalized_name.to_string()))
+        }
+        _ => Err(BuildError::config(
+            path,
+            "expected a string, boolean, number, or an object of the form `{ \"var\": \"field_name\" }`",
+        )),
+    }
 }
 
 fn parse_optional_failure_mode(
@@ -1854,6 +2146,28 @@ fn validate_named_input_name(name: &str, path: &str) -> Result<(), BuildError> {
     }
 
     validate_reserved_top_level_name(name, path)
+}
+
+fn validate_tool_name(name: &str, path: &str) -> Result<(), BuildError> {
+    if name.trim().is_empty() {
+        return Err(BuildError::config(path, "tool name cannot be empty"));
+    }
+
+    if name != name.trim() {
+        return Err(BuildError::config(
+            path,
+            "tool names cannot start or end with whitespace",
+        ));
+    }
+
+    if name.chars().any(char::is_whitespace) {
+        return Err(BuildError::config(
+            path,
+            "tool names cannot contain whitespace",
+        ));
+    }
+
+    Ok(())
 }
 
 fn parse_runtime_var_type(spec: &Map<String, Value>, path: &str) -> Result<FieldType, BuildError> {
@@ -3257,6 +3571,19 @@ fn render_action_run_var_value(value: &ActionRunVarValueSpec) -> String {
     }
 }
 
+fn render_tool_param_value(value: &ToolParamValue) -> String {
+    match value {
+        ToolParamValue::Literal(literal) => format!(
+            "ToolParamValue::Literal(serde_json::from_str({}).expect(\"generated tool param literal must be valid JSON\"))",
+            rust_string_literal(&literal.to_string())
+        ),
+        ToolParamValue::Variable(variable) => format!(
+            "ToolParamValue::Variable({}.to_string())",
+            rust_string_literal(variable)
+        ),
+    }
+}
+
 fn render_agent_model(config: &AgentConfig) -> String {
     let mut struct_fields = String::new();
     let mut validation_calls = String::new();
@@ -3458,6 +3785,29 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     .as_ref()
                     .map(|agent| format!("Some({}.to_string())", rust_string_literal(agent)))
                     .unwrap_or_else(|| "None".to_string());
+                let tool_name = run_step
+                    .tool_name
+                    .as_ref()
+                    .map(|name| format!("Some({}.to_string())", rust_string_literal(name)))
+                    .unwrap_or_else(|| "None".to_string());
+                let tool_params = {
+                    let rendered = run_step
+                        .tool_params
+                        .iter()
+                        .map(|(name, value)| {
+                            format!(
+                                "({}.to_string(), {})",
+                                rust_string_literal(name),
+                                render_tool_param_value(value)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "std::collections::BTreeMap::from([{}])",
+                        rendered
+                    )
+                };
                 let run_vars = run_step
                     .run_vars
                     .as_ref()
@@ -3547,10 +3897,13 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         subject: {},
                         text: {},
                         agent: {},
+                        tool_name: {},
+                        tool_params: {},
                         run_vars: {},
                         input_overrides: {},
                         inputs: {},
                         input_mode: {},
+                        ignore_tools: {},
                         platforms: {},
                     }}",
                     rust_string_literal(&run_step.kind),
@@ -3574,10 +3927,13 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     subject,
                     text,
                     agent,
+                    tool_name,
+                    tool_params,
                     run_vars,
                     input_overrides,
                     inputs,
                     input_mode,
+                    run_step.ignore_tools,
                     platforms
                 )
             })
@@ -3780,6 +4136,12 @@ pub struct ActionRunVar {{
 }}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum ToolParamValue {{
+    Literal(serde_json::Value),
+    Variable(String),
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum FailureMode {{
     Stop,
     Continue,
@@ -3810,10 +4172,13 @@ pub struct RunStep {{
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
     agent: Option<String>,
+    tool_name: Option<String>,
+    tool_params: std::collections::BTreeMap<String, ToolParamValue>,
     run_vars: Option<Vec<ActionRunVar>>,
     input_overrides: Option<Vec<ActionInputOverride>>,
     inputs: Option<Vec<ActionInput>>,
     input_mode: Option<ActionInputMode>,
+    ignore_tools: bool,
     platforms: Option<Vec<String>>,
 }}
 

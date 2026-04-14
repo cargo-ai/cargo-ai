@@ -750,6 +750,7 @@ pub(crate) struct ActionProviderContext {
     pub(crate) url: String,
     pub(crate) token: String,
     pub(crate) inference_timeout_in_sec: u64,
+    pub(crate) tool_resolver: Option<std::sync::Arc<crate::commands::tools::ToolResolver>>,
 }
 
 impl ActionProviderContext {
@@ -1303,6 +1304,17 @@ async fn run_matching_action_steps(
             )
             .await
             .map(|outcome| (outcome, None))
+        } else if step.kind.eq_ignore_ascii_case("tool") {
+            run_tool_step(
+                step,
+                &action_data,
+                action_index,
+                &action.name,
+                provider_context,
+                runtime_budget,
+            )
+            .await
+            .map(|captured_output| (StepExecutionOutcome::Completed, captured_output))
         } else if step.kind.eq_ignore_ascii_case("generate_image") {
             run_generate_image_step(
                 step,
@@ -1520,6 +1532,132 @@ async fn run_exec_step(
                 &format!("while waiting for command '{}'", program),
             )),
         }
+    }
+}
+
+async fn run_tool_step(
+    step: &crate::RunStep,
+    data: &serde_json::Value,
+    action_index: usize,
+    action_name: &str,
+    provider_context: &ActionProviderContext,
+    runtime_budget: InvocationRuntimeBudget,
+) -> Result<Option<(String, String)>, String> {
+    let tool_name = step.tool_name.as_deref().ok_or_else(|| {
+        format!(
+            "Action '{}' tool step is missing required `name`.",
+            action_name
+        )
+    })?;
+    let resolver = provider_context.tool_resolver.as_ref().ok_or_else(|| {
+        format!(
+            "Action '{}' tool step '{}' cannot resolve tools because no tool resolver is available.",
+            action_name, tool_name
+        )
+    })?;
+    let contract = resolver.resolve_contract(tool_name)?;
+    let params = crate::commands::tools::resolve_tool_invoke_params(
+        step,
+        data,
+        action_name,
+        &contract.describe,
+    )?;
+    let request = serde_json::json!({
+        "protocol_version": 1,
+        "params": params,
+    });
+    let request_bytes = serde_json::to_vec(&request).map_err(|error| {
+        format!(
+            "Action '{}' tool step '{}' could not serialize invoke request: {}",
+            action_name, tool_name, error
+        )
+    })?;
+    let remaining = remaining_runtime_duration(
+        runtime_budget,
+        &format!("before starting tool '{}'", tool_name),
+    )
+    .map_err(|context| {
+        action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
+    })?;
+
+    let child = tokio::process::Command::new(&contract.resolved.binary_path)
+        .arg("invoke")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            format!(
+                "Action '{}' failed to start tool '{}': {}",
+                action_name, tool_name, error
+            )
+        })?;
+    let mut child = child;
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            format!(
+                "Action '{}' failed to open stdin for tool '{}'.",
+                action_name, tool_name
+            )
+        })?;
+        stdin.write_all(&request_bytes).await.map_err(|error| {
+            format!(
+                "Action '{}' failed to write invoke request for tool '{}': {}",
+                action_name, tool_name, error
+            )
+        })?;
+    }
+
+    let output = match tokio::time::timeout(remaining, child.wait_with_output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            return Err(format!(
+                "Action '{}' failed while waiting for tool '{}': {}",
+                action_name, tool_name, error
+            ));
+        }
+        Err(_) => {
+            return Err(action_runtime_timeout_message(
+                action_name,
+                runtime_budget,
+                &format!("while waiting for tool '{}'", tool_name),
+            ));
+        }
+    };
+
+    emit_action_output_bytes(action_index, action_name, &output.stderr);
+    if !output.status.success() {
+        return Err(format!(
+            "Action '{}' tool '{}' exited with status {}.",
+            action_name, tool_name, output.status
+        ));
+    }
+
+    let result =
+        crate::commands::tools::validate_tool_invoke_response(&contract.resolved, &output.stdout)?;
+    if let Some(output_variable) = step.output_variable.as_deref() {
+        let value = result.ok_or_else(|| {
+            format!(
+                "Action '{}' tool '{}' completed successfully but returned null result for output variable '{}'.",
+                action_name, tool_name, output_variable
+            )
+        })?;
+        print_action_line(
+            action_index,
+            action_name,
+            format!("stored tool result in variable '{}'.", output_variable).as_str(),
+        );
+        Ok(Some((output_variable.to_string(), value)))
+    } else {
+        if let Some(result) = result {
+            print_action_line(
+                action_index,
+                action_name,
+                format!("tool '{}' returned '{}'.", tool_name, result).as_str(),
+            );
+        }
+        Ok(None)
     }
 }
 
@@ -2090,6 +2228,7 @@ async fn resolve_generate_image_step_profile_context(
         url,
         token,
         inference_timeout_in_sec: invocation_timeout_in_sec,
+        tool_resolver: None,
     }))
 }
 
@@ -2199,6 +2338,9 @@ async fn run_agent_step(
             crate::ActionExecutionMode::Sequential => "sequential",
             crate::ActionExecutionMode::Parallel => "parallel",
         });
+    }
+    if step.ignore_tools {
+        command.arg("--ignore-tools");
     }
     if let Some(profile_name) =
         resolve_step_profile_name(step.profile.as_ref(), data, action_name, "agent")?
@@ -3821,6 +3963,9 @@ mod tests {
         args: Vec<crate::RunArg>,
     ) -> crate::RunStep {
         crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "exec".to_string(),
             program: Some(program.to_string()),
             model: None,
@@ -3858,6 +4003,7 @@ mod tests {
             url: "https://api.openai.com/v1/chat/completions".to_string(),
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
+            tool_resolver: None,
         }
     }
 
@@ -3902,6 +4048,7 @@ auth_mode = "{auth_mode}"
             url: server_url.to_string(),
             token: String::new(),
             inference_timeout_in_sec: 60,
+            tool_resolver: None,
         }
     }
 
@@ -4778,6 +4925,7 @@ auth_mode = "{auth_mode}"
             url: openai_oauth::OPENAI_ACCOUNT_RESPONSES_URL.to_string(),
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
+            tool_resolver: None,
         };
 
         assert_eq!(
@@ -4796,6 +4944,7 @@ auth_mode = "{auth_mode}"
             url: "https://custom.example.test/v1/chat/completions".to_string(),
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
+            tool_resolver: None,
         };
 
         assert_eq!(
@@ -4869,6 +5018,9 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn exec_step_captures_output_variable_on_success() {
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
@@ -4909,6 +5061,9 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn exec_step_buckets_raw_output_into_live_lane() {
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
@@ -4982,6 +5137,9 @@ auth_mode = "{auth_mode}"
 
         let output_name = format!(".tmp-cai2054-generated-image-{}.png", std::process::id());
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "generate_image".to_string(),
             program: None,
             model: Some(crate::RunArg::Literal("gpt-image-1".to_string())),
@@ -5014,6 +5172,7 @@ auth_mode = "{auth_mode}"
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
+            tool_resolver: None,
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
@@ -5064,6 +5223,9 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "generate_image".to_string(),
             program: None,
             model: Some(crate::RunArg::Variable("runtime.image_model".to_string())),
@@ -5095,6 +5257,7 @@ auth_mode = "{auth_mode}"
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
+            tool_resolver: None,
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
@@ -5149,6 +5312,9 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "generate_image".to_string(),
             program: None,
             model: None,
@@ -5180,6 +5346,7 @@ auth_mode = "{auth_mode}"
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
+            tool_resolver: None,
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
@@ -5207,6 +5374,9 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn generate_image_step_requires_model_when_step_and_invocation_omit_it() {
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "generate_image".to_string(),
             program: None,
             model: None,
@@ -5240,6 +5410,7 @@ auth_mode = "{auth_mode}"
             url: "https://api.openai.com/v1/chat/completions".to_string(),
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
+            tool_resolver: None,
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
@@ -5291,6 +5462,9 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "generate_image".to_string(),
             program: None,
             model: None,
@@ -5409,6 +5583,9 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "generate_image".to_string(),
             program: None,
             model: Some(crate::RunArg::Literal("gpt-image-explicit".to_string())),
@@ -5464,6 +5641,9 @@ auth_mode = "{auth_mode}"
         let _test_env = TestCargoHome::new(&config);
 
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "generate_image".to_string(),
             program: None,
             model: Some(crate::RunArg::Literal("gpt-image-explicit".to_string())),
@@ -5528,6 +5708,9 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "generate_image".to_string(),
             program: None,
             model: None,
@@ -5608,6 +5791,9 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "generate_image".to_string(),
             program: None,
             model: None,
@@ -5657,6 +5843,9 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn generate_image_step_rejects_non_png_output_for_ollama() {
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "generate_image".to_string(),
             program: None,
             model: None,
@@ -5729,6 +5918,9 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -5839,6 +6031,9 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -5945,6 +6140,9 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -6030,6 +6228,9 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -6117,6 +6318,9 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let exec_step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
@@ -6142,6 +6346,9 @@ auth_mode = "{auth_mode}"
             platforms: None,
         };
         let agent_step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -6237,6 +6444,9 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -6312,6 +6522,9 @@ auth_mode = "{auth_mode}"
         fs::write(&artifact_path, "{}").expect("json child artifact should be written");
 
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -6393,6 +6606,9 @@ auth_mode = "{auth_mode}"
         fs::write(&artifact_path, "{}").expect("json child artifact should be written");
 
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -6461,6 +6677,9 @@ auth_mode = "{auth_mode}"
         fs::write(&artifact_path, "{}").expect("json child artifact should be written");
 
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -6506,6 +6725,9 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn agent_step_rejects_bare_child_name() {
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -6548,6 +6770,9 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn agent_step_rejects_parent_traversal_path() {
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -6590,6 +6815,9 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn agent_step_rejects_nested_child_path() {
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -6649,6 +6877,9 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -6712,6 +6943,9 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let failing_step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
@@ -6737,6 +6971,9 @@ auth_mode = "{auth_mode}"
             platforms: None,
         };
         let second_step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -6809,6 +7046,9 @@ auth_mode = "{auth_mode}"
             name: "first_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                tool_name: None,
+                tool_params: std::collections::BTreeMap::new(),
+                ignore_tools: false,
                 kind: "exec".to_string(),
                 program: Some("/bin/sh".to_string()),
                 model: None,
@@ -6838,6 +7078,9 @@ auth_mode = "{auth_mode}"
             name: "second_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                tool_name: None,
+                tool_params: std::collections::BTreeMap::new(),
+                ignore_tools: false,
                 kind: "agent".to_string(),
                 program: None,
                 model: None,
@@ -6904,6 +7147,9 @@ auth_mode = "{auth_mode}"
             name: "first_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                tool_name: None,
+                tool_params: std::collections::BTreeMap::new(),
+                ignore_tools: false,
                 kind: "exec".to_string(),
                 program: Some("/bin/sh".to_string()),
                 model: None,
@@ -6936,6 +7182,9 @@ auth_mode = "{auth_mode}"
             name: "second_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                tool_name: None,
+                tool_params: std::collections::BTreeMap::new(),
+                ignore_tools: false,
                 kind: "exec".to_string(),
                 program: Some("/bin/sh".to_string()),
                 model: None,
@@ -7021,6 +7270,9 @@ auth_mode = "{auth_mode}"
             name: "first_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                tool_name: None,
+                tool_params: std::collections::BTreeMap::new(),
+                ignore_tools: false,
                 kind: "exec".to_string(),
                 program: Some("/bin/sh".to_string()),
                 model: None,
@@ -7050,6 +7302,9 @@ auth_mode = "{auth_mode}"
             name: "second_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                tool_name: None,
+                tool_params: std::collections::BTreeMap::new(),
+                ignore_tools: false,
                 kind: "exec".to_string(),
                 program: Some("/bin/sh".to_string()),
                 model: None,
@@ -7131,6 +7386,9 @@ auth_mode = "{auth_mode}"
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![
                 crate::RunStep {
+                    tool_name: None,
+                    tool_params: std::collections::BTreeMap::new(),
+                    ignore_tools: false,
                     kind: "exec".to_string(),
                     program: Some("/bin/sh".to_string()),
                     model: None,
@@ -7156,6 +7414,9 @@ auth_mode = "{auth_mode}"
                     platforms: None,
                 },
                 crate::RunStep {
+                    tool_name: None,
+                    tool_params: std::collections::BTreeMap::new(),
+                    ignore_tools: false,
                     kind: "agent".to_string(),
                     program: None,
                     model: None,
@@ -7183,6 +7444,9 @@ auth_mode = "{auth_mode}"
             name: "second_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                tool_name: None,
+                tool_params: std::collections::BTreeMap::new(),
+                ignore_tools: false,
                 kind: "agent".to_string(),
                 program: None,
                 model: None,
@@ -7249,6 +7513,9 @@ auth_mode = "{auth_mode}"
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![
                 crate::RunStep {
+                    tool_name: None,
+                    tool_params: std::collections::BTreeMap::new(),
+                    ignore_tools: false,
                     kind: "exec".to_string(),
                     program: Some("/bin/sh".to_string()),
                     model: None,
@@ -7274,6 +7541,9 @@ auth_mode = "{auth_mode}"
                     platforms: None,
                 },
                 crate::RunStep {
+                    tool_name: None,
+                    tool_params: std::collections::BTreeMap::new(),
+                    ignore_tools: false,
                     kind: "exec".to_string(),
                     program: Some("/bin/sh".to_string()),
                     model: None,
@@ -7305,6 +7575,9 @@ auth_mode = "{auth_mode}"
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![
                 crate::RunStep {
+                    tool_name: None,
+                    tool_params: std::collections::BTreeMap::new(),
+                    ignore_tools: false,
                     kind: "exec".to_string(),
                     program: Some("/bin/sh".to_string()),
                     model: None,
@@ -7330,6 +7603,9 @@ auth_mode = "{auth_mode}"
                     platforms: None,
                 },
                 crate::RunStep {
+                    tool_name: None,
+                    tool_params: std::collections::BTreeMap::new(),
+                    ignore_tools: false,
                     kind: "exec".to_string(),
                     program: Some("/bin/sh".to_string()),
                     model: None,
@@ -7410,6 +7686,9 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let failing_step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
@@ -7435,6 +7714,9 @@ auth_mode = "{auth_mode}"
             platforms: None,
         };
         let second_step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -7507,6 +7789,9 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -7582,6 +7867,9 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
