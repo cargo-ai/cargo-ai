@@ -861,13 +861,14 @@ When the file checks cleanly, use the Codex workflow below for the fastest itera
 If you want the fastest authoring loop, start in a new folder and let Codex build the agent definition with you.
 
 ```bash
-mkdir my-agent
+cargo ai new my-agent --template codex
 cd my-agent
-cargo ai add guidance --style codex
 codex
 ```
 
-This creates `AGENTS.md` plus helper files under `.cargo-ai/guidance/` so Codex knows the Cargo AI contract.
+This creates the Cargo AI project boundary plus `AGENTS.md` and helper files under `.cargo-ai/guidance/` so Codex knows the Cargo AI contract.
+
+If you already have a folder, use `cargo ai init --template codex` instead.
 
 Then tell Codex: `I want to build a Cargo AI agent.` Describe what the agent should do, what inputs it should accept, what structured output it should return, and any follow-up actions you want.
 
@@ -888,17 +889,21 @@ Cargo AI can also scaffold project-local tools that agents call through `kind: "
 This is the current local workflow:
 
 ```bash
-mkdir my-tool-project
+cargo ai new my-tool-project --template codex
 cd my-tool-project
-mkdir -p .cargo-ai
-printf 'format_version = 1\n' > .cargo-ai/project.toml
-
-cargo ai add guidance --style codex
 cargo ai add tool hello_tool
 ```
 
+If you are already inside an existing folder, run `cargo ai init --template codex` first.
+
 That creates:
 
+- `.cargo-ai/project.toml`
+  - Cargo AI project metadata
+- `.gitignore`
+  - generated artifact ignore rules when VCS is enabled
+- `AGENTS.md` plus `.cargo-ai/guidance/`
+  - Codex guidance when you use `--template codex`
 - `tools/hello_tool/`
   - normal Rust source for the tool crate
 - `.cargo-ai/tools/hello_tool/tool.json`

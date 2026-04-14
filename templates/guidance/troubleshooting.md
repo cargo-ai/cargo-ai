@@ -67,11 +67,19 @@ Check for:
 
 Check for:
 - trying to run `cargo ai add tool <name>` outside a Cargo AI project with no `.cargo-ai/project.toml`
+- forgetting to bootstrap the project boundary first with `cargo ai init` or `cargo ai new <path>`
 - updating `tools/<tool_name>/src/lib.rs` but forgetting `cargo ai tools build <tool_name> --target <triple>`
 - wiring agent JSON to a tool `name` that does not match the managed `tool.json`
 - using param names or scalar types that do not match the tool `describe` contract
 - setting `output_variable` on a tool step when the tool returns `result: null`
 - expecting `--ignore-tools` to make a missing tool succeed; it only skips the upfront audit
+
+### Project bootstrap confusion
+
+Check for:
+- expecting `cargo ai add guidance` or `cargo ai add tool` to create `.cargo-ai/project.toml`; use `cargo ai init` or `cargo ai new <path>` first
+- forgetting that `cargo ai init/new` defaults to `--vcs git`
+- seeing a Git setup failure and missing the suggestion to either install Git or rerun with `--vcs none`
 
 ### Step did not run on the current OS
 

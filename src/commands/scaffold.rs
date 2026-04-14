@@ -1,8 +1,9 @@
 //! Shared scaffolding logic for `cargo ai init` and `cargo ai new`.
 use std::fmt;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const CODEX_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -33,24 +34,6 @@ const DOC_HATCH_CHECK_LOOP: &str = include_str!(concat!(
     "/templates/shared/docs/hatch-check-loop.md"
 ));
 
-pub(crate) const SCAFFOLD_ENABLE_ENV_VAR: &str = "CARGO_AI_ENABLE_SCAFFOLD";
-
-pub(crate) fn scaffold_gate_enabled(experimental_flag: bool) -> bool {
-    experimental_flag
-        || std::env::var(SCAFFOLD_ENABLE_ENV_VAR)
-            .map(|value| {
-                let normalized = value.trim().to_ascii_lowercase();
-                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-            })
-            .unwrap_or(false)
-}
-
-pub(crate) fn scaffold_gate_message(command_name: &str) -> String {
-    format!(
-        "Project scaffolding is currently hidden from the supported MVP path.\nTo use `cargo ai {command_name}`, re-run with `--experimental` or set `{SCAFFOLD_ENABLE_ENV_VAR}=1`."
-    )
-}
-
 #[derive(Clone, Copy)]
 struct TemplateArtifact {
     relative_path: &'static str,
@@ -80,6 +63,19 @@ const COMMON_TEMPLATE_ARTIFACTS: [TemplateArtifact; 5] = [
     },
 ];
 
+const GITIGNORE_BEGIN_MARKER: &str = "# BEGIN cargo-ai managed artifacts";
+const GITIGNORE_END_MARKER: &str = "# END cargo-ai managed artifacts";
+const GITIGNORE_ENTRIES: [&str; 8] = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".cargo-ai/guidance/",
+    ".cargo-ai/docs/",
+    ".cargo-ai/examples/",
+    ".cargo-ai/tools/",
+    ".cargo-ai/agents/",
+    "tools/*/target/",
+];
+
 /// Supported template overlays for scaffolding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProjectTemplate {
@@ -98,13 +94,6 @@ impl ProjectTemplate {
                 "Unsupported template '{}'. Use `--template codex` or `--template claude`.",
                 other
             )),
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Codex => "codex",
-            Self::Claude => "claude",
         }
     }
 
@@ -152,13 +141,6 @@ impl VcsMode {
             )),
         }
     }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Git => "git",
-            Self::None => "none",
-        }
-    }
 }
 
 /// Git setup result for scaffold execution reporting.
@@ -179,12 +161,33 @@ impl fmt::Display for GitSetup {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManagedFileStatus {
+    Created,
+    Updated,
+    Unchanged,
+    Skipped,
+}
+
+impl fmt::Display for ManagedFileStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Created => write!(f, "created"),
+            Self::Updated => write!(f, "updated"),
+            Self::Unchanged => write!(f, "unchanged"),
+            Self::Skipped => write!(f, "skipped"),
+        }
+    }
+}
+
 /// Structured scaffold output for CLI reporting and tests.
 #[derive(Debug)]
 pub struct ScaffoldReport {
     pub project_root: PathBuf,
     pub metadata_path: PathBuf,
-    pub metadata_written: bool,
+    pub metadata_status: ManagedFileStatus,
+    pub gitignore_path: PathBuf,
+    pub gitignore_status: ManagedFileStatus,
     pub template_output_path: Option<PathBuf>,
     pub git_setup: GitSetup,
 }
@@ -250,6 +253,7 @@ fn scaffold_in_place(
 ) -> Result<ScaffoldReport, String> {
     let metadata_path = target_dir.join(".cargo-ai").join("project.toml");
     let metadata_exists = metadata_path.exists();
+    let gitignore_path = target_dir.join(".gitignore");
     let template_artifacts = template.map(ProjectTemplate::artifacts).unwrap_or_default();
     let template_output_path =
         template.map(|selected| target_dir.join(selected.output_file_name()));
@@ -265,30 +269,21 @@ fn scaffold_in_place(
 
     ensure_no_conflicts(&managed_paths)?;
 
-    let metadata_written = if metadata_exists {
-        false
-    } else {
-        if let Some(parent) = metadata_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                format!(
-                    "Failed to create metadata directory '{}': {}",
-                    parent.display(),
-                    error
-                )
-            })?;
-        }
+    let git_setup = setup_git(target_dir, vcs_mode)?;
+    let include_git_metadata = vcs_mode == VcsMode::Git && git_setup != GitSetup::Skipped;
 
-        fs::write(&metadata_path, render_project_metadata(template, vcs_mode)).map_err(
-            |error| {
-                format!(
-                    "Failed to write metadata file '{}': {}",
-                    metadata_path.display(),
-                    error
-                )
-            },
-        )?;
-        true
-    };
+    if let Some(parent) = metadata_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create metadata directory '{}': {}",
+                parent.display(),
+                error
+            )
+        })?;
+    }
+
+    let metadata_status = write_project_metadata(&metadata_path, include_git_metadata)?;
+    let gitignore_status = ensure_gitignore(&gitignore_path, include_git_metadata)?;
 
     for artifact in &template_artifacts {
         let output_path = target_dir.join(artifact.relative_path);
@@ -311,12 +306,12 @@ fn scaffold_in_place(
         })?;
     }
 
-    let git_setup = setup_git(target_dir, vcs_mode)?;
-
     Ok(ScaffoldReport {
         project_root: target_dir.to_path_buf(),
         metadata_path,
-        metadata_written,
+        metadata_status,
+        gitignore_path,
+        gitignore_status,
         template_output_path,
         git_setup,
     })
@@ -353,53 +348,190 @@ fn setup_git(target_dir: &Path, vcs_mode: VcsMode) -> Result<GitSetup, String> {
     let status = Command::new("git")
         .arg("init")
         .current_dir(target_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map_err(|error| {
-            format!(
-                "Failed to run `git init` in '{}': {}",
-                target_dir.display(),
-                error
-            )
+            if error.kind() == ErrorKind::NotFound {
+                format!(
+                    "Git initialization could not be completed in '{}'. Install Git or re-run with `--vcs none`.",
+                    target_dir.display()
+                )
+            } else {
+                format!(
+                    "Git initialization could not be completed in '{}': {}. Install Git or re-run with `--vcs none`.",
+                    target_dir.display(),
+                    error
+                )
+            }
         })?;
 
     if !status.success() {
         return Err(format!(
-            "`git init` failed in '{}'. Exit status: {}.",
-            target_dir.display(),
-            status
+            "Git initialization failed in '{}'. Install Git or re-run with `--vcs none` if you do not want version control. Exit status: {}.",
+            target_dir.display(), status
         ));
     }
 
     Ok(GitSetup::Initialized)
 }
 
-fn render_project_metadata(template: Option<ProjectTemplate>, vcs_mode: VcsMode) -> String {
-    let selected_template = template.map(ProjectTemplate::as_str).unwrap_or("none");
-    format!(
-        "# Managed by cargo-ai init/new.\n\
-format_version = 1\n\
-tool = \"cargo-ai\"\n\
-tool_version = \"{}\"\n\
-template = \"{}\"\n\
-vcs = \"{}\"\n",
-        env!("CARGO_PKG_VERSION"),
-        selected_template,
-        vcs_mode.as_str(),
-    )
+fn write_project_metadata(
+    metadata_path: &Path,
+    include_git_metadata: bool,
+) -> Result<ManagedFileStatus, String> {
+    let existing = match fs::read_to_string(metadata_path) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "Failed to read metadata file '{}': {}",
+                metadata_path.display(),
+                error
+            ))
+        }
+    };
+    let rendered = render_project_metadata(existing.as_deref(), include_git_metadata);
+
+    let status = match existing.as_deref() {
+        None => ManagedFileStatus::Created,
+        Some(contents) if contents == rendered => ManagedFileStatus::Unchanged,
+        Some(_) => ManagedFileStatus::Updated,
+    };
+
+    if status != ManagedFileStatus::Unchanged {
+        fs::write(metadata_path, rendered).map_err(|error| {
+            format!(
+                "Failed to write metadata file '{}': {}",
+                metadata_path.display(),
+                error
+            )
+        })?;
+    }
+
+    Ok(status)
+}
+
+fn render_project_metadata(existing: Option<&str>, include_git_metadata: bool) -> String {
+    let mut trailing_lines = Vec::new();
+
+    if let Some(existing) = existing {
+        for line in existing.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("format_version")
+                || trimmed.starts_with("vcs")
+                || trimmed.starts_with("tool ")
+                || trimmed.starts_with("tool_version")
+                || trimmed.starts_with("template")
+                || trimmed.starts_with("managed_by")
+                || trimmed.starts_with("managed_by_version")
+                || trimmed == "# Managed by cargo-ai init/new."
+            {
+                continue;
+            }
+
+            trailing_lines.push(line.to_string());
+        }
+    }
+
+    while trailing_lines.first().map(|line| line.trim().is_empty()) == Some(true) {
+        trailing_lines.remove(0);
+    }
+    while trailing_lines.last().map(|line| line.trim().is_empty()) == Some(true) {
+        trailing_lines.pop();
+    }
+
+    let mut lines = vec!["format_version = 1".to_string()];
+    if include_git_metadata {
+        lines.push("vcs = \"git\"".to_string());
+    }
+    if !trailing_lines.is_empty() {
+        lines.push(String::new());
+        lines.extend(trailing_lines);
+    }
+
+    format!("{}\n", lines.join("\n"))
+}
+
+fn ensure_gitignore(
+    gitignore_path: &Path,
+    include_gitignore_block: bool,
+) -> Result<ManagedFileStatus, String> {
+    if !include_gitignore_block {
+        return Ok(ManagedFileStatus::Skipped);
+    }
+
+    let existing = match fs::read_to_string(gitignore_path) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "Failed to read ignore file '{}': {}",
+                gitignore_path.display(),
+                error
+            ))
+        }
+    };
+
+    if existing
+        .as_deref()
+        .map(gitignore_has_required_entries)
+        .unwrap_or(false)
+    {
+        return Ok(ManagedFileStatus::Unchanged);
+    }
+
+    let block = render_gitignore_block();
+    let rendered = match existing {
+        None => block,
+        Some(mut contents) => {
+            if !contents.ends_with('\n') {
+                contents.push('\n');
+            }
+            if !contents.trim_end().is_empty() {
+                contents.push('\n');
+            }
+            contents.push_str(&block);
+            contents
+        }
+    };
+
+    let status = if gitignore_path.exists() {
+        ManagedFileStatus::Updated
+    } else {
+        ManagedFileStatus::Created
+    };
+
+    fs::write(gitignore_path, rendered).map_err(|error| {
+        format!(
+            "Failed to write ignore file '{}': {}",
+            gitignore_path.display(),
+            error
+        )
+    })?;
+
+    Ok(status)
+}
+
+fn render_gitignore_block() -> String {
+    let mut lines = vec![GITIGNORE_BEGIN_MARKER.to_string()];
+    lines.extend(GITIGNORE_ENTRIES.iter().map(|entry| entry.to_string()));
+    lines.push(GITIGNORE_END_MARKER.to_string());
+    format!("{}\n", lines.join("\n"))
+}
+
+fn gitignore_has_required_entries(contents: &str) -> bool {
+    GITIGNORE_ENTRIES
+        .iter()
+        .all(|entry| contents.lines().any(|line| line.trim() == *entry))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        scaffold_gate_enabled, scaffold_init, scaffold_new, ProjectTemplate, VcsMode,
-        SCAFFOLD_ENABLE_ENV_VAR,
-    };
+    use super::{scaffold_init, scaffold_new, ManagedFileStatus, ProjectTemplate, VcsMode};
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::{LazyLock, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn temp_dir_path(stem: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -407,32 +539,6 @@ mod tests {
             .expect("system time should be after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("cargo-ai-scaffold-test-{}-{}", stem, nanos))
-    }
-
-    #[test]
-    fn scaffold_gate_is_disabled_by_default() {
-        let _guard = ENV_LOCK.lock().expect("env lock should be available");
-        std::env::remove_var(SCAFFOLD_ENABLE_ENV_VAR);
-
-        assert!(!scaffold_gate_enabled(false));
-    }
-
-    #[test]
-    fn scaffold_gate_accepts_experimental_flag() {
-        let _guard = ENV_LOCK.lock().expect("env lock should be available");
-        std::env::remove_var(SCAFFOLD_ENABLE_ENV_VAR);
-
-        assert!(scaffold_gate_enabled(true));
-    }
-
-    #[test]
-    fn scaffold_gate_accepts_enable_env_var() {
-        let _guard = ENV_LOCK.lock().expect("env lock should be available");
-        std::env::set_var(SCAFFOLD_ENABLE_ENV_VAR, "1");
-
-        assert!(scaffold_gate_enabled(false));
-
-        std::env::remove_var(SCAFFOLD_ENABLE_ENV_VAR);
     }
 
     #[test]
@@ -453,8 +559,9 @@ mod tests {
 
         let report = scaffold_init(&dir, Some(ProjectTemplate::Codex), VcsMode::None)
             .expect("init should succeed");
-        assert!(report.metadata_written);
+        assert_eq!(report.metadata_status, ManagedFileStatus::Created);
         assert!(report.metadata_path.exists());
+        assert_eq!(report.gitignore_status, ManagedFileStatus::Skipped);
         let template_path = report
             .template_output_path
             .expect("template output should be present");
@@ -466,8 +573,7 @@ mod tests {
 
         let metadata_contents =
             fs::read_to_string(&report.metadata_path).expect("metadata should be readable");
-        assert!(metadata_contents.contains("template = \"codex\""));
-        assert!(metadata_contents.contains("vcs = \"none\""));
+        assert_eq!(metadata_contents, "format_version = 1\n");
         assert!(dir.join(".cargo-ai/examples/agent-minimal.json").exists());
         assert!(dir
             .join(".cargo-ai/examples/agent-enum-bounds-valid.json")
@@ -489,8 +595,8 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_init_is_idempotent_when_metadata_exists() {
-        let dir = temp_dir_path("init-idempotent");
+    fn scaffold_init_preserves_valid_existing_metadata() {
+        let dir = temp_dir_path("init-preserve");
         let metadata_path = dir.join(".cargo-ai").join("project.toml");
         fs::create_dir_all(
             metadata_path
@@ -498,15 +604,47 @@ mod tests {
                 .expect("metadata parent should exist"),
         )
         .expect("metadata dir should be created");
-        fs::write(&metadata_path, "existing = true\n").expect("metadata fixture should be written");
+        fs::write(&metadata_path, "format_version = 1\n")
+            .expect("metadata fixture should be written");
 
         let report = scaffold_init(&dir, None, VcsMode::None).expect("init should succeed");
-        assert!(!report.metadata_written);
+        assert_eq!(report.metadata_status, ManagedFileStatus::Unchanged);
+        assert_eq!(report.gitignore_status, ManagedFileStatus::Skipped);
         assert!(report.template_output_path.is_none());
 
         let metadata_contents =
             fs::read_to_string(&metadata_path).expect("metadata should be readable");
-        assert_eq!(metadata_contents, "existing = true\n");
+        assert_eq!(metadata_contents, "format_version = 1\n");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scaffold_init_normalizes_existing_metadata_to_phase_one_contract() {
+        let dir = temp_dir_path("init-normalize");
+        let metadata_path = dir.join(".cargo-ai").join("project.toml");
+        fs::create_dir_all(
+            metadata_path
+                .parent()
+                .expect("metadata parent should exist"),
+        )
+        .expect("metadata dir should be created");
+        fs::write(
+            &metadata_path,
+            "# Managed by cargo-ai init/new.\n\
+tool = \"cargo-ai\"\n\
+tool_version = \"0.1.0\"\n\
+template = \"codex\"\n\
+existing = true\n",
+        )
+        .expect("metadata fixture should be written");
+
+        let report = scaffold_init(&dir, None, VcsMode::None).expect("init should succeed");
+        assert_eq!(report.metadata_status, ManagedFileStatus::Updated);
+
+        let metadata_contents =
+            fs::read_to_string(&metadata_path).expect("metadata should be readable");
+        assert_eq!(metadata_contents, "format_version = 1\n\nexisting = true\n");
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -518,7 +656,7 @@ mod tests {
 
         let report = scaffold_init(&dir, Some(ProjectTemplate::Claude), VcsMode::None)
             .expect("init should succeed");
-        assert!(report.metadata_written);
+        assert_eq!(report.metadata_status, ManagedFileStatus::Created);
         let template_path = report
             .template_output_path
             .expect("template output should be present");
@@ -553,7 +691,7 @@ mod tests {
 
         let report = scaffold_init(&dir, Some(ProjectTemplate::Codex), VcsMode::None)
             .expect("template add should succeed");
-        assert!(!report.metadata_written);
+        assert_eq!(report.metadata_status, ManagedFileStatus::Updated);
         let template_path = report
             .template_output_path
             .expect("template output should be present");
@@ -565,7 +703,7 @@ mod tests {
 
         let metadata_contents =
             fs::read_to_string(&metadata_path).expect("metadata should be readable");
-        assert_eq!(metadata_contents, "existing = true\n");
+        assert_eq!(metadata_contents, "format_version = 1\n\nexisting = true\n");
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -602,6 +740,33 @@ mod tests {
             .expect_err("init should fail");
         assert!(err.contains("managed file"));
         assert!(err.contains("agent-minimal.json"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scaffold_init_with_git_writes_vcs_and_gitignore_when_git_boundary_exists() {
+        let dir = temp_dir_path("init-git");
+        fs::create_dir_all(dir.join(".git")).expect("git dir should be created");
+
+        let report = scaffold_init(&dir, None, VcsMode::Git).expect("init should succeed");
+        assert_eq!(report.git_setup, super::GitSetup::AlreadyPresent);
+        assert_eq!(report.metadata_status, ManagedFileStatus::Created);
+        assert_eq!(report.gitignore_status, ManagedFileStatus::Created);
+
+        let metadata_contents =
+            fs::read_to_string(&report.metadata_path).expect("metadata should be readable");
+        assert_eq!(metadata_contents, "format_version = 1\nvcs = \"git\"\n");
+
+        let gitignore_contents =
+            fs::read_to_string(&report.gitignore_path).expect("gitignore should be readable");
+        assert!(gitignore_contents.contains("AGENTS.md"));
+        assert!(gitignore_contents.contains(".cargo-ai/guidance/"));
+        assert!(gitignore_contents.contains("tools/*/target/"));
+
+        let second = scaffold_init(&dir, None, VcsMode::Git).expect("second init should succeed");
+        assert_eq!(second.metadata_status, ManagedFileStatus::Unchanged);
+        assert_eq!(second.gitignore_status, ManagedFileStatus::Unchanged);
 
         let _ = fs::remove_dir_all(dir);
     }

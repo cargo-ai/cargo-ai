@@ -2,38 +2,50 @@
 use clap::ArgMatches;
 use std::path::Path;
 
+fn display_path(path: &Path) -> String {
+    if path.is_relative() {
+        return path.display().to_string();
+    }
+
+    match std::env::current_dir() {
+        Ok(current_dir) => match path.strip_prefix(&current_dir) {
+            Ok(relative) if relative.as_os_str().is_empty() => ".".to_string(),
+            Ok(relative) => format!("./{}", relative.display()),
+            Err(_) => path.display().to_string(),
+        },
+        Err(_) => path.display().to_string(),
+    }
+}
+
 fn print_success(report: &super::scaffold::ScaffoldReport) {
+    println!("✓ Project initialized");
+    println!("Root:      {}", display_path(&report.project_root));
     println!(
-        "✅ Cargo-AI project initialized at: {}",
-        report.project_root.display()
+        "Metadata:  {} ({})",
+        report.metadata_status,
+        display_path(&report.metadata_path)
     );
-    if report.metadata_written {
-        println!("🧩 Wrote metadata: {}", report.metadata_path.display());
-    } else {
+    if report.gitignore_status != super::scaffold::ManagedFileStatus::Skipped {
         println!(
-            "ℹ️ Metadata already present: {}",
-            report.metadata_path.display()
+            "Gitignore: {} ({})",
+            report.gitignore_status,
+            display_path(&report.gitignore_path)
         );
     }
     if let Some(template_path) = &report.template_output_path {
-        println!("🧩 Applied template file: {}", template_path.display());
-        println!(
-            "🧩 Wrote companion template assets under: {}",
-            report.project_root.join(".cargo-ai").display()
-        );
+        println!("Template:  {}", display_path(template_path));
     }
-    println!("🌿 VCS setup: {}", report.git_setup);
+    let vcs_status = match report.git_setup {
+        super::scaffold::GitSetup::Skipped => "none".to_string(),
+        _ => report.git_setup.to_string(),
+    };
+    println!("VCS:       {vcs_status}");
 }
 
 /// Executes the `init` command flow from parsed CLI arguments.
 pub fn run(sub_m: &ArgMatches) -> bool {
-    if !super::scaffold::scaffold_gate_enabled(sub_m.get_flag("experimental")) {
-        eprintln!("⚠️ {}", super::scaffold::scaffold_gate_message("init"));
-        return false;
-    }
-
     if let Err(error) = run_impl(sub_m) {
-        eprintln!("❌ {}", error);
+        eprintln!("x {error}");
         return false;
     }
     true
@@ -58,7 +70,6 @@ fn run_impl(sub_m: &ArgMatches) -> Result<(), String> {
         Err(error) => return Err(error),
     };
 
-    println!("Initialize Cargo-AI project: {path}");
     match super::scaffold::scaffold_init(Path::new(path), template, vcs_mode) {
         Ok(report) => {
             print_success(&report);

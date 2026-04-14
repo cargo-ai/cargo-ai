@@ -17,7 +17,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
     };
     let Some(project_root) = crate::commands::tools::maybe_find_project_root(&current_dir) else {
         eprintln!(
-            "x No Cargo AI project metadata was found from the current directory upward. Run `cargo ai init` first."
+            "x No Cargo AI project metadata was found from the current directory upward. Run `cargo ai init` here or `cargo ai new <path>` for a new project first."
         );
         return false;
     };

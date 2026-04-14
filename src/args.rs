@@ -40,6 +40,8 @@ fn cli_command(bin_name: &'static str) -> Command {
     let command = command.subcommand(hatch::command());
 
     command
+        .subcommand(new::command())
+        .subcommand(init::command())
         .subcommand(add::command())
         .subcommand(tools::command())
         .subcommand(profile::command())
@@ -47,8 +49,6 @@ fn cli_command(bin_name: &'static str) -> Command {
         .subcommand(credentials::command())
         .subcommand(account::command())
         .subcommand(version::command())
-        .subcommand(new::command())
-        .subcommand(init::command())
 }
 
 /// Parses CLI arguments into clap matches.
@@ -119,9 +119,10 @@ mod tests {
 
         if developer_tools_enabled() {
             assert!(index_of("run") < index_of("hatch"));
-            assert!(index_of("hatch") < index_of("profile"));
-            assert!(index_of("hatch") < index_of("add"));
+            assert!(index_of("hatch") < index_of("new"));
         }
+        assert!(index_of("new") < index_of("init"));
+        assert!(index_of("init") < index_of("add"));
         assert!(index_of("add") < index_of("tools"));
         assert!(index_of("tools") < index_of("profile"));
         assert!(index_of("profile") < index_of("auth"));
@@ -131,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn top_level_help_shows_add_and_hides_scaffold_commands() {
+    fn top_level_help_shows_supported_scaffold_commands() {
         let mut command = cli_command("cargo-ai");
         let mut help = Vec::new();
         command
@@ -140,10 +141,10 @@ mod tests {
         let help = String::from_utf8(help).expect("help should be utf8");
 
         assert!(help.contains("\n  run"));
+        assert!(help.contains("\n  new"));
+        assert!(help.contains("\n  init"));
         assert!(help.contains("\n  add"));
         assert!(help.contains("\n  tools"));
-        assert!(!help.contains("\n  new"));
-        assert!(!help.contains("\n  init"));
         if developer_tools_enabled() {
             assert!(help.contains("\n  hatch"));
         } else {
@@ -1086,19 +1087,6 @@ mod tests {
     }
 
     #[test]
-    fn init_experimental_flag_parses() {
-        let matches = cli_command("cargo-ai")
-            .try_get_matches_from(["cargo-ai", "init", "--experimental"])
-            .expect("init --experimental should parse");
-
-        let init = matches
-            .subcommand_matches("init")
-            .expect("init subcommand should be available");
-
-        assert!(init.get_flag("experimental"));
-    }
-
-    #[test]
     fn new_requires_path_and_parses_template_vcs() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from([
@@ -1128,19 +1116,6 @@ mod tests {
             new.get_one::<String>("vcs").map(String::as_str),
             Some("none")
         );
-    }
-
-    #[test]
-    fn new_experimental_flag_parses() {
-        let matches = cli_command("cargo-ai")
-            .try_get_matches_from(["cargo-ai", "new", "sample-agent", "--experimental"])
-            .expect("new --experimental should parse");
-
-        let new = matches
-            .subcommand_matches("new")
-            .expect("new subcommand should be available");
-
-        assert!(new.get_flag("experimental"));
     }
 
     #[test]

@@ -1,10 +1,9 @@
 //! CLI parser definition for `cargo ai new`.
-use clap::{Arg, ArgAction, Command};
+use clap::{Arg, Command};
 
 /// Builds the `new` command schema.
 pub fn command() -> Command {
     Command::new("new")
-        .hide(true)
         .about("Create a new Cargo-AI project directory")
         .arg(
             Arg::new("path")
@@ -27,12 +26,5 @@ pub fn command() -> Command {
                 .value_parser(["git", "none"])
                 .default_value("git")
                 .num_args(1),
-        )
-        .arg(
-            Arg::new("experimental")
-                .long("experimental")
-                .help("Internal: enable hidden scaffold commands")
-                .hide(true)
-                .action(ArgAction::SetTrue),
         )
 }

@@ -16,13 +16,30 @@ If plain `exec`, `email_me`, `agent`, or `generate_image` can solve the request 
 
 ## Project Preconditions
 
-Tool authoring assumes the workspace is already a Cargo AI project with:
+Tool authoring assumes the workspace is already a Cargo AI project.
+
+If the project boundary is missing, bootstrap it first:
+
+1. New folder:
+   - `cargo ai new <path>`
+2. Existing folder:
+   - `cargo ai init`
+
+If the user also wants Codex guidance in the same step, use:
+- `cargo ai new <path> --template codex`
+- `cargo ai init --template codex`
+
+Current minimum project metadata:
 
 ```text
 .cargo-ai/project.toml
 ```
 
-If that metadata is missing, explain that `cargo ai add tool <name>` needs a Cargo AI project first.
+with:
+
+```toml
+format_version = 1
+```
 
 ## Default Local Tool Workflow
 
@@ -48,6 +65,8 @@ If that metadata is missing, explain that `cargo ai add tool <name>` needs a Car
 7. Validate the agent/tool pairing:
    - `cargo ai tools check --config <agent.json>`
    - `cargo ai hatch <agent-name> --config <agent.json> --check`
+
+If `cargo ai init/new` was run with the default VCS mode, it will also initialize Git and create or update `.gitignore` for generated guidance and managed build state. If Git is unavailable, rerun with `--vcs none`.
 
 ## What The Scaffold Means
 
