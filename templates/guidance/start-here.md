@@ -27,6 +27,11 @@ When action behavior may vary by invocation, also clarify:
 - should the caller choose the image model at runtime?
 - if yes, prefer top-level `runtime_vars` plus `--run-var` over asking the caller to edit JSON for each run
 
+When the user says they need a reusable local tool or native helper:
+- confirm that they really need a project-local `kind: "tool"` capability rather than a plain `exec` step
+- if yes, switch to `.cargo-ai/guidance/tool-authoring.md`
+- keep the tool workflow separate from the agent JSON workflow, then wire them back together with `cargo ai tools check --config <agent.json>`
+
 ## How To Drive The Conversation
 
 - Keep the questions in plain language.
@@ -37,13 +42,14 @@ When action behavior may vary by invocation, also clarify:
 ## What To Do Next
 
 1. Use `pattern-selection.md` to infer the right Cargo AI shape.
-2. Copy the closest example from `examples/`.
-3. Decide which inputs are baked into JSON, which are caller-supplied runtime inputs, and whether any action behavior belongs in `runtime_vars`.
-4. Draft the JSON in canonical field order.
-5. If the flow becomes complex, recommend a same-name sidecar Markdown file.
-6. Validate with:
+2. If the request truly needs a local tool, use `tool-authoring.md` and keep the tool crate small.
+3. Copy the closest example from `examples/`.
+4. Decide which inputs are baked into JSON, which are caller-supplied runtime inputs, and whether any action behavior belongs in `runtime_vars`.
+5. Draft the JSON in canonical field order.
+6. If the flow becomes complex, recommend a same-name sidecar Markdown file.
+7. Validate with:
    - `cargo ai hatch <agent-name> --config <config.json> --check`
-7. Fix reported errors before building.
+8. Fix reported errors before building.
 
 ## Behavioral Defaults
 

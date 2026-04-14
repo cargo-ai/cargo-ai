@@ -18,6 +18,7 @@ Examples:
 - `output_variable` on `agent` or `email_me`
 - missing `program` for `exec`
 - missing `agent` for `kind: "agent"`
+- missing `name` for `kind: "tool"`
 - unsupported or misspelled `platform` values
 
 ### Bad variable references
@@ -61,6 +62,16 @@ Check for:
 - passing an empty `--run-var` value for `boolean`, `integer`, or `number`
 - forgetting to quote a `--run-var` value that contains spaces or shell-sensitive characters
 - trying to use captured step vars in `generate_image.model`; that field only accepts literal strings plus top-level string schema fields and `runtime.*` in the current contract
+
+### Tool workflow confusion
+
+Check for:
+- trying to run `cargo ai add tool <name>` outside a Cargo AI project with no `.cargo-ai/project.toml`
+- updating `tools/<tool_name>/src/lib.rs` but forgetting `cargo ai tools build <tool_name> --target <triple>`
+- wiring agent JSON to a tool `name` that does not match the managed `tool.json`
+- using param names or scalar types that do not match the tool `describe` contract
+- setting `output_variable` on a tool step when the tool returns `result: null`
+- expecting `--ignore-tools` to make a missing tool succeed; it only skips the upfront audit
 
 ### Step did not run on the current OS
 

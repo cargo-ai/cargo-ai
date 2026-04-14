@@ -881,6 +881,59 @@ Then review the generated JSON yourself to make sure it matches your intent.
 
 Cargo AI works best when the definition stays small, understandable, and easy to verify as you iterate.
 
+## Local Project Tools
+
+Cargo AI can also scaffold project-local tools that agents call through `kind: "tool"`.
+
+This is the current local workflow:
+
+```bash
+mkdir my-tool-project
+cd my-tool-project
+mkdir -p .cargo-ai
+printf 'format_version = 1\n' > .cargo-ai/project.toml
+
+cargo ai add guidance --style codex
+cargo ai add tool hello_tool
+```
+
+That creates:
+
+- `tools/hello_tool/`
+  - normal Rust source for the tool crate
+- `.cargo-ai/tools/hello_tool/tool.json`
+  - Cargo AI-managed metadata pointing back to the source crate
+
+After you implement the tool's `describe` / `invoke` logic in `tools/hello_tool/src/lib.rs`, build and inspect it with:
+
+```bash
+cargo ai tools build hello_tool --target aarch64-apple-darwin
+cargo ai tools describe hello_tool
+cargo ai tools check hello_tool
+```
+
+Then wire it into your agent JSON:
+
+```json
+{
+  "kind": "tool",
+  "name": "hello_tool",
+  "params": {
+    "name": "Cargo AI"
+  },
+  "output_variable": "greeting"
+}
+```
+
+Validate the pairing with:
+
+```bash
+cargo ai tools check --config ./my_agent.json
+cargo ai hatch my_agent --config ./my_agent.json --check
+```
+
+By default, `run`, `hatch --check`, and `hatch` perform an upfront tool audit against the tool `describe` contract. Use `--ignore-tools` only when you intentionally want to skip that startup audit and accept failure later if a tool step is actually reached.
+
 ## Account-Backed Flows
 
 After registration, you can use Cargo AI as more than a local hatching tool:

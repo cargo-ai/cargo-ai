@@ -36,6 +36,7 @@ If no agent JSON exists yet:
 
 Read these files before inventing structure:
 - `.cargo-ai/guidance/start-here.md`
+- `.cargo-ai/guidance/tool-authoring.md`
 - `.cargo-ai/guidance/pattern-selection.md`
 - `.cargo-ai/guidance/agent-definition-contract.md`
 - `.cargo-ai/guidance/action-rules.md`
@@ -91,6 +92,7 @@ For account-hosted definitions, remember the current split:
   - `minimum`, `maximum`, `exclusiveMinimum`, and `exclusiveMaximum` on `number` and `integer`
 - Treat top-level arrays, nested objects, and union types as unsupported unless the local contract docs say otherwise.
 - Treat the local contract and action helper docs as authoritative for step fields such as `platform`, runtime input override behavior, and child-agent data-flow limits.
+- If the user needs a reusable project-local capability behind `kind: "tool"`, read `.cargo-ai/guidance/tool-authoring.md` before inventing a custom tool workflow.
 - For `type: "url"`, prefer content Cargo AI can fetch directly with a normal HTTP request; treat `curl`-comparable ordinary pages as the target floor, not browser-only or JavaScript-rendered pages.
 - Prefer the most minimal portable steps that satisfy the user's goal.
 - Use platform-specific commands only when the user explicitly wants local-machine behavior or the task cannot be met portably.
