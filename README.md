@@ -4,7 +4,7 @@
 [![Multi-OS CI](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml/badge.svg)](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml)
 [![Status: Stable – Ongoing Development](https://img.shields.io/badge/Status-Stable_–_Ongoing_Development-blue)](https://github.com/analyzer1/cargo-ai)
 
-Build AI-powered CLI tools from a single JSON definition.
+Build AI-powered CLI tools from a single JSON definition locally.
 
 Define declarative agents in JSON, hatch native executables locally, and share them in minutes.
 
