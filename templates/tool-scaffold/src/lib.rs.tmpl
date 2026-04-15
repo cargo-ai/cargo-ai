@@ -1,3 +1,11 @@
+//! Cargo AI protocol adapter for this tool.
+//!
+//! Tool-specific behavior lives in `tool.rs`. Keep this file focused on the
+//! stable `describe` / `invoke` command protocol unless you are changing the
+//! tool runtime contract itself.
+
+mod tool;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -5,8 +13,6 @@ use std::fmt;
 use std::io;
 
 const PROTOCOL_VERSION: u32 = 1;
-const TOOL_NAME: &str = "__TOOL_NAME__";
-const TOOL_DESCRIPTION: &str = "Minimal Cargo AI tool scaffold.";
 
 pub fn run(command: Option<&str>) -> Result<(), ToolError> {
     match command {
@@ -25,11 +31,11 @@ pub fn run(command: Option<&str>) -> Result<(), ToolError> {
             println!();
             Ok(())
         }
-        Some(other) => Err(ToolError(format!(
+        Some(other) => Err(ToolError::new(format!(
             "Unsupported command '{other}'. Use 'describe' or 'invoke'."
         ))),
-        None => Err(ToolError(
-            "Missing command. Use 'describe' or 'invoke'.".to_string(),
+        None => Err(ToolError::new(
+            "Missing command. Use 'describe' or 'invoke'.",
         )),
     }
 }
@@ -37,36 +43,20 @@ pub fn run(command: Option<&str>) -> Result<(), ToolError> {
 fn describe_document() -> DescribeDocument {
     DescribeDocument {
         protocol_version: PROTOCOL_VERSION,
-        name: TOOL_NAME.to_string(),
-        description: TOOL_DESCRIPTION.to_string(),
-        params: BTreeMap::new(),
-        result: ResultSpec {
-            kind: "string".to_string(),
-            nullable: true,
-            description: "Optional compact result such as an output path or summary.".to_string(),
-        },
-        resource_profile: ResourceProfile {
-            network: AccessLevel::None,
-            filesystem_read: AccessLevel::None,
-            filesystem_write: AccessLevel::None,
-            subprocess: AccessLevel::None,
-            env_read: AccessLevel::None,
-            credential_access: AccessLevel::None,
-        },
-        self_test: SelfTestSpec {
-            supported: false,
-            safe: false,
-            description: "Optional conformance hook. Not implemented in the MVP scaffold."
-                .to_string(),
-        },
+        name: tool::TOOL_NAME.to_string(),
+        description: tool::description().to_string(),
+        params: tool::params(),
+        result: tool::result(),
+        resource_profile: tool::resource_profile(),
+        self_test: tool::self_test(),
         examples: Examples {
             minimal_invoke: InvokeRequest {
                 protocol_version: PROTOCOL_VERSION,
-                params: BTreeMap::new(),
+                params: tool::minimal_example_params(),
             },
             full_invoke: InvokeRequest {
                 protocol_version: PROTOCOL_VERSION,
-                params: BTreeMap::new(),
+                params: tool::full_example_params(),
             },
         },
     }
@@ -74,22 +64,26 @@ fn describe_document() -> DescribeDocument {
 
 fn invoke(request: InvokeRequest) -> Result<InvokeResponse, ToolError> {
     if request.protocol_version != PROTOCOL_VERSION {
-        return Err(ToolError(format!(
+        return Err(ToolError::new(format!(
             "Unsupported protocol_version {}. Expected {}.",
             request.protocol_version, PROTOCOL_VERSION
         )));
     }
 
-    let _params = request.params;
-
     Ok(InvokeResponse {
         protocol_version: PROTOCOL_VERSION,
-        result: None,
+        result: tool::invoke(request.params)?,
     })
 }
 
 #[derive(Debug)]
 pub struct ToolError(String);
+
+impl ToolError {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
 
 impl fmt::Display for ToolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -122,46 +116,47 @@ struct DescribeDocument {
 }
 
 #[derive(Debug, Serialize)]
-struct ParamSpec {
+pub(crate) struct ParamSpec {
     #[serde(rename = "type")]
-    kind: String,
-    required: bool,
-    description: String,
+    pub(crate) kind: String,
+    pub(crate) required: bool,
+    pub(crate) description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    default: Option<Value>,
+    pub(crate) default: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
-struct ResultSpec {
+pub(crate) struct ResultSpec {
     #[serde(rename = "type")]
-    kind: String,
-    nullable: bool,
-    description: String,
+    pub(crate) kind: String,
+    pub(crate) nullable: bool,
+    pub(crate) description: String,
 }
 
 #[derive(Debug, Serialize)]
-struct ResourceProfile {
-    network: AccessLevel,
-    filesystem_read: AccessLevel,
-    filesystem_write: AccessLevel,
-    subprocess: AccessLevel,
-    env_read: AccessLevel,
-    credential_access: AccessLevel,
+pub(crate) struct ResourceProfile {
+    pub(crate) network: AccessLevel,
+    pub(crate) filesystem_read: AccessLevel,
+    pub(crate) filesystem_write: AccessLevel,
+    pub(crate) subprocess: AccessLevel,
+    pub(crate) env_read: AccessLevel,
+    pub(crate) credential_access: AccessLevel,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum AccessLevel {
+#[allow(dead_code)]
+pub(crate) enum AccessLevel {
     None,
     Optional,
     Required,
 }
 
 #[derive(Debug, Serialize)]
-struct SelfTestSpec {
-    supported: bool,
-    safe: bool,
-    description: String,
+pub(crate) struct SelfTestSpec {
+    pub(crate) supported: bool,
+    pub(crate) safe: bool,
+    pub(crate) description: String,
 }
 
 #[derive(Debug, Serialize)]

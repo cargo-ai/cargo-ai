@@ -909,11 +909,11 @@ That creates:
 - `AGENTS.md` plus `.cargo-ai/guidance/`
   - Codex guidance when you run `cargo ai add guidance --style codex`
 - `tools/hello_tool/`
-  - normal Rust source for the tool crate
+  - normal Rust source for the tool crate, with custom behavior isolated in `src/tool.rs`
 - `.cargo-ai/tools/hello_tool/tool.json`
   - Cargo AI-managed metadata pointing back to the source crate
 
-After you implement the tool's `describe` / `invoke` logic in `tools/hello_tool/src/lib.rs`, build and inspect it with:
+After you implement the tool's metadata and invoke behavior in `tools/hello_tool/src/tool.rs`, build and inspect it with:
 
 ```bash
 cargo ai tools build hello_tool --target aarch64-apple-darwin

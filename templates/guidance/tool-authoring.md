@@ -54,10 +54,15 @@ format_version = 1
    - `tools/<tool_name>/Cargo.toml`
    - `tools/<tool_name>/src/main.rs`
    - `tools/<tool_name>/src/lib.rs`
+   - `tools/<tool_name>/src/tool.rs`
    - `.cargo-ai/tools/<tool_name>/tool.json`
-3. Implement the tool contract in `src/lib.rs`:
-   - `describe`
-   - `invoke`
+3. Implement the tool behavior in `src/tool.rs`:
+   - description
+   - params
+   - result metadata
+   - resource profile
+   - examples
+   - invoke behavior
 4. Build the managed artifact:
    - `cargo ai tools build <tool_name> --target <triple>`
 5. Inspect and validate it:
@@ -82,7 +87,11 @@ The generated scaffold is intentionally minimal:
   - dispatches `describe` and `invoke`
 - `src/lib.rs`
   - owns the request/response models
-  - owns `describe` and `invoke`
+  - owns the Cargo AI protocol adapter for `describe` and `invoke`
+  - normally does not need edits for tool behavior
+- `src/tool.rs`
+  - author-owned implementation area
+  - owns the tool metadata and `invoke` behavior
   - starts with a stub success response of `result: null`
 - `.cargo-ai/tools/<tool_name>/tool.json`
   - Cargo AI-managed metadata that points back to the source crate
@@ -178,8 +187,9 @@ Project scope resolves before machine scope.
 
 If the user wants a local tool, ask Codex to:
 - scaffold or inspect the local tool crate
-- implement `describe` and `invoke` in `src/lib.rs`
+- implement tool metadata and behavior in `src/tool.rs`
 - keep `src/main.rs` thin
+- avoid rewriting the protocol adapter in `src/lib.rs` unless the tool contract itself must change
 - build with `cargo ai tools build <tool_name> --target <triple>`
 - validate with `cargo ai tools describe`, `cargo ai tools check`, and `cargo ai hatch --check`
 

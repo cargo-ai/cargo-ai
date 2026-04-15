@@ -23,6 +23,10 @@ const TOOL_SCAFFOLD_LIB_RS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/tool-scaffold/src/lib.rs.tmpl"
 ));
+const TOOL_SCAFFOLD_TOOL_RS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/tool-scaffold/src/tool.rs.tmpl"
+));
 const TOOL_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -460,12 +464,14 @@ pub(crate) fn scaffold_local_tool(project_root: &Path, tool_name: &str) -> Resul
     let cargo_toml_path = source_dir.join("Cargo.toml");
     let main_rs_path = source_dir.join("src").join("main.rs");
     let lib_rs_path = source_dir.join("src").join("lib.rs");
+    let tool_rs_path = source_dir.join("src").join("tool.rs");
     let manifest_path = tool_dir.join(TOOL_MANIFEST_FILE_NAME);
 
     for path in [
         &cargo_toml_path,
         &main_rs_path,
         &lib_rs_path,
+        &tool_rs_path,
         &manifest_path,
     ] {
         if path.exists() {
@@ -503,6 +509,10 @@ pub(crate) fn scaffold_local_tool(project_root: &Path, tool_name: &str) -> Resul
     write_utf8_file(
         &lib_rs_path,
         TOOL_SCAFFOLD_LIB_RS.replace("__TOOL_NAME__", tool_name),
+    )?;
+    write_utf8_file(
+        &tool_rs_path,
+        TOOL_SCAFFOLD_TOOL_RS.replace("__TOOL_NAME__", tool_name),
     )?;
     write_utf8_file(
         &manifest_path,
@@ -1327,7 +1337,7 @@ fn copy_directory_recursive(source: &Path, destination: &Path) -> io::Result<()>
 mod tests {
     use super::{
         maybe_find_project_root, render_binary_tool_manifest_json,
-        render_source_tool_manifest_json, validate_local_tool_name,
+        render_source_tool_manifest_json, scaffold_local_tool, validate_local_tool_name,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -1360,6 +1370,35 @@ mod tests {
     fn local_tool_name_validation_rejects_whitespace() {
         let err = validate_local_tool_name("bad name").expect_err("whitespace should fail");
         assert!(err.contains("whitespace"));
+    }
+
+    #[test]
+    fn scaffold_local_tool_splits_protocol_adapter_from_author_code() {
+        let root = temp_dir("tool-scaffold");
+        fs::create_dir_all(root.join(".cargo-ai")).expect("project metadata dir should be created");
+        fs::write(root.join(".cargo-ai/project.toml"), "format_version = 1\n")
+            .expect("project metadata should be written");
+
+        scaffold_local_tool(&root, "hello_tool").expect("tool scaffold should succeed");
+
+        let source_dir = root.join("tools/hello_tool/src");
+        assert!(source_dir.join("main.rs").exists());
+        assert!(source_dir.join("lib.rs").exists());
+        assert!(source_dir.join("tool.rs").exists());
+        assert!(root.join(".cargo-ai/tools/hello_tool/tool.json").exists());
+
+        let lib_rs =
+            fs::read_to_string(source_dir.join("lib.rs")).expect("lib.rs should be readable");
+        assert!(lib_rs.contains("mod tool;"));
+        assert!(lib_rs.contains("Cargo AI protocol adapter"));
+
+        let tool_rs =
+            fs::read_to_string(source_dir.join("tool.rs")).expect("tool.rs should be readable");
+        assert!(tool_rs.contains("Author-owned implementation area"));
+        assert!(tool_rs.contains("pub(crate) const TOOL_NAME: &str = \"hello_tool\";"));
+        assert!(tool_rs.contains("Replace this stub with the tool's behavior."));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

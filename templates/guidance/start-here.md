@@ -43,7 +43,7 @@ When the user says they need a reusable local tool or native helper:
 ## What To Do Next
 
 1. Use `pattern-selection.md` to infer the right Cargo AI shape.
-2. If the request truly needs a local tool, use `tool-authoring.md`, keep the Rust tool crate small, and avoid standalone helper scripts unless explicitly requested or Cargo is unavailable.
+2. If the request truly needs a local tool, use `tool-authoring.md`, keep the Rust tool crate small, and put custom behavior in `src/tool.rs` instead of rewriting the protocol adapter.
 3. Copy the closest example from `examples/`.
 4. Decide which inputs are baked into JSON, which are caller-supplied runtime inputs, and whether any action behavior belongs in `runtime_vars`.
 5. Draft the JSON in canonical field order.
