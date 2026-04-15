@@ -434,6 +434,10 @@ pub(crate) fn copy_tool_bundle_for_export(
     force_overwrite: bool,
 ) -> io::Result<()> {
     let destination = tool_bundle_destination_for_export(dest_dir, &resolved.tool_id);
+    if existing_paths_are_same(&resolved.tool_dir, &destination)? {
+        return Ok(());
+    }
+
     if destination.exists() {
         if !force_overwrite {
             return Err(io::Error::new(
@@ -769,7 +773,10 @@ fn run_check(sub_m: &ArgMatches) -> bool {
                 return false;
             }
         };
-        let target_triple = crate::cargo_ai_metadata::current_build_target();
+        let target_triple = sub_m
+            .get_one::<String>("target")
+            .cloned()
+            .unwrap_or_else(crate::cargo_ai_metadata::current_build_target);
         let project_root = std::env::current_dir()
             .ok()
             .and_then(|_| maybe_find_project_root(Path::new(config)));
@@ -1006,9 +1013,9 @@ fn validate_describe_document(
             resolved.tool_id
         ));
     }
-    if describe.result.kind != "string" {
+    if describe.result.kind != "string" || !describe.result.nullable {
         return Err(format!(
-            "Tool '{}' describe result.type must be `string`.",
+            "Tool '{}' describe result must be a nullable string.",
             resolved.tool_id
         ));
     }
@@ -1333,12 +1340,24 @@ fn copy_directory_recursive(source: &Path, destination: &Path) -> io::Result<()>
     Ok(())
 }
 
+fn existing_paths_are_same(left: &Path, right: &Path) -> io::Result<bool> {
+    if !left.exists() || !right.exists() {
+        return Ok(false);
+    }
+
+    Ok(fs::canonicalize(left)? == fs::canonicalize(right)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        maybe_find_project_root, render_binary_tool_manifest_json,
-        render_source_tool_manifest_json, scaffold_local_tool, validate_local_tool_name,
+        copy_tool_bundle_for_export, maybe_find_project_root, render_binary_tool_manifest_json,
+        render_source_tool_manifest_json, scaffold_local_tool, validate_describe_document,
+        validate_local_tool_name, ResolvedTool, ToolDescribeDocument, ToolDescribeExamples,
+        ToolDescribeResourceProfile, ToolDescribeResult, ToolDescribeSelfTest, ToolScope,
     };
+    use serde_json::json;
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1422,5 +1441,84 @@ mod tests {
         );
         assert!(rendered.contains("\"aarch64-apple-darwin\""));
         assert!(rendered.contains("\"default_name\":\"render_cover_image\""));
+    }
+
+    #[test]
+    fn export_copy_preserves_managed_tool_dir_when_destination_is_same_path() {
+        let root = temp_dir("same-tool-export");
+        let tool_dir = root.join(".cargo-ai/tools/hello_tool");
+        let bin_dir = tool_dir.join("bin/aarch64-apple-darwin");
+        fs::create_dir_all(&bin_dir).expect("tool artifact dir should be created");
+        fs::write(tool_dir.join("tool.json"), "{}").expect("tool manifest should be written");
+        fs::write(bin_dir.join("hello_tool"), "binary").expect("tool binary should be written");
+
+        let resolved = ResolvedTool {
+            tool_id: "hello_tool".to_string(),
+            scope: ToolScope::Project,
+            tool_dir: tool_dir.clone(),
+            manifest_path: tool_dir.join("tool.json"),
+            binary_name: "hello_tool".to_string(),
+            target_triple: "aarch64-apple-darwin".to_string(),
+            binary_path: bin_dir.join("hello_tool"),
+        };
+
+        copy_tool_bundle_for_export(&resolved, &root, false)
+            .expect("same-path export should be a no-op without force");
+        copy_tool_bundle_for_export(&resolved, &root, true)
+            .expect("same-path export should be a no-op with force");
+
+        assert!(tool_dir.join("tool.json").exists());
+        assert!(bin_dir.join("hello_tool").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn validate_describe_document_rejects_non_nullable_string_result() {
+        let root = temp_dir("describe-result");
+        let tool_dir = root.join(".cargo-ai/tools/hello_tool");
+        let binary_path = tool_dir.join("bin/aarch64-apple-darwin/hello_tool");
+        let resolved = ResolvedTool {
+            tool_id: "hello_tool".to_string(),
+            scope: ToolScope::Project,
+            tool_dir: tool_dir.clone(),
+            manifest_path: tool_dir.join("tool.json"),
+            binary_name: "hello_tool".to_string(),
+            target_triple: "aarch64-apple-darwin".to_string(),
+            binary_path,
+        };
+        let describe = ToolDescribeDocument {
+            protocol_version: 1,
+            name: "hello_tool".to_string(),
+            description: "Example tool.".to_string(),
+            params: BTreeMap::new(),
+            result: ToolDescribeResult {
+                kind: "string".to_string(),
+                nullable: false,
+                description: None,
+            },
+            resource_profile: ToolDescribeResourceProfile {
+                network: "none".to_string(),
+                filesystem_read: "none".to_string(),
+                filesystem_write: "none".to_string(),
+                subprocess: "none".to_string(),
+                env_read: "none".to_string(),
+                credential_access: "none".to_string(),
+            },
+            self_test: ToolDescribeSelfTest {
+                supported: false,
+                safe: false,
+                description: None,
+            },
+            examples: ToolDescribeExamples {
+                minimal_invoke: json!({ "protocol_version": 1, "params": {} }),
+                full_invoke: json!({ "protocol_version": 1, "params": {} }),
+            },
+        };
+
+        let error = validate_describe_document(&describe, &resolved)
+            .expect_err("non-nullable result should fail");
+
+        assert!(error.contains("nullable string"));
     }
 }

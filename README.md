@@ -923,6 +923,8 @@ cargo ai tools describe hello_tool
 cargo ai tools check hello_tool
 ```
 
+The tool `describe` result schema must be a nullable string. A step that sets `output_variable` still requires the actual `invoke` response to contain a non-null string result. For UI or background-process tools, keep rendering/artifact creation testable without launching the UI when practical, expose a smoke-test control such as `open_window=false`, and declare UI/process behavior in the tool `resource_profile`.
+
 Then wire it into your agent JSON:
 
 ```json

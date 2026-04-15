@@ -48,6 +48,13 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - `agent`
   - Required: `kind`, `agent`
   - Optional: `profile`
+- `tool`
+  - Required: `kind`, `name`
+  - Optional: `params`, `output_variable`
+  - Use this for Cargo AI-managed project-local tools created with `cargo ai add tool <name>`
+  - `params` values may be scalar literals or `{ "var": "<name>" }` references
+  - Literal params are checked against the tool `describe.params` contract during validation; variable params are checked after resolution at runtime
+  - The tool `describe.result` schema must be a nullable string; if `output_variable` is set, the actual `invoke` result must be a non-null string
 - `email_me`
   - Required: `kind`, `subject`, `text`
 - `generate_image`
@@ -86,8 +93,9 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - `error_variable`
   - Stores a human-readable error string when the step fails.
 - `output_variable`
-  - `exec` only
-  - Stores captured stdout.
+  - `exec` and `tool` only
+  - For `exec`, stores captured stdout.
+  - For `tool`, stores the non-null string returned by the tool `invoke` response.
 
 ## Step Outcome Rules
 - Steps stop the action by default when they fail.
@@ -103,7 +111,7 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 
 - Top-level `agent_schema` fields are the returned output of the agent.
 - Action steps are side effects or follow-up orchestration after that output exists.
-- `output_variable` captures step-local stdout only. It does not change the returned top-level output object.
+- `output_variable` captures step-local text from `exec` or a non-null string result from `tool`. It does not change the returned top-level output object.
 - If `agent_schema.properties` is empty, Cargo AI skips the initial model call and starts directly at the action layer.
 - In that structural action-only shape, top-level `inputs` are allowed only as named reusable parent-owned inputs.
 - In that structural action-only shape, anonymous runtime `--input-*` flags remain invalid.

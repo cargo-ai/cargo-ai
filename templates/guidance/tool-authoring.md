@@ -137,6 +137,12 @@ Before completion, review:
 - dependency risk and feature surface
 - failure modes, cleanup behavior, and whether partial output can be mistaken for success
 
+For UI or background-process tools:
+- separate rendering or artifact generation from launching the UI when practical
+- expose a smoke-test control such as `open_window=false` so automated validation can prove the tool without leaving a process open
+- make process lifetime explicit when launching windows, servers, or other child processes
+- mark UI launch, subprocess use, filesystem writes, and background behavior accurately in `resource_profile`
+
 Use normal Rust best practices:
 - parse into typed values before business logic
 - keep custom behavior in `src/tool.rs`

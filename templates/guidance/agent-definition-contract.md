@@ -236,6 +236,22 @@ Required fields:
 Optional fields:
 - `profile`
 
+### `tool`
+
+Required fields:
+- `kind`
+- `name`
+
+Optional fields:
+- `params`
+- `output_variable`
+
+Use `kind: "tool"` for Cargo AI-managed project-local tools created with `cargo ai add tool <name>`.
+
+`params` is an object whose values may be scalar literals (`string`, `boolean`, `integer`, or `number`) or variable references such as `{ "var": "runtime.symbol" }`. Cargo AI validates literal params during check/build and validates resolved variable params at runtime against the tool's `describe.params` contract.
+
+`output_variable` is optional. The tool's `describe.result` schema must be a nullable string, but if `output_variable` is set, the actual `invoke` response must contain a non-null string result.
+
 ### `email_me`
 
 Required fields:
@@ -277,7 +293,7 @@ These fields are available on every step kind:
 - `status_variable`
 - `error_variable`
 
-`exec` also supports:
+`exec` and `tool` also support:
 - `output_variable`
 
 ### `platform`
@@ -307,7 +323,7 @@ Example:
 
 - The top-level `agent_schema` fields are the agent's returned structured output.
 - Actions run after the model has produced that top-level output.
-- `exec`, `agent`, `email_me`, and `generate_image` steps are follow-up side effects or orchestration.
+- `exec`, `agent`, `tool`, `email_me`, and `generate_image` steps are follow-up side effects or orchestration.
 - Action steps do not mutate the returned top-level output object.
 - `output_variable`, `status_variable`, and `error_variable` are action-local only.
 
@@ -410,7 +426,9 @@ Expect `cargo ai hatch <agent-name> --config <config.json> --check` to reject at
 - invalid relative file or image paths
 - invalid generated-image output path extension
 - invalid `platform` value
-- `output_variable` on non-`exec` steps
+- `output_variable` on non-`exec` / non-`tool` steps
+- malformed or unknown tool `params`
+- tool `describe.result` that is not a nullable string schema
 - captured-variable collisions
 - malformed `when`
 - malformed `failure_mode`
@@ -438,6 +456,10 @@ Expect `cargo ai hatch <agent-name> --config <config.json> --check` to reject at
 
 ```json
 { "kind": "agent", "agent": "./child_reporter" }
+```
+
+```json
+{ "kind": "tool", "name": "hello_tool", "params": { "name": { "var": "runtime.name" } }, "output_variable": "greeting" }
 ```
 
 ```json
