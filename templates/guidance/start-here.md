@@ -44,13 +44,15 @@ When the user says they need a reusable local tool or native helper:
 
 1. Use `pattern-selection.md` to infer the right Cargo AI shape.
 2. If the request truly needs a local tool, use `tool-authoring.md`, keep the Rust tool crate small, and put custom behavior in `src/tool.rs` instead of rewriting the protocol adapter.
-3. Copy the closest example from `examples/`.
-4. Decide which inputs are baked into JSON, which are caller-supplied runtime inputs, and whether any action behavior belongs in `runtime_vars`.
-5. Draft the JSON in canonical field order.
-6. If the flow becomes complex, recommend a same-name sidecar Markdown file.
-7. Validate with:
+3. If the tool needs crates.io dependencies, apply `tool-authoring.md` dependency discipline before editing `Cargo.toml`.
+4. Before presenting a tool as complete, perform the `tool-authoring.md` hardening review.
+5. Copy the closest example from `examples/`.
+6. Decide which inputs are baked into JSON, which are caller-supplied runtime inputs, and whether any action behavior belongs in `runtime_vars`.
+7. Draft the JSON in canonical field order.
+8. If the flow becomes complex, recommend a same-name sidecar Markdown file.
+9. Validate with:
    - `cargo ai hatch <agent-name> --config <config.json> --check`
-8. Fix reported errors before building.
+10. Fix reported errors before building.
 
 ## Behavioral Defaults
 
