@@ -14,6 +14,13 @@ Use a local Cargo AI tool when the user needs:
 
 If plain `exec`, `email_me`, `agent`, or `generate_image` can solve the request cleanly, keep the workflow in JSON and do not invent a tool.
 
+When executable code is needed and Cargo is available, prefer a Rust Cargo AI tool:
+- scaffold it with `cargo ai add tool <tool_name>`
+- implement behavior inside the generated Rust crate
+- avoid creating ad hoc Python, Node, or shell helper scripts by default
+
+Only use another language or standalone script when the user explicitly asks, Cargo is unavailable, or the task cannot reasonably fit the current `describe` / `invoke` tool contract.
+
 ## Project Preconditions
 
 Tool authoring assumes the workspace is already a Cargo AI project.

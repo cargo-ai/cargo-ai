@@ -129,6 +129,7 @@ If one Cargo AI agent needs to call another Cargo AI agent:
 
 If the user needs a reusable project-local capability:
 - prefer a native `kind: "tool"` step over inventing repeated `exec` wrappers
+- when Cargo is available and new executable code is needed, create a Rust tool with `cargo ai add tool <name>` instead of ad hoc Python, Node, or shell helper scripts
 - keep the tool contract in the tool crate and keep the agent JSON focused on `name`, `params`, and optional output capture
 - use `.cargo-ai/guidance/tool-authoring.md` for the actual tool workflow
 

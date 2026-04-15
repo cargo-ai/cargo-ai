@@ -887,6 +887,8 @@ Cargo AI works best when the definition stays small, understandable, and easy to
 
 Cargo AI can also scaffold project-local tools that agents call through `kind: "tool"`.
 
+When an agent needs new project-local executable code and you have Cargo available, prefer a Rust tool created with `cargo ai add tool <name>`. Use ad hoc Python, Node, or shell helper scripts only when you explicitly want that shape or the task does not fit the current tool contract.
+
 This is the current local workflow:
 
 ```bash

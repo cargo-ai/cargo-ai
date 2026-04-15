@@ -29,6 +29,7 @@ When action behavior may vary by invocation, also clarify:
 
 When the user says they need a reusable local tool or native helper:
 - confirm that they really need a project-local `kind: "tool"` capability rather than a plain `exec` step
+- if they need new executable code and Cargo is available, prefer Rust inside a `cargo ai add tool <name>` scaffold instead of ad hoc Python, Node, or shell helper scripts
 - if yes, switch to `.cargo-ai/guidance/tool-authoring.md`
 - keep the tool workflow separate from the agent JSON workflow, then wire them back together with `cargo ai tools check --config <agent.json>`
 
@@ -42,7 +43,7 @@ When the user says they need a reusable local tool or native helper:
 ## What To Do Next
 
 1. Use `pattern-selection.md` to infer the right Cargo AI shape.
-2. If the request truly needs a local tool, use `tool-authoring.md` and keep the tool crate small.
+2. If the request truly needs a local tool, use `tool-authoring.md`, keep the Rust tool crate small, and avoid standalone helper scripts unless explicitly requested or Cargo is unavailable.
 3. Copy the closest example from `examples/`.
 4. Decide which inputs are baked into JSON, which are caller-supplied runtime inputs, and whether any action behavior belongs in `runtime_vars`.
 5. Draft the JSON in canonical field order.
