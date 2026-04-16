@@ -838,6 +838,18 @@ struct ToolManifest {
     artifacts: BTreeMap<String, ToolManifestArtifact>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ProjectMetadataDocument {
+    #[serde(default)]
+    tools: Option<ProjectToolsPolicyDocument>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ProjectToolsPolicyDocument {
+    #[serde(default)]
+    allow_global_fallback: Option<bool>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct ToolDescribeParam {
     #[serde(rename = "type")]
@@ -932,6 +944,7 @@ impl ToolResolver {
 
     fn resolve_tool(&self, tool_id: &str) -> Result<ResolvedTool, String> {
         validate_tool_identifier(tool_id)?;
+        let mut allow_machine_fallback = self.project_root.is_none();
 
         if let Some(bundled_root) = self.bundled_root.as_ref() {
             if let Some(resolved) =
@@ -942,6 +955,7 @@ impl ToolResolver {
         }
 
         if let Some(project_root) = self.project_root.as_ref() {
+            allow_machine_fallback = project_allows_global_fallback(project_root)?;
             if let Some(resolved) = resolve_tool_from_scope_root(
                 project_root.join(PROJECT_TOOLS_RELATIVE_PATH).as_path(),
                 tool_id,
@@ -949,6 +963,13 @@ impl ToolResolver {
             )? {
                 return Ok(resolved);
             }
+        }
+
+        if !allow_machine_fallback {
+            return Err(format!(
+                "Tool '{}' was not found in the current project, and project tool policy disallows Cargo AI Home fallback.",
+                tool_id
+            ));
         }
 
         resolve_tool_from_scope_root(
@@ -963,6 +984,28 @@ impl ToolResolver {
             )
         })
     }
+}
+
+fn project_allows_global_fallback(project_root: &Path) -> Result<bool, String> {
+    let metadata_path = project_root.join(PROJECT_METADATA_RELATIVE_PATH);
+    let contents = fs::read_to_string(&metadata_path).map_err(|error| {
+        format!(
+            "Failed to read project metadata '{}': {}",
+            metadata_path.display(),
+            error
+        )
+    })?;
+    let metadata: ProjectMetadataDocument = toml::from_str(&contents).map_err(|error| {
+        format!(
+            "Failed to parse project metadata '{}': {}",
+            metadata_path.display(),
+            error
+        )
+    })?;
+    Ok(metadata
+        .tools
+        .and_then(|tools| tools.allow_global_fallback)
+        .unwrap_or(false))
 }
 
 fn maybe_find_project_root(start: &Path) -> Option<PathBuf> {

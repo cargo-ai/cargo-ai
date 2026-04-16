@@ -902,10 +902,20 @@ cargo ai add tool hello_tool
 
 If you are already inside an existing folder, run `cargo ai init` first. Add `cargo ai add guidance --style codex` when you want the Codex guidance bundle.
 
+If you want a project to refuse machine/global tool fallback, set this in `.cargo-ai/project.toml`:
+
+```toml
+[tools]
+allow_global_fallback = false
+```
+
+If `allow_global_fallback` is missing, Cargo AI treats that as project-only lookup.
+
 That creates:
 
 - `.cargo-ai/project.toml`
-  - Cargo AI project metadata
+  - Cargo AI project metadata and tool-resolution policy
+  - `cargo ai new/init` writes `[tools] allow_global_fallback = true` by default
 - `.gitignore`
   - generated artifact ignore rules when VCS is enabled
 - `AGENTS.md` plus `.cargo-ai/guidance/`

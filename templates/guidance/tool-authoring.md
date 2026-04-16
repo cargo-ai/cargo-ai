@@ -44,7 +44,12 @@ with:
 
 ```toml
 format_version = 1
+
+[tools]
+allow_global_fallback = true
 ```
+
+`cargo ai new/init` writes that default policy so new projects can reuse machine-level tools when desired. If you hand-author `project.toml` and omit `allow_global_fallback`, Cargo AI treats that as project-only lookup.
 
 ## Default Local Tool Workflow
 

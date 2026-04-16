@@ -1,4 +1,5 @@
 //! Shared scaffolding logic for `cargo ai init` and `cargo ai new`.
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs;
 use std::io::ErrorKind;
@@ -85,6 +86,26 @@ pub struct ScaffoldReport {
     pub gitignore_path: PathBuf,
     pub gitignore_status: ManagedFileStatus,
     pub git_setup: GitSetup,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct ProjectMetadataDocument {
+    #[serde(default)]
+    format_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vcs: Option<String>,
+    #[serde(default)]
+    tools: Option<ProjectToolsPolicyDocument>,
+    #[serde(flatten)]
+    extra: toml::Table,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct ProjectToolsPolicyDocument {
+    #[serde(default)]
+    allow_global_fallback: Option<bool>,
+    #[serde(flatten)]
+    extra: toml::Table,
 }
 
 /// Creates a new Cargo-AI project directory and initializes managed files.
@@ -270,44 +291,29 @@ fn write_project_metadata(
 }
 
 fn render_project_metadata(existing: Option<&str>, include_git_metadata: bool) -> String {
-    let mut trailing_lines = Vec::new();
+    let mut document = existing
+        .and_then(|contents| toml::from_str::<ProjectMetadataDocument>(contents).ok())
+        .unwrap_or_default();
+    document.format_version = 1;
+    document.vcs = include_git_metadata.then(|| "git".to_string());
+    document.extra.remove("tool");
+    document.extra.remove("tool_version");
+    document.extra.remove("template");
+    document.extra.remove("managed_by");
+    document.extra.remove("managed_by_version");
 
-    if let Some(existing) = existing {
-        for line in existing.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("format_version")
-                || trimmed.starts_with("vcs")
-                || trimmed.starts_with("tool ")
-                || trimmed.starts_with("tool_version")
-                || trimmed.starts_with("template")
-                || trimmed.starts_with("managed_by")
-                || trimmed.starts_with("managed_by_version")
-                || trimmed == "# Managed by cargo-ai init/new."
-            {
-                continue;
-            }
+    let mut tools = document.tools.unwrap_or_default();
+    if tools.allow_global_fallback.is_none() {
+        tools.allow_global_fallback = Some(true);
+    }
+    document.tools = Some(tools);
 
-            trailing_lines.push(line.to_string());
-        }
+    let mut rendered =
+        toml::to_string_pretty(&document).expect("project metadata should serialize to TOML");
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
     }
-
-    while trailing_lines.first().map(|line| line.trim().is_empty()) == Some(true) {
-        trailing_lines.remove(0);
-    }
-    while trailing_lines.last().map(|line| line.trim().is_empty()) == Some(true) {
-        trailing_lines.pop();
-    }
-
-    let mut lines = vec!["format_version = 1".to_string()];
-    if include_git_metadata {
-        lines.push("vcs = \"git\"".to_string());
-    }
-    if !trailing_lines.is_empty() {
-        lines.push(String::new());
-        lines.extend(trailing_lines);
-    }
-
-    format!("{}\n", lines.join("\n"))
+    rendered
 }
 
 fn ensure_gitignore(
@@ -389,6 +395,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use toml::Value;
 
     fn temp_dir_path(stem: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -421,7 +428,19 @@ mod tests {
 
         let metadata_contents =
             fs::read_to_string(&report.metadata_path).expect("metadata should be readable");
-        assert_eq!(metadata_contents, "format_version = 1\n");
+        let parsed: Value = toml::from_str(&metadata_contents).expect("metadata should parse");
+        assert_eq!(
+            parsed.get("format_version").and_then(Value::as_integer),
+            Some(1)
+        );
+        assert_eq!(
+            parsed
+                .get("tools")
+                .and_then(Value::as_table)
+                .and_then(|tools| tools.get("allow_global_fallback"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
         assert!(!dir.join("AGENTS.md").exists());
         assert!(!dir.join("CLAUDE.md").exists());
         assert!(!dir.join(".cargo-ai/guidance").exists());
@@ -432,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_init_preserves_valid_existing_metadata() {
+    fn scaffold_init_adds_default_tool_policy_to_existing_minimal_metadata() {
         let dir = temp_dir_path("init-preserve");
         let metadata_path = dir.join(".cargo-ai").join("project.toml");
         fs::create_dir_all(
@@ -445,12 +464,24 @@ mod tests {
             .expect("metadata fixture should be written");
 
         let report = scaffold_init(&dir, VcsMode::None).expect("init should succeed");
-        assert_eq!(report.metadata_status, ManagedFileStatus::Unchanged);
+        assert_eq!(report.metadata_status, ManagedFileStatus::Updated);
         assert_eq!(report.gitignore_status, ManagedFileStatus::Skipped);
 
         let metadata_contents =
             fs::read_to_string(&metadata_path).expect("metadata should be readable");
-        assert_eq!(metadata_contents, "format_version = 1\n");
+        let parsed: Value = toml::from_str(&metadata_contents).expect("metadata should parse");
+        assert_eq!(
+            parsed.get("format_version").and_then(Value::as_integer),
+            Some(1)
+        );
+        assert_eq!(
+            parsed
+                .get("tools")
+                .and_then(Value::as_table)
+                .and_then(|tools| tools.get("allow_global_fallback"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -480,7 +511,54 @@ existing = true\n",
 
         let metadata_contents =
             fs::read_to_string(&metadata_path).expect("metadata should be readable");
-        assert_eq!(metadata_contents, "format_version = 1\n\nexisting = true\n");
+        let parsed: Value = toml::from_str(&metadata_contents).expect("metadata should parse");
+        assert_eq!(
+            parsed.get("format_version").and_then(Value::as_integer),
+            Some(1)
+        );
+        assert_eq!(parsed.get("existing").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            parsed
+                .get("tools")
+                .and_then(Value::as_table)
+                .and_then(|tools| tools.get("allow_global_fallback"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scaffold_init_preserves_explicit_existing_tool_policy() {
+        let dir = temp_dir_path("init-preserve-tool-policy");
+        let metadata_path = dir.join(".cargo-ai").join("project.toml");
+        fs::create_dir_all(
+            metadata_path
+                .parent()
+                .expect("metadata parent should exist"),
+        )
+        .expect("metadata dir should be created");
+        fs::write(
+            &metadata_path,
+            "format_version = 1\n\n[tools]\nallow_global_fallback = false\n",
+        )
+        .expect("metadata fixture should be written");
+
+        let report = scaffold_init(&dir, VcsMode::None).expect("init should succeed");
+        assert_eq!(report.metadata_status, ManagedFileStatus::Unchanged);
+
+        let metadata_contents =
+            fs::read_to_string(&metadata_path).expect("metadata should be readable");
+        let parsed: Value = toml::from_str(&metadata_contents).expect("metadata should parse");
+        assert_eq!(
+            parsed
+                .get("tools")
+                .and_then(Value::as_table)
+                .and_then(|tools| tools.get("allow_global_fallback"))
+                .and_then(Value::as_bool),
+            Some(false)
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -497,7 +575,20 @@ existing = true\n",
 
         let metadata_contents =
             fs::read_to_string(&report.metadata_path).expect("metadata should be readable");
-        assert_eq!(metadata_contents, "format_version = 1\nvcs = \"git\"\n");
+        let parsed: Value = toml::from_str(&metadata_contents).expect("metadata should parse");
+        assert_eq!(
+            parsed.get("format_version").and_then(Value::as_integer),
+            Some(1)
+        );
+        assert_eq!(parsed.get("vcs").and_then(Value::as_str), Some("git"));
+        assert_eq!(
+            parsed
+                .get("tools")
+                .and_then(Value::as_table)
+                .and_then(|tools| tools.get("allow_global_fallback"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
 
         let gitignore_contents =
             fs::read_to_string(&report.gitignore_path).expect("gitignore should be readable");

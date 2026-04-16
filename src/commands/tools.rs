@@ -81,6 +81,18 @@ struct ToolManifest {
     distribution: Option<ToolManifestDistribution>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ProjectMetadataDocument {
+    #[serde(default)]
+    tools: Option<ProjectToolsPolicyDocument>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ProjectToolsPolicyDocument {
+    #[serde(default)]
+    allow_global_fallback: Option<bool>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ToolDescribeParam {
     #[serde(rename = "type")]
@@ -193,6 +205,7 @@ impl ToolResolver {
 
     pub(crate) fn resolve_tool(&self, tool_id: &str) -> Result<ResolvedTool, String> {
         validate_tool_identifier(tool_id)?;
+        let mut allow_machine_fallback = self.project_root.is_none();
 
         if let Some(bundled_root) = self.bundled_root.as_ref() {
             if let Some(resolved) = resolve_tool_from_scope_root(
@@ -206,6 +219,7 @@ impl ToolResolver {
         }
 
         if let Some(project_root) = self.project_root.as_ref() {
+            allow_machine_fallback = project_allows_global_fallback(project_root)?;
             let project_tools_root = project_tools_root(project_root);
             match resolve_tool_from_scope_root(
                 &project_tools_root,
@@ -217,6 +231,13 @@ impl ToolResolver {
                 Ok(None) => {}
                 Err(error) => return Err(error),
             }
+        }
+
+        if !allow_machine_fallback {
+            return Err(format!(
+                "Tool '{}' was not found in the current project, and project tool policy disallows Cargo AI Home fallback.",
+                tool_id
+            ));
         }
 
         let machine_tools_root = machine_tools_root();
@@ -233,6 +254,28 @@ impl ToolResolver {
             )
         })
     }
+}
+
+fn project_allows_global_fallback(project_root: &Path) -> Result<bool, String> {
+    let metadata_path = project_root.join(PROJECT_METADATA_RELATIVE_PATH);
+    let contents = fs::read_to_string(&metadata_path).map_err(|error| {
+        format!(
+            "Failed to read project metadata '{}': {}",
+            metadata_path.display(),
+            error
+        )
+    })?;
+    let metadata: ProjectMetadataDocument = toml::from_str(&contents).map_err(|error| {
+        format!(
+            "Failed to parse project metadata '{}': {}",
+            metadata_path.display(),
+            error
+        )
+    })?;
+    Ok(metadata
+        .tools
+        .and_then(|tools| tools.allow_global_fallback)
+        .unwrap_or(false))
 }
 
 pub(crate) fn maybe_find_project_root(start: &Path) -> Option<PathBuf> {
@@ -1364,7 +1407,8 @@ mod tests {
         copy_tool_bundle_for_export, maybe_find_project_root, render_binary_tool_manifest_json,
         render_source_tool_manifest_json, scaffold_local_tool, validate_describe_document,
         validate_local_tool_name, ResolvedTool, ToolDescribeDocument, ToolDescribeExamples,
-        ToolDescribeResourceProfile, ToolDescribeResult, ToolDescribeSelfTest, ToolScope,
+        ToolDescribeResourceProfile, ToolDescribeResult, ToolDescribeSelfTest, ToolResolver,
+        ToolScope,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1388,6 +1432,44 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn make_executable_script(path: &PathBuf, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, body).expect("script should be written");
+        let mut permissions = fs::metadata(path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("script should be executable");
+    }
+
+    #[cfg(unix)]
+    fn write_machine_tool_fixture(root: &PathBuf, tool_id: &str, target: &str) -> PathBuf {
+        let tool_dir = root.join("tools").join(tool_id);
+        fs::create_dir_all(&tool_dir).expect("machine tool dir should be created");
+
+        let script_path = tool_dir.join(tool_id);
+        make_executable_script(
+            &script_path,
+            "#!/bin/sh\nif [ \"$1\" = \"describe\" ]; then\nprintf '{\"protocol_version\":1,\"name\":\"machine_only\",\"description\":\"machine fixture\",\"params\":{},\"result\":{\"type\":\"string\",\"nullable\":true},\"resource_profile\":{\"network\":\"none\",\"filesystem_read\":\"none\",\"filesystem_write\":\"none\",\"subprocess\":\"none\",\"env_read\":\"none\",\"credential_access\":\"none\"},\"self_test\":{\"supported\":false,\"safe\":false},\"examples\":{\"minimal_invoke\":{\"protocol_version\":1,\"params\":{}},\"full_invoke\":{\"protocol_version\":1,\"params\":{}}}}\\n'\nelse\nprintf '{\"protocol_version\":1,\"result\":\"ok\"}\\n'\nfi\n",
+        );
+
+        let manifest = render_binary_tool_manifest_json(
+            tool_id,
+            tool_id,
+            target,
+            script_path
+                .strip_prefix(&tool_dir)
+                .expect("artifact should be relative to tool dir")
+                .to_string_lossy()
+                .as_ref(),
+        );
+        fs::write(tool_dir.join("tool.json"), manifest).expect("tool manifest should be written");
+
+        script_path
+    }
+
     #[test]
     fn finds_project_root_by_managed_metadata() {
         let root = temp_dir("project-root");
@@ -1401,6 +1483,68 @@ mod tests {
         assert_eq!(found, root);
 
         let _ = fs::remove_dir_all(found);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_tool_resolution_defaults_to_project_only_when_policy_missing() {
+        let _guard = crate::commands::runtime_actions::TEST_ENV_LOCK
+            .lock()
+            .expect("environment lock should not be poisoned");
+        let original_cargo_ai_home = std::env::var_os("CARGO_AI_HOME");
+        let root = temp_dir("resolver-project-only");
+        let machine_home = temp_dir("resolver-machine-home");
+        fs::create_dir_all(root.join(".cargo-ai")).expect("project metadata dir should be created");
+        fs::write(root.join(".cargo-ai/project.toml"), "format_version = 1\n")
+            .expect("project metadata should be written");
+        std::env::set_var("CARGO_AI_HOME", &machine_home);
+        write_machine_tool_fixture(&machine_home, "machine_only", "test-target");
+
+        let resolver = ToolResolver::new(Some(root.clone()), "test-target");
+        let err = resolver
+            .resolve_tool("machine_only")
+            .expect_err("missing policy should block machine fallback");
+        assert!(err.contains("disallows Cargo AI Home fallback"));
+
+        match original_cargo_ai_home {
+            Some(value) => std::env::set_var("CARGO_AI_HOME", value),
+            None => std::env::remove_var("CARGO_AI_HOME"),
+        }
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(machine_home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_tool_resolution_can_fallback_to_machine_when_policy_enabled() {
+        let _guard = crate::commands::runtime_actions::TEST_ENV_LOCK
+            .lock()
+            .expect("environment lock should not be poisoned");
+        let original_cargo_ai_home = std::env::var_os("CARGO_AI_HOME");
+        let root = temp_dir("resolver-machine-fallback");
+        let machine_home = temp_dir("resolver-machine-home-allowed");
+        fs::create_dir_all(root.join(".cargo-ai")).expect("project metadata dir should be created");
+        fs::write(
+            root.join(".cargo-ai/project.toml"),
+            "format_version = 1\n\n[tools]\nallow_global_fallback = true\n",
+        )
+        .expect("project metadata should be written");
+        std::env::set_var("CARGO_AI_HOME", &machine_home);
+        let script_path = write_machine_tool_fixture(&machine_home, "machine_only", "test-target");
+
+        let resolver = ToolResolver::new(Some(root.clone()), "test-target");
+        let resolved = resolver
+            .resolve_tool("machine_only")
+            .expect("explicit policy should allow machine fallback");
+        assert_eq!(resolved.scope, ToolScope::Machine);
+        assert_eq!(resolved.binary_path, script_path);
+
+        match original_cargo_ai_home {
+            Some(value) => std::env::set_var("CARGO_AI_HOME", value),
+            None => std::env::remove_var("CARGO_AI_HOME"),
+        }
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(machine_home);
     }
 
     #[test]
