@@ -24,6 +24,9 @@ The generated scaffold is intentionally minimal:
 - `.cargo-ai/tools/<tool_name>/tool.json`
   - Cargo AI-managed metadata that points back to the source crate
 
+Treat `.cargo-ai/tools/...` and `.cargo-ai/agents/...` as Cargo AI-owned generated state.
+Do not manually `cp`, `mv`, `ln`, or `rm` files inside those directories during normal debugging or validation.
+
 For the current MVP, assume:
 - one logical tool
 - one Cargo crate
@@ -125,6 +128,11 @@ That usually means:
 - then run the parent orchestration path
 - only then enable side effects such as email delivery
 
+If the final workflow mixes deterministic fan-out logic with live web inputs:
+- prove the deterministic path first with hardcoded or otherwise controlled inputs
+- add live URLs only after the tool-to-child path is already green
+- leave real side effects for the end
+
 `cargo test`, `cargo ai tools lint`, `cargo ai tools check`, and `cargo ai hatch --check` are necessary static gates, but they do not prove live URL fetches, provider responses, or child-process lifecycle behavior.
 
 ## Process Hygiene
@@ -142,6 +150,26 @@ When cleanup is needed:
 - explain why cleanup is necessary before doing it
 - do not use broad kill patterns
 - do not inspect or terminate unrelated system processes
+
+## Managed State Ownership
+
+`.cargo-ai/tools/...` and `.cargo-ai/agents/...` are Cargo AI-owned generated state, not author-owned source folders.
+
+Do not manually:
+- replace managed binaries with `cp`
+- rename or move them with `mv`
+- create symlinks into those directories for normal validation
+- delete managed artifacts with `rm` as part of ad hoc debugging
+
+If you manually mutate managed state, treat the workspace as contaminated for further diagnosis.
+Do not keep attributing later failures in that workspace to Cargo AI until you reproduce them from:
+- a fresh workspace, or
+- freshly regenerated managed state with no manual edits afterward
+
+When diagnosing managed-artifact issues:
+- prefer `cargo ai tools describe <tool_name>` and `cargo ai tools check <tool_name>` first
+- if you run the managed binary path directly, do it only as a read-only diagnostic immediately after a fresh `cargo ai tools build`
+- do not mutate the managed artifact path while debugging the problem you are trying to diagnose
 
 ## Resolution And Failure Behavior
 

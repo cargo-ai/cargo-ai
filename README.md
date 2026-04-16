@@ -944,6 +944,8 @@ When a parent agent calls a `kind: "tool"` step, new scaffolded tools also recei
 
 For validation, use Cargo AI surfaces first: `cargo test` only for crate-local Rust logic, then `cargo ai tools lint`, `build`, `check`, and `hatch --check`, with live leaf runtime checks before live parent orchestration and real side effects last. Treat `ps` or `kill` as exceptional cleanup for a specific long-lived child process left behind by your own live test run, not as a normal part of authoring-time validation.
 
+Treat `.cargo-ai/tools/...` and `.cargo-ai/agents/...` as Cargo AI-owned generated state, not as author-owned scratch space. Do not manually copy, move, symlink, or delete files there during debugging. If you do touch managed state by hand, stop using that workspace as proof of a Cargo AI artifact bug and rerun the repro from a fresh workspace or freshly regenerated managed state instead. When a workflow mixes deterministic fan-out logic with live sources, prove the hardcoded-input path first and add URL/provider behavior only after the local orchestration path is already green.
+
 Then wire it into your agent JSON:
 
 ```json

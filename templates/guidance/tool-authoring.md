@@ -63,6 +63,7 @@ allow_global_fallback = true
    - `tools/<tool_name>/src/agent_bridge.rs`
    - `tools/<tool_name>/src/tool.rs`
    - `.cargo-ai/tools/<tool_name>/tool.json`
+   - treat `.cargo-ai/tools/...` and `.cargo-ai/agents/...` as Cargo AI-owned generated state; do not manually replace, rename, symlink, or delete files there during validation
 3. Implement the tool behavior in `src/tool.rs`:
    - description
    - params
@@ -87,6 +88,9 @@ allow_global_fallback = true
    - run the leaf tool or child agent in print/smoke mode first
    - run the parent orchestration path next
    - run real side effects such as email delivery last
+   - if the workflow also depends on live URLs or provider behavior, prove the deterministic hardcoded-input path first
+
+If a debugging session manually mutates `.cargo-ai/tools/...` or `.cargo-ai/agents/...`, stop trusting that workspace as a clean diagnostic surface. Move the repro to a fresh workspace or freshly regenerated managed state instead of continuing to patch around contaminated generated artifacts.
 
 If `cargo ai init/new` was run with the default VCS mode, it will also initialize Git and create or update `.gitignore` for generated guidance and managed build state. If Git is unavailable, rerun with `--vcs none`.
 
