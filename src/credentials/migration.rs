@@ -80,16 +80,13 @@ mod tests {
     use super::*;
     use crate::credentials::store::{credentials_path, load_account_tokens, load_profile_token};
     use std::path::Path;
-    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_test_env<F>(test: F)
     where
         F: FnOnce(&Path),
     {
-        let _guard = ENV_LOCK
+        let _guard = crate::commands::runtime_actions::TEST_ENV_LOCK
             .lock()
             .expect("environment lock should not be poisoned");
 

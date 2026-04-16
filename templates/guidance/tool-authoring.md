@@ -73,6 +73,7 @@ allow_global_fallback = true
    - `cargo ai tools build <tool_name> --target <triple>`
 5. Inspect and validate it:
    - `cargo ai tools describe <tool_name>`
+   - `cargo ai tools lint <tool_name>`
    - `cargo ai tools check <tool_name>`
 6. Wire the tool into agent JSON:
    - `kind: "tool"`
@@ -110,6 +111,8 @@ For the current MVP, assume:
 - one logical tool
 - one Cargo crate
 - one primary binary target
+
+`cargo ai tools lint <tool_name>` is the static source/scaffold lint for project-local source-backed tools. It checks managed metadata linkage and scaffold/layout expectations without executing the tool's business logic. It stays separate from `cargo ai tools check`, which validates the built binary contract.
 
 ## Dependency Discipline
 

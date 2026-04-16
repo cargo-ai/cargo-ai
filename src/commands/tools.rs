@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, ErrorKind};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const PROJECT_METADATA_RELATIVE_PATH: &str = ".cargo-ai/project.toml";
@@ -174,6 +174,22 @@ pub(crate) struct ToolContract {
     pub(crate) describe: ToolDescribeDocument,
 }
 
+#[derive(Clone, Debug, Default)]
+struct ToolLintReport {
+    tool_id: String,
+    notes: Vec<String>,
+    errors: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ProjectSourceToolContext {
+    tool_id: String,
+    tool_manifest_path: PathBuf,
+    source_manifest_relative_path: String,
+    source_manifest_path: PathBuf,
+    source_root: PathBuf,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ToolResolver {
     bundled_root: Option<PathBuf>,
@@ -276,6 +292,29 @@ fn project_allows_global_fallback(project_root: &Path) -> Result<bool, String> {
         .tools
         .and_then(|tools| tools.allow_global_fallback)
         .unwrap_or(false))
+}
+
+fn validate_project_relative_path(raw_path: &str, label: &str) -> Result<(), String> {
+    if raw_path.trim().is_empty() {
+        return Err(format!("{label} path must be a non-empty relative path."));
+    }
+    let candidate = Path::new(raw_path);
+    if candidate.is_absolute() {
+        return Err(format!(
+            "{label} path must be relative and stay at the current level or below."
+        ));
+    }
+    if path_uses_parent_traversal(candidate) {
+        return Err(format!(
+            "{label} path must stay at the current level or below; parent traversal (`..`) is not allowed."
+        ));
+    }
+    Ok(())
+}
+
+fn path_uses_parent_traversal(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
 }
 
 pub(crate) fn maybe_find_project_root(start: &Path) -> Option<PathBuf> {
@@ -717,16 +756,259 @@ pub(crate) fn build_source_tool(
     .resolve_tool(tool_name)
 }
 
+fn load_project_source_tool_context(
+    project_root: &Path,
+    tool_name: &str,
+) -> Result<ProjectSourceToolContext, String> {
+    validate_tool_identifier(tool_name)?;
+
+    let tool_manifest_path = project_tools_root(project_root)
+        .join(tool_name)
+        .join(TOOL_MANIFEST_FILE_NAME);
+    if !tool_manifest_path.exists() {
+        let machine_manifest_path = machine_tools_root()
+            .join(tool_name)
+            .join(TOOL_MANIFEST_FILE_NAME);
+        if machine_manifest_path.exists() {
+            return Err(format!(
+                "Tool '{}' is only materialized in Cargo AI Home. `cargo ai tools lint` currently supports project-local source-backed tools only.",
+                tool_name
+            ));
+        }
+        return Err(format!(
+            "Tool '{}' was not found in the current project's managed tool metadata.",
+            tool_name
+        ));
+    }
+
+    let manifest = load_tool_manifest(&tool_manifest_path, tool_name)?;
+    let source = manifest.source.ok_or_else(|| {
+        format!(
+            "Tool '{}' is not source-backed. `cargo ai tools lint` currently supports project-local source-backed tools only.",
+            tool_name
+        )
+    })?;
+    validate_project_relative_path(source.manifest_path.as_str(), "Tool source manifest")?;
+
+    let source_manifest_path = project_root.join(source.manifest_path.as_str());
+    let source_root = source_manifest_path
+        .parent()
+        .ok_or_else(|| {
+            format!(
+                "Tool '{}' source manifest path '{}' has no parent directory.",
+                tool_name, source.manifest_path
+            )
+        })?
+        .to_path_buf();
+
+    Ok(ProjectSourceToolContext {
+        tool_id: tool_name.to_string(),
+        tool_manifest_path,
+        source_manifest_relative_path: source.manifest_path,
+        source_manifest_path,
+        source_root,
+    })
+}
+
+fn lint_project_source_tool(
+    project_root: &Path,
+    tool_name: &str,
+) -> Result<ToolLintReport, String> {
+    let context = load_project_source_tool_context(project_root, tool_name)?;
+    let mut report = ToolLintReport {
+        tool_id: tool_name.to_string(),
+        ..ToolLintReport::default()
+    };
+
+    lint_universal_source_checks(&context, &mut report);
+    lint_scaffold_source_checks(&context, &mut report);
+
+    Ok(report)
+}
+
+fn lint_universal_source_checks(context: &ProjectSourceToolContext, report: &mut ToolLintReport) {
+    if Path::new(context.source_manifest_relative_path.as_str())
+        .file_name()
+        .and_then(|value| value.to_str())
+        != Some("Cargo.toml")
+    {
+        report.errors.push(format!(
+            "Managed tool manifest '{}' points to '{}', but source-backed tools must reference a Cargo.toml manifest.",
+            context.tool_manifest_path.display(),
+            context.source_manifest_relative_path
+        ));
+    }
+
+    if !context.source_manifest_path.exists() {
+        report.errors.push(format!(
+            "Source manifest '{}' does not exist on disk.",
+            context.source_manifest_path.display()
+        ));
+        return;
+    }
+
+    let cargo_toml = match fs::read_to_string(&context.source_manifest_path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            report.errors.push(format!(
+                "Failed to read source manifest '{}': {}",
+                context.source_manifest_path.display(),
+                error
+            ));
+            return;
+        }
+    };
+    let parsed: toml::Value = match toml::from_str(&cargo_toml) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            report.errors.push(format!(
+                "Source manifest '{}' is not valid TOML: {}",
+                context.source_manifest_path.display(),
+                error
+            ));
+            return;
+        }
+    };
+
+    let package_name = parsed
+        .get("package")
+        .and_then(toml::Value::as_table)
+        .and_then(|package| package.get("name"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if package_name.is_none() {
+        report.errors.push(format!(
+            "Source manifest '{}' must define a non-empty [package].name for the tool crate.",
+            context.source_manifest_path.display()
+        ));
+    }
+}
+
+fn lint_scaffold_source_checks(context: &ProjectSourceToolContext, report: &mut ToolLintReport) {
+    let main_rs_path = context.source_root.join("src").join("main.rs");
+    let lib_rs_path = context.source_root.join("src").join("lib.rs");
+    let agent_bridge_rs_path = context.source_root.join("src").join("agent_bridge.rs");
+    let tool_rs_path = context.source_root.join("src").join("tool.rs");
+    let scaffold_paths = [
+        (&main_rs_path, "src/main.rs"),
+        (&lib_rs_path, "src/lib.rs"),
+        (&agent_bridge_rs_path, "src/agent_bridge.rs"),
+        (&tool_rs_path, "src/tool.rs"),
+    ];
+    let scaffold_layout_present = scaffold_paths.iter().any(|(path, _)| path.exists());
+
+    if !scaffold_layout_present {
+        report.notes.push(format!(
+            "Skipped scaffold-specific checks for '{}' because the source crate does not use the standard `cargo ai add tool` layout.",
+            context.tool_id
+        ));
+        return;
+    }
+
+    for (path, label) in &scaffold_paths {
+        if !path.exists() {
+            report.errors.push(format!(
+                "Scaffold-specific lint expected '{}' for tool '{}' but it is missing.",
+                path.display(),
+                context.tool_id
+            ));
+        } else if path
+            .strip_prefix(&context.source_root)
+            .ok()
+            .map(|relative| relative != Path::new(label))
+            .unwrap_or(false)
+        {
+            report.errors.push(format!(
+                "Scaffold-specific lint expected '{}' under the tool source root for '{}'.",
+                label, context.tool_id
+            ));
+        }
+    }
+
+    if !report.errors.is_empty() {
+        return;
+    }
+
+    require_file_contains(
+        &lib_rs_path,
+        "Cargo AI protocol adapter for this tool.",
+        report,
+        "src/lib.rs no longer advertises the Cargo AI protocol adapter seam",
+    );
+    require_file_contains(
+        &lib_rs_path,
+        "mod tool;",
+        report,
+        "src/lib.rs no longer declares the author-owned tool module",
+    );
+    require_file_contains(
+        &lib_rs_path,
+        "mod agent_bridge;",
+        report,
+        "src/lib.rs no longer declares the Cargo AI-owned agent bridge module",
+    );
+    require_file_contains(
+        &agent_bridge_rs_path,
+        "Cargo AI-owned helper layer for tool-authored child-agent calls.",
+        report,
+        "src/agent_bridge.rs no longer contains the Cargo AI-owned helper marker",
+    );
+    require_file_contains(
+        &agent_bridge_rs_path,
+        "ChildAgentRequest",
+        report,
+        "src/agent_bridge.rs no longer exposes the child-agent request helper surface",
+    );
+    require_file_contains(
+        &tool_rs_path,
+        "Author-owned implementation area for this Cargo AI tool.",
+        report,
+        "src/tool.rs no longer contains the author-owned implementation marker",
+    );
+    require_file_contains(
+        &tool_rs_path,
+        format!(
+            "pub(crate) const TOOL_NAME: &str = \"{}\";",
+            context.tool_id
+        )
+        .as_str(),
+        report,
+        "src/tool.rs no longer declares the expected TOOL_NAME constant for this tool",
+    );
+}
+
+fn require_file_contains(path: &Path, needle: &str, report: &mut ToolLintReport, message: &str) {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            report.errors.push(format!(
+                "Failed to read '{}' during tool lint: {}",
+                path.display(),
+                error
+            ));
+            return;
+        }
+    };
+    if !contents.contains(needle) {
+        report
+            .errors
+            .push(format!("{} ('{}').", message, path.display()));
+    }
+}
+
 pub(crate) fn run(sub_m: &ArgMatches) -> bool {
     if let Some(build_m) = sub_m.subcommand_matches("build") {
         run_build(build_m)
     } else if let Some(describe_m) = sub_m.subcommand_matches("describe") {
         run_describe(describe_m)
+    } else if let Some(lint_m) = sub_m.subcommand_matches("lint") {
+        run_lint(lint_m)
     } else if let Some(check_m) = sub_m.subcommand_matches("check") {
         run_check(check_m)
     } else {
         eprintln!(
-            "No tools subcommand found. Try `cargo ai tools build <name>`, `cargo ai tools describe <name>`, or `cargo ai tools check <name>`."
+            "No tools subcommand found. Try `cargo ai tools build <name>`, `cargo ai tools describe <name>`, `cargo ai tools lint <name>`, or `cargo ai tools check <name>`."
         );
         false
     }
@@ -737,10 +1019,7 @@ fn run_build(sub_m: &ArgMatches) -> bool {
         eprintln!("x Missing tool name. Use `cargo ai tools build <name>`.");
         return false;
     };
-    let project_root = match std::env::current_dir()
-        .ok()
-        .and_then(|dir| maybe_find_project_root(dir.as_path()))
-    {
+    let project_root = match current_project_root() {
         Some(root) => root,
         None => {
             eprintln!(
@@ -783,6 +1062,55 @@ fn run_build(sub_m: &ArgMatches) -> bool {
             println!("Target: {}", resolved.target_triple);
             println!("Path:   {}", resolved.binary_path.display());
             true
+        }
+        Err(error) => {
+            eprintln!("x {error}");
+            false
+        }
+    }
+}
+
+fn run_lint(sub_m: &ArgMatches) -> bool {
+    let Some(name) = sub_m.get_one::<String>("name").map(String::as_str) else {
+        eprintln!("x Missing tool name. Use `cargo ai tools lint <name>`.");
+        return false;
+    };
+    let project_root = match current_project_root() {
+        Some(root) => root,
+        None => {
+            eprintln!(
+                "x No Cargo AI project metadata was found from the current directory upward."
+            );
+            return false;
+        }
+    };
+
+    match lint_project_source_tool(&project_root, name) {
+        Ok(report) if report.errors.is_empty() => {
+            println!("✓ Tool lint passed");
+            println!("Tool:   {}", report.tool_id);
+            if !report.notes.is_empty() {
+                println!("Notes:");
+                for note in report.notes {
+                    println!("- {note}");
+                }
+            }
+            true
+        }
+        Ok(report) => {
+            eprintln!("x Tool lint failed");
+            eprintln!("Tool:   {}", report.tool_id);
+            eprintln!("Problems:");
+            for error in report.errors {
+                eprintln!("- {error}");
+            }
+            if !report.notes.is_empty() {
+                eprintln!("Notes:");
+                for note in report.notes {
+                    eprintln!("- {note}");
+                }
+            }
+            false
         }
         Err(error) => {
             eprintln!("x {error}");
@@ -872,6 +1200,12 @@ fn run_check(sub_m: &ArgMatches) -> bool {
         eprintln!("x Missing tool name or --config for `cargo ai tools check`.");
         false
     }
+}
+
+fn current_project_root() -> Option<PathBuf> {
+    std::env::current_dir()
+        .ok()
+        .and_then(|dir| maybe_find_project_root(dir.as_path()))
 }
 
 fn resolver_from_current_dir(sub_m: &ArgMatches) -> Result<ToolResolver, String> {
@@ -1404,11 +1738,11 @@ fn existing_paths_are_same(left: &Path, right: &Path) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_tool_bundle_for_export, maybe_find_project_root, render_binary_tool_manifest_json,
-        render_source_tool_manifest_json, scaffold_local_tool, validate_describe_document,
-        validate_local_tool_name, ResolvedTool, ToolDescribeDocument, ToolDescribeExamples,
-        ToolDescribeResourceProfile, ToolDescribeResult, ToolDescribeSelfTest, ToolResolver,
-        ToolScope,
+        copy_tool_bundle_for_export, lint_project_source_tool, maybe_find_project_root,
+        render_binary_tool_manifest_json, render_source_tool_manifest_json, scaffold_local_tool,
+        validate_describe_document, validate_local_tool_name, ResolvedTool, ToolDescribeDocument,
+        ToolDescribeExamples, ToolDescribeResourceProfile, ToolDescribeResult,
+        ToolDescribeSelfTest, ToolResolver, ToolScope,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1468,6 +1802,38 @@ mod tests {
         fs::write(tool_dir.join("tool.json"), manifest).expect("tool manifest should be written");
 
         script_path
+    }
+
+    fn write_source_tool_fixture(
+        project_root: &PathBuf,
+        tool_id: &str,
+        manifest_relative_path: &str,
+    ) -> PathBuf {
+        let source_manifest_path = project_root.join(manifest_relative_path);
+        fs::create_dir_all(
+            source_manifest_path
+                .parent()
+                .expect("manifest parent should exist"),
+        )
+        .expect("source manifest parent should be created");
+        fs::write(
+            &source_manifest_path,
+            format!(
+                "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+                tool_id
+            ),
+        )
+        .expect("source manifest should be written");
+
+        let tool_dir = project_root.join(".cargo-ai/tools").join(tool_id);
+        fs::create_dir_all(&tool_dir).expect("tool metadata dir should be created");
+        fs::write(
+            tool_dir.join("tool.json"),
+            render_source_tool_manifest_json(tool_id, manifest_relative_path, tool_id),
+        )
+        .expect("tool manifest should be written");
+
+        source_manifest_path
     }
 
     #[test]
@@ -1584,6 +1950,105 @@ mod tests {
         assert!(tool_rs.contains("Author-owned implementation area"));
         assert!(tool_rs.contains("pub(crate) const TOOL_NAME: &str = \"hello_tool\";"));
         assert!(tool_rs.contains("context.invoke_agent(request)?;"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lint_project_source_tool_passes_for_scaffolded_tool() {
+        let root = temp_dir("tool-lint-scaffold");
+        fs::create_dir_all(root.join(".cargo-ai")).expect("project metadata dir should be created");
+        fs::write(
+            root.join(".cargo-ai/project.toml"),
+            "format_version = 1\n\n[tools]\nallow_global_fallback = true\n",
+        )
+        .expect("project metadata should be written");
+
+        scaffold_local_tool(&root, "hello_tool").expect("tool scaffold should succeed");
+        let report = lint_project_source_tool(&root, "hello_tool")
+            .expect("lint should succeed structurally");
+
+        assert!(
+            report.errors.is_empty(),
+            "report should be clean: {report:?}"
+        );
+        assert!(
+            report.notes.is_empty(),
+            "scaffolded tool should not skip checks"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lint_project_source_tool_skips_scaffold_checks_for_non_scaffolded_source_tool() {
+        let root = temp_dir("tool-lint-non-scaffold");
+        fs::create_dir_all(root.join(".cargo-ai")).expect("project metadata dir should be created");
+        fs::write(root.join(".cargo-ai/project.toml"), "format_version = 1\n")
+            .expect("project metadata should be written");
+        write_source_tool_fixture(&root, "custom_tool", "custom_tools/custom_tool/Cargo.toml");
+
+        let report =
+            lint_project_source_tool(&root, "custom_tool").expect("lint should still succeed");
+
+        assert!(
+            report.errors.is_empty(),
+            "report should be clean: {report:?}"
+        );
+        assert_eq!(report.notes.len(), 1);
+        assert!(report.notes[0].contains("Skipped scaffold-specific checks"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lint_project_source_tool_rejects_machine_only_tools() {
+        let _guard = crate::commands::runtime_actions::TEST_ENV_LOCK
+            .lock()
+            .expect("environment lock should not be poisoned");
+        let original_cargo_ai_home = std::env::var_os("CARGO_AI_HOME");
+        let root = temp_dir("tool-lint-project-root");
+        let machine_home = temp_dir("tool-lint-machine-only");
+        fs::create_dir_all(root.join(".cargo-ai")).expect("project metadata dir should be created");
+        fs::write(root.join(".cargo-ai/project.toml"), "format_version = 1\n")
+            .expect("project metadata should be written");
+        std::env::set_var("CARGO_AI_HOME", &machine_home);
+        write_machine_tool_fixture(&machine_home, "machine_only", "test-target");
+
+        let error = lint_project_source_tool(&root, "machine_only")
+            .expect_err("machine-only tool should be out of scope");
+        assert!(error.contains("project-local source-backed tools only"));
+
+        match original_cargo_ai_home {
+            Some(value) => std::env::set_var("CARGO_AI_HOME", value),
+            None => std::env::remove_var("CARGO_AI_HOME"),
+        }
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(machine_home);
+    }
+
+    #[test]
+    fn lint_project_source_tool_reports_missing_scaffold_files() {
+        let root = temp_dir("tool-lint-missing-file");
+        fs::create_dir_all(root.join(".cargo-ai")).expect("project metadata dir should be created");
+        fs::write(root.join(".cargo-ai/project.toml"), "format_version = 1\n")
+            .expect("project metadata should be written");
+
+        scaffold_local_tool(&root, "hello_tool").expect("tool scaffold should succeed");
+        fs::remove_file(root.join("tools/hello_tool/src/agent_bridge.rs"))
+            .expect("agent bridge file should be removed");
+
+        let report =
+            lint_project_source_tool(&root, "hello_tool").expect("lint should produce a report");
+
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("src/agent_bridge.rs")),
+            "expected missing scaffold file error, got {report:?}"
+        );
 
         let _ = fs::remove_dir_all(root);
     }

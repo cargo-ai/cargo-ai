@@ -48,6 +48,16 @@ pub fn command() -> Command {
                 ),
         )
         .subcommand(
+            Command::new("lint")
+                .about("Statically lint a project-local source-backed tool scaffold")
+                .arg(
+                    Arg::new("name")
+                        .help("Tool name")
+                        .required(true)
+                        .value_name("NAME"),
+                ),
+        )
+        .subcommand(
             Command::new("check")
                 .about("Validate tool contract readiness")
                 .group(
@@ -130,5 +140,20 @@ mod tests {
             Some("./agent.json")
         );
         assert!(check.get_one::<String>("name").is_none());
+    }
+
+    #[test]
+    fn lint_requires_tool_name() {
+        let matches = super::command()
+            .try_get_matches_from(["tools", "lint", "hello_tool"])
+            .expect("tools lint should parse");
+
+        let lint = matches
+            .subcommand_matches("lint")
+            .expect("lint subcommand should be available");
+        assert_eq!(
+            lint.get_one::<String>("name").map(String::as_str),
+            Some("hello_tool")
+        );
     }
 }
