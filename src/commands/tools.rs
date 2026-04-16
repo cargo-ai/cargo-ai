@@ -23,6 +23,10 @@ const TOOL_SCAFFOLD_LIB_RS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/tool-scaffold/src/lib.rs.tmpl"
 ));
+const TOOL_SCAFFOLD_AGENT_BRIDGE_RS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/tool-scaffold/src/agent_bridge.rs.tmpl"
+));
 const TOOL_SCAFFOLD_TOOL_RS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/tool-scaffold/src/tool.rs.tmpl"
@@ -468,6 +472,7 @@ pub(crate) fn scaffold_local_tool(project_root: &Path, tool_name: &str) -> Resul
     let cargo_toml_path = source_dir.join("Cargo.toml");
     let main_rs_path = source_dir.join("src").join("main.rs");
     let lib_rs_path = source_dir.join("src").join("lib.rs");
+    let agent_bridge_rs_path = source_dir.join("src").join("agent_bridge.rs");
     let tool_rs_path = source_dir.join("src").join("tool.rs");
     let manifest_path = tool_dir.join(TOOL_MANIFEST_FILE_NAME);
 
@@ -475,6 +480,7 @@ pub(crate) fn scaffold_local_tool(project_root: &Path, tool_name: &str) -> Resul
         &cargo_toml_path,
         &main_rs_path,
         &lib_rs_path,
+        &agent_bridge_rs_path,
         &tool_rs_path,
         &manifest_path,
     ] {
@@ -513,6 +519,10 @@ pub(crate) fn scaffold_local_tool(project_root: &Path, tool_name: &str) -> Resul
     write_utf8_file(
         &lib_rs_path,
         TOOL_SCAFFOLD_LIB_RS.replace("__TOOL_NAME__", tool_name),
+    )?;
+    write_utf8_file(
+        &agent_bridge_rs_path,
+        TOOL_SCAFFOLD_AGENT_BRIDGE_RS.to_string(),
     )?;
     write_utf8_file(
         &tool_rs_path,
@@ -1360,6 +1370,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(stem: &str) -> PathBuf {
@@ -1368,6 +1379,13 @@ mod tests {
             .expect("system time should be after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("cargo-ai-tools-test-{stem}-{nanos}"))
+    }
+
+    fn cargo_command() -> Command {
+        match std::env::var_os("CARGO") {
+            Some(path) => Command::new(path),
+            None => Command::new("cargo"),
+        }
     }
 
     #[test]
@@ -1403,6 +1421,7 @@ mod tests {
         let source_dir = root.join("tools/hello_tool/src");
         assert!(source_dir.join("main.rs").exists());
         assert!(source_dir.join("lib.rs").exists());
+        assert!(source_dir.join("agent_bridge.rs").exists());
         assert!(source_dir.join("tool.rs").exists());
         assert!(root.join(".cargo-ai/tools/hello_tool/tool.json").exists());
 
@@ -1411,11 +1430,253 @@ mod tests {
         assert!(lib_rs.contains("mod tool;"));
         assert!(lib_rs.contains("Cargo AI protocol adapter"));
 
+        let agent_bridge_rs = fs::read_to_string(source_dir.join("agent_bridge.rs"))
+            .expect("agent_bridge.rs should be readable");
+        assert!(agent_bridge_rs.contains("Cargo AI-owned helper layer"));
+        assert!(agent_bridge_rs.contains("ChildAgentRequest"));
+
         let tool_rs =
             fs::read_to_string(source_dir.join("tool.rs")).expect("tool.rs should be readable");
         assert!(tool_rs.contains("Author-owned implementation area"));
         assert!(tool_rs.contains("pub(crate) const TOOL_NAME: &str = \"hello_tool\";"));
-        assert!(tool_rs.contains("Replace this stub with the tool's behavior."));
+        assert!(tool_rs.contains("context.invoke_agent(request)?;"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scaffolded_tool_compiles_with_agent_bridge_support() {
+        let _guard = crate::commands::runtime_actions::TEST_ENV_LOCK
+            .lock()
+            .expect("environment lock should not be poisoned");
+        let root = temp_dir("tool-compile");
+        fs::create_dir_all(root.join(".cargo-ai")).expect("project metadata dir should be created");
+        fs::write(root.join(".cargo-ai/project.toml"), "format_version = 1\n")
+            .expect("project metadata should be written");
+
+        scaffold_local_tool(&root, "hello_tool").expect("tool scaffold should succeed");
+
+        let output = cargo_command()
+            .arg("check")
+            .arg("--manifest-path")
+            .arg(root.join("tools/hello_tool/Cargo.toml"))
+            .arg("--target")
+            .arg(crate::cargo_ai_metadata::current_build_target())
+            .output()
+            .expect("cargo check should start");
+
+        if !output.status.success() {
+            panic!(
+                "scaffolded tool should compile\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scaffolded_tool_agent_bridge_invokes_child_agent() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Stdio;
+
+        let _guard = crate::commands::runtime_actions::TEST_ENV_LOCK
+            .lock()
+            .expect("environment lock should not be poisoned");
+        let root = temp_dir("tool-child-agent");
+        fs::create_dir_all(root.join(".cargo-ai")).expect("project metadata dir should be created");
+        fs::write(root.join(".cargo-ai/project.toml"), "format_version = 1\n")
+            .expect("project metadata should be written");
+
+        scaffold_local_tool(&root, "hello_tool").expect("tool scaffold should succeed");
+
+        let tool_source = root.join("tools/hello_tool/src/tool.rs");
+        fs::write(
+            &tool_source,
+            r#"//! Author-owned implementation area for this Cargo AI tool.
+
+use crate::{
+    AccessLevel, AgentInputMode, ChildAgentRequest, InvocationContext, ParamSpec, ResourceProfile,
+    ResultSpec, SelfTestSpec, ToolError,
+};
+use serde_json::Value;
+use std::collections::BTreeMap;
+
+pub(crate) const TOOL_NAME: &str = "hello_tool";
+
+pub(crate) fn description() -> &'static str {
+    "Bridge test tool."
+}
+
+pub(crate) fn params() -> BTreeMap<String, ParamSpec> {
+    BTreeMap::new()
+}
+
+pub(crate) fn result() -> ResultSpec {
+    ResultSpec {
+        kind: "string".to_string(),
+        nullable: true,
+        description: "Bridge result.".to_string(),
+    }
+}
+
+pub(crate) fn resource_profile() -> ResourceProfile {
+    ResourceProfile {
+        network: AccessLevel::None,
+        filesystem_read: AccessLevel::None,
+        filesystem_write: AccessLevel::Optional,
+        subprocess: AccessLevel::Required,
+        env_read: AccessLevel::Optional,
+        credential_access: AccessLevel::None,
+    }
+}
+
+pub(crate) fn self_test() -> SelfTestSpec {
+    SelfTestSpec {
+        supported: false,
+        safe: false,
+        description: "Not implemented.".to_string(),
+    }
+}
+
+pub(crate) fn minimal_example_params() -> BTreeMap<String, Value> {
+    BTreeMap::new()
+}
+
+pub(crate) fn full_example_params() -> BTreeMap<String, Value> {
+    BTreeMap::new()
+}
+
+pub(crate) fn invoke(
+    _params: BTreeMap<String, Value>,
+    context: InvocationContext,
+) -> Result<Option<String>, ToolError> {
+    let request = ChildAgentRequest::new("./child_agent")
+        .with_input_mode(AgentInputMode::Append)
+        .add_run_var("ticker", "MSFT")
+        .add_input_override("company", "Microsoft")
+        .add_text_input("from tool");
+    context.invoke_agent(request)?;
+    Ok(Some("child invoked".to_string()))
+}
+"#,
+        )
+        .expect("tool.rs should be overwritten");
+
+        let child_capture_path = root.join("child-agent-capture.txt");
+        let child_script_path = root.join("child_agent");
+        let child_script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$CARGO_AI_AGENT_ACTION_DEPTH\" > \"{}\"\nprintf '%s\\n' \"$@\" >> \"{}\"\n",
+            child_capture_path.display(),
+            child_capture_path.display()
+        );
+        fs::write(&child_script_path, child_script).expect("child script should be written");
+        let mut child_permissions = fs::metadata(&child_script_path)
+            .expect("child script metadata should load")
+            .permissions();
+        child_permissions.set_mode(0o755);
+        fs::set_permissions(&child_script_path, child_permissions)
+            .expect("child script should be executable");
+
+        let build_output = cargo_command()
+            .arg("build")
+            .arg("--manifest-path")
+            .arg(root.join("tools/hello_tool/Cargo.toml"))
+            .arg("--target")
+            .arg(crate::cargo_ai_metadata::current_build_target())
+            .output()
+            .expect("cargo build should start");
+        if !build_output.status.success() {
+            panic!(
+                "scaffolded tool should build\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&build_output.stdout),
+                String::from_utf8_lossy(&build_output.stderr)
+            );
+        }
+
+        let binary_name = if cfg!(windows) {
+            "hello_tool.exe"
+        } else {
+            "hello_tool"
+        };
+        let binary_path = root
+            .join("tools/hello_tool/target")
+            .join(crate::cargo_ai_metadata::current_build_target())
+            .join("debug")
+            .join(binary_name);
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_millis() as u64;
+        let request = serde_json::json!({
+            "protocol_version": 1,
+            "params": {},
+            "runtime_context": {
+                "agent_bridge": {
+                    "current_depth": 1,
+                    "max_depth": 3,
+                    "runtime_budget": {
+                        "max_runtime_secs": 600,
+                        "started_at_ms": now_ms,
+                        "deadline_ms": now_ms + 600_000
+                    },
+                    "action_execution": "sequential"
+                }
+            }
+        });
+
+        let mut child = Command::new(&binary_path)
+            .arg("invoke")
+            .current_dir(&root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("tool invoke should start");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin should be available")
+            .write_all(
+                serde_json::to_vec(&request)
+                    .expect("request should serialize")
+                    .as_slice(),
+            )
+            .expect("request should be written");
+        let output = child.wait_with_output().expect("tool invoke should finish");
+        assert!(
+            output.status.success(),
+            "tool invoke should succeed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let response: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("response should be valid json");
+        assert_eq!(response.get("result"), Some(&json!("child invoked")));
+
+        let capture =
+            fs::read_to_string(&child_capture_path).expect("child invocation should be captured");
+        assert_eq!(
+            capture.lines().collect::<Vec<_>>(),
+            vec![
+                "2",
+                "--action-execution",
+                "sequential",
+                "--run-var",
+                "ticker=MSFT",
+                "--input-override",
+                "company=Microsoft",
+                "--input-mode",
+                "append",
+                "--input-text",
+                "from tool",
+            ]
+        );
 
         let _ = fs::remove_dir_all(root);
     }

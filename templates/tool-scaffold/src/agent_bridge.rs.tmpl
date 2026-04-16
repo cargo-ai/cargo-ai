@@ -1,0 +1,570 @@
+//! Cargo AI-owned helper layer for tool-authored child-agent calls.
+//!
+//! Tool authors should use the types in this module from `src/tool.rs` instead
+//! of hand-rolling subprocess flags, depth handling, or runtime-budget
+//! propagation.
+
+use crate::ToolError;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::io::{self, Read, Write};
+use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const AGENT_ACTION_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_DEPTH";
+const AGENT_ACTION_MAX_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_MAX_DEPTH";
+const AGENT_ACTION_MAX_RUNTIME_SECS_ENV: &str = "CARGO_AI_AGENT_MAX_RUNTIME_SECS";
+const AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_STARTED_AT_MS";
+const AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_DEADLINE_MS";
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct InvocationContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_bridge: Option<AgentBridgeContext>,
+}
+
+impl InvocationContext {
+    pub(crate) fn can_invoke_agents(&self) -> bool {
+        self.agent_bridge.is_some()
+    }
+
+    pub(crate) fn invoke_agent(
+        &self,
+        request: ChildAgentRequest,
+    ) -> Result<ChildAgentOutcome, ToolError> {
+        let bridge = self.agent_bridge.as_ref().ok_or_else(|| {
+            ToolError::new(
+                "Child-agent helper is unavailable for this invocation. This tool must run from a Cargo AI agent `kind: \"tool\"` step to call another agent.",
+            )
+        })?;
+        bridge.invoke_agent(request)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AgentBridgeContext {
+    current_depth: u32,
+    max_depth: u32,
+    runtime_budget: RuntimeBudget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    action_execution: Option<ActionExecutionMode>,
+}
+
+impl AgentBridgeContext {
+    fn invoke_agent(&self, request: ChildAgentRequest) -> Result<ChildAgentOutcome, ToolError> {
+        validate_child_agent_target(request.artifact.as_str())?;
+        if self.current_depth >= self.max_depth {
+            return Err(ToolError::new(format!(
+                "Child-agent call '{}' would exceed max-agent-depth {} from current depth {}.",
+                request.artifact, self.max_depth, self.current_depth
+            )));
+        }
+
+        let invocation = resolve_child_artifact_invocation(request.artifact.as_str())?;
+        let mut command = child_artifact_command(&invocation, request.artifact.as_str());
+        let command_line_args = request.command_line_args()?;
+        if let Some(action_execution) = request.action_execution.or(self.action_execution) {
+            command.arg("--action-execution");
+            command.arg(match action_execution {
+                ActionExecutionMode::Sequential => "sequential",
+                ActionExecutionMode::Parallel => "parallel",
+            });
+        }
+        if request.ignore_tools {
+            command.arg("--ignore-tools");
+        }
+        if let Some(profile) = request.profile.as_ref() {
+            command.arg("--profile");
+            command.arg(profile);
+        }
+        for argument in command_line_args {
+            command.arg(argument);
+        }
+        command.env(
+            AGENT_ACTION_DEPTH_ENV,
+            (self.current_depth.saturating_add(1)).to_string(),
+        );
+        command.env(AGENT_ACTION_MAX_DEPTH_ENV, self.max_depth.to_string());
+        command.env(
+            AGENT_ACTION_MAX_RUNTIME_SECS_ENV,
+            self.runtime_budget.max_runtime_secs.to_string(),
+        );
+        command.env(
+            AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV,
+            self.runtime_budget.started_at_ms.to_string(),
+        );
+        command.env(
+            AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV,
+            self.runtime_budget.deadline_ms.to_string(),
+        );
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+
+        remaining_runtime_duration(
+            self.runtime_budget,
+            format!(
+                "before starting child agent '{}'",
+                request.artifact
+            )
+            .as_str(),
+        )?;
+        let child = command.spawn().map_err(|error| {
+            ToolError::new(format!(
+                "Failed to start child agent '{}': {}",
+                request.artifact, error
+            ))
+        })?;
+        let output = wait_for_child_output(child, self.runtime_budget, request.artifact.as_str())?;
+        emit_child_output(&output)?;
+
+        if !output.status.success() {
+            return Err(ToolError::new(format!(
+                "Child agent '{}' exited with status {} at depth {}.",
+                request.artifact,
+                output.status,
+                self.current_depth.saturating_add(1)
+            )));
+        }
+
+        Ok(ChildAgentOutcome {
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ActionExecutionMode {
+    Sequential,
+    Parallel,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgentInputMode {
+    Replace,
+    Append,
+    Prepend,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+struct RuntimeBudget {
+    max_runtime_secs: u64,
+    started_at_ms: u64,
+    deadline_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ChildAgentRequest {
+    artifact: String,
+    profile: Option<String>,
+    action_execution: Option<ActionExecutionMode>,
+    ignore_tools: bool,
+    input_mode: Option<AgentInputMode>,
+    inputs: Vec<ChildAgentInput>,
+    run_vars: BTreeMap<String, String>,
+    input_overrides: BTreeMap<String, String>,
+}
+
+impl ChildAgentRequest {
+    pub(crate) fn new(artifact: impl Into<String>) -> Self {
+        Self {
+            artifact: artifact.into(),
+            profile: None,
+            action_execution: None,
+            ignore_tools: false,
+            input_mode: None,
+            inputs: Vec::new(),
+            run_vars: BTreeMap::new(),
+            input_overrides: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn with_profile(mut self, profile: impl Into<String>) -> Self {
+        self.profile = Some(profile.into());
+        self
+    }
+
+    pub(crate) fn with_action_execution(mut self, mode: ActionExecutionMode) -> Self {
+        self.action_execution = Some(mode);
+        self
+    }
+
+    pub(crate) fn with_ignore_tools(mut self, ignore_tools: bool) -> Self {
+        self.ignore_tools = ignore_tools;
+        self
+    }
+
+    pub(crate) fn with_input_mode(mut self, input_mode: AgentInputMode) -> Self {
+        self.input_mode = Some(input_mode);
+        self
+    }
+
+    pub(crate) fn add_text_input(mut self, text: impl Into<String>) -> Self {
+        self.inputs.push(ChildAgentInput::Text(text.into()));
+        self
+    }
+
+    pub(crate) fn add_url_input(mut self, url: impl Into<String>) -> Self {
+        self.inputs.push(ChildAgentInput::Url(url.into()));
+        self
+    }
+
+    pub(crate) fn add_image_input(mut self, path: impl Into<String>) -> Self {
+        self.inputs.push(ChildAgentInput::Image(path.into()));
+        self
+    }
+
+    pub(crate) fn add_file_input(mut self, path: impl Into<String>) -> Self {
+        self.inputs.push(ChildAgentInput::File(path.into()));
+        self
+    }
+
+    pub(crate) fn add_run_var(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.run_vars.insert(name.into(), value.into());
+        self
+    }
+
+    pub(crate) fn add_input_override(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.input_overrides.insert(name.into(), value.into());
+        self
+    }
+
+    fn command_line_args(&self) -> Result<Vec<String>, ToolError> {
+        let mut args = Vec::new();
+        for (name, value) in &self.run_vars {
+            args.push("--run-var".to_string());
+            args.push(format!("{name}={value}"));
+        }
+        for (name, value) in &self.input_overrides {
+            args.push("--input-override".to_string());
+            args.push(format!("{name}={value}"));
+        }
+        if let Some(input_mode) = self.input_mode {
+            if self.inputs.is_empty() {
+                return Err(ToolError::new(
+                    "Child-agent `input_mode` requires at least one input.",
+                ));
+            }
+            args.push("--input-mode".to_string());
+            args.push(
+                match input_mode {
+                    AgentInputMode::Replace => "replace",
+                    AgentInputMode::Append => "append",
+                    AgentInputMode::Prepend => "prepend",
+                }
+                .to_string(),
+            );
+        }
+        for input in &self.inputs {
+            let (flag, value) = match input {
+                ChildAgentInput::Text(text) => ("--input-text", text.as_str()),
+                ChildAgentInput::Url(url) => ("--input-url", url.as_str()),
+                ChildAgentInput::Image(path) => ("--input-image", path.as_str()),
+                ChildAgentInput::File(path) => ("--input-file", path.as_str()),
+            };
+            args.push(flag.to_string());
+            args.push(value.to_string());
+        }
+        Ok(args)
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ChildAgentInput {
+    Text(String),
+    Url(String),
+    Image(String),
+    File(String),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ChildAgentOutcome {
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+}
+
+#[derive(Debug)]
+struct ChildProcessOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+#[derive(Debug)]
+enum ChildArtifactInvocation {
+    DirectExecutable(PathBuf),
+    CargoSubcommand,
+    StandaloneCargoAi,
+}
+
+fn validate_child_agent_target(artifact: &str) -> Result<(), ToolError> {
+    if !artifact.starts_with("./") {
+        return Err(ToolError::new(format!(
+            "Child-agent target '{}' must be a same-level relative path such as './child_agent' or './child_agent.json'.",
+            artifact
+        )));
+    }
+
+    if contains_explicit_path_separator(&artifact[2..]) && !is_single_normal_path_component(&artifact[2..]) {
+        return Err(ToolError::new(format!(
+            "Child-agent target '{}' must stay at the same level; nested paths such as './agents/child_agent' are not allowed.",
+            artifact
+        )));
+    }
+
+    if artifact[2..].is_empty() || !is_single_normal_path_component(&artifact[2..]) {
+        return Err(ToolError::new(format!(
+            "Child-agent target '{}' must name exactly one sibling artifact.",
+            artifact
+        )));
+    }
+
+    if !Path::new(artifact).exists() {
+        return Err(ToolError::new(format!(
+            "Child-agent target '{}' was not found relative to the current working directory.",
+            artifact
+        )));
+    }
+
+    Ok(())
+}
+
+fn artifact_is_json_definition(artifact: &str) -> bool {
+    Path::new(artifact)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("json"))
+        .unwrap_or(false)
+}
+
+fn resolve_child_artifact_invocation(
+    artifact: &str,
+) -> Result<ChildArtifactInvocation, ToolError> {
+    if !artifact_is_json_definition(artifact) {
+        return Ok(ChildArtifactInvocation::DirectExecutable(
+            Path::new(artifact).to_path_buf(),
+        ));
+    }
+
+    let cargo_ai_exists = command_exists_on_path("cargo-ai");
+    if command_exists_on_path("cargo") && cargo_ai_exists {
+        return Ok(ChildArtifactInvocation::CargoSubcommand);
+    }
+    if cargo_ai_exists {
+        return Ok(ChildArtifactInvocation::StandaloneCargoAi);
+    }
+
+    Err(ToolError::new(format!(
+        "Child-agent JSON artifact '{}' requires Cargo AI to be available as `cargo ai` or `cargo-ai` on PATH.",
+        artifact
+    )))
+}
+
+fn child_artifact_command(invocation: &ChildArtifactInvocation, artifact: &str) -> Command {
+    match invocation {
+        ChildArtifactInvocation::DirectExecutable(path) => Command::new(path),
+        ChildArtifactInvocation::CargoSubcommand => {
+            let mut command = Command::new("cargo");
+            command.arg("ai");
+            command.arg("run");
+            command.arg(artifact);
+            command
+        }
+        ChildArtifactInvocation::StandaloneCargoAi => {
+            let mut command = Command::new("cargo-ai");
+            command.arg("run");
+            command.arg(artifact);
+            command
+        }
+    }
+}
+
+fn command_exists_on_path(command: &str) -> bool {
+    let Some(path_value) = std::env::var_os("PATH") else {
+        return false;
+    };
+
+    std::env::split_paths(&path_value).any(|directory| {
+        command_candidates_for_directory(&directory, command)
+            .into_iter()
+            .any(|candidate| candidate.is_file())
+    })
+}
+
+fn command_candidates_for_directory(directory: &Path, command: &str) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        if Path::new(command).extension().is_some() {
+            return vec![directory.join(command)];
+        }
+
+        let pathext = std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+        let candidates = pathext
+            .to_string_lossy()
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+            .map(|extension| directory.join(format!("{command}{extension}")))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            vec![directory.join(command)]
+        } else {
+            candidates
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        vec![directory.join(command)]
+    }
+}
+
+fn contains_explicit_path_separator(path: &str) -> bool {
+    path.contains('/') || path.contains('\\')
+}
+
+fn is_single_normal_path_component(path: &str) -> bool {
+    let mut components = Path::new(path).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+fn current_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn remaining_runtime_duration(
+    runtime_budget: RuntimeBudget,
+    exhausted_context: &str,
+) -> Result<Duration, ToolError> {
+    let now = current_time_millis();
+    if now >= runtime_budget.deadline_ms {
+        return Err(ToolError::new(format!(
+            "Current invocation exceeded max-runtime-in-sec {} {}.",
+            runtime_budget.max_runtime_secs, exhausted_context
+        )));
+    }
+
+    Ok(Duration::from_millis(
+        runtime_budget.deadline_ms.saturating_sub(now),
+    ))
+}
+
+fn wait_for_child_output(
+    mut child: std::process::Child,
+    runtime_budget: RuntimeBudget,
+    artifact: &str,
+) -> Result<ChildProcessOutput, ToolError> {
+    let stdout_reader = child.stdout.take().map(spawn_reader);
+    let stderr_reader = child.stderr.take().map(spawn_reader);
+
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| {
+            ToolError::new(format!(
+                "Failed while waiting for child agent '{}': {}",
+                artifact, error
+            ))
+        })? {
+            return Ok(ChildProcessOutput {
+                status,
+                stdout: join_reader(stdout_reader)?,
+                stderr: join_reader(stderr_reader)?,
+            });
+        }
+
+        if current_time_millis() >= runtime_budget.deadline_ms {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stdout = join_reader(stdout_reader)?;
+            let stderr = join_reader(stderr_reader)?;
+            let _ = emit_child_output(&ChildProcessOutput {
+                status: child
+                    .try_wait()
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| exit_status_after_kill()),
+                stdout,
+                stderr,
+            });
+            return Err(ToolError::new(format!(
+                "Current invocation exceeded max-runtime-in-sec {} while waiting for child agent '{}' at depth {}.",
+                runtime_budget.max_runtime_secs,
+                artifact,
+                std::env::var(AGENT_ACTION_DEPTH_ENV)
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0)
+                    .saturating_add(1)
+            )));
+        }
+
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(unix)]
+fn exit_status_after_kill() -> std::process::ExitStatus {
+    use std::os::unix::process::ExitStatusExt;
+    std::process::ExitStatus::from_raw(9)
+}
+
+#[cfg(windows)]
+fn exit_status_after_kill() -> std::process::ExitStatus {
+    use std::os::windows::process::ExitStatusExt;
+    std::process::ExitStatus::from_raw(1)
+}
+
+fn spawn_reader<R>(mut reader: R) -> thread::JoinHandle<io::Result<Vec<u8>>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+}
+
+fn join_reader(
+    handle: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+) -> Result<Vec<u8>, ToolError> {
+    let Some(handle) = handle else {
+        return Ok(Vec::new());
+    };
+    handle
+        .join()
+        .map_err(|_| ToolError::new("Failed to join child-agent output reader thread."))?
+        .map_err(ToolError::from)
+}
+
+fn emit_child_output(output: &ChildProcessOutput) -> Result<(), ToolError> {
+    let mut stderr = io::stderr().lock();
+    if !output.stdout.is_empty() {
+        stderr.write_all(&output.stdout)?;
+        if !output.stdout.ends_with(b"\n") {
+            stderr.write_all(b"\n")?;
+        }
+    }
+    if !output.stderr.is_empty() {
+        stderr.write_all(&output.stderr)?;
+        if !output.stderr.ends_with(b"\n") {
+            stderr.write_all(b"\n")?;
+        }
+    }
+    stderr.flush()?;
+    Ok(())
+}

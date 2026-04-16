@@ -912,6 +912,7 @@ That creates:
   - Codex guidance when you run `cargo ai add guidance --style codex`
 - `tools/hello_tool/`
   - normal Rust source for the tool crate, with custom behavior isolated in `src/tool.rs`
+  - Cargo AI-owned child-agent helper code isolated in `src/agent_bridge.rs`
 - `.cargo-ai/tools/hello_tool/tool.json`
   - Cargo AI-managed metadata pointing back to the source crate
 
@@ -924,6 +925,8 @@ cargo ai tools check hello_tool
 ```
 
 The tool `describe` result schema must be a nullable string. A step that sets `output_variable` still requires the actual `invoke` response to contain a non-null string result. For UI or background-process tools, keep rendering/artifact creation testable without launching the UI when practical, expose a smoke-test control such as `open_window=false`, and declare UI/process behavior in the tool `resource_profile`.
+
+When a parent agent calls a `kind: "tool"` step, new scaffolded tools also receive a Cargo AI-owned child-agent helper in `src/agent_bridge.rs`. That helper is available through the `InvocationContext` argument passed to `src/tool.rs`, so tool-authored Rust code can call one or more same-project child agents without hand-rolling subprocess flags, depth handling, or runtime-budget propagation. Tool execution itself does not consume an extra agent-depth hop; child-agent calls made from the tool consume depth exactly as if the parent had called those children directly.
 
 Then wire it into your agent JSON:
 

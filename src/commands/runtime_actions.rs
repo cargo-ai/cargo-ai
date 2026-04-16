@@ -25,6 +25,9 @@ const DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS: u64 = 600;
 const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str = "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
 const ACTION_LANE_OUTPUT_BUFFER_LIMIT: usize = 6;
 
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 tokio::task_local! {
     static ACTION_OUTPUT: ActionOutput;
 }
@@ -1311,6 +1314,8 @@ async fn run_matching_action_steps(
                 action_index,
                 &action.name,
                 provider_context,
+                action_execution_override,
+                max_agent_depth,
                 runtime_budget,
             )
             .await
@@ -1541,6 +1546,8 @@ async fn run_tool_step(
     action_index: usize,
     action_name: &str,
     provider_context: &ActionProviderContext,
+    action_execution_override: Option<crate::ActionExecutionMode>,
+    max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<Option<(String, String)>, String> {
     let tool_name = step.tool_name.as_deref().ok_or_else(|| {
@@ -1562,9 +1569,25 @@ async fn run_tool_step(
         action_name,
         &contract.describe,
     )?;
+    let current_depth = current_agent_action_depth();
     let request = serde_json::json!({
         "protocol_version": 1,
         "params": params,
+        "runtime_context": {
+            "agent_bridge": {
+                "current_depth": current_depth,
+                "max_depth": max_agent_depth,
+                "runtime_budget": {
+                    "max_runtime_secs": runtime_budget.max_runtime_secs,
+                    "started_at_ms": runtime_budget.started_at_ms,
+                    "deadline_ms": runtime_budget.deadline_ms,
+                },
+                "action_execution": action_execution_override.map(|mode| match mode {
+                    crate::ActionExecutionMode::Sequential => "sequential",
+                    crate::ActionExecutionMode::Parallel => "parallel",
+                }),
+            }
+        },
     });
     let request_bytes = serde_json::to_vec(&request).map_err(|error| {
         format!(
@@ -3788,8 +3811,8 @@ mod tests {
         resolve_action_render_mode_for_capability as resolve_action_output_mode_for_capability,
         resolve_generate_image_step_profile_context, resolve_run_args, resolve_string_parts,
         run_agent_step, run_completion_message_for_depth, run_exec_step, run_generate_image_step,
-        run_header_line, step_matches_platform, validate_agent_action_depth, ActionOutput,
-        ActionOutputMode, ActionProviderContext,
+        run_header_line, run_tool_step, step_matches_platform, validate_agent_action_depth,
+        ActionOutput, ActionOutputMode, ActionProviderContext,
         RequestedActionRenderMode as RequestedActionOutputMode, StepExecutionOutcome,
         ACTION_OUTPUT,
     };
@@ -3799,10 +3822,8 @@ mod tests {
     use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::{Arc, MutexGuard};
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct TestCargoHome {
         _guard: MutexGuard<'static, ()>,
@@ -3813,7 +3834,7 @@ mod tests {
 
     impl TestCargoHome {
         fn new(config_toml: &str) -> Self {
-            let guard = ENV_LOCK
+            let guard = super::TEST_ENV_LOCK
                 .lock()
                 .expect("environment lock should not be poisoned");
             let unique = SystemTime::now()
@@ -3867,7 +3888,7 @@ mod tests {
 
     impl TestPathCommands {
         fn new() -> Self {
-            let guard = ENV_LOCK
+            let guard = super::TEST_ENV_LOCK
                 .lock()
                 .expect("environment lock should not be poisoned");
             let unique = SystemTime::now()
@@ -6497,6 +6518,133 @@ auth_mode = "{auth_mode}"
             inherited_values.lines().collect::<Vec<_>>(),
             vec!["7", "600"]
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tool_step_includes_child_agent_bridge_runtime_context() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = super::TEST_ENV_LOCK
+            .lock()
+            .expect("environment lock should not be poisoned");
+        let original_depth = std::env::var_os(super::AGENT_ACTION_DEPTH_ENV);
+        std::env::set_var(super::AGENT_ACTION_DEPTH_ENV, "1");
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("cargo-ai-tool-bridge-{unique}"));
+        let tool_root = root.join(".cargo-ai").join("tools").join("bridge_tool");
+        fs::create_dir_all(&tool_root).expect("tool metadata dir should be created");
+        fs::write(
+            root.join(".cargo-ai").join("project.toml"),
+            "format_version = 1\n",
+        )
+        .expect("project metadata should be written");
+
+        let capture_path = root.join("bridge-request.json");
+        let script_path = root.join("bridge_tool.sh");
+        let script_body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"describe\" ]; then\ncat <<'EOF'\n{{\"protocol_version\":1,\"name\":\"bridge_tool\",\"description\":\"bridge test\",\"params\":{{}},\"result\":{{\"type\":\"string\",\"nullable\":true,\"description\":\"bridge result\"}},\"resource_profile\":{{\"network\":\"none\",\"filesystem_read\":\"none\",\"filesystem_write\":\"none\",\"subprocess\":\"none\",\"env_read\":\"none\",\"credential_access\":\"none\"}},\"self_test\":{{\"supported\":false,\"safe\":false,\"description\":\"not implemented\"}},\"examples\":{{\"minimal_invoke\":{{\"protocol_version\":1,\"params\":{{}}}},\"full_invoke\":{{\"protocol_version\":1,\"params\":{{}}}}}}}}\nEOF\nelif [ \"$1\" = \"invoke\" ]; then\ncat > \"{}\"\nprintf '{{\"protocol_version\":1,\"result\":null}}\\n'\nelse\nexit 1\nfi\n",
+            capture_path.display()
+        );
+        fs::write(&script_path, script_body).expect("tool script should be written");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("script should be executable");
+
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "tool_id": "bridge_tool",
+            "binary": {
+                "default_name": "bridge_tool"
+            },
+            "artifacts": {
+                "test-target": {
+                    "path": script_path.display().to_string()
+                }
+            }
+        });
+        fs::write(
+            tool_root.join("tool.json"),
+            serde_json::to_string(&manifest).expect("manifest should serialize"),
+        )
+        .expect("tool manifest should be written");
+
+        let step = crate::RunStep {
+            tool_name: Some("bridge_tool".to_string()),
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
+            kind: "tool".to_string(),
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: None,
+            run_vars: None,
+            input_overrides: None,
+            inputs: None,
+            input_mode: None,
+            platforms: None,
+        };
+
+        let mut provider_context = provider_context();
+        provider_context.tool_resolver = Some(Arc::new(crate::commands::tools::ToolResolver::new(
+            Some(root.clone()),
+            "test-target",
+        )));
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_tool_step(
+            &step,
+            &json!({}),
+            0,
+            "bridge_action",
+            &provider_context,
+            Some(crate::ActionExecutionMode::Sequential),
+            4,
+            runtime_budget,
+        )
+        .await;
+
+        match &original_depth {
+            Some(value) => std::env::set_var(super::AGENT_ACTION_DEPTH_ENV, value),
+            None => std::env::remove_var(super::AGENT_ACTION_DEPTH_ENV),
+        }
+
+        assert!(result.is_ok(), "tool step should succeed: {result:?}");
+
+        let captured_request: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&capture_path).expect("request should exist"))
+                .expect("request json should parse");
+        let bridge = captured_request
+            .get("runtime_context")
+            .and_then(|value| value.get("agent_bridge"))
+            .expect("agent bridge should be present");
+        assert_eq!(bridge.get("current_depth"), Some(&json!(1)));
+        assert_eq!(bridge.get("max_depth"), Some(&json!(4)));
+        assert_eq!(bridge.get("action_execution"), Some(&json!("sequential")));
+        assert_eq!(
+            bridge
+                .get("runtime_budget")
+                .and_then(|value| value.get("max_runtime_secs")),
+            Some(&json!(600))
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]

@@ -54,6 +54,7 @@ format_version = 1
    - `tools/<tool_name>/Cargo.toml`
    - `tools/<tool_name>/src/main.rs`
    - `tools/<tool_name>/src/lib.rs`
+   - `tools/<tool_name>/src/agent_bridge.rs`
    - `tools/<tool_name>/src/tool.rs`
    - `.cargo-ai/tools/<tool_name>/tool.json`
 3. Implement the tool behavior in `src/tool.rs`:
@@ -88,6 +89,10 @@ The generated scaffold is intentionally minimal:
 - `src/lib.rs`
   - owns the request/response models
   - owns the Cargo AI protocol adapter for `describe` and `invoke`
+  - normally does not need edits for tool behavior
+- `src/agent_bridge.rs`
+  - Cargo AI-owned helper layer for child-agent calls from the tool
+  - keeps child-agent argument shaping, depth rules, and runtime-budget propagation out of author code
   - normally does not need edits for tool behavior
 - `src/tool.rs`
   - author-owned implementation area
@@ -173,6 +178,8 @@ Current `invoke` request shape:
 }
 ```
 
+When Cargo AI calls a tool from a parent `kind: "tool"` step, it may also include an internal optional `runtime_context` block. New scaffolded tools wrap that block as the `InvocationContext` argument passed to `src/tool.rs`.
+
 Current success response shape:
 
 ```json
@@ -183,6 +190,31 @@ Current success response shape:
 ```
 
 `result` may be `null` when the tool succeeds without a compact string result.
+
+## Tool-To-Agent Handoff
+
+New scaffolded tools receive an `InvocationContext` argument plus a Cargo AI-owned helper in `src/agent_bridge.rs`.
+
+Use that helper when the tool needs procedural control such as:
+- splitting or iterating over input values
+- calling one or more same-project child agents in sequence
+- keeping iterator/fan-out logic in Rust instead of expanding the agent JSON or relying on the model to do deterministic string processing
+
+Use it from `src/tool.rs`:
+
+```rust
+let request = ChildAgentRequest::new("./child_agent.json")
+    .add_text_input("hello from the tool");
+context.invoke_agent(request)?;
+```
+
+Current first-slice rules:
+- same-project child-agent targets only; use same-level relative paths such as `./child_agent` or `./child_agent.json`
+- tool execution itself does not consume an extra agent-depth hop
+- a child-agent call from the tool consumes depth exactly as if the parent had called that child directly
+- the helper carries the remaining runtime budget through to the child-agent invocation
+- manual direct `describe` / `invoke` calls outside a parent Cargo AI tool step will not include child-agent bridge context
+- keep custom orchestration in `src/tool.rs`; do not rewrite `src/agent_bridge.rs`
 
 ## Agent JSON Wiring
 

@@ -5,7 +5,8 @@
 //! `invoke` requests.
 
 use crate::{
-    AccessLevel, ParamSpec, ResourceProfile, ResultSpec, SelfTestSpec, ToolError,
+    AccessLevel, ChildAgentRequest, InvocationContext, ParamSpec, ResourceProfile, ResultSpec,
+    SelfTestSpec, ToolError,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -55,9 +56,22 @@ pub(crate) fn full_example_params() -> BTreeMap<String, Value> {
     BTreeMap::new()
 }
 
-pub(crate) fn invoke(params: BTreeMap<String, Value>) -> Result<Option<String>, ToolError> {
+pub(crate) fn invoke(
+    params: BTreeMap<String, Value>,
+    context: InvocationContext,
+) -> Result<Option<String>, ToolError> {
     let _params = params;
+    let _context = context;
 
     // Replace this stub with the tool's behavior.
+    //
+    // If this tool needs procedural fan-out to one or more project-local child
+    // agents, keep that orchestration here and use the Cargo AI-owned helper
+    // instead of hand-rolling subprocess flags:
+    //
+    // let request = ChildAgentRequest::new("./child_agent.json")
+    //     .add_text_input("hello from the tool");
+    // context.invoke_agent(request)?;
+    let _example_child_agent_request = ChildAgentRequest::new("./child_agent.json");
     Ok(None)
 }

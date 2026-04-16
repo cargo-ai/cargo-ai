@@ -3654,6 +3654,8 @@ async fn run_matching_action_steps(
                 action_index,
                 &action.name,
                 provider_context,
+                action_execution_override,
+                max_agent_depth,
                 runtime_budget,
             )
             .await
@@ -3873,6 +3875,8 @@ async fn run_tool_step(
     action_index: usize,
     action_name: &str,
     provider_context: &ActionProviderContext,
+    action_execution_override: Option<ActionExecutionMode>,
+    max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<Option<(String, String)>, String> {
     let tool_name = step.tool_name.as_deref().ok_or_else(|| {
@@ -3889,9 +3893,25 @@ async fn run_tool_step(
     })?;
     let contract = resolver.resolve_contract(tool_name)?;
     let params = resolve_tool_invoke_params(step, data, action_name, &contract.describe)?;
+    let current_depth = current_agent_action_depth();
     let request = serde_json::json!({
         "protocol_version": 1,
         "params": params,
+        "runtime_context": {
+            "agent_bridge": {
+                "current_depth": current_depth,
+                "max_depth": max_agent_depth,
+                "runtime_budget": {
+                    "max_runtime_secs": runtime_budget.max_runtime_secs,
+                    "started_at_ms": runtime_budget.started_at_ms,
+                    "deadline_ms": runtime_budget.deadline_ms,
+                },
+                "action_execution": action_execution_override.map(|mode| match mode {
+                    ActionExecutionMode::Sequential => "sequential",
+                    ActionExecutionMode::Parallel => "parallel",
+                }),
+            }
+        },
     });
     let request_bytes = serde_json::to_vec(&request).map_err(|error| {
         format!(

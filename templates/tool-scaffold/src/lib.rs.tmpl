@@ -4,8 +4,13 @@
 //! stable `describe` / `invoke` command protocol unless you are changing the
 //! tool runtime contract itself.
 
+mod agent_bridge;
 mod tool;
 
+#[allow(unused_imports)]
+pub(crate) use agent_bridge::{
+    ActionExecutionMode, AgentInputMode, ChildAgentOutcome, ChildAgentRequest, InvocationContext,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -53,10 +58,12 @@ fn describe_document() -> DescribeDocument {
             minimal_invoke: InvokeRequest {
                 protocol_version: PROTOCOL_VERSION,
                 params: tool::minimal_example_params(),
+                runtime_context: None,
             },
             full_invoke: InvokeRequest {
                 protocol_version: PROTOCOL_VERSION,
                 params: tool::full_example_params(),
+                runtime_context: None,
             },
         },
     }
@@ -72,7 +79,7 @@ fn invoke(request: InvokeRequest) -> Result<InvokeResponse, ToolError> {
 
     Ok(InvokeResponse {
         protocol_version: PROTOCOL_VERSION,
-        result: tool::invoke(request.params)?,
+        result: tool::invoke(request.params, request.runtime_context.unwrap_or_default())?,
     })
 }
 
@@ -170,6 +177,8 @@ struct InvokeRequest {
     protocol_version: u32,
     #[serde(default)]
     params: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_context: Option<InvocationContext>,
 }
 
 #[derive(Debug, Serialize)]

@@ -95,6 +95,7 @@ For account-hosted definitions, remember the current split:
 - If the user needs a reusable project-local capability behind `kind: "tool"`, read `.cargo-ai/guidance/tool-authoring.md` before inventing a custom tool workflow.
 - If new project-local executable code is needed and Cargo is available, prefer `cargo ai add tool <name>` and implement Rust inside the generated tool crate instead of creating ad hoc Python, Node, or shell helper scripts.
 - In generated tool crates, put custom behavior in `src/tool.rs` and avoid rewriting `src/lib.rs` unless the Cargo AI protocol adapter itself must change.
+- If a tool needs to call one or more subsequent project-local agents, use the scaffolded helper from `src/agent_bridge.rs` through the `InvocationContext` passed to `src/tool.rs`; do not hand-roll subprocess flags, depth propagation, or runtime-budget forwarding.
 - When adding crates.io dependencies to a tool, use the dependency discipline in `.cargo-ai/guidance/tool-authoring.md`: choose stable, focused, well-maintained crates, keep features narrow, document the rationale, and keep `Cargo.lock`.
 - Before calling a tool complete, perform the hardening review in `.cargo-ai/guidance/tool-authoring.md`; treat tools as trusted local executable code, not disposable glue scripts.
 - For UI or background-process tools, keep artifact generation testable without launching the UI when practical, add a smoke-test control such as `open_window=false`, and declare UI/process behavior in the tool `resource_profile`.
