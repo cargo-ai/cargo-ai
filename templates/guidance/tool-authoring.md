@@ -92,6 +92,16 @@ allow_global_fallback = true
 
 If a debugging session manually mutates `.cargo-ai/tools/...` or `.cargo-ai/agents/...`, stop trusting that workspace as a clean diagnostic surface. Move the repro to a fresh workspace or freshly regenerated managed state instead of continuing to patch around contaminated generated artifacts.
 
+For troubleshooting, identify the first failing layer and work upward:
+- leaf agent first
+- tool-only deterministic input next
+- tool-to-child fan-out next
+- parent orchestration next
+- live URLs/providers after that
+- side effects last
+
+Do not keep changing higher layers while a lower layer is still failing.
+
 If `cargo ai init/new` was run with the default VCS mode, it will also initialize Git and create or update `.gitignore` for generated guidance and managed build state. If Git is unavailable, rerun with `--vcs none`.
 
 ## Guidance Map
@@ -133,6 +143,7 @@ If the user wants a local tool, ask Codex to:
 - build with `cargo ai tools build <tool_name> --target <triple>`
 - validate with `cargo ai tools describe`, `cargo ai tools lint`, `cargo ai tools check`, and `cargo ai hatch --check`
 - prefer leaf-first live testing before parent orchestration when runtime behavior depends on URLs, providers, or child-agent calls
+- identify the first failing layer and prove the smallest deterministic layer first before changing higher layers
 - use `tool-contract.md` for scaffold and protocol details
 - use `tool-child-agents.md` when the tool needs to call child agents
 - use `tool-hardening.md` for dependency selection and completion review

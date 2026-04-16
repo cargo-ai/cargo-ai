@@ -135,6 +135,28 @@ If the final workflow mixes deterministic fan-out logic with live web inputs:
 
 `cargo test`, `cargo ai tools lint`, `cargo ai tools check`, and `cargo ai hatch --check` are necessary static gates, but they do not prove live URL fetches, provider responses, or child-process lifecycle behavior.
 
+## Layered Troubleshooting Strategy
+
+When a workflow spans parent agent logic, a tool, child agents, live URLs, and side effects, do not keep changing every layer at once.
+
+Identify the first failing layer explicitly:
+- leaf agent execution
+- tool-only deterministic behavior
+- tool-to-child fan-out
+- parent orchestration
+- live-source or provider behavior
+- final side effects
+
+Then work upward in order:
+- prove the leaf agent alone
+- prove the tool alone with deterministic or hardcoded inputs
+- prove tool-to-child fan-out with deterministic inputs
+- prove the parent orchestration next
+- add live URLs or provider behavior only after local orchestration is already green
+- add side effects such as email last
+
+If a lower layer is still failing, stop changing higher layers until that lower layer is green.
+
 ## Process Hygiene
 
 Do not use `ps`, `kill`, or similar process-management commands as part of normal tool validation.
