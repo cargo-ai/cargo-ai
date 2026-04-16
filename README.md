@@ -920,6 +920,7 @@ That creates:
   - generated artifact ignore rules when VCS is enabled
 - `AGENTS.md` plus `.cargo-ai/guidance/`
   - Codex guidance when you run `cargo ai add guidance --style codex`
+  - `tool-authoring.md` stays the workflow overview, while detailed contract, child-agent, and hardening rules live in adjacent guidance files
 - `tools/hello_tool/`
   - normal Rust source for the tool crate, with custom behavior isolated in `src/tool.rs`
   - Cargo AI-owned child-agent helper code isolated in `src/agent_bridge.rs`

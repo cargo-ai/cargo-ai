@@ -34,6 +34,18 @@ const TOOL_AUTHORING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/tool-authoring.md"
 ));
+const TOOL_CONTRACT_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/tool-contract.md"
+));
+const TOOL_CHILD_AGENTS_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/tool-child-agents.md"
+));
+const TOOL_HARDENING_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/tool-hardening.md"
+));
 const PATTERN_SELECTION_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/pattern-selection.md"
@@ -81,7 +93,7 @@ struct GuidanceArtifact {
     contents: &'static str,
 }
 
-const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 17] = [
+const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 20] = [
     GuidanceArtifact {
         relative_path: "AGENTS.md",
         contents: CODEX_GUIDANCE_TEMPLATE,
@@ -109,6 +121,18 @@ const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 17] = [
     GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/tool-authoring.md",
         contents: TOOL_AUTHORING_TEMPLATE,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/tool-contract.md",
+        contents: TOOL_CONTRACT_TEMPLATE,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/tool-child-agents.md",
+        contents: TOOL_CHILD_AGENTS_TEMPLATE,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/tool-hardening.md",
+        contents: TOOL_HARDENING_TEMPLATE,
     },
     GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/pattern-selection.md",
@@ -349,7 +373,7 @@ mod tests {
                 .and_then(|name| name.to_str()),
             Some("AGENTS.md")
         );
-        assert_eq!(report.artifact_paths.len(), 17);
+        assert_eq!(report.artifact_paths.len(), 20);
         assert!(dir
             .join(".cargo-ai/guidance/agent-definition-contract.md")
             .exists());
@@ -360,6 +384,9 @@ mod tests {
         assert!(dir.join(".cargo-ai/guidance/examples/README.md").exists());
         assert!(dir.join(".cargo-ai/guidance/start-here.md").exists());
         assert!(dir.join(".cargo-ai/guidance/tool-authoring.md").exists());
+        assert!(dir.join(".cargo-ai/guidance/tool-contract.md").exists());
+        assert!(dir.join(".cargo-ai/guidance/tool-child-agents.md").exists());
+        assert!(dir.join(".cargo-ai/guidance/tool-hardening.md").exists());
         assert!(dir.join(".cargo-ai/guidance/pattern-selection.md").exists());
         assert!(dir.join(".cargo-ai/guidance/troubleshooting.md").exists());
         assert!(dir
@@ -392,6 +419,9 @@ mod tests {
         assert!(guidance.contains("Cargo AI Agent Authoring (Codex)"));
         assert!(guidance.contains(".cargo-ai/guidance/start-here.md"));
         assert!(guidance.contains(".cargo-ai/guidance/tool-authoring.md"));
+        assert!(guidance.contains(".cargo-ai/guidance/tool-contract.md"));
+        assert!(guidance.contains(".cargo-ai/guidance/tool-child-agents.md"));
+        assert!(guidance.contains(".cargo-ai/guidance/tool-hardening.md"));
         assert!(guidance.contains(".cargo-ai/guidance/pattern-selection.md"));
         assert!(guidance.contains(".cargo-ai/guidance/agent-definition-contract.md"));
         assert!(guidance.contains(".cargo-ai/guidance/examples/schema-features.json"));
@@ -418,7 +448,24 @@ mod tests {
             .expect("tool authoring guidance should be readable");
         assert!(tool_authoring.contains("cargo ai add tool <tool_name>"));
         assert!(tool_authoring.contains("cargo ai tools build <tool_name> --target <triple>"));
-        assert!(tool_authoring.contains("\"kind\": \"tool\""));
+        assert!(tool_authoring.contains("tool-contract.md"));
+
+        let tool_contract = fs::read_to_string(dir.join(".cargo-ai/guidance/tool-contract.md"))
+            .expect("tool contract guidance should be readable");
+        assert!(tool_contract.contains("\"kind\": \"tool\""));
+        assert!(tool_contract.contains("describe"));
+        assert!(tool_contract.contains("invoke"));
+
+        let tool_child_agents =
+            fs::read_to_string(dir.join(".cargo-ai/guidance/tool-child-agents.md"))
+                .expect("tool child-agents guidance should be readable");
+        assert!(tool_child_agents.contains("InvocationContext"));
+        assert!(tool_child_agents.contains("ChildAgentRequest"));
+
+        let tool_hardening = fs::read_to_string(dir.join(".cargo-ai/guidance/tool-hardening.md"))
+            .expect("tool hardening guidance should be readable");
+        assert!(tool_hardening.contains("cargo audit"));
+        assert!(tool_hardening.contains("resource_profile"));
 
         let patterns = fs::read_to_string(dir.join(".cargo-ai/guidance/pattern-selection.md"))
             .expect("pattern selection guidance should be readable");

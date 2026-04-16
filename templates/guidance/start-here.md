@@ -31,6 +31,10 @@ When the user says they need a reusable local tool or native helper:
 - confirm that they really need a project-local `kind: "tool"` capability rather than a plain `exec` step
 - if they need new executable code and Cargo is available, prefer Rust inside a `cargo ai add tool <name>` scaffold instead of ad hoc Python, Node, or shell helper scripts
 - if yes, switch to `.cargo-ai/guidance/tool-authoring.md`
+- use the narrower tool files only as needed:
+  - `tool-contract.md` for scaffold and protocol details
+  - `tool-child-agents.md` when the tool must call child agents
+  - `tool-hardening.md` for dependency and hardening review
 - keep the tool workflow separate from the agent JSON workflow, then wire them back together with `cargo ai tools check --config <agent.json>`
 
 ## How To Drive The Conversation
@@ -44,8 +48,8 @@ When the user says they need a reusable local tool or native helper:
 
 1. Use `pattern-selection.md` to infer the right Cargo AI shape.
 2. If the request truly needs a local tool, use `tool-authoring.md`, keep the Rust tool crate small, and put custom behavior in `src/tool.rs` instead of rewriting the protocol adapter.
-3. If the tool needs crates.io dependencies, apply `tool-authoring.md` dependency discipline before editing `Cargo.toml`.
-4. Before presenting a tool as complete, perform the `tool-authoring.md` hardening review.
+3. If the tool needs crates.io dependencies, apply `tool-hardening.md` dependency discipline before editing `Cargo.toml`.
+4. Before presenting a tool as complete, perform the `tool-hardening.md` hardening review.
 5. Copy the closest example from `examples/`.
 6. Decide which inputs are baked into JSON, which are caller-supplied runtime inputs, and whether any action behavior belongs in `runtime_vars`.
 7. Draft the JSON in canonical field order.
