@@ -53,3 +53,4 @@ For UI or background-process tools:
 - expose a smoke-test control such as `open_window=false` so automated validation can prove the tool without leaving a process open
 - make process lifetime explicit when launching windows, servers, or other child processes
 - mark UI launch, subprocess use, filesystem writes, and background behavior accurately in `resource_profile`
+- if a live run does leave a long-lived child process behind, treat cleanup as exceptional process hygiene rather than as a normal testing step; inspect first, target only the specific child process from your own run, and explain the cleanup reason before terminating it

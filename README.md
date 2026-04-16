@@ -942,6 +942,8 @@ The tool `describe` result schema must be a nullable string. A step that sets `o
 
 When a parent agent calls a `kind: "tool"` step, new scaffolded tools also receive a Cargo AI-owned child-agent helper in `src/agent_bridge.rs`. That helper is available through the `InvocationContext` argument passed to `src/tool.rs`, so tool-authored Rust code can call one or more same-project child agents without hand-rolling subprocess flags, depth handling, or runtime-budget propagation. Tool execution itself does not consume an extra agent-depth hop; child-agent calls made from the tool consume depth exactly as if the parent had called those children directly.
 
+For validation, use Cargo AI surfaces first: `cargo test` only for crate-local Rust logic, then `cargo ai tools lint`, `build`, `check`, and `hatch --check`, with live leaf runtime checks before live parent orchestration and real side effects last. Treat `ps` or `kill` as exceptional cleanup for a specific long-lived child process left behind by your own live test run, not as a normal part of authoring-time validation.
+
 Then wire it into your agent JSON:
 
 ```json

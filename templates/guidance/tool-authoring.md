@@ -83,6 +83,10 @@ allow_global_fallback = true
 7. Validate the agent/tool pairing:
    - `cargo ai tools check --config <agent.json>`
    - `cargo ai hatch <agent-name> --config <agent.json> --check`
+8. For live behavior, prefer leaf-first runtime checks:
+   - run the leaf tool or child agent in print/smoke mode first
+   - run the parent orchestration path next
+   - run real side effects such as email delivery last
 
 If `cargo ai init/new` was run with the default VCS mode, it will also initialize Git and create or update `.gitignore` for generated guidance and managed build state. If Git is unavailable, rerun with `--vcs none`.
 
@@ -96,6 +100,7 @@ Use the narrower guidance files for detailed rules:
   - `describe` / `invoke`
   - nullable string result rules
   - lint versus check
+  - testing ladder and process hygiene
   - runtime resolution and failure behavior
 
 - `tool-child-agents.md`
@@ -123,6 +128,7 @@ If the user wants a local tool, ask Codex to:
 - avoid rewriting the protocol adapter in `src/lib.rs` unless the tool contract itself must change
 - build with `cargo ai tools build <tool_name> --target <triple>`
 - validate with `cargo ai tools describe`, `cargo ai tools lint`, `cargo ai tools check`, and `cargo ai hatch --check`
+- prefer leaf-first live testing before parent orchestration when runtime behavior depends on URLs, providers, or child-agent calls
 - use `tool-contract.md` for scaffold and protocol details
 - use `tool-child-agents.md` when the tool needs to call child agents
 - use `tool-hardening.md` for dependency selection and completion review
