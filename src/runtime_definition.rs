@@ -9,7 +9,7 @@ const SUPPORTED_FILE_EXTENSIONS: [&str; 24] = [
 ];
 const SUPPORTED_GENERATED_IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum SchemaFieldType {
     String,
     Number,
@@ -409,14 +409,89 @@ enum SchemaPropertyContext {
     ObjectProperty,
 }
 
+#[derive(Clone, Copy)]
+struct ParsedSchemaFieldType {
+    field_type: SchemaFieldType,
+    nullable: bool,
+}
+
 fn parse_schema_field_type(
     property: &Map<String, Value>,
     path: &str,
-) -> Result<SchemaFieldType, String> {
-    let raw = required_string(property, "type", path)?
-        .trim()
-        .to_ascii_lowercase();
-    match raw.as_str() {
+    context: SchemaPropertyContext,
+) -> Result<ParsedSchemaFieldType, String> {
+    let type_path = format!("{path}.type");
+    let type_value = required_field(property, "type", path)?;
+    match type_value {
+        Value::String(raw) => Ok(ParsedSchemaFieldType {
+            field_type: parse_schema_field_type_name(raw, &type_path)?,
+            nullable: false,
+        }),
+        Value::Array(type_entries) => {
+            parse_nullable_schema_field_type(type_entries, &type_path, context)
+        }
+        _ => Err(format!("{type_path}: expected a string schema type")),
+    }
+}
+
+fn parse_nullable_schema_field_type(
+    type_entries: &[Value],
+    type_path: &str,
+    context: SchemaPropertyContext,
+) -> Result<ParsedSchemaFieldType, String> {
+    if !matches!(context, SchemaPropertyContext::ObjectProperty) {
+        return Err(format!(
+            "{type_path}: union schema types are not supported yet"
+        ));
+    }
+    if type_entries.len() != 2 {
+        return Err(format!(
+            "{type_path}: object properties inside structured tool-bound fields may use only `scalar | null` unions in this story"
+        ));
+    }
+
+    let mut nullable = false;
+    let mut scalar_type = None;
+    for type_entry in type_entries {
+        let raw_type = type_entry.as_str().ok_or_else(|| {
+            format!("{type_path}: nullable unions must contain only string schema types")
+        })?;
+        let normalized_type = raw_type.trim().to_ascii_lowercase();
+        if normalized_type == "null" {
+            nullable = true;
+            continue;
+        }
+
+        let field_type = parse_schema_field_type_name(normalized_type.as_str(), type_path)?;
+        if matches!(field_type, SchemaFieldType::Array | SchemaFieldType::Object)
+            || scalar_type.replace(field_type).is_some()
+        {
+            return Err(format!(
+                "{type_path}: object properties inside structured tool-bound fields may use only `scalar | null` unions in this story"
+            ));
+        }
+    }
+
+    let Some(field_type) = scalar_type else {
+        return Err(format!(
+            "{type_path}: object properties inside structured tool-bound fields may use only `scalar | null` unions in this story"
+        ));
+    };
+    if !nullable {
+        return Err(format!(
+            "{type_path}: object properties inside structured tool-bound fields may use only `scalar | null` unions in this story"
+        ));
+    }
+
+    Ok(ParsedSchemaFieldType {
+        field_type,
+        nullable: true,
+    })
+}
+
+fn parse_schema_field_type_name(raw: &str, type_path: &str) -> Result<SchemaFieldType, String> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
         "string" => Ok(SchemaFieldType::String),
         "number" => Ok(SchemaFieldType::Number),
         "integer" => Ok(SchemaFieldType::Integer),
@@ -424,8 +499,30 @@ fn parse_schema_field_type(
         "array" => Ok(SchemaFieldType::Array),
         "object" => Ok(SchemaFieldType::Object),
         _ => Err(format!(
-            "{path}.type: unsupported schema type `{raw}` (supported: `string`, `number`, `integer`, `boolean`, `array`, `object`)"
+            "{type_path}: unsupported schema type `{normalized}` (supported: `string`, `number`, `integer`, `boolean`, `array`, `object`)"
         )),
+    }
+}
+
+fn normalized_schema_type_value(field_type: SchemaFieldType, nullable: bool) -> Value {
+    if nullable {
+        Value::Array(vec![
+            Value::String(schema_field_type_name(field_type).to_string()),
+            Value::String("null".to_string()),
+        ])
+    } else {
+        Value::String(schema_field_type_name(field_type).to_string())
+    }
+}
+
+fn schema_field_type_name(field_type: SchemaFieldType) -> &'static str {
+    match field_type {
+        SchemaFieldType::String => "string",
+        SchemaFieldType::Number => "number",
+        SchemaFieldType::Integer => "integer",
+        SchemaFieldType::Boolean => "boolean",
+        SchemaFieldType::Array => "array",
+        SchemaFieldType::Object => "object",
     }
 }
 
@@ -435,7 +532,8 @@ fn normalize_schema_property(
     context: SchemaPropertyContext,
 ) -> Result<(SchemaFieldType, Value), String> {
     validate_optional_description(property, path)?;
-    let field_type = parse_schema_field_type(property, path)?;
+    let parsed_type = parse_schema_field_type(property, path, context)?;
+    let field_type = parsed_type.field_type;
     match field_type {
         SchemaFieldType::Array if matches!(context, SchemaPropertyContext::ObjectProperty) => {
             return Err(format!(
@@ -453,6 +551,10 @@ fn normalize_schema_property(
     let enum_values = parse_enum_values(property, path, &field_type)?;
     let numeric_constraints = parse_numeric_constraints(property, path, &field_type)?;
     let mut normalized = property.clone();
+    normalized.insert(
+        "type".to_string(),
+        normalized_schema_type_value(field_type, parsed_type.nullable),
+    );
 
     match field_type {
         SchemaFieldType::String
@@ -1817,10 +1919,14 @@ fn validate_schema_value(value: &Value, path: &str, schema: &Value) -> Result<()
     let schema_obj = schema
         .as_object()
         .ok_or_else(|| format!("field `{path}` uses an invalid schema"))?;
-    let schema_type = schema_obj
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("field `{path}` uses an invalid schema type"))?;
+    let (schema_type, nullable) = parse_runtime_schema_type(schema_obj, path)?;
+    if value.is_null() {
+        return if nullable {
+            Ok(())
+        } else {
+            Err(format!("field `{path}` must not be null"))
+        };
+    }
 
     match schema_type {
         "string" => {
@@ -1907,6 +2013,49 @@ fn validate_schema_value(value: &Value, path: &str, schema: &Value) -> Result<()
         other => Err(format!(
             "field `{path}` uses unsupported schema type `{other}`"
         )),
+    }
+}
+
+fn parse_runtime_schema_type<'a>(
+    schema: &'a Map<String, Value>,
+    path: &str,
+) -> Result<(&'a str, bool), String> {
+    let type_value = schema
+        .get("type")
+        .ok_or_else(|| format!("field `{path}` uses an invalid schema type"))?;
+
+    match type_value {
+        Value::String(schema_type) => Ok((schema_type.as_str(), false)),
+        Value::Array(type_entries) => {
+            if type_entries.len() != 2 {
+                return Err(format!("field `{path}` uses an invalid schema type"));
+            }
+
+            let mut nullable = false;
+            let mut scalar_type = None;
+            for type_entry in type_entries {
+                let raw_type = type_entry
+                    .as_str()
+                    .ok_or_else(|| format!("field `{path}` uses an invalid schema type"))?;
+                if raw_type == "null" {
+                    nullable = true;
+                    continue;
+                }
+                if scalar_type.replace(raw_type).is_some() {
+                    return Err(format!("field `{path}` uses an invalid schema type"));
+                }
+            }
+
+            let Some(schema_type) = scalar_type else {
+                return Err(format!("field `{path}` uses an invalid schema type"));
+            };
+            if !nullable {
+                return Err(format!("field `{path}` uses an invalid schema type"));
+            }
+
+            Ok((schema_type, true))
+        }
+        _ => Err(format!("field `{path}` uses an invalid schema type")),
     }
 }
 
@@ -2200,6 +2349,34 @@ mod tests {
     }
 
     #[test]
+    fn validates_nullable_scalar_object_properties_inside_structured_fields() {
+        let cfg = config_with(
+            r#""rows": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "customer": { "type": "string" },
+                  "discount": { "type": ["number", "null"] }
+                }
+              }
+            }"#,
+            "[]",
+        );
+
+        let definition = assert_runtime_and_codegen_accept(&cfg);
+
+        definition
+            .validate_provider_output(r#"{"rows":[{"customer":"Acme","discount":null}]}"#)
+            .expect("nullable structured field should accept null");
+
+        let error = definition
+            .validate_provider_output(r#"{"rows":[{"customer":"Acme","discount":"free"}]}"#)
+            .expect_err("non-numeric discount should fail");
+        assert!(error.contains("field `rows[0].discount` must be a number"));
+    }
+
+    #[test]
     fn structural_action_only_requires_named_inputs() {
         let error = RuntimeAgentDefinition::from_str(
             r#"{
@@ -2264,6 +2441,18 @@ mod tests {
         assert!(build_error.contains("expected `sequential` or `parallel`"));
         assert!(runtime_error.contains("$.action_execution"));
         assert!(runtime_error.contains("expected `sequential` or `parallel`"));
+    }
+
+    #[test]
+    fn matches_codegen_for_rejecting_top_level_nullable_fields() {
+        let cfg = config_with(r#""value": { "type": ["string", "null"] }"#, "[]");
+
+        let (build_error, runtime_error) = assert_runtime_and_codegen_reject(&cfg);
+
+        assert!(build_error.contains("$.agent_schema.properties.value.type"));
+        assert!(build_error.contains("union schema types are not supported yet"));
+        assert!(runtime_error.contains("$.agent_schema.properties.value.type"));
+        assert!(runtime_error.contains("union schema types are not supported yet"));
     }
 
     #[test]

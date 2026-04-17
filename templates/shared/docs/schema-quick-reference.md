@@ -48,13 +48,13 @@ Optional top-level property metadata and constraints:
 - `array` fields must be homogeneous
 - `object` fields must declare their shape explicitly
 - arrays may contain supported scalar item types or declared-shape object items
-- object properties inside structured tool-bound fields must stay scalar in this slice
+- object properties inside structured tool-bound fields may be scalar or `scalar | null`
 
 ## Current unsupported schema shapes
 These should fail fast during `hatch --check`:
 - nested arrays
 - deeper nested objects
-- union types
+- union types other than `scalar | null` on object properties inside structured tool-bound fields
 
 ## `actions` expectations
 - `actions` is an array

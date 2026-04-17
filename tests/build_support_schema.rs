@@ -275,6 +275,27 @@ fn accepts_top_level_array_fields_and_arrays_of_objects() {
 }
 
 #[test]
+fn accepts_nullable_scalar_object_properties_inside_structured_fields() {
+    let cfg = config_with(
+        r#""rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "customer": { "type": "string" },
+              "discount": { "type": ["number", "null"] }
+            }
+          }
+        }"#,
+        "[]",
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains(r#"\"discount\":{\"type\":[\"number\",\"null\"]}"#));
+}
+
+#[test]
 fn rejects_nested_arrays_with_actionable_path() {
     let cfg = config_with(
         r#""matrix": {
@@ -410,6 +431,18 @@ fn rejects_conflicting_numeric_lower_bounds() {
 
     assert!(err.contains("$.agent_schema.properties.confidence.exclusiveMinimum"));
     assert!(err.contains("cannot be combined with `minimum`"));
+}
+
+#[test]
+fn rejects_top_level_nullable_fields() {
+    let cfg = config_with(r#""value": { "type": ["string", "null"] }"#, "[]");
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.agent_schema.properties.value.type"));
+    assert!(err.contains("union schema types are not supported yet"));
 }
 
 #[test]

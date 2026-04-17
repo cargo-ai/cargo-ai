@@ -480,8 +480,9 @@ The narrow structured-data rule is:
 - arrays must be homogeneous
 - objects must declare their shape explicitly
 - arrays may contain supported scalar item types or declared-shape object items
-- object properties inside structured tool-bound fields must stay scalar in this slice
+- object properties inside structured tool-bound fields may be scalar or `scalar | null`
 - structured top-level fields may flow only into tool params as raw JSON
+- nullable support is limited to `scalar | null` object properties inside those structured payloads
 - scalar-first surfaces such as `logic`, `when`, `exec.args`, string-part interpolation, `email_me`, and child `run_vars` reject structured field references
 
 <details>

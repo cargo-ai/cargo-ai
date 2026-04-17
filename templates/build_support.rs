@@ -213,7 +213,7 @@ struct RuntimeVarSpec {
     default_value: Option<Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FieldType {
     String,
     Boolean,
@@ -2996,6 +2996,12 @@ enum SchemaPropertyContext {
     ObjectProperty,
 }
 
+#[derive(Clone, Copy)]
+struct ParsedAgentPropertyType {
+    field_type: FieldType,
+    nullable: bool,
+}
+
 fn parse_agent_property(
     name: &str,
     property: &Map<String, Value>,
@@ -3024,43 +3030,33 @@ fn normalize_agent_property_schema(
     path: &str,
     context: SchemaPropertyContext,
 ) -> Result<(FieldType, Value), BuildError> {
-    let schema_type = get_schema_type(property, path)?;
-    let field_type = match schema_type.as_str() {
-        "string" => FieldType::String,
-        "boolean" => FieldType::Boolean,
-        "number" => FieldType::Number,
-        "integer" => FieldType::Integer,
-        "array" => {
-            if matches!(context, SchemaPropertyContext::ObjectProperty) {
-                return Err(BuildError::config(
-                    format!("{path}.type"),
-                    "object properties inside structured tool-bound fields must stay scalar in this story",
-                ));
-            }
-            FieldType::Array
-        }
-        "object" => {
-            if matches!(context, SchemaPropertyContext::ObjectProperty) {
-                return Err(BuildError::config(
-                    format!("{path}.type"),
-                    "nested object fields are not supported beyond one declared object layer in this story",
-                ));
-            }
-            FieldType::Object
-        }
-        other => {
+    let parsed_type = parse_agent_property_type(property, path, context)?;
+    let field_type = parsed_type.field_type;
+    match field_type {
+        FieldType::Array if matches!(context, SchemaPropertyContext::ObjectProperty) => {
             return Err(BuildError::config(
                 format!("{path}.type"),
-                format!("unsupported schema type `{other}`"),
+                "object properties inside structured tool-bound fields must stay scalar in this story",
             ));
         }
-    };
+        FieldType::Object if matches!(context, SchemaPropertyContext::ObjectProperty) => {
+            return Err(BuildError::config(
+                format!("{path}.type"),
+                "nested object fields are not supported beyond one declared object layer in this story",
+            ));
+        }
+        _ => {}
+    }
 
     let description = parse_optional_description(property, path)?;
     let enum_values = parse_optional_string_enum(property, path, &field_type)?;
     let numeric_constraints = parse_numeric_constraints(property, path, &field_type)?;
 
     let mut normalized = property.clone();
+    normalized.insert(
+        "type".to_string(),
+        normalized_schema_type_value(field_type, parsed_type.nullable),
+    );
     if let Some(description) = description {
         normalized.insert("description".to_string(), Value::String(description));
     }
@@ -3412,6 +3408,115 @@ fn number_constraint_value(value: &NumericConstraintValue) -> f64 {
     match value {
         NumericConstraintValue::Number(value) => *value,
         NumericConstraintValue::Integer(value) => *value as f64,
+    }
+}
+
+fn parse_agent_property_type(
+    property: &Map<String, Value>,
+    path: &str,
+    context: SchemaPropertyContext,
+) -> Result<ParsedAgentPropertyType, BuildError> {
+    let type_value = get_required_field(property, "type", path)?;
+    let type_path = format!("{path}.type");
+    match type_value {
+        Value::String(schema_type) => Ok(ParsedAgentPropertyType {
+            field_type: parse_field_type_name(schema_type.as_str(), &type_path)?,
+            nullable: false,
+        }),
+        Value::Array(type_entries) => {
+            parse_nullable_property_type_union(type_entries, &type_path, context)
+        }
+        _ => Err(BuildError::config(
+            type_path,
+            "expected a string schema type",
+        )),
+    }
+}
+
+fn parse_nullable_property_type_union(
+    type_entries: &[Value],
+    type_path: &str,
+    context: SchemaPropertyContext,
+) -> Result<ParsedAgentPropertyType, BuildError> {
+    if !matches!(context, SchemaPropertyContext::ObjectProperty) {
+        return Err(BuildError::config(
+            type_path,
+            "union schema types are not supported yet",
+        ));
+    }
+    if type_entries.len() != 2 {
+        return Err(BuildError::config(
+            type_path,
+            "object properties inside structured tool-bound fields may use only `scalar | null` unions in this story",
+        ));
+    }
+
+    let mut nullable = false;
+    let mut scalar_type = None;
+    for type_entry in type_entries {
+        let raw_type = type_entry.as_str().ok_or_else(|| {
+            BuildError::config(
+                type_path,
+                "nullable unions must contain only string schema types",
+            )
+        })?;
+        let normalized_type = raw_type.trim().to_ascii_lowercase();
+        if normalized_type == "null" {
+            nullable = true;
+            continue;
+        }
+
+        let field_type = parse_field_type_name(normalized_type.as_str(), type_path)?;
+        if is_structured_type(&field_type) || scalar_type.replace(field_type).is_some() {
+            return Err(BuildError::config(
+                type_path,
+                "object properties inside structured tool-bound fields may use only `scalar | null` unions in this story",
+            ));
+        }
+    }
+
+    let Some(field_type) = scalar_type else {
+        return Err(BuildError::config(
+            type_path,
+            "object properties inside structured tool-bound fields may use only `scalar | null` unions in this story",
+        ));
+    };
+    if !nullable {
+        return Err(BuildError::config(
+            type_path,
+            "object properties inside structured tool-bound fields may use only `scalar | null` unions in this story",
+        ));
+    }
+
+    Ok(ParsedAgentPropertyType {
+        field_type,
+        nullable: true,
+    })
+}
+
+fn parse_field_type_name(schema_type: &str, type_path: &str) -> Result<FieldType, BuildError> {
+    match schema_type.trim().to_ascii_lowercase().as_str() {
+        "string" => Ok(FieldType::String),
+        "boolean" => Ok(FieldType::Boolean),
+        "number" => Ok(FieldType::Number),
+        "integer" => Ok(FieldType::Integer),
+        "array" => Ok(FieldType::Array),
+        "object" => Ok(FieldType::Object),
+        other => Err(BuildError::config(
+            type_path,
+            format!("unsupported schema type `{other}`"),
+        )),
+    }
+}
+
+fn normalized_schema_type_value(field_type: FieldType, nullable: bool) -> Value {
+    if nullable {
+        Value::Array(vec![
+            Value::String(type_name(&field_type).to_string()),
+            Value::String("null".to_string()),
+        ])
+    } else {
+        Value::String(type_name(&field_type).to_string())
     }
 }
 
@@ -4287,10 +4392,14 @@ fn validate_schema_value(
     let schema_obj = schema
         .as_object()
         .ok_or_else(|| format!("field `{path}` uses an invalid generated schema"))?;
-    let schema_type = schema_obj
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| format!("field `{path}` uses an invalid generated schema type"))?;
+    let (schema_type, nullable) = parse_generated_schema_type(schema_obj, path)?;
+    if value.is_null() {
+        return if nullable {
+            Ok(())
+        } else {
+            Err(format!("field `{path}` must not be null"))
+        };
+    }
 
     match schema_type {
         "string" => {
@@ -4371,6 +4480,49 @@ fn validate_schema_value(
         other => Err(format!(
             "field `{path}` uses unsupported generated schema type `{other}`"
         )),
+    }
+}
+
+fn parse_generated_schema_type<'a>(
+    schema: &'a serde_json::Map<String, serde_json::Value>,
+    path: &str,
+) -> Result<(&'a str, bool), String> {
+    let type_value = schema
+        .get("type")
+        .ok_or_else(|| format!("field `{path}` uses an invalid generated schema type"))?;
+
+    match type_value {
+        serde_json::Value::String(schema_type) => Ok((schema_type.as_str(), false)),
+        serde_json::Value::Array(type_entries) => {
+            if type_entries.len() != 2 {
+                return Err(format!("field `{path}` uses an invalid generated schema type"));
+            }
+
+            let mut nullable = false;
+            let mut scalar_type = None;
+            for type_entry in type_entries {
+                let raw_type = type_entry
+                    .as_str()
+                    .ok_or_else(|| format!("field `{path}` uses an invalid generated schema type"))?;
+                if raw_type == "null" {
+                    nullable = true;
+                    continue;
+                }
+                if scalar_type.replace(raw_type).is_some() {
+                    return Err(format!("field `{path}` uses an invalid generated schema type"));
+                }
+            }
+
+            let Some(schema_type) = scalar_type else {
+                return Err(format!("field `{path}` uses an invalid generated schema type"));
+            };
+            if !nullable {
+                return Err(format!("field `{path}` uses an invalid generated schema type"));
+            }
+
+            Ok((schema_type, true))
+        }
+        _ => Err(format!("field `{path}` uses an invalid generated schema type")),
     }
 }
 

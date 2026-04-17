@@ -168,15 +168,16 @@ Constraint rules:
 - `array` fields must be homogeneous
 - `object` fields must declare their shape explicitly
 - arrays may contain supported scalar item types or declared-shape object items
-- object properties inside structured tool-bound fields must stay scalar in this slice
+- object properties inside structured tool-bound fields may be scalar or `scalar | null`
 
 Unsupported schema shapes for the current MVP:
 - nested arrays
 - deeper nested objects
-- union types
+- union types other than `scalar | null` on object properties inside structured tool-bound fields
 
 Structured-value lane:
 - top-level `array` / `object` fields exist for structured tool consumption
+- nullable support is limited to `scalar | null` object properties inside those structured payloads
 - structured top-level fields may flow only into tool params as raw JSON
 - `logic`, `when`, `exec.args`, string-part interpolation, `email_me`, child `run_vars`, and other scalar-first substitution surfaces must reject structured field references
 
@@ -428,7 +429,7 @@ Expect `cargo ai hatch <agent-name> --config <config.json> --check` to reject at
 - missing required top-level keys
 - malformed `version`
 - unsupported `agent_schema` property types
-- nested arrays, deeper nested objects, or union types in `agent_schema`
+- nested arrays, deeper nested objects, or unsupported union types in `agent_schema`
 - invalid `description`, `enum`, or numeric-bound metadata on a property
 - unsupported run-step kind
 - missing required fields for a step kind
