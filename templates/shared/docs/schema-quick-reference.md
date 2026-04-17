@@ -35,6 +35,8 @@ Supported property `type` values:
 - `number`
 - `integer`
 - `boolean`
+ - `array`
+ - `object`
 
 Optional top-level property metadata and constraints:
 - `description` on any supported field
@@ -43,19 +45,25 @@ Optional top-level property metadata and constraints:
 - `enum` values are exact and case-sensitive
 - lower bounds may use `minimum` or `exclusiveMinimum`, but not both
 - upper bounds may use `maximum` or `exclusiveMaximum`, but not both
+- `array` fields must be homogeneous
+- `object` fields must declare their shape explicitly
+- arrays may contain supported scalar item types or declared-shape object items
+- object properties inside structured tool-bound fields must stay scalar in this slice
 
 ## Current unsupported schema shapes
 These should fail fast during `hatch --check`:
-- top-level arrays
-- nested objects
+- nested arrays
+- deeper nested objects
 - union types
 
 ## `actions` expectations
 - `actions` is an array
 - each action includes `name`, `logic`, and `run`
-- each run step currently supports `kind: "exec"` only
+- run steps may use `kind: "exec"`, `kind: "agent"`, `kind: "tool"`, `kind: "email_me"`, or `kind: "generate_image"`
 - `run[*].args` must be an array of literal strings and/or `{ "var": "field_name" }` objects
 - `run[*].args[*].var` must reference a top-level field declared in `agent_schema.properties`
+- structured top-level fields may flow only into tool params
+- scalar-first surfaces such as `logic`, `when`, `run[*].args`, string-part interpolation, and child `run_vars` reject structured field references
 - `run[*].platform` is optional
 - `run[*].platform` may be a single string or an array of strings
 - supported platform values are `macos`, `linux`, and `windows`
