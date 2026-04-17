@@ -127,6 +127,15 @@ If one Cargo AI agent needs to call another Cargo AI agent:
 - do not add Python or shell wrappers just to launch the child agent
 - use wrapper programs only when the task truly needs non-Cargo-AI behavior around that call
 
+If the user needs a reusable project-local capability:
+- prefer a native `kind: "tool"` step over inventing repeated `exec` wrappers
+- when Cargo is available and new executable code is needed, create a Rust tool with `cargo ai add tool <name>` instead of ad hoc Python, Node, or shell helper scripts
+- put custom behavior in `src/tool.rs`; leave `src/lib.rs` focused on Cargo AI protocol adapter code unless the protocol contract itself must change
+- when adding dependencies, follow the dependency discipline in `tool-hardening.md` instead of grabbing the first crate that compiles
+- before completion, perform the hardening review in `tool-hardening.md` and treat the tool as production local executable code
+- keep the tool contract in the tool crate and keep the agent JSON focused on `name`, `params`, and optional output capture
+- use `.cargo-ai/guidance/tool-authoring.md` for the workflow, `.cargo-ai/guidance/tool-contract.md` for the detailed contract, and `.cargo-ai/guidance/tool-child-agents.md` when the tool needs child agents
+
 When the user wants portability across macOS, Windows, and Linux:
 - avoid shell-specific scripts when possible
 - avoid OS-specific paths

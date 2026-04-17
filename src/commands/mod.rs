@@ -16,4 +16,5 @@ pub mod run;
 pub mod runtime;
 pub mod runtime_actions;
 pub mod scaffold;
+pub mod tools;
 pub mod version;

@@ -136,6 +136,12 @@ pub(crate) fn runtime_command(name: &'static str, about: &'static str) -> Comman
                 .action(ArgAction::Append)
                 .num_args(1),
         )
+        .arg(
+            Arg::new("ignore_tools")
+                .long("ignore-tools")
+                .help("Skip upfront tool contract checks and fail only if a tool step is reached")
+                .action(ArgAction::SetTrue),
+        )
 }
 
 #[cfg(test)]

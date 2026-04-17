@@ -167,5 +167,11 @@ pub fn build_cli() -> ArgMatches {
                 .action(ArgAction::Append)
                 .num_args(1),
         )
+        .arg(
+            Arg::new("ignore_tools")
+                .long("ignore-tools")
+                .help("Skip upfront tool contract checks and fail only if a tool step is reached")
+                .action(ArgAction::SetTrue),
+        )
         .get_matches_from(args)
 }

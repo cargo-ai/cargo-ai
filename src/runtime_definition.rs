@@ -1,5 +1,5 @@
 use serde_json::{Map, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -600,10 +600,13 @@ fn parse_run_step(value: &Value, path: &str) -> Result<crate::RunStep, String> {
             subject: None,
             text: None,
             agent: None,
+            tool_name: None,
+            tool_params: BTreeMap::new(),
             run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
+            ignore_tools: false,
             platforms,
         }),
         "email_me" => Ok(crate::RunStep {
@@ -622,10 +625,13 @@ fn parse_run_step(value: &Value, path: &str) -> Result<crate::RunStep, String> {
             subject: Some(parse_string_parts_field(run_obj, "subject", path)?),
             text: Some(parse_string_parts_field(run_obj, "text", path)?),
             agent: None,
+            tool_name: None,
+            tool_params: BTreeMap::new(),
             run_vars: None,
             input_overrides: None,
             inputs: None,
             input_mode: None,
+            ignore_tools: false,
             platforms,
         }),
         "agent" => {
@@ -652,13 +658,41 @@ fn parse_run_step(value: &Value, path: &str) -> Result<crate::RunStep, String> {
                 subject: None,
                 text: None,
                 agent: Some(agent),
+                tool_name: None,
+                tool_params: BTreeMap::new(),
                 run_vars: optional_action_run_vars(run_obj, path)?,
                 input_overrides: optional_action_input_overrides(run_obj, path)?,
                 inputs,
                 input_mode,
+                ignore_tools: optional_boolean_field(run_obj, "ignore_tools", path)?.unwrap_or(false),
                 platforms,
             })
         }
+        "tool" => Ok(crate::RunStep {
+            kind,
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: optional_capture_name(run_obj, "output_variable", path)?,
+            status_variable,
+            error_variable,
+            failure_mode,
+            when,
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: None,
+            tool_name: Some(required_tool_name(run_obj, path)?),
+            tool_params: optional_tool_params(run_obj, path)?,
+            run_vars: None,
+            input_overrides: None,
+            inputs: None,
+            input_mode: None,
+            ignore_tools: false,
+            platforms,
+        }),
         "generate_image" => {
             let path_parts = parse_string_parts_field(run_obj, "path", path)?;
             if let Some(literal_path) = resolve_literal_run_args(&path_parts) {
@@ -689,15 +723,78 @@ fn parse_run_step(value: &Value, path: &str) -> Result<crate::RunStep, String> {
                 subject: None,
                 text: None,
                 agent: None,
+                tool_name: None,
+                tool_params: BTreeMap::new(),
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
                 input_mode: None,
+                ignore_tools: false,
                 platforms,
             })
         }
         other => Err(format!(
-            "{path}.kind: unsupported kind `{other}` (supported: `exec`, `email_me`, `agent`, `generate_image`)"
+            "{path}.kind: unsupported kind `{other}` (supported: `exec`, `email_me`, `agent`, `tool`, `generate_image`)"
+        )),
+    }
+}
+
+fn required_tool_name(run_obj: &Map<String, Value>, path: &str) -> Result<String, String> {
+    let name = required_non_empty_string(run_obj, "name", path)?;
+    validate_tool_identifier(name.as_str(), format!("{path}.name").as_str())?;
+    Ok(name)
+}
+
+fn optional_tool_params(
+    run_obj: &Map<String, Value>,
+    path: &str,
+) -> Result<BTreeMap<String, crate::ToolParamValue>, String> {
+    let Some(value) = run_obj.get("params") else {
+        return Ok(BTreeMap::new());
+    };
+
+    let params = expect_object(value, format!("{path}.params").as_str())?;
+    let mut parsed = BTreeMap::new();
+    for (name, value) in params {
+        validate_tool_identifier(name, format!("{path}.params.{name}").as_str())?;
+        parsed.insert(
+            name.clone(),
+            parse_tool_param_value(value, format!("{path}.params.{name}").as_str())?,
+        );
+    }
+    Ok(parsed)
+}
+
+fn parse_tool_param_value(value: &Value, path: &str) -> Result<crate::ToolParamValue, String> {
+    match value {
+        Value::String(_) | Value::Bool(_) => Ok(crate::ToolParamValue::Literal(value.clone())),
+        Value::Number(number) if number.is_i64() || number.is_u64() || number.is_f64() => {
+            Ok(crate::ToolParamValue::Literal(value.clone()))
+        }
+        Value::Object(map) => {
+            if map.len() != 1 {
+                return Err(format!(
+                    "{path}: expected a scalar literal or an object of the form `{{ \"var\": \"field_name\" }}`"
+                ));
+            }
+            let Some(variable) = map.get("var") else {
+                return Err(format!(
+                    "{path}: expected a scalar literal or an object of the form `{{ \"var\": \"field_name\" }}`"
+                ));
+            };
+            let variable_name = variable
+                .as_str()
+                .ok_or_else(|| format!("{path}.var: expected `var` to be a string field name"))?
+                .trim()
+                .to_string();
+            validate_tool_variable_lookup_name(
+                variable_name.as_str(),
+                format!("{path}.var").as_str(),
+            )?;
+            Ok(crate::ToolParamValue::Variable(variable_name))
+        }
+        _ => Err(format!(
+            "{path}: expected a string, boolean, number, or an object of the form `{{ \"var\": \"field_name\" }}`"
         )),
     }
 }
@@ -829,6 +926,21 @@ fn optional_failure_mode(
             "{path}.failure_mode: unsupported `failure_mode` (supported: `stop`, `continue`, `abort`)"
         )),
     }
+}
+
+fn optional_boolean_field(
+    run_obj: &Map<String, Value>,
+    field_name: &str,
+    path: &str,
+) -> Result<Option<bool>, String> {
+    let Some(value) = run_obj.get(field_name) else {
+        return Ok(None);
+    };
+
+    value
+        .as_bool()
+        .ok_or_else(|| format!("{path}.{field_name}: expected a boolean"))
+        .map(Some)
 }
 
 fn optional_logic_object(
@@ -1180,6 +1292,62 @@ fn validate_flat_identifier(name: &str, path: &str, label: &str) -> Result<(), S
     }
     if name.contains('.') {
         return Err(format!("{path}: {label} names must be flat"));
+    }
+    Ok(())
+}
+
+fn validate_tool_identifier(name: &str, path: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err(format!("{path}: tool names cannot be empty"));
+    }
+    if name != name.trim() {
+        return Err(format!(
+            "{path}: tool names cannot start or end with whitespace"
+        ));
+    }
+    if name.chars().any(char::is_whitespace) {
+        return Err(format!("{path}: tool names cannot contain whitespace"));
+    }
+    Ok(())
+}
+
+fn validate_tool_variable_lookup_name(name: &str, path: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err(format!("{path}: variable name cannot be empty"));
+    }
+    if name != name.trim() {
+        return Err(format!(
+            "{path}: variable names cannot start or end with whitespace"
+        ));
+    }
+    if name.chars().any(char::is_whitespace) {
+        return Err(format!("{path}: variable names cannot contain whitespace"));
+    }
+
+    let mut segments = name.split('.');
+    let Some(first) = segments.next() else {
+        return Err(format!("{path}: variable name cannot be empty"));
+    };
+    if first.is_empty() {
+        return Err(format!("{path}: variable name cannot be empty"));
+    }
+    if first == "runtime" {
+        let Some(runtime_name) = segments.next() else {
+            return Err(format!(
+                "{path}: runtime variable lookups must use the form `runtime.<name>`"
+            ));
+        };
+        if runtime_name.is_empty() || segments.next().is_some() {
+            return Err(format!(
+                "{path}: runtime variable lookups must use the form `runtime.<name>`"
+            ));
+        }
+        return Ok(());
+    }
+    if segments.next().is_some() {
+        return Err(format!(
+            "{path}: variable lookups must be flat or use `runtime.<name>`"
+        ));
     }
     Ok(())
 }

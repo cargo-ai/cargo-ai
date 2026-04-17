@@ -38,6 +38,10 @@ const AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_STA
 const AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_DEADLINE_MS";
 const DEFAULT_AGENT_ACTION_MAX_DEPTH: u32 = 5;
 const DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS: u64 = 600;
+const PROJECT_METADATA_RELATIVE_PATH: &str = ".cargo-ai/project.toml";
+const PROJECT_TOOLS_RELATIVE_PATH: &str = ".cargo-ai/tools";
+const TOOL_MANIFEST_FILE_NAME: &str = "tool.json";
+const TOOL_PROTOCOL_VERSION: u32 = 1;
 const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str =
     "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
 const ACTION_LANE_OUTPUT_BUFFER_LIMIT: usize = 6;
@@ -788,6 +792,7 @@ struct ActionProviderContext {
     url: String,
     token: String,
     inference_timeout_in_sec: u64,
+    tool_resolver: Option<Arc<ToolResolver>>,
 }
 
 impl ActionProviderContext {
@@ -810,6 +815,683 @@ impl ActionProviderContext {
 
         line
     }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ToolManifestBinary {
+    #[serde(default)]
+    default_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ToolManifestArtifact {
+    path: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ToolManifest {
+    schema_version: u32,
+    tool_id: String,
+    #[serde(default)]
+    binary: ToolManifestBinary,
+    #[serde(default)]
+    artifacts: BTreeMap<String, ToolManifestArtifact>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ProjectMetadataDocument {
+    #[serde(default)]
+    tools: Option<ProjectToolsPolicyDocument>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ProjectToolsPolicyDocument {
+    #[serde(default)]
+    allow_global_fallback: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ToolDescribeParam {
+    #[serde(rename = "type")]
+    kind: String,
+    required: bool,
+    #[serde(default)]
+    default: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ToolDescribeResult {
+    #[serde(rename = "type")]
+    kind: String,
+    nullable: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ToolDescribeResourceProfile {
+    network: String,
+    filesystem_read: String,
+    filesystem_write: String,
+    subprocess: String,
+    env_read: String,
+    credential_access: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ToolDescribeExamples {
+    minimal_invoke: serde_json::Value,
+    full_invoke: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ToolDescribeDocument {
+    protocol_version: u32,
+    name: String,
+    description: String,
+    #[serde(default)]
+    params: BTreeMap<String, ToolDescribeParam>,
+    result: ToolDescribeResult,
+    resource_profile: ToolDescribeResourceProfile,
+    self_test: serde_json::Value,
+    examples: ToolDescribeExamples,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ToolInvokeResponse {
+    protocol_version: u32,
+    result: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedTool {
+    tool_id: String,
+    binary_name: String,
+    binary_path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct ToolContract {
+    resolved: ResolvedTool,
+    describe: ToolDescribeDocument,
+}
+
+#[derive(Clone, Debug)]
+struct ToolResolver {
+    bundled_root: Option<PathBuf>,
+    project_root: Option<PathBuf>,
+    target_triple: String,
+}
+
+impl ToolResolver {
+    fn new(project_root: Option<PathBuf>, target_triple: impl Into<String>) -> Self {
+        Self {
+            bundled_root: None,
+            project_root,
+            target_triple: target_triple.into(),
+        }
+    }
+
+    fn with_bundled_root(mut self, bundled_root: Option<PathBuf>) -> Self {
+        self.bundled_root = bundled_root;
+        self
+    }
+
+    fn resolve_contract(&self, tool_id: &str) -> Result<ToolContract, String> {
+        let resolved = self.resolve_tool(tool_id)?;
+        let describe = load_tool_describe_document(&resolved)?;
+        validate_describe_document(&describe, &resolved)?;
+        Ok(ToolContract { resolved, describe })
+    }
+
+    fn resolve_tool(&self, tool_id: &str) -> Result<ResolvedTool, String> {
+        validate_tool_identifier(tool_id)?;
+        let mut allow_machine_fallback = self.project_root.is_none();
+
+        if let Some(bundled_root) = self.bundled_root.as_ref() {
+            if let Some(resolved) =
+                resolve_tool_from_scope_root(bundled_root, tool_id, self.target_triple.as_str())?
+            {
+                return Ok(resolved);
+            }
+        }
+
+        if let Some(project_root) = self.project_root.as_ref() {
+            allow_machine_fallback = project_allows_global_fallback(project_root)?;
+            if let Some(resolved) = resolve_tool_from_scope_root(
+                project_root.join(PROJECT_TOOLS_RELATIVE_PATH).as_path(),
+                tool_id,
+                self.target_triple.as_str(),
+            )? {
+                return Ok(resolved);
+            }
+        }
+
+        if !allow_machine_fallback {
+            return Err(format!(
+                "Tool '{}' was not found in the current project, and project tool policy disallows Cargo AI Home fallback.",
+                tool_id
+            ));
+        }
+
+        resolve_tool_from_scope_root(
+            machine_tools_root().as_path(),
+            tool_id,
+            self.target_triple.as_str(),
+        )?
+        .ok_or_else(|| {
+            format!(
+                "Tool '{}' was not found in bundled, project, or Cargo AI Home tool scopes.",
+                tool_id
+            )
+        })
+    }
+}
+
+fn project_allows_global_fallback(project_root: &Path) -> Result<bool, String> {
+    let metadata_path = project_root.join(PROJECT_METADATA_RELATIVE_PATH);
+    let contents = fs::read_to_string(&metadata_path).map_err(|error| {
+        format!(
+            "Failed to read project metadata '{}': {}",
+            metadata_path.display(),
+            error
+        )
+    })?;
+    let metadata: ProjectMetadataDocument = toml::from_str(&contents).map_err(|error| {
+        format!(
+            "Failed to parse project metadata '{}': {}",
+            metadata_path.display(),
+            error
+        )
+    })?;
+    Ok(metadata
+        .tools
+        .and_then(|tools| tools.allow_global_fallback)
+        .unwrap_or(false))
+}
+
+fn maybe_find_project_root(start: &Path) -> Option<PathBuf> {
+    let mut current = if start.is_dir() {
+        start.to_path_buf()
+    } else {
+        start.parent()?.to_path_buf()
+    };
+
+    loop {
+        if current.join(PROJECT_METADATA_RELATIVE_PATH).exists() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+fn bundled_tools_root_from_executable() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .map(|path| path.join(PROJECT_TOOLS_RELATIVE_PATH))
+        .filter(|path| path.exists())
+}
+
+fn machine_tools_root() -> PathBuf {
+    config_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(".cargo-ai"))
+        .join("tools")
+}
+
+fn current_tool_target_triple() -> &'static str {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "x86_64-apple-darwin"
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) {
+        "x86_64-unknown-linux-gnu"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu")) {
+        "aarch64-unknown-linux-gnu"
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        "x86_64-pc-windows-msvc"
+    } else {
+        "unknown-target"
+    }
+}
+
+fn audit_actions_for_tools(
+    actions: &[Action],
+    resolver: &ToolResolver,
+    current_platform: Option<&str>,
+) -> Result<(), String> {
+    let mut validated = BTreeMap::<String, ToolContract>::new();
+
+    for action in actions {
+        for (step_index, step) in action.run.iter().enumerate() {
+            if !step_matches_platform(step.platforms.as_deref(), current_platform) {
+                continue;
+            }
+            if !step.kind.eq_ignore_ascii_case("tool") {
+                continue;
+            }
+
+            let tool_name = step.tool_name.as_deref().ok_or_else(|| {
+                format!(
+                    "Action '{}' tool step {} is missing required `name`.",
+                    action.name,
+                    step_index + 1
+                )
+            })?;
+            let contract = if let Some(existing) = validated.get(tool_name) {
+                existing.clone()
+            } else {
+                let contract = resolver.resolve_contract(tool_name)?;
+                validated.insert(tool_name.to_string(), contract.clone());
+                contract
+            };
+
+            validate_tool_step_against_contract(
+                step,
+                &contract.describe,
+                action.name.as_str(),
+                step_index,
+            )?;
+            if contract.describe.name != tool_name && contract.describe.name != contract.resolved.binary_name {
+                return Err(format!(
+                    "Tool '{}' describe contract reported name '{}', which does not match the referenced tool id.",
+                    tool_name, contract.describe.name
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_tool_invoke_params(
+    step: &RunStep,
+    data: &serde_json::Value,
+    action_name: &str,
+    describe: &ToolDescribeDocument,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let mut params = serde_json::Map::new();
+
+    for (name, value) in &step.tool_params {
+        let resolved = match value {
+            ToolParamValue::Literal(literal) => literal.clone(),
+            ToolParamValue::Variable(variable) => {
+                let Some(resolved) = lookup_action_variable(data, variable) else {
+                    return Err(format!(
+                        "Action '{}' tool param '{}' references missing variable '{}'.",
+                        action_name, name, variable
+                    ));
+                };
+                if !(resolved.is_string() || resolved.is_boolean() || resolved.is_number()) {
+                    return Err(format!(
+                        "Action '{}' tool param '{}' references variable '{}', which resolved to a non-scalar value.",
+                        action_name, name, variable
+                    ));
+                }
+                resolved.clone()
+            }
+        };
+
+        let expected = describe.params.get(name).ok_or_else(|| {
+            format!("Action '{}' references unknown tool param '{}'.", action_name, name)
+        })?;
+        if !json_value_matches_declared_type(&resolved, expected.kind.as_str()) {
+            return Err(format!(
+                "Action '{}' tool param '{}' resolved to an incompatible value; expected {}.",
+                action_name,
+                name,
+                display_type_name(expected.kind.as_str())
+            ));
+        }
+
+        params.insert(name.clone(), resolved);
+    }
+
+    for (name, param_spec) in &describe.params {
+        if param_spec.required && param_spec.default.is_none() && !params.contains_key(name) {
+            return Err(format!(
+                "Action '{}' tool step is missing required param '{}'.",
+                action_name, name
+            ));
+        }
+    }
+
+    Ok(params)
+}
+
+fn validate_tool_step_against_contract(
+    step: &RunStep,
+    describe: &ToolDescribeDocument,
+    action_name: &str,
+    step_index: usize,
+) -> Result<(), String> {
+    for (name, value) in &step.tool_params {
+        let Some(param_spec) = describe.params.get(name) else {
+            return Err(format!(
+                "Action '{}' tool step {} references unknown tool param '{}'.",
+                action_name,
+                step_index + 1,
+                name
+            ));
+        };
+
+        if let ToolParamValue::Literal(literal) = value {
+            if !json_value_matches_declared_type(literal, param_spec.kind.as_str()) {
+                return Err(format!(
+                    "Action '{}' tool step {} param '{}' must be {}.",
+                    action_name,
+                    step_index + 1,
+                    name,
+                    display_type_name(param_spec.kind.as_str())
+                ));
+            }
+        }
+    }
+
+    for (name, param_spec) in &describe.params {
+        if param_spec.required && param_spec.default.is_none() && !step.tool_params.contains_key(name) {
+            return Err(format!(
+                "Action '{}' tool step {} is missing required tool param '{}'.",
+                action_name,
+                step_index + 1,
+                name
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_tool_from_scope_root(
+    scope_root: &Path,
+    tool_id: &str,
+    target_triple: &str,
+) -> Result<Option<ResolvedTool>, String> {
+    let tool_dir = scope_root.join(tool_id);
+    if !tool_dir.exists() {
+        return Ok(None);
+    }
+
+    let manifest_path = tool_dir.join(TOOL_MANIFEST_FILE_NAME);
+    let manifest = load_tool_manifest(&manifest_path, tool_id)?;
+    let artifact = manifest.artifacts.get(target_triple).ok_or_else(|| {
+        format!(
+            "Tool '{}' does not have a materialized artifact for target '{}'.",
+            tool_id, target_triple
+        )
+    })?;
+    let binary_name = manifest
+        .binary
+        .default_name
+        .clone()
+        .unwrap_or_else(|| manifest.tool_id.clone());
+    let binary_path = tool_dir.join(&artifact.path);
+    if !binary_path.exists() {
+        return Err(format!(
+            "Tool '{}' artifact '{}' does not exist on disk.",
+            tool_id,
+            binary_path.display()
+        ));
+    }
+
+    Ok(Some(ResolvedTool {
+        tool_id: tool_id.to_string(),
+        binary_name,
+        binary_path,
+    }))
+}
+
+fn load_tool_manifest(path: &Path, expected_tool_id: &str) -> Result<ToolManifest, String> {
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("Failed to read tool manifest '{}': {}", path.display(), error))?;
+    let manifest: ToolManifest = serde_json::from_str(&contents)
+        .map_err(|error| format!("Failed to parse tool manifest '{}': {}", path.display(), error))?;
+    if manifest.schema_version != 1 {
+        return Err(format!(
+            "Tool manifest '{}' uses unsupported schema_version {}.",
+            path.display(),
+            manifest.schema_version
+        ));
+    }
+    if manifest.tool_id != expected_tool_id {
+        return Err(format!(
+            "Tool manifest '{}' declares tool_id '{}', expected '{}'.",
+            path.display(),
+            manifest.tool_id,
+            expected_tool_id
+        ));
+    }
+    Ok(manifest)
+}
+
+fn load_tool_describe_document(resolved: &ResolvedTool) -> Result<ToolDescribeDocument, String> {
+    let stdout = run_tool_command_capture_stdout(&resolved.binary_path, "describe", None)?;
+    serde_json::from_slice::<ToolDescribeDocument>(&stdout).map_err(|error| {
+        format!(
+            "Tool '{}' returned invalid describe JSON: {}",
+            resolved.tool_id, error
+        )
+    })
+}
+
+fn run_tool_command_capture_stdout(
+    binary_path: &Path,
+    command: &str,
+    stdin: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    let mut child = std::process::Command::new(binary_path);
+    child
+        .arg(command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if stdin.is_some() {
+        child.stdin(Stdio::piped());
+    }
+
+    let mut child = child.spawn().map_err(|error| {
+        format!(
+            "Failed to start tool binary '{}': {}",
+            binary_path.display(),
+            error
+        )
+    })?;
+
+    if let Some(stdin_bytes) = stdin {
+        let mut writer = child.stdin.take().ok_or_else(|| {
+            format!(
+                "Failed to open stdin for tool binary '{}'.",
+                binary_path.display()
+            )
+        })?;
+        writer.write_all(stdin_bytes).map_err(|error| {
+            format!(
+                "Failed to write stdin for tool binary '{}': {}",
+                binary_path.display(),
+                error
+            )
+        })?;
+    }
+
+    let output = child.wait_with_output().map_err(|error| {
+        format!(
+            "Failed while waiting for tool binary '{}': {}",
+            binary_path.display(),
+            error
+        )
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!(
+                "Tool binary '{}' exited with status {}.",
+                binary_path.display(),
+                output.status
+            )
+        } else {
+            format!(
+                "Tool binary '{}' exited with status {}: {}",
+                binary_path.display(),
+                output.status,
+                stderr
+            )
+        });
+    }
+
+    Ok(output.stdout)
+}
+
+fn validate_describe_document(
+    describe: &ToolDescribeDocument,
+    resolved: &ResolvedTool,
+) -> Result<(), String> {
+    if describe.protocol_version != TOOL_PROTOCOL_VERSION {
+        return Err(format!(
+            "Tool '{}' reports unsupported protocol_version {} in describe.",
+            resolved.tool_id, describe.protocol_version
+        ));
+    }
+    if describe.name.trim().is_empty() || describe.description.trim().is_empty() {
+        return Err(format!(
+            "Tool '{}' describe output is missing required metadata.",
+            resolved.tool_id
+        ));
+    }
+    if describe.result.kind != "string" || !describe.result.nullable {
+        return Err(format!(
+            "Tool '{}' describe result must be a nullable string.",
+            resolved.tool_id
+        ));
+    }
+
+    for (name, param) in &describe.params {
+        if !matches!(param.kind.as_str(), "string" | "boolean" | "integer" | "number") {
+            return Err(format!(
+                "Tool '{}' describe param '{}' uses unsupported type '{}'.",
+                resolved.tool_id, name, param.kind
+            ));
+        }
+        if param.required && param.default.is_some() {
+            return Err(format!(
+                "Tool '{}' describe param '{}' cannot be both required and defaulted.",
+                resolved.tool_id, name
+            ));
+        }
+        if let Some(default) = param.default.as_ref() {
+            if !json_value_matches_declared_type(default, param.kind.as_str()) {
+                return Err(format!(
+                    "Tool '{}' describe param '{}' default does not match declared type '{}'.",
+                    resolved.tool_id, name, param.kind
+                ));
+            }
+        }
+    }
+
+    for value in [
+        describe.resource_profile.network.as_str(),
+        describe.resource_profile.filesystem_read.as_str(),
+        describe.resource_profile.filesystem_write.as_str(),
+        describe.resource_profile.subprocess.as_str(),
+        describe.resource_profile.env_read.as_str(),
+        describe.resource_profile.credential_access.as_str(),
+    ] {
+        if !matches!(value, "none" | "optional" | "required") {
+            return Err(format!(
+                "Tool '{}' describe resource_profile uses unsupported value '{}'.",
+                resolved.tool_id, value
+            ));
+        }
+    }
+
+    if !describe.self_test.is_object() {
+        return Err(format!(
+            "Tool '{}' describe self_test must be an object.",
+            resolved.tool_id
+        ));
+    }
+
+    for example in [&describe.examples.minimal_invoke, &describe.examples.full_invoke] {
+        let Some(example_obj) = example.as_object() else {
+            return Err(format!(
+                "Tool '{}' describe examples must be objects.",
+                resolved.tool_id
+            ));
+        };
+        if example_obj
+            .get("protocol_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(TOOL_PROTOCOL_VERSION as u64)
+        {
+            return Err(format!(
+                "Tool '{}' describe examples must use protocol_version {}.",
+                resolved.tool_id, TOOL_PROTOCOL_VERSION
+            ));
+        }
+        if !example_obj
+            .get("params")
+            .is_some_and(serde_json::Value::is_object)
+        {
+            return Err(format!(
+                "Tool '{}' describe examples must include object params.",
+                resolved.tool_id
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_tool_invoke_response(
+    resolved: &ResolvedTool,
+    stdout: &[u8],
+) -> Result<Option<String>, String> {
+    let response: ToolInvokeResponse = serde_json::from_slice(stdout).map_err(|error| {
+        format!(
+            "Tool '{}' returned invalid invoke JSON: {}",
+            resolved.tool_id, error
+        )
+    })?;
+    if response.protocol_version != TOOL_PROTOCOL_VERSION {
+        return Err(format!(
+            "Tool '{}' returned unsupported invoke protocol_version {}.",
+            resolved.tool_id, response.protocol_version
+        ));
+    }
+    Ok(response.result)
+}
+
+fn json_value_matches_declared_type(value: &serde_json::Value, expected: &str) -> bool {
+    match expected {
+        "string" => value.is_string(),
+        "boolean" => value.is_boolean(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "number" => value.is_number(),
+        _ => false,
+    }
+}
+
+fn display_type_name(kind: &str) -> &str {
+    match kind {
+        "string" => "a string",
+        "boolean" => "a boolean",
+        "integer" => "an integer",
+        "number" => "a number",
+        _ => "a supported scalar value",
+    }
+}
+
+fn validate_tool_identifier(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("Tool names cannot be empty.".to_string());
+    }
+    if name != name.trim() {
+        return Err("Tool names cannot start or end with whitespace.".to_string());
+    }
+    if name.chars().any(char::is_whitespace) {
+        return Err("Tool names cannot contain whitespace.".to_string());
+    }
+    Ok(())
 }
 
 fn provider_server_name(provider: ProviderKind) -> &'static str {
@@ -2265,6 +2947,27 @@ async fn main() {
     };
     let effective_action_execution = effective_action_execution_for_run(action_execution_override);
     let has_output_schema_properties = has_output_schema_properties();
+    let actions = actions();
+    let ignore_tools = cmd_args.get_flag("ignore_tools");
+    let tool_resolver = Arc::new(
+        ToolResolver::new(
+            std::env::current_dir()
+                .ok()
+                .and_then(|dir| maybe_find_project_root(dir.as_path())),
+            current_tool_target_triple(),
+        )
+        .with_bundled_root(bundled_tools_root_from_executable()),
+    );
+    if !ignore_tools {
+        if let Err(error) = audit_actions_for_tools(
+            &actions,
+            tool_resolver.as_ref(),
+            current_action_platform(),
+        ) {
+            eprintln!("❌ {error}");
+            std::process::exit(1);
+        }
+    }
     let action_provider_context = ActionProviderContext {
         provider,
         profile_name: selected_profile.as_ref().map(|profile| profile.name.clone()),
@@ -2279,6 +2982,7 @@ async fn main() {
         url: url.clone(),
         token: token.clone(),
         inference_timeout_in_sec,
+        tool_resolver: Some(tool_resolver),
     };
 
     if let Err(error) =
@@ -2300,7 +3004,6 @@ async fn main() {
                 std::process::exit(1);
             }
         };
-        let actions = actions();
         let action_output = ActionOutput::new(
             effective_action_execution,
             requested_render_mode,
@@ -2490,7 +3193,6 @@ async fn main() {
         }
     };
 
-    let actions = actions();
     action_output.print_execution_header();
     if let Err(error) =
         apply_actions(
@@ -2988,6 +3690,19 @@ async fn run_matching_action_steps(
             )
             .await
             .map(|outcome| (outcome, None))
+        } else if step.kind.eq_ignore_ascii_case("tool") {
+            run_tool_step(
+                step,
+                &action_data,
+                action_index,
+                &action.name,
+                provider_context,
+                action_execution_override,
+                max_agent_depth,
+                runtime_budget,
+            )
+            .await
+            .map(|captured_output| (StepExecutionOutcome::Completed, captured_output))
         } else if step.kind.eq_ignore_ascii_case("generate_image") {
             run_generate_image_step(
                 step,
@@ -3194,6 +3909,144 @@ async fn run_exec_step(
                 ))
             }
         }
+    }
+}
+
+async fn run_tool_step(
+    step: &RunStep,
+    data: &serde_json::Value,
+    action_index: usize,
+    action_name: &str,
+    provider_context: &ActionProviderContext,
+    action_execution_override: Option<ActionExecutionMode>,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+) -> Result<Option<(String, String)>, String> {
+    let tool_name = step.tool_name.as_deref().ok_or_else(|| {
+        format!(
+            "Action '{}' tool step is missing required `name`.",
+            action_name
+        )
+    })?;
+    let resolver = provider_context.tool_resolver.as_ref().ok_or_else(|| {
+        format!(
+            "Action '{}' tool step '{}' cannot resolve tools because no tool resolver is available.",
+            action_name, tool_name
+        )
+    })?;
+    let contract = resolver.resolve_contract(tool_name)?;
+    let params = resolve_tool_invoke_params(step, data, action_name, &contract.describe)?;
+    let current_depth = current_agent_action_depth();
+    let request = serde_json::json!({
+        "protocol_version": 1,
+        "params": params,
+        "runtime_context": {
+            "agent_bridge": {
+                "current_depth": current_depth,
+                "max_depth": max_agent_depth,
+                "runtime_budget": {
+                    "max_runtime_secs": runtime_budget.max_runtime_secs,
+                    "started_at_ms": runtime_budget.started_at_ms,
+                    "deadline_ms": runtime_budget.deadline_ms,
+                },
+                "action_execution": action_execution_override.map(|mode| match mode {
+                    ActionExecutionMode::Sequential => "sequential",
+                    ActionExecutionMode::Parallel => "parallel",
+                }),
+            }
+        },
+    });
+    let request_bytes = serde_json::to_vec(&request).map_err(|error| {
+        format!(
+            "Action '{}' tool step '{}' could not serialize invoke request: {}",
+            action_name, tool_name, error
+        )
+    })?;
+    let remaining = remaining_runtime_duration(
+        runtime_budget,
+        &format!("before starting tool '{}'", tool_name),
+    )
+    .map_err(|context| {
+        action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
+    })?;
+
+    let child = tokio::process::Command::new(&contract.resolved.binary_path)
+        .arg("invoke")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            format!(
+                "Action '{}' failed to start tool '{}': {}",
+                action_name, tool_name, error
+            )
+        })?;
+    let mut child = child;
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            format!(
+                "Action '{}' failed to open stdin for tool '{}'.",
+                action_name, tool_name
+            )
+        })?;
+        stdin.write_all(&request_bytes).await.map_err(|error| {
+            format!(
+                "Action '{}' failed to write invoke request for tool '{}': {}",
+                action_name, tool_name, error
+            )
+        })?;
+    }
+
+    let output = match tokio::time::timeout(remaining, child.wait_with_output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            return Err(format!(
+                "Action '{}' failed while waiting for tool '{}': {}",
+                action_name, tool_name, error
+            ));
+        }
+        Err(_) => {
+            return Err(action_runtime_timeout_message(
+                action_name,
+                runtime_budget,
+                &format!("while waiting for tool '{}'", tool_name),
+            ));
+        }
+    };
+
+    emit_action_output_bytes(action_index, action_name, &output.stderr);
+    if !output.status.success() {
+        return Err(format!(
+            "Action '{}' tool '{}' exited with status {}.",
+            action_name, tool_name, output.status
+        ));
+    }
+
+    let result = validate_tool_invoke_response(&contract.resolved, &output.stdout)?;
+    if let Some(output_variable) = step.output_variable.as_deref() {
+        let value = result.ok_or_else(|| {
+            format!(
+                "Action '{}' tool '{}' completed successfully but returned null result for output variable '{}'.",
+                action_name, tool_name, output_variable
+            )
+        })?;
+        print_action_line(
+            action_index,
+            action_name,
+            format!("stored tool result in variable '{}'.", output_variable).as_str(),
+        );
+        Ok(Some((output_variable.to_string(), value)))
+    } else {
+        if let Some(result) = result {
+            print_action_line(
+                action_index,
+                action_name,
+                format!("tool '{}' returned '{}'.", tool_name, result).as_str(),
+            );
+        }
+        Ok(None)
     }
 }
 
@@ -3669,6 +4522,7 @@ async fn resolve_generate_image_step_profile_context(
         url,
         token: resolved_token.token,
         inference_timeout_in_sec: invocation_timeout_in_sec,
+        tool_resolver: None,
     }))
 }
 
@@ -3779,6 +4633,9 @@ async fn run_agent_step(
             ActionExecutionMode::Sequential => "sequential",
             ActionExecutionMode::Parallel => "parallel",
         });
+    }
+    if step.ignore_tools {
+        command.arg("--ignore-tools");
     }
     if let Some(profile_name) = resolve_step_profile_name(step.profile.as_ref(), data, action_name, "agent")? {
         let config_file = config_path();

@@ -27,6 +27,16 @@ When action behavior may vary by invocation, also clarify:
 - should the caller choose the image model at runtime?
 - if yes, prefer top-level `runtime_vars` plus `--run-var` over asking the caller to edit JSON for each run
 
+When the user says they need a reusable local tool or native helper:
+- confirm that they really need a project-local `kind: "tool"` capability rather than a plain `exec` step
+- if they need new executable code and Cargo is available, prefer Rust inside a `cargo ai add tool <name>` scaffold instead of ad hoc Python, Node, or shell helper scripts
+- if yes, switch to `.cargo-ai/guidance/tool-authoring.md`
+- use the narrower tool files only as needed:
+  - `tool-contract.md` for scaffold and protocol details
+  - `tool-child-agents.md` when the tool must call child agents
+  - `tool-hardening.md` for dependency and hardening review
+- keep the tool workflow separate from the agent JSON workflow, then wire them back together with `cargo ai tools check --config <agent.json>`
+
 ## How To Drive The Conversation
 
 - Keep the questions in plain language.
@@ -37,13 +47,16 @@ When action behavior may vary by invocation, also clarify:
 ## What To Do Next
 
 1. Use `pattern-selection.md` to infer the right Cargo AI shape.
-2. Copy the closest example from `examples/`.
-3. Decide which inputs are baked into JSON, which are caller-supplied runtime inputs, and whether any action behavior belongs in `runtime_vars`.
-4. Draft the JSON in canonical field order.
-5. If the flow becomes complex, recommend a same-name sidecar Markdown file.
-6. Validate with:
+2. If the request truly needs a local tool, use `tool-authoring.md`, keep the Rust tool crate small, and put custom behavior in `src/tool.rs` instead of rewriting the protocol adapter.
+3. If the tool needs crates.io dependencies, apply `tool-hardening.md` dependency discipline before editing `Cargo.toml`.
+4. Before presenting a tool as complete, perform the `tool-hardening.md` hardening review.
+5. Copy the closest example from `examples/`.
+6. Decide which inputs are baked into JSON, which are caller-supplied runtime inputs, and whether any action behavior belongs in `runtime_vars`.
+7. Draft the JSON in canonical field order.
+8. If the flow becomes complex, recommend a same-name sidecar Markdown file.
+9. Validate with:
    - `cargo ai hatch <agent-name> --config <config.json> --check`
-7. Fix reported errors before building.
+10. Fix reported errors before building.
 
 ## Behavioral Defaults
 

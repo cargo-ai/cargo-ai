@@ -75,6 +75,13 @@ pub fn command() -> Command {
                 .required(false)
                 .action(clap::ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("ignore_tools")
+                .long("ignore-tools")
+                .help("Skip upfront tool contract checks while hatching or checking")
+                .required(false)
+                .action(clap::ArgAction::SetTrue),
+        )
         .after_help(
             "Definition sources:\n  - NAME by itself: agent name, registry name, or local .json shorthand\n  - --config <FILE>: agent definition JSON file\n  - --json <JSON>: raw agent definition JSON string\n  - --stdin: read agent definition JSON from stdin\n\nWhen --config, --json, or --stdin is used, positional NAME is always the local output/project name.",
         )

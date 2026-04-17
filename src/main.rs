@@ -49,9 +49,9 @@ async fn main() {
         }
     }
 
-    if let Err(error) = cargo_ai_metadata::persist_current_metadata() {
-        eprintln!("⚠️ Failed to persist local Cargo-AI metadata: {error}");
-    }
+    // Metadata only powers local drift checks; project-local commands should not
+    // look failed when a sandbox blocks best-effort user-home writes.
+    let _ = cargo_ai_metadata::persist_current_metadata();
 
     if let Some(notice) = cargo_ai_home_initialization_notice(
         cargo_ai_home_preexisting,
@@ -74,6 +74,8 @@ async fn main() {
             command_succeeded
         } else if let Some(sub_m) = cmd_args.subcommand_matches("add") {
             commands::add::run(sub_m)
+        } else if let Some(sub_m) = cmd_args.subcommand_matches("tools") {
+            commands::tools::run(sub_m)
         } else if let Some(sub_m) = cmd_args.subcommand_matches("init") {
             commands::init::run(sub_m)
         } else if let Some(sub_m) = cmd_args.subcommand_matches("new") {

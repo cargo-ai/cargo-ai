@@ -4,7 +4,7 @@
 [![Multi-OS CI](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml/badge.svg)](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml)
 [![Status: Stable – Ongoing Development](https://img.shields.io/badge/Status-Stable_–_Ongoing_Development-blue)](https://github.com/analyzer1/cargo-ai)
 
-Build AI-powered CLI tools from a single JSON definition.
+Build AI-powered CLI tools from a single JSON definition locally.
 
 Define declarative agents in JSON, hatch native executables locally, and share them in minutes.
 
@@ -861,13 +861,15 @@ When the file checks cleanly, use the Codex workflow below for the fastest itera
 If you want the fastest authoring loop, start in a new folder and let Codex build the agent definition with you.
 
 ```bash
-mkdir my-agent
+cargo ai new my-agent
 cd my-agent
 cargo ai add guidance --style codex
 codex
 ```
 
-This creates `AGENTS.md` plus helper files under `.cargo-ai/guidance/` so Codex knows the Cargo AI contract.
+This creates the Cargo AI project boundary first, then installs `AGENTS.md` plus the helper files under `.cargo-ai/guidance/` so Codex knows the Cargo AI contract.
+
+If you already have a folder, use `cargo ai init` first, then `cargo ai add guidance --style codex`.
 
 Then tell Codex: `I want to build a Cargo AI agent.` Describe what the agent should do, what inputs it should accept, what structured output it should return, and any follow-up actions you want.
 
@@ -880,6 +882,91 @@ Ask Codex to:
 Then review the generated JSON yourself to make sure it matches your intent.
 
 Cargo AI works best when the definition stays small, understandable, and easy to verify as you iterate.
+
+## Local Project Tools
+
+Cargo AI can also scaffold project-local tools that agents call through `kind: "tool"`.
+
+When an agent needs new project-local executable code and you have Cargo available, prefer a Rust tool created with `cargo ai add tool <name>`. Use ad hoc Python, Node, or shell helper scripts only when you explicitly want that shape or the task does not fit the current tool contract.
+
+Tools are normal Rust crates, so they may use crates.io dependencies when needed. Keep dependency choices conservative: prefer stable, focused, actively maintained crates, enable only the features required, avoid Git/path dependencies unless intentional, and keep the tool's `Cargo.lock`. Before treating a tool as complete, review it as trusted local executable code: validate params, keep errors clear, document filesystem/network/subprocess/credential behavior in the resource profile, and run dependency checks such as `cargo tree -e features`, `cargo audit`, or `cargo deny check` when practical.
+
+This is the current local workflow:
+
+```bash
+cargo ai new my-tool-project
+cd my-tool-project
+cargo ai add guidance --style codex
+cargo ai add tool hello_tool
+```
+
+If you are already inside an existing folder, run `cargo ai init` first. Add `cargo ai add guidance --style codex` when you want the Codex guidance bundle.
+
+If you want a project to refuse machine/global tool fallback, set this in `.cargo-ai/project.toml`:
+
+```toml
+[tools]
+allow_global_fallback = false
+```
+
+If `allow_global_fallback` is missing, Cargo AI treats that as project-only lookup.
+
+That creates:
+
+- `.cargo-ai/project.toml`
+  - Cargo AI project metadata and tool-resolution policy
+  - `cargo ai new/init` writes `[tools] allow_global_fallback = true` by default
+- `.gitignore`
+  - generated artifact ignore rules when VCS is enabled
+- `AGENTS.md` plus `.cargo-ai/guidance/`
+  - Codex guidance when you run `cargo ai add guidance --style codex`
+  - `tool-authoring.md` stays the workflow overview, while detailed contract, child-agent, and hardening rules live in adjacent guidance files
+- `tools/hello_tool/`
+  - normal Rust source for the tool crate, with custom behavior isolated in `src/tool.rs`
+  - Cargo AI-owned child-agent helper code isolated in `src/agent_bridge.rs`
+- `.cargo-ai/tools/hello_tool/tool.json`
+  - Cargo AI-managed metadata pointing back to the source crate
+
+After you implement the tool's metadata and invoke behavior in `tools/hello_tool/src/tool.rs`, build and inspect it with:
+
+```bash
+cargo ai tools build hello_tool --target aarch64-apple-darwin
+cargo ai tools describe hello_tool
+cargo ai tools lint hello_tool
+cargo ai tools check hello_tool
+```
+
+`cargo ai tools lint <name>` is the static source/scaffold check for project-local source-backed tools. It checks Cargo AI-managed metadata linkage plus scaffold/layout expectations without executing the tool's business logic. Machine-only or binary-only tools are currently out of scope for linting.
+
+The tool `describe` result schema must be a nullable string. A step that sets `output_variable` still requires the actual `invoke` response to contain a non-null string result. For UI or background-process tools, keep rendering/artifact creation testable without launching the UI when practical, expose a smoke-test control such as `open_window=false`, and declare UI/process behavior in the tool `resource_profile`.
+
+When a parent agent calls a `kind: "tool"` step, new scaffolded tools also receive a Cargo AI-owned child-agent helper in `src/agent_bridge.rs`. That helper is available through the `InvocationContext` argument passed to `src/tool.rs`, so tool-authored Rust code can call one or more same-project child agents without hand-rolling subprocess flags, depth handling, or runtime-budget propagation. Tool execution itself does not consume an extra agent-depth hop; child-agent calls made from the tool consume depth exactly as if the parent had called those children directly.
+
+For validation, use Cargo AI surfaces first: `cargo test` only for crate-local Rust logic, then `cargo ai tools lint`, `build`, `check`, and `hatch --check`, with live leaf runtime checks before live parent orchestration and real side effects last. Treat `ps` or `kill` as exceptional cleanup for a specific long-lived child process left behind by your own live test run, not as a normal part of authoring-time validation.
+
+Treat `.cargo-ai/tools/...` and `.cargo-ai/agents/...` as Cargo AI-owned generated state, not as author-owned scratch space. Do not manually copy, move, symlink, or delete files there during debugging. If you do touch managed state by hand, stop using that workspace as proof of a Cargo AI artifact bug and rerun the repro from a fresh workspace or freshly regenerated managed state instead. When a workflow mixes deterministic fan-out logic with live sources, prove the hardcoded-input path first and add URL/provider behavior only after the local orchestration path is already green.
+
+Then wire it into your agent JSON:
+
+```json
+{
+  "kind": "tool",
+  "name": "hello_tool",
+  "params": {
+    "name": "Cargo AI"
+  },
+  "output_variable": "greeting"
+}
+```
+
+Validate the pairing with:
+
+```bash
+cargo ai tools check --config ./my_agent.json
+cargo ai hatch my_agent --config ./my_agent.json --check
+```
+
+By default, `run`, `hatch --check`, and `hatch` perform an upfront tool audit against the tool `describe` contract. Use `--ignore-tools` only when you intentionally want to skip that startup audit and accept failure later if a tool step is actually reached.
 
 ## Account-Backed Flows
 
