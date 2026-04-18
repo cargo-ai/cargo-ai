@@ -213,13 +213,14 @@ struct RuntimeVarSpec {
     default_value: Option<Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FieldType {
     String,
     Boolean,
     Number,
     Integer,
     Array,
+    Object,
 }
 
 #[derive(Debug, Clone)]
@@ -236,23 +237,12 @@ struct NumericConstraints {
     exclusive_maximum: Option<NumericConstraintValue>,
 }
 
-impl NumericConstraints {
-    fn has_any(&self) -> bool {
-        self.minimum.is_some()
-            || self.maximum.is_some()
-            || self.exclusive_minimum.is_some()
-            || self.exclusive_maximum.is_some()
-    }
-}
-
 #[derive(Debug, Clone)]
 struct AgentProperty {
     name: String,
     rust_type: String,
     field_type: FieldType,
-    description: Option<String>,
-    enum_values: Option<Vec<String>>,
-    numeric_constraints: NumericConstraints,
+    schema_value: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -1582,57 +1572,36 @@ fn parse_tool_param_value(
     schema_field_types: &BTreeMap<String, FieldType>,
 ) -> Result<ToolParamValue, BuildError> {
     match value {
-        Value::String(_) | Value::Bool(_) => Ok(ToolParamValue::Literal(value.clone())),
+        Value::String(_) | Value::Bool(_) | Value::Array(_) => {
+            Ok(ToolParamValue::Literal(value.clone()))
+        }
         Value::Number(number) if number.is_i64() || number.is_u64() || number.is_f64() => {
             Ok(ToolParamValue::Literal(value.clone()))
         }
         Value::Object(map) => {
-            if map.len() != 1 {
-                return Err(BuildError::config(
-                    path,
-                    "expected a scalar literal or an object with exactly one key (`var`)",
-                ));
-            }
-
-            let Some((key, variable_value)) = map.iter().next() else {
-                return Err(BuildError::config(
-                    path,
-                    "expected a scalar literal or an object with exactly one key (`var`)",
-                ));
-            };
-
-            if key != "var" {
-                return Err(BuildError::config(
-                    path,
-                    format!("unsupported tool param object key `{key}` (supported: `var`)"),
-                ));
-            }
-
-            let variable_path = format!("{path}.var");
-            let variable_name = variable_value.as_str().ok_or_else(|| {
-                BuildError::config(&variable_path, "expected `var` to be a string field name")
-            })?;
-            let normalized_name = variable_name.trim();
-            validate_variable_lookup_name(normalized_name, &variable_path)?;
-            let field_type = resolve_var_field_type(
-                &Value::String(normalized_name.to_string()),
-                schema_field_types,
-                &variable_path,
-            )?;
-            if field_type == FieldType::Array {
-                return Err(BuildError::config(
+            if map.len() == 1 && map.contains_key("var") {
+                let variable_path = format!("{path}.var");
+                let Some(variable_value) = map.get("var") else {
+                    unreachable!("checked key presence above");
+                };
+                let variable_name = variable_value.as_str().ok_or_else(|| {
+                    BuildError::config(&variable_path, "expected `var` to be a string field name")
+                })?;
+                let normalized_name = variable_name.trim();
+                validate_variable_lookup_name(normalized_name, &variable_path)?;
+                resolve_var_field_type(
+                    &Value::String(normalized_name.to_string()),
+                    schema_field_types,
                     &variable_path,
-                    format!(
-                        "array-valued field `{normalized_name}` cannot be used as a tool param variable in this story"
-                    ),
-                ));
+                )?;
+                Ok(ToolParamValue::Variable(normalized_name.to_string()))
+            } else {
+                Ok(ToolParamValue::Literal(value.clone()))
             }
-
-            Ok(ToolParamValue::Variable(normalized_name.to_string()))
         }
         _ => Err(BuildError::config(
             path,
-            "expected a string, boolean, number, or an object of the form `{ \"var\": \"field_name\" }`",
+            "expected a JSON literal or an object of the form `{ \"var\": \"field_name\" }`",
         )),
     }
 }
@@ -1902,7 +1871,7 @@ fn parse_action_scalar_variable_reference(
         path,
     )?;
 
-    if field_type == FieldType::Array {
+    if is_structured_type(&field_type) {
         return Err(BuildError::config(
             path,
             format!(
@@ -2251,9 +2220,9 @@ fn validate_runtime_default_value(
                 ))
             }
         }
-        FieldType::Array => Err(BuildError::config(
+        FieldType::Array | FieldType::Object => Err(BuildError::config(
             path,
-            "array runtime variable defaults are not supported in this story",
+            "structured runtime variable defaults are not supported in this story",
         )),
     }
 }
@@ -2626,11 +2595,11 @@ fn parse_run_arg(
                 schema_field_types,
                 &variable_path,
             )?;
-            if field_type == FieldType::Array {
+            if is_structured_type(&field_type) {
                 return Err(BuildError::config(
                     &variable_path,
                     format!(
-                        "array-valued field `{}` cannot be used as an action arg variable in this story",
+                        "structured field `{}` cannot be used as an action arg variable in this story",
                         normalized_name
                     ),
                 ));
@@ -2757,7 +2726,17 @@ fn validate_logic_expression(
             }
 
             if operator == "var" {
-                resolve_var_field_type(arguments, schema_field_types, &format!("{path}.var"))?;
+                let field_type =
+                    resolve_var_field_type(arguments, schema_field_types, &format!("{path}.var"))?;
+                if is_structured_type(&field_type) {
+                    return Err(BuildError::config(
+                        format!("{path}.var"),
+                        format!(
+                            "structured field references are only supported in tool params in this story; got {}",
+                            type_name(&field_type)
+                        ),
+                    ));
+                }
                 return Ok(());
             }
 
@@ -2991,6 +2970,10 @@ fn is_numeric_type(field_type: &FieldType) -> bool {
     matches!(field_type, FieldType::Number | FieldType::Integer)
 }
 
+fn is_structured_type(field_type: &FieldType) -> bool {
+    matches!(field_type, FieldType::Array | FieldType::Object)
+}
+
 fn are_compatible_types(left: &FieldType, right: &FieldType) -> bool {
     left == right || (is_numeric_type(left) && is_numeric_type(right))
 }
@@ -3002,7 +2985,21 @@ fn type_name(field_type: &FieldType) -> &'static str {
         FieldType::Number => "number",
         FieldType::Integer => "integer",
         FieldType::Array => "array",
+        FieldType::Object => "object",
     }
+}
+
+#[derive(Clone, Copy)]
+enum SchemaPropertyContext {
+    TopLevel,
+    ArrayItem,
+    ObjectProperty,
+}
+
+#[derive(Clone, Copy)]
+struct ParsedAgentPropertyType {
+    field_type: FieldType,
+    nullable: bool,
 }
 
 fn parse_agent_property(
@@ -3010,40 +3007,163 @@ fn parse_agent_property(
     property: &Map<String, Value>,
     path: &str,
 ) -> Result<AgentProperty, BuildError> {
-    let schema_type = get_schema_type(property, path)?;
-    let (rust_type, field_type) = match schema_type.as_str() {
-        "string" => ("String".to_string(), FieldType::String),
-        "boolean" => ("bool".to_string(), FieldType::Boolean),
-        "number" => ("f64".to_string(), FieldType::Number),
-        "integer" => ("i64".to_string(), FieldType::Integer),
-        "array" => {
-            return Err(BuildError::config(
-                format!("{path}.type"),
-                "top-level array output fields are not supported in this story",
-            ));
-        }
-        "object" => {
-            return Err(BuildError::config(
-                format!("{path}.type"),
-                "nested object fields are not supported yet",
-            ));
-        }
-        other => {
-            return Err(BuildError::config(
-                format!("{path}.type"),
-                format!("unsupported schema type `{other}`"),
-            ));
-        }
+    let (field_type, schema_value) =
+        normalize_agent_property_schema(property, path, SchemaPropertyContext::TopLevel)?;
+    let rust_type = match field_type {
+        FieldType::String => "String".to_string(),
+        FieldType::Boolean => "bool".to_string(),
+        FieldType::Number => "f64".to_string(),
+        FieldType::Integer => "i64".to_string(),
+        FieldType::Array | FieldType::Object => "serde_json::Value".to_string(),
     };
 
     Ok(AgentProperty {
         name: name.to_string(),
         rust_type,
         field_type: field_type.clone(),
-        description: parse_optional_description(property, path)?,
-        enum_values: parse_optional_string_enum(property, path, &field_type)?,
-        numeric_constraints: parse_numeric_constraints(property, path, &field_type)?,
+        schema_value,
     })
+}
+
+fn normalize_agent_property_schema(
+    property: &Map<String, Value>,
+    path: &str,
+    context: SchemaPropertyContext,
+) -> Result<(FieldType, Value), BuildError> {
+    let parsed_type = parse_agent_property_type(property, path, context)?;
+    let field_type = parsed_type.field_type;
+    match field_type {
+        FieldType::Array if matches!(context, SchemaPropertyContext::ObjectProperty) => {
+            return Err(BuildError::config(
+                format!("{path}.type"),
+                "object properties inside structured tool-bound fields must stay scalar in this story",
+            ));
+        }
+        FieldType::Object if matches!(context, SchemaPropertyContext::ObjectProperty) => {
+            return Err(BuildError::config(
+                format!("{path}.type"),
+                "nested object fields are not supported beyond one declared object layer in this story",
+            ));
+        }
+        _ => {}
+    }
+
+    let description = parse_optional_description(property, path)?;
+    let enum_values = parse_optional_string_enum(property, path, &field_type)?;
+    let numeric_constraints = parse_numeric_constraints(property, path, &field_type)?;
+
+    let mut normalized = property.clone();
+    normalized.insert(
+        "type".to_string(),
+        normalized_schema_type_value(field_type, parsed_type.nullable),
+    );
+    if let Some(description) = description {
+        normalized.insert("description".to_string(), Value::String(description));
+    }
+    match field_type {
+        FieldType::String | FieldType::Boolean | FieldType::Number | FieldType::Integer => {
+            if let Some(enum_values) = enum_values {
+                normalized.insert(
+                    "enum".to_string(),
+                    Value::Array(enum_values.into_iter().map(Value::String).collect()),
+                );
+            }
+            apply_numeric_constraint(
+                &mut normalized,
+                "minimum",
+                numeric_constraints.minimum.as_ref(),
+            );
+            apply_numeric_constraint(
+                &mut normalized,
+                "maximum",
+                numeric_constraints.maximum.as_ref(),
+            );
+            apply_numeric_constraint(
+                &mut normalized,
+                "exclusiveMinimum",
+                numeric_constraints.exclusive_minimum.as_ref(),
+            );
+            apply_numeric_constraint(
+                &mut normalized,
+                "exclusiveMaximum",
+                numeric_constraints.exclusive_maximum.as_ref(),
+            );
+        }
+        FieldType::Array => {
+            let items_value = get_required_field(property, "items", path)?;
+            let items_path = format!("{path}.items");
+            let items_obj = expect_object(items_value, &items_path)?;
+            let (item_type, normalized_items) = normalize_agent_property_schema(
+                items_obj,
+                &items_path,
+                SchemaPropertyContext::ArrayItem,
+            )?;
+            if item_type == FieldType::Array {
+                return Err(BuildError::config(
+                    format!("{items_path}.type"),
+                    "nested arrays are not supported in this story",
+                ));
+            }
+            normalized.insert("items".to_string(), normalized_items);
+        }
+        FieldType::Object => {
+            let properties_value = get_required_field(property, "properties", path)?;
+            let properties_path = format!("{path}.properties");
+            let properties = expect_object(properties_value, &properties_path)?;
+            if properties.is_empty() {
+                return Err(BuildError::config(
+                    &properties_path,
+                    "object fields must declare at least one property in this story",
+                ));
+            }
+
+            let mut normalized_properties = Map::new();
+            let mut required = Vec::with_capacity(properties.len());
+            for (property_name, property_value) in properties {
+                let property_path = format!("{properties_path}.{property_name}");
+                let property_obj = expect_object(property_value, &property_path)?;
+                let (nested_type, normalized_property) = normalize_agent_property_schema(
+                    property_obj,
+                    &property_path,
+                    SchemaPropertyContext::ObjectProperty,
+                )?;
+                if is_structured_type(&nested_type) {
+                    return Err(BuildError::config(
+                        format!("{property_path}.type"),
+                        "object properties inside structured tool-bound fields must stay scalar in this story",
+                    ));
+                }
+                normalized_properties.insert(property_name.clone(), normalized_property);
+                required.push(Value::String(property_name.clone()));
+            }
+
+            normalized.insert(
+                "properties".to_string(),
+                Value::Object(normalized_properties),
+            );
+            normalized.insert("additionalProperties".to_string(), Value::Bool(false));
+            normalized.insert("required".to_string(), Value::Array(required));
+        }
+    }
+
+    Ok((field_type, Value::Object(normalized)))
+}
+
+fn apply_numeric_constraint(
+    property: &mut Map<String, Value>,
+    key: &str,
+    value: Option<&NumericConstraintValue>,
+) {
+    if let Some(value) = value {
+        property.insert(key.to_string(), constraint_to_json(value));
+    }
+}
+
+fn constraint_to_json(value: &NumericConstraintValue) -> Value {
+    match value {
+        NumericConstraintValue::Integer(value) => Value::Number(serde_json::Number::from(*value)),
+        NumericConstraintValue::Number(value) => serde_json::json!(value),
+    }
 }
 
 fn parse_optional_description(
@@ -3288,6 +3408,115 @@ fn number_constraint_value(value: &NumericConstraintValue) -> f64 {
     match value {
         NumericConstraintValue::Number(value) => *value,
         NumericConstraintValue::Integer(value) => *value as f64,
+    }
+}
+
+fn parse_agent_property_type(
+    property: &Map<String, Value>,
+    path: &str,
+    context: SchemaPropertyContext,
+) -> Result<ParsedAgentPropertyType, BuildError> {
+    let type_value = get_required_field(property, "type", path)?;
+    let type_path = format!("{path}.type");
+    match type_value {
+        Value::String(schema_type) => Ok(ParsedAgentPropertyType {
+            field_type: parse_field_type_name(schema_type.as_str(), &type_path)?,
+            nullable: false,
+        }),
+        Value::Array(type_entries) => {
+            parse_nullable_property_type_union(type_entries, &type_path, context)
+        }
+        _ => Err(BuildError::config(
+            type_path,
+            "expected a string schema type",
+        )),
+    }
+}
+
+fn parse_nullable_property_type_union(
+    type_entries: &[Value],
+    type_path: &str,
+    context: SchemaPropertyContext,
+) -> Result<ParsedAgentPropertyType, BuildError> {
+    if !matches!(context, SchemaPropertyContext::ObjectProperty) {
+        return Err(BuildError::config(
+            type_path,
+            "union schema types are not supported yet",
+        ));
+    }
+    if type_entries.len() != 2 {
+        return Err(BuildError::config(
+            type_path,
+            "object properties inside structured tool-bound fields may use only `scalar | null` unions in this story",
+        ));
+    }
+
+    let mut nullable = false;
+    let mut scalar_type = None;
+    for type_entry in type_entries {
+        let raw_type = type_entry.as_str().ok_or_else(|| {
+            BuildError::config(
+                type_path,
+                "nullable unions must contain only string schema types",
+            )
+        })?;
+        let normalized_type = raw_type.trim().to_ascii_lowercase();
+        if normalized_type == "null" {
+            nullable = true;
+            continue;
+        }
+
+        let field_type = parse_field_type_name(normalized_type.as_str(), type_path)?;
+        if is_structured_type(&field_type) || scalar_type.replace(field_type).is_some() {
+            return Err(BuildError::config(
+                type_path,
+                "object properties inside structured tool-bound fields may use only `scalar | null` unions in this story",
+            ));
+        }
+    }
+
+    let Some(field_type) = scalar_type else {
+        return Err(BuildError::config(
+            type_path,
+            "object properties inside structured tool-bound fields may use only `scalar | null` unions in this story",
+        ));
+    };
+    if !nullable {
+        return Err(BuildError::config(
+            type_path,
+            "object properties inside structured tool-bound fields may use only `scalar | null` unions in this story",
+        ));
+    }
+
+    Ok(ParsedAgentPropertyType {
+        field_type,
+        nullable: true,
+    })
+}
+
+fn parse_field_type_name(schema_type: &str, type_path: &str) -> Result<FieldType, BuildError> {
+    match schema_type.trim().to_ascii_lowercase().as_str() {
+        "string" => Ok(FieldType::String),
+        "boolean" => Ok(FieldType::Boolean),
+        "number" => Ok(FieldType::Number),
+        "integer" => Ok(FieldType::Integer),
+        "array" => Ok(FieldType::Array),
+        "object" => Ok(FieldType::Object),
+        other => Err(BuildError::config(
+            type_path,
+            format!("unsupported schema type `{other}`"),
+        )),
+    }
+}
+
+fn normalized_schema_type_value(field_type: FieldType, nullable: bool) -> Value {
+    if nullable {
+        Value::Array(vec![
+            Value::String(type_name(&field_type).to_string()),
+            Value::String("null".to_string()),
+        ])
+    } else {
+        Value::String(type_name(&field_type).to_string())
     }
 }
 
@@ -3588,9 +3817,6 @@ fn render_agent_model(config: &AgentConfig) -> String {
     let mut struct_fields = String::new();
     let mut validation_calls = String::new();
     let mut schema_metadata_calls = String::new();
-    let mut has_enum_validation = false;
-    let mut has_i64_validation = false;
-    let mut has_f64_validation = false;
 
     let mut input_list = String::new();
     for property in &config.properties {
@@ -3599,89 +3825,26 @@ fn render_agent_model(config: &AgentConfig) -> String {
             property.name, property.rust_type
         ));
 
-        if let Some(enum_values) = &property.enum_values {
-            has_enum_validation = true;
-            let allowed_values = enum_values
-                .iter()
-                .map(|value| rust_string_literal(value))
-                .collect::<Vec<_>>()
-                .join(", ");
-            validation_calls.push_str(&format!(
-                "        validate_enum_field(&self.{name}, {field_name}, &[{allowed_values}])?;\n",
-                name = property.name,
-                field_name = rust_string_literal(&property.name)
-            ));
-        }
+        validation_calls.push_str(&format!(
+            "        validate_schema_field(
+            &serde_json::to_value(&self.{name}).expect(\"output field should serialize to JSON\"),
+            {field_name},
+            &serde_json::from_str({schema}).expect(\"generated property schema must be valid JSON\"),
+        )?;\n",
+            name = property.name,
+            field_name = rust_string_literal(&property.name),
+            schema = rust_string_literal(&property.schema_value.to_string()),
+        ));
 
-        if property.numeric_constraints.has_any() {
-            let validation_call = match property.field_type {
-                FieldType::Integer => {
-                    has_i64_validation = true;
-                    format!(
-                        "        validate_i64_range(self.{name}, {field_name}, {minimum}, {exclusive_minimum}, {maximum}, {exclusive_maximum})?;\n",
-                        name = property.name,
-                        field_name = rust_string_literal(&property.name),
-                        minimum = render_optional_i64_literal(property.numeric_constraints.minimum.as_ref()),
-                        exclusive_minimum = render_optional_i64_literal(
-                            property.numeric_constraints.exclusive_minimum.as_ref()
-                        ),
-                        maximum = render_optional_i64_literal(property.numeric_constraints.maximum.as_ref()),
-                        exclusive_maximum = render_optional_i64_literal(
-                            property.numeric_constraints.exclusive_maximum.as_ref()
-                        ),
-                    )
-                }
-                FieldType::Number => {
-                    has_f64_validation = true;
-                    format!(
-                        "        validate_f64_range(self.{name}, {field_name}, {minimum}, {exclusive_minimum}, {maximum}, {exclusive_maximum})?;\n",
-                        name = property.name,
-                        field_name = rust_string_literal(&property.name),
-                        minimum = render_optional_f64_literal(property.numeric_constraints.minimum.as_ref()),
-                        exclusive_minimum = render_optional_f64_literal(
-                            property.numeric_constraints.exclusive_minimum.as_ref()
-                        ),
-                        maximum = render_optional_f64_literal(property.numeric_constraints.maximum.as_ref()),
-                        exclusive_maximum = render_optional_f64_literal(
-                            property.numeric_constraints.exclusive_maximum.as_ref()
-                        ),
-                    )
-                }
-                _ => String::new(),
-            };
-            validation_calls.push_str(&validation_call);
-        }
-
-        if property.description.is_some()
-            || property.enum_values.is_some()
-            || property.numeric_constraints.has_any()
-        {
-            schema_metadata_calls.push_str(&format!(
-                "    apply_property_schema_metadata(
+        schema_metadata_calls.push_str(&format!(
+            "    apply_property_schema_override(
         properties,
         {field_name},
-        {description},
-        {enum_values},
-        {minimum},
-        {maximum},
-        {exclusive_minimum},
-        {exclusive_maximum},
+        serde_json::from_str({schema}).expect(\"generated property schema must be valid JSON\"),
     );\n",
-                field_name = rust_string_literal(&property.name),
-                description = render_optional_description(&property.description),
-                enum_values = render_optional_enum_values(property.enum_values.as_ref()),
-                minimum =
-                    render_optional_constraint_json(property.numeric_constraints.minimum.as_ref()),
-                maximum =
-                    render_optional_constraint_json(property.numeric_constraints.maximum.as_ref()),
-                exclusive_minimum = render_optional_constraint_json(
-                    property.numeric_constraints.exclusive_minimum.as_ref()
-                ),
-                exclusive_maximum = render_optional_constraint_json(
-                    property.numeric_constraints.exclusive_maximum.as_ref()
-                ),
-            ));
-        }
+            field_name = rust_string_literal(&property.name),
+            schema = rust_string_literal(&property.schema_value.to_string()),
+        ));
     }
 
     for input in &config.inputs {
@@ -3952,8 +4115,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
         ));
     }
 
-    let validation_helpers =
-        render_validation_helpers(has_enum_validation, has_i64_validation, has_f64_validation);
+    let validation_helpers = render_validation_helpers();
     let schema_metadata_helpers = render_schema_metadata_helpers(&schema_metadata_calls);
     let schema_metadata_apply = if schema_metadata_calls.is_empty() {
         String::new()
@@ -4212,108 +4374,227 @@ pub fn actions() -> Vec<Action> {{
     )
 }
 
-fn render_validation_helpers(
-    has_enum_validation: bool,
-    has_i64_validation: bool,
-    has_f64_validation: bool,
-) -> String {
-    let mut helpers = String::new();
-
-    if has_enum_validation {
-        helpers.push_str(
-            r#"
-fn validate_enum_field(value: &str, field_name: &str, allowed_values: &[&str]) -> Result<(), String> {
-    if allowed_values.contains(&value) {
-        return Ok(());
-    }
-
-    let allowed = allowed_values
-        .iter()
-        .map(|value| format!("`{value}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(format!("field `{field_name}` must be one of: {allowed}"))
+fn render_validation_helpers() -> String {
+    r#"
+fn validate_schema_field(
+    value: &serde_json::Value,
+    field_name: &str,
+    schema: &serde_json::Value,
+) -> Result<(), String> {
+    validate_schema_value(value, field_name, schema)
 }
-"#,
-        );
+
+fn validate_schema_value(
+    value: &serde_json::Value,
+    path: &str,
+    schema: &serde_json::Value,
+) -> Result<(), String> {
+    let schema_obj = schema
+        .as_object()
+        .ok_or_else(|| format!("field `{path}` uses an invalid generated schema"))?;
+    let (schema_type, nullable) = parse_generated_schema_type(schema_obj, path)?;
+    if value.is_null() {
+        return if nullable {
+            Ok(())
+        } else {
+            Err(format!("field `{path}` must not be null"))
+        };
     }
 
-    if has_i64_validation {
-        helpers.push_str(
-            r#"
-fn validate_i64_range(
+    match schema_type {
+        "string" => {
+            let text = value
+                .as_str()
+                .ok_or_else(|| format!("field `{path}` must be a string"))?;
+            if let Some(enum_values) = schema_obj.get("enum").and_then(serde_json::Value::as_array) {
+                let allowed = enum_values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>();
+                if !allowed.iter().any(|candidate| candidate == &text) {
+                    let allowed = allowed
+                        .iter()
+                        .map(|value| format!("`{value}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(format!("field `{path}` must be one of: {allowed}"));
+                }
+            }
+            Ok(())
+        }
+        "boolean" => {
+            if value.is_boolean() {
+                Ok(())
+            } else {
+                Err(format!("field `{path}` must be a boolean"))
+            }
+        }
+        "integer" => {
+            let integer = value
+                .as_i64()
+                .ok_or_else(|| format!("field `{path}` must be an integer"))?;
+            validate_integer_constraints(integer, path, schema_obj)
+        }
+        "number" => {
+            let number = value
+                .as_f64()
+                .filter(|number| number.is_finite())
+                .ok_or_else(|| format!("field `{path}` must be a number"))?;
+            validate_number_constraints(number, path, schema_obj)
+        }
+        "array" => {
+            let items = value
+                .as_array()
+                .ok_or_else(|| format!("field `{path}` must be an array"))?;
+            let item_schema = schema_obj
+                .get("items")
+                .ok_or_else(|| format!("field `{path}` uses an invalid generated array schema"))?;
+            for (index, item) in items.iter().enumerate() {
+                validate_schema_value(item, &format!("{path}[{index}]"), item_schema)?;
+            }
+            Ok(())
+        }
+        "object" => {
+            let object = value
+                .as_object()
+                .ok_or_else(|| format!("field `{path}` must be an object"))?;
+            let properties = schema_obj
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| format!("field `{path}` uses an invalid generated object schema"))?;
+            for (name, property_schema) in properties {
+                let field_value = object
+                    .get(name)
+                    .ok_or_else(|| format!("field `{path}` is missing required property `{name}`"))?;
+                validate_schema_value(field_value, &format!("{path}.{name}"), property_schema)?;
+            }
+            for key in object.keys() {
+                if !properties.contains_key(key) {
+                    return Err(format!(
+                        "field `{path}` contains unexpected property `{key}`; object fields are strict"
+                    ));
+                }
+            }
+            Ok(())
+        }
+        other => Err(format!(
+            "field `{path}` uses unsupported generated schema type `{other}`"
+        )),
+    }
+}
+
+fn parse_generated_schema_type<'a>(
+    schema: &'a serde_json::Map<String, serde_json::Value>,
+    path: &str,
+) -> Result<(&'a str, bool), String> {
+    let type_value = schema
+        .get("type")
+        .ok_or_else(|| format!("field `{path}` uses an invalid generated schema type"))?;
+
+    match type_value {
+        serde_json::Value::String(schema_type) => Ok((schema_type.as_str(), false)),
+        serde_json::Value::Array(type_entries) => {
+            if type_entries.len() != 2 {
+                return Err(format!("field `{path}` uses an invalid generated schema type"));
+            }
+
+            let mut nullable = false;
+            let mut scalar_type = None;
+            for type_entry in type_entries {
+                let raw_type = type_entry
+                    .as_str()
+                    .ok_or_else(|| format!("field `{path}` uses an invalid generated schema type"))?;
+                if raw_type == "null" {
+                    nullable = true;
+                    continue;
+                }
+                if scalar_type.replace(raw_type).is_some() {
+                    return Err(format!("field `{path}` uses an invalid generated schema type"));
+                }
+            }
+
+            let Some(schema_type) = scalar_type else {
+                return Err(format!("field `{path}` uses an invalid generated schema type"));
+            };
+            if !nullable {
+                return Err(format!("field `{path}` uses an invalid generated schema type"));
+            }
+
+            Ok((schema_type, true))
+        }
+        _ => Err(format!("field `{path}` uses an invalid generated schema type")),
+    }
+}
+
+fn validate_integer_constraints(
     value: i64,
-    field_name: &str,
-    minimum: Option<i64>,
-    exclusive_minimum: Option<i64>,
-    maximum: Option<i64>,
-    exclusive_maximum: Option<i64>,
+    path: &str,
+    schema: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), String> {
-    if let Some(minimum) = minimum {
+    if let Some(minimum) = schema.get("minimum").and_then(serde_json::Value::as_i64) {
         if value < minimum {
-            return Err(format!("field `{field_name}` must be greater than or equal to {minimum}"));
+            return Err(format!("field `{path}` must be greater than or equal to {minimum}"));
         }
     }
-    if let Some(exclusive_minimum) = exclusive_minimum {
+    if let Some(exclusive_minimum) = schema
+        .get("exclusiveMinimum")
+        .and_then(serde_json::Value::as_i64)
+    {
         if value <= exclusive_minimum {
-            return Err(format!("field `{field_name}` must be greater than {exclusive_minimum}"));
+            return Err(format!("field `{path}` must be greater than {exclusive_minimum}"));
         }
     }
-    if let Some(maximum) = maximum {
+    if let Some(maximum) = schema.get("maximum").and_then(serde_json::Value::as_i64) {
         if value > maximum {
-            return Err(format!("field `{field_name}` must be less than or equal to {maximum}"));
+            return Err(format!("field `{path}` must be less than or equal to {maximum}"));
         }
     }
-    if let Some(exclusive_maximum) = exclusive_maximum {
+    if let Some(exclusive_maximum) = schema
+        .get("exclusiveMaximum")
+        .and_then(serde_json::Value::as_i64)
+    {
         if value >= exclusive_maximum {
-            return Err(format!("field `{field_name}` must be less than {exclusive_maximum}"));
+            return Err(format!("field `{path}` must be less than {exclusive_maximum}"));
         }
     }
     Ok(())
 }
-"#,
-        );
-    }
 
-    if has_f64_validation {
-        helpers.push_str(
-            r#"
-
-fn validate_f64_range(
+fn validate_number_constraints(
     value: f64,
-    field_name: &str,
-    minimum: Option<f64>,
-    exclusive_minimum: Option<f64>,
-    maximum: Option<f64>,
-    exclusive_maximum: Option<f64>,
+    path: &str,
+    schema: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), String> {
-    if let Some(minimum) = minimum {
+    if let Some(minimum) = schema.get("minimum").and_then(serde_json::Value::as_f64) {
         if value < minimum {
-            return Err(format!("field `{field_name}` must be greater than or equal to {minimum}"));
+            return Err(format!("field `{path}` must be greater than or equal to {minimum}"));
         }
     }
-    if let Some(exclusive_minimum) = exclusive_minimum {
+    if let Some(exclusive_minimum) = schema
+        .get("exclusiveMinimum")
+        .and_then(serde_json::Value::as_f64)
+    {
         if value <= exclusive_minimum {
-            return Err(format!("field `{field_name}` must be greater than {exclusive_minimum}"));
+            return Err(format!("field `{path}` must be greater than {exclusive_minimum}"));
         }
     }
-    if let Some(maximum) = maximum {
+    if let Some(maximum) = schema.get("maximum").and_then(serde_json::Value::as_f64) {
         if value > maximum {
-            return Err(format!("field `{field_name}` must be less than or equal to {maximum}"));
+            return Err(format!("field `{path}` must be less than or equal to {maximum}"));
         }
     }
-    if let Some(exclusive_maximum) = exclusive_maximum {
+    if let Some(exclusive_maximum) = schema
+        .get("exclusiveMaximum")
+        .and_then(serde_json::Value::as_f64)
+    {
         if value >= exclusive_maximum {
-            return Err(format!("field `{field_name}` must be less than {exclusive_maximum}"));
+            return Err(format!("field `{path}` must be less than {exclusive_maximum}"));
         }
     }
     Ok(())
 }
-"#,
-        );
-    }
-
-    helpers
+"#
+    .to_string()
 }
 
 fn render_schema_metadata_helpers(schema_metadata_calls: &str) -> String {
@@ -4336,127 +4617,16 @@ fn apply_output_schema_metadata(schema: &mut serde_json::Value) {{
 
 {schema_metadata_calls}}}
 
-fn apply_property_schema_metadata(
+fn apply_property_schema_override(
     properties: &mut serde_json::Map<String, serde_json::Value>,
     field_name: &str,
-    description: Option<&str>,
-    enum_values: Option<Vec<&str>>,
-    minimum: Option<serde_json::Value>,
-    maximum: Option<serde_json::Value>,
-    exclusive_minimum: Option<serde_json::Value>,
-    exclusive_maximum: Option<serde_json::Value>,
+    schema_value: serde_json::Value,
 ) {{
-    let Some(property_schema) = properties
-        .get_mut(field_name)
-        .and_then(serde_json::Value::as_object_mut)
-    else {{
-        return;
-    }};
-
-    if let Some(description) = description {{
-        property_schema.insert(
-            "description".to_string(),
-            serde_json::Value::String(description.to_string()),
-        );
-    }}
-    if let Some(enum_values) = enum_values {{
-        property_schema.insert(
-            "enum".to_string(),
-            serde_json::Value::Array(
-                enum_values
-                    .into_iter()
-                    .map(|value| serde_json::Value::String(value.to_string()))
-                    .collect(),
-            ),
-        );
-    }}
-    if let Some(minimum) = minimum {{
-        property_schema.insert("minimum".to_string(), minimum);
-    }}
-    if let Some(maximum) = maximum {{
-        property_schema.insert("maximum".to_string(), maximum);
-    }}
-    if let Some(exclusive_minimum) = exclusive_minimum {{
-        property_schema.insert("exclusiveMinimum".to_string(), exclusive_minimum);
-    }}
-    if let Some(exclusive_maximum) = exclusive_maximum {{
-        property_schema.insert("exclusiveMaximum".to_string(), exclusive_maximum);
-    }}
+    properties.insert(field_name.to_string(), schema_value);
 }}
 "#,
         schema_metadata_calls = schema_metadata_calls
     )
-}
-
-fn render_optional_description(description: &Option<String>) -> String {
-    description
-        .as_ref()
-        .map(|description| format!("Some({})", rust_string_literal(description)))
-        .unwrap_or_else(|| "None".to_string())
-}
-
-fn render_optional_enum_values(enum_values: Option<&Vec<String>>) -> String {
-    enum_values
-        .map(|values| {
-            let rendered = values
-                .iter()
-                .map(|value| rust_string_literal(value))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("Some(vec![{rendered}])")
-        })
-        .unwrap_or_else(|| "None".to_string())
-}
-
-fn render_optional_constraint_json(value: Option<&NumericConstraintValue>) -> String {
-    value
-        .map(|value| format!("Some({})", render_constraint_json(value)))
-        .unwrap_or_else(|| "None".to_string())
-}
-
-fn render_constraint_json(value: &NumericConstraintValue) -> String {
-    match value {
-        NumericConstraintValue::Integer(value) => {
-            format!("serde_json::Value::Number(serde_json::Number::from({value}i64))")
-        }
-        NumericConstraintValue::Number(value) => {
-            format!("serde_json::json!({value})")
-        }
-    }
-}
-
-fn render_optional_i64_literal(value: Option<&NumericConstraintValue>) -> String {
-    value
-        .map(|value| format!("Some({})", render_i64_literal(value)))
-        .unwrap_or_else(|| "None".to_string())
-}
-
-fn render_i64_literal(value: &NumericConstraintValue) -> String {
-    match value {
-        NumericConstraintValue::Integer(value) => value.to_string(),
-        NumericConstraintValue::Number(_) => {
-            unreachable!("integer constraints should remain integer")
-        }
-    }
-}
-
-fn render_optional_f64_literal(value: Option<&NumericConstraintValue>) -> String {
-    value
-        .map(|value| format!("Some({})", render_f64_literal(value)))
-        .unwrap_or_else(|| "None".to_string())
-}
-
-fn render_f64_literal(value: &NumericConstraintValue) -> String {
-    let numeric_value = match value {
-        NumericConstraintValue::Number(value) => value.to_string(),
-        NumericConstraintValue::Integer(value) => (*value as f64).to_string(),
-    };
-
-    if numeric_value.contains(['.', 'e', 'E']) {
-        numeric_value
-    } else {
-        format!("{numeric_value}.0")
-    }
 }
 
 fn rust_string_literal(value: &str) -> String {
@@ -4469,7 +4639,9 @@ fn render_runtime_var_type_expr(field_type: &FieldType) -> &'static str {
         FieldType::Boolean => "RuntimeVarType::Boolean",
         FieldType::Number => "RuntimeVarType::Number",
         FieldType::Integer => "RuntimeVarType::Integer",
-        FieldType::Array => unreachable!("array runtime vars are rejected during parsing"),
+        FieldType::Array | FieldType::Object => {
+            unreachable!("structured runtime vars are rejected during parsing")
+        }
     }
 }
 

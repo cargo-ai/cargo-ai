@@ -9,12 +9,14 @@ const SUPPORTED_FILE_EXTENSIONS: [&str; 24] = [
 ];
 const SUPPORTED_GENERATED_IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum SchemaFieldType {
     String,
     Number,
     Integer,
     Boolean,
+    Array,
+    Object,
 }
 
 #[derive(Clone, Debug)]
@@ -34,10 +36,7 @@ struct NumericConstraints {
 #[derive(Clone, Debug)]
 struct SchemaProperty {
     name: String,
-    field_type: SchemaFieldType,
     schema_value: Value,
-    enum_values: Option<Vec<String>>,
-    numeric_constraints: NumericConstraints,
 }
 
 #[derive(Clone, Debug)]
@@ -388,38 +387,299 @@ fn parse_schema_properties(root_obj: &Map<String, Value>) -> Result<Vec<SchemaPr
 
         let property_path = format!("$.agent_schema.properties.{name}");
         let property = expect_object(raw_property, property_path.as_str())?;
-        let field_type = parse_schema_field_type(property, property_path.as_str())?;
-        let enum_values = parse_enum_values(property, property_path.as_str(), &field_type)?;
-        let numeric_constraints =
-            parse_numeric_constraints(property, property_path.as_str(), &field_type)?;
+        let (_, schema_value) = normalize_schema_property(
+            property,
+            property_path.as_str(),
+            SchemaPropertyContext::TopLevel,
+        )?;
 
         parsed.push(SchemaProperty {
             name: name.clone(),
-            field_type,
-            schema_value: raw_property.clone(),
-            enum_values,
-            numeric_constraints,
+            schema_value,
         });
     }
 
     Ok(parsed)
 }
 
+#[derive(Clone, Copy)]
+enum SchemaPropertyContext {
+    TopLevel,
+    ArrayItem,
+    ObjectProperty,
+}
+
+#[derive(Clone, Copy)]
+struct ParsedSchemaFieldType {
+    field_type: SchemaFieldType,
+    nullable: bool,
+}
+
 fn parse_schema_field_type(
     property: &Map<String, Value>,
     path: &str,
-) -> Result<SchemaFieldType, String> {
-    let raw = required_string(property, "type", path)?
-        .trim()
-        .to_ascii_lowercase();
-    match raw.as_str() {
+    context: SchemaPropertyContext,
+) -> Result<ParsedSchemaFieldType, String> {
+    let type_path = format!("{path}.type");
+    let type_value = required_field(property, "type", path)?;
+    match type_value {
+        Value::String(raw) => Ok(ParsedSchemaFieldType {
+            field_type: parse_schema_field_type_name(raw, &type_path)?,
+            nullable: false,
+        }),
+        Value::Array(type_entries) => {
+            parse_nullable_schema_field_type(type_entries, &type_path, context)
+        }
+        _ => Err(format!("{type_path}: expected a string schema type")),
+    }
+}
+
+fn parse_nullable_schema_field_type(
+    type_entries: &[Value],
+    type_path: &str,
+    context: SchemaPropertyContext,
+) -> Result<ParsedSchemaFieldType, String> {
+    if !matches!(context, SchemaPropertyContext::ObjectProperty) {
+        return Err(format!(
+            "{type_path}: union schema types are not supported yet"
+        ));
+    }
+    if type_entries.len() != 2 {
+        return Err(format!(
+            "{type_path}: object properties inside structured tool-bound fields may use only `scalar | null` unions in this story"
+        ));
+    }
+
+    let mut nullable = false;
+    let mut scalar_type = None;
+    for type_entry in type_entries {
+        let raw_type = type_entry.as_str().ok_or_else(|| {
+            format!("{type_path}: nullable unions must contain only string schema types")
+        })?;
+        let normalized_type = raw_type.trim().to_ascii_lowercase();
+        if normalized_type == "null" {
+            nullable = true;
+            continue;
+        }
+
+        let field_type = parse_schema_field_type_name(normalized_type.as_str(), type_path)?;
+        if matches!(field_type, SchemaFieldType::Array | SchemaFieldType::Object)
+            || scalar_type.replace(field_type).is_some()
+        {
+            return Err(format!(
+                "{type_path}: object properties inside structured tool-bound fields may use only `scalar | null` unions in this story"
+            ));
+        }
+    }
+
+    let Some(field_type) = scalar_type else {
+        return Err(format!(
+            "{type_path}: object properties inside structured tool-bound fields may use only `scalar | null` unions in this story"
+        ));
+    };
+    if !nullable {
+        return Err(format!(
+            "{type_path}: object properties inside structured tool-bound fields may use only `scalar | null` unions in this story"
+        ));
+    }
+
+    Ok(ParsedSchemaFieldType {
+        field_type,
+        nullable: true,
+    })
+}
+
+fn parse_schema_field_type_name(raw: &str, type_path: &str) -> Result<SchemaFieldType, String> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
         "string" => Ok(SchemaFieldType::String),
         "number" => Ok(SchemaFieldType::Number),
         "integer" => Ok(SchemaFieldType::Integer),
         "boolean" => Ok(SchemaFieldType::Boolean),
+        "array" => Ok(SchemaFieldType::Array),
+        "object" => Ok(SchemaFieldType::Object),
         _ => Err(format!(
-            "{path}.type: unsupported schema type `{raw}` (supported: `string`, `number`, `integer`, `boolean`)"
+            "{type_path}: unsupported schema type `{normalized}` (supported: `string`, `number`, `integer`, `boolean`, `array`, `object`)"
         )),
+    }
+}
+
+fn normalized_schema_type_value(field_type: SchemaFieldType, nullable: bool) -> Value {
+    if nullable {
+        Value::Array(vec![
+            Value::String(schema_field_type_name(field_type).to_string()),
+            Value::String("null".to_string()),
+        ])
+    } else {
+        Value::String(schema_field_type_name(field_type).to_string())
+    }
+}
+
+fn schema_field_type_name(field_type: SchemaFieldType) -> &'static str {
+    match field_type {
+        SchemaFieldType::String => "string",
+        SchemaFieldType::Number => "number",
+        SchemaFieldType::Integer => "integer",
+        SchemaFieldType::Boolean => "boolean",
+        SchemaFieldType::Array => "array",
+        SchemaFieldType::Object => "object",
+    }
+}
+
+fn normalize_schema_property(
+    property: &Map<String, Value>,
+    path: &str,
+    context: SchemaPropertyContext,
+) -> Result<(SchemaFieldType, Value), String> {
+    validate_optional_description(property, path)?;
+    let parsed_type = parse_schema_field_type(property, path, context)?;
+    let field_type = parsed_type.field_type;
+    match field_type {
+        SchemaFieldType::Array if matches!(context, SchemaPropertyContext::ObjectProperty) => {
+            return Err(format!(
+                "{path}.type: object properties inside structured tool-bound fields must stay scalar in this story"
+            ));
+        }
+        SchemaFieldType::Object if matches!(context, SchemaPropertyContext::ObjectProperty) => {
+            return Err(format!(
+                "{path}.type: nested object fields are not supported beyond one declared object layer in this story"
+            ));
+        }
+        _ => {}
+    }
+
+    let enum_values = parse_enum_values(property, path, &field_type)?;
+    let numeric_constraints = parse_numeric_constraints(property, path, &field_type)?;
+    let mut normalized = property.clone();
+    normalized.insert(
+        "type".to_string(),
+        normalized_schema_type_value(field_type, parsed_type.nullable),
+    );
+
+    match field_type {
+        SchemaFieldType::String
+        | SchemaFieldType::Number
+        | SchemaFieldType::Integer
+        | SchemaFieldType::Boolean => {
+            if let Some(enum_values) = enum_values {
+                normalized.insert(
+                    "enum".to_string(),
+                    Value::Array(enum_values.into_iter().map(Value::String).collect()),
+                );
+            }
+            apply_numeric_constraint(
+                &mut normalized,
+                "minimum",
+                numeric_constraints.minimum.as_ref(),
+            );
+            apply_numeric_constraint(
+                &mut normalized,
+                "maximum",
+                numeric_constraints.maximum.as_ref(),
+            );
+            apply_numeric_constraint(
+                &mut normalized,
+                "exclusiveMinimum",
+                numeric_constraints.exclusive_minimum.as_ref(),
+            );
+            apply_numeric_constraint(
+                &mut normalized,
+                "exclusiveMaximum",
+                numeric_constraints.exclusive_maximum.as_ref(),
+            );
+        }
+        SchemaFieldType::Array => {
+            let items_value = required_field(property, "items", path)?;
+            let items_path = format!("{path}.items");
+            let items_obj = expect_object(items_value, items_path.as_str())?;
+            let (item_type, normalized_items) = normalize_schema_property(
+                items_obj,
+                items_path.as_str(),
+                SchemaPropertyContext::ArrayItem,
+            )?;
+            if item_type == SchemaFieldType::Array {
+                return Err(format!(
+                    "{items_path}.type: nested arrays are not supported in this story"
+                ));
+            }
+            normalized.insert("items".to_string(), normalized_items);
+        }
+        SchemaFieldType::Object => {
+            let properties_value = required_field(property, "properties", path)?;
+            let properties_path = format!("{path}.properties");
+            let properties = expect_object(properties_value, properties_path.as_str())?;
+            if properties.is_empty() {
+                return Err(format!(
+                    "{properties_path}: object fields must declare at least one property in this story"
+                ));
+            }
+
+            let mut normalized_properties = Map::new();
+            let mut required = Vec::with_capacity(properties.len());
+            for (property_name, property_value) in properties {
+                let property_path = format!("{properties_path}.{property_name}");
+                let property_obj = expect_object(property_value, property_path.as_str())?;
+                let (nested_type, normalized_property) = normalize_schema_property(
+                    property_obj,
+                    property_path.as_str(),
+                    SchemaPropertyContext::ObjectProperty,
+                )?;
+                if matches!(
+                    nested_type,
+                    SchemaFieldType::Array | SchemaFieldType::Object
+                ) {
+                    return Err(format!(
+                        "{property_path}.type: object properties inside structured tool-bound fields must stay scalar in this story"
+                    ));
+                }
+                normalized_properties.insert(property_name.clone(), normalized_property);
+                required.push(Value::String(property_name.clone()));
+            }
+
+            normalized.insert(
+                "properties".to_string(),
+                Value::Object(normalized_properties),
+            );
+            normalized.insert("additionalProperties".to_string(), Value::Bool(false));
+            normalized.insert("required".to_string(), Value::Array(required));
+        }
+    }
+
+    Ok((field_type, Value::Object(normalized)))
+}
+
+fn validate_optional_description(property: &Map<String, Value>, path: &str) -> Result<(), String> {
+    let Some(description_value) = property.get("description") else {
+        return Ok(());
+    };
+
+    let description_path = format!("{path}.description");
+    let description = description_value
+        .as_str()
+        .ok_or_else(|| format!("{description_path}: expected a string"))?;
+    if description.trim().is_empty() {
+        return Err(format!(
+            "{description_path}: description cannot be empty when provided"
+        ));
+    }
+
+    Ok(())
+}
+
+fn apply_numeric_constraint(
+    property: &mut Map<String, Value>,
+    key: &str,
+    value: Option<&NumericConstraintValue>,
+) {
+    if let Some(value) = value {
+        property.insert(key.to_string(), constraint_to_json(value));
+    }
+}
+
+fn constraint_to_json(value: &NumericConstraintValue) -> Value {
+    match value {
+        NumericConstraintValue::Integer(value) => Value::Number((*value).into()),
+        NumericConstraintValue::Number(value) => serde_json::json!(value),
     }
 }
 
@@ -767,34 +1027,33 @@ fn optional_tool_params(
 
 fn parse_tool_param_value(value: &Value, path: &str) -> Result<crate::ToolParamValue, String> {
     match value {
-        Value::String(_) | Value::Bool(_) => Ok(crate::ToolParamValue::Literal(value.clone())),
+        Value::String(_) | Value::Bool(_) | Value::Array(_) => {
+            Ok(crate::ToolParamValue::Literal(value.clone()))
+        }
         Value::Number(number) if number.is_i64() || number.is_u64() || number.is_f64() => {
             Ok(crate::ToolParamValue::Literal(value.clone()))
         }
         Value::Object(map) => {
-            if map.len() != 1 {
-                return Err(format!(
-                    "{path}: expected a scalar literal or an object of the form `{{ \"var\": \"field_name\" }}`"
-                ));
+            if map.len() == 1 && map.contains_key("var") {
+                let Some(variable) = map.get("var") else {
+                    unreachable!("checked key presence above");
+                };
+                let variable_name = variable
+                    .as_str()
+                    .ok_or_else(|| format!("{path}.var: expected `var` to be a string field name"))?
+                    .trim()
+                    .to_string();
+                validate_tool_variable_lookup_name(
+                    variable_name.as_str(),
+                    format!("{path}.var").as_str(),
+                )?;
+                Ok(crate::ToolParamValue::Variable(variable_name))
+            } else {
+                Ok(crate::ToolParamValue::Literal(value.clone()))
             }
-            let Some(variable) = map.get("var") else {
-                return Err(format!(
-                    "{path}: expected a scalar literal or an object of the form `{{ \"var\": \"field_name\" }}`"
-                ));
-            };
-            let variable_name = variable
-                .as_str()
-                .ok_or_else(|| format!("{path}.var: expected `var` to be a string field name"))?
-                .trim()
-                .to_string();
-            validate_tool_variable_lookup_name(
-                variable_name.as_str(),
-                format!("{path}.var").as_str(),
-            )?;
-            Ok(crate::ToolParamValue::Variable(variable_name))
         }
         _ => Err(format!(
-            "{path}: expected a string, boolean, number, or an object of the form `{{ \"var\": \"field_name\" }}`"
+            "{path}: expected a JSON literal or an object of the form `{{ \"var\": \"field_name\" }}`"
         )),
     }
 }
@@ -1653,17 +1912,36 @@ fn validate_runtime_var_default(
 }
 
 fn validate_property_value(property: &SchemaProperty, value: &Value) -> Result<(), String> {
-    match property.field_type {
-        SchemaFieldType::String => {
+    validate_schema_value(value, property.name.as_str(), &property.schema_value)
+}
+
+fn validate_schema_value(value: &Value, path: &str, schema: &Value) -> Result<(), String> {
+    let schema_obj = schema
+        .as_object()
+        .ok_or_else(|| format!("field `{path}` uses an invalid schema"))?;
+    let (schema_type, nullable) = parse_runtime_schema_type(schema_obj, path)?;
+    if value.is_null() {
+        return if nullable {
+            Ok(())
+        } else {
+            Err(format!("field `{path}` must not be null"))
+        };
+    }
+
+    match schema_type {
+        "string" => {
             let text = value
                 .as_str()
-                .ok_or_else(|| format!("field `{}` must be a string", property.name))?;
-            if let Some(allowed_values) = property.enum_values.as_ref() {
-                if !allowed_values.iter().any(|candidate| candidate == text) {
+                .ok_or_else(|| format!("field `{path}` must be a string"))?;
+            if let Some(allowed_values) = schema_obj.get("enum").and_then(Value::as_array) {
+                let allowed = allowed_values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>();
+                if !allowed.iter().any(|candidate| candidate == &text) {
                     return Err(format!(
-                        "field `{}` must be one of: {}",
-                        property.name,
-                        allowed_values
+                        "field `{path}` must be one of: {}",
+                        allowed
                             .iter()
                             .map(|value| format!("`{value}`"))
                             .collect::<Vec<_>>()
@@ -1671,104 +1949,182 @@ fn validate_property_value(property: &SchemaProperty, value: &Value) -> Result<(
                     ));
                 }
             }
+            Ok(())
         }
-        SchemaFieldType::Boolean => {
-            if !value.is_boolean() {
-                return Err(format!("field `{}` must be a boolean", property.name));
+        "boolean" => {
+            if value.is_boolean() {
+                Ok(())
+            } else {
+                Err(format!("field `{path}` must be a boolean"))
             }
         }
-        SchemaFieldType::Integer => {
+        "integer" => {
             let integer_value = value
                 .as_i64()
-                .ok_or_else(|| format!("field `{}` must be an integer", property.name))?;
-            validate_integer_constraints(property, integer_value)?;
+                .ok_or_else(|| format!("field `{path}` must be an integer"))?;
+            validate_integer_schema_constraints(integer_value, path, schema_obj)
         }
-        SchemaFieldType::Number => {
+        "number" => {
             let number_value = value
                 .as_f64()
                 .filter(|number| number.is_finite())
-                .ok_or_else(|| format!("field `{}` must be a number", property.name))?;
-            validate_number_constraints(property, number_value)?;
+                .ok_or_else(|| format!("field `{path}` must be a number"))?;
+            validate_number_schema_constraints(number_value, path, schema_obj)
+        }
+        "array" => {
+            let items = value
+                .as_array()
+                .ok_or_else(|| format!("field `{path}` must be an array"))?;
+            let item_schema = schema_obj
+                .get("items")
+                .ok_or_else(|| format!("field `{path}` uses an invalid array schema"))?;
+            for (index, item) in items.iter().enumerate() {
+                validate_schema_value(item, format!("{path}[{index}]").as_str(), item_schema)?;
+            }
+            Ok(())
+        }
+        "object" => {
+            let object = value
+                .as_object()
+                .ok_or_else(|| format!("field `{path}` must be an object"))?;
+            let properties = schema_obj
+                .get("properties")
+                .and_then(Value::as_object)
+                .ok_or_else(|| format!("field `{path}` uses an invalid object schema"))?;
+            for (name, property_schema) in properties {
+                let field_value = object.get(name).ok_or_else(|| {
+                    format!("field `{path}` is missing required property `{name}`")
+                })?;
+                validate_schema_value(
+                    field_value,
+                    format!("{path}.{name}").as_str(),
+                    property_schema,
+                )?;
+            }
+            for key in object.keys() {
+                if !properties.contains_key(key) {
+                    return Err(format!(
+                        "field `{path}` contains unexpected property `{key}`; object fields are strict"
+                    ));
+                }
+            }
+            Ok(())
+        }
+        other => Err(format!(
+            "field `{path}` uses unsupported schema type `{other}`"
+        )),
+    }
+}
+
+fn parse_runtime_schema_type<'a>(
+    schema: &'a Map<String, Value>,
+    path: &str,
+) -> Result<(&'a str, bool), String> {
+    let type_value = schema
+        .get("type")
+        .ok_or_else(|| format!("field `{path}` uses an invalid schema type"))?;
+
+    match type_value {
+        Value::String(schema_type) => Ok((schema_type.as_str(), false)),
+        Value::Array(type_entries) => {
+            if type_entries.len() != 2 {
+                return Err(format!("field `{path}` uses an invalid schema type"));
+            }
+
+            let mut nullable = false;
+            let mut scalar_type = None;
+            for type_entry in type_entries {
+                let raw_type = type_entry
+                    .as_str()
+                    .ok_or_else(|| format!("field `{path}` uses an invalid schema type"))?;
+                if raw_type == "null" {
+                    nullable = true;
+                    continue;
+                }
+                if scalar_type.replace(raw_type).is_some() {
+                    return Err(format!("field `{path}` uses an invalid schema type"));
+                }
+            }
+
+            let Some(schema_type) = scalar_type else {
+                return Err(format!("field `{path}` uses an invalid schema type"));
+            };
+            if !nullable {
+                return Err(format!("field `{path}` uses an invalid schema type"));
+            }
+
+            Ok((schema_type, true))
+        }
+        _ => Err(format!("field `{path}` uses an invalid schema type")),
+    }
+}
+
+fn validate_integer_schema_constraints(
+    value: i64,
+    path: &str,
+    schema: &Map<String, Value>,
+) -> Result<(), String> {
+    if let Some(minimum) = schema.get("minimum").and_then(Value::as_i64) {
+        if value < minimum {
+            return Err(format!(
+                "field `{path}` must be greater than or equal to {minimum}"
+            ));
         }
     }
-
+    if let Some(exclusive_minimum) = schema.get("exclusiveMinimum").and_then(Value::as_i64) {
+        if value <= exclusive_minimum {
+            return Err(format!(
+                "field `{path}` must be greater than {exclusive_minimum}"
+            ));
+        }
+    }
+    if let Some(maximum) = schema.get("maximum").and_then(Value::as_i64) {
+        if value > maximum {
+            return Err(format!(
+                "field `{path}` must be less than or equal to {maximum}"
+            ));
+        }
+    }
+    if let Some(exclusive_maximum) = schema.get("exclusiveMaximum").and_then(Value::as_i64) {
+        if value >= exclusive_maximum {
+            return Err(format!(
+                "field `{path}` must be less than {exclusive_maximum}"
+            ));
+        }
+    }
     Ok(())
 }
 
-fn validate_integer_constraints(property: &SchemaProperty, value: i64) -> Result<(), String> {
-    if let Some(NumericConstraintValue::Integer(minimum)) = property.numeric_constraints.minimum {
+fn validate_number_schema_constraints(
+    value: f64,
+    path: &str,
+    schema: &Map<String, Value>,
+) -> Result<(), String> {
+    if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64) {
         if value < minimum {
             return Err(format!(
-                "field `{}` must be greater than or equal to {}",
-                property.name, minimum
+                "field `{path}` must be greater than or equal to {minimum}"
             ));
         }
     }
-    if let Some(NumericConstraintValue::Integer(minimum)) =
-        property.numeric_constraints.exclusive_minimum
-    {
-        if value <= minimum {
+    if let Some(exclusive_minimum) = schema.get("exclusiveMinimum").and_then(Value::as_f64) {
+        if value <= exclusive_minimum {
             return Err(format!(
-                "field `{}` must be greater than {}",
-                property.name, minimum
+                "field `{path}` must be greater than {exclusive_minimum}"
             ));
         }
     }
-    if let Some(NumericConstraintValue::Integer(maximum)) = property.numeric_constraints.maximum {
+    if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64) {
         if value > maximum {
             return Err(format!(
-                "field `{}` must be less than or equal to {}",
-                property.name, maximum
+                "field `{path}` must be less than or equal to {maximum}"
             ));
         }
     }
-    if let Some(NumericConstraintValue::Integer(maximum)) =
-        property.numeric_constraints.exclusive_maximum
-    {
-        if value >= maximum {
+    if let Some(exclusive_maximum) = schema.get("exclusiveMaximum").and_then(Value::as_f64) {
+        if value >= exclusive_maximum {
             return Err(format!(
-                "field `{}` must be less than {}",
-                property.name, maximum
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_number_constraints(property: &SchemaProperty, value: f64) -> Result<(), String> {
-    if let Some(NumericConstraintValue::Number(minimum)) = property.numeric_constraints.minimum {
-        if value < minimum {
-            return Err(format!(
-                "field `{}` must be greater than or equal to {}",
-                property.name, minimum
-            ));
-        }
-    }
-    if let Some(NumericConstraintValue::Number(minimum)) =
-        property.numeric_constraints.exclusive_minimum
-    {
-        if value <= minimum {
-            return Err(format!(
-                "field `{}` must be greater than {}",
-                property.name, minimum
-            ));
-        }
-    }
-    if let Some(NumericConstraintValue::Number(maximum)) = property.numeric_constraints.maximum {
-        if value > maximum {
-            return Err(format!(
-                "field `{}` must be less than or equal to {}",
-                property.name, maximum
-            ));
-        }
-    }
-    if let Some(NumericConstraintValue::Number(maximum)) =
-        property.numeric_constraints.exclusive_maximum
-    {
-        if value >= maximum {
-            return Err(format!(
-                "field `{}` must be less than {}",
-                property.name, maximum
+                "field `{path}` must be less than {exclusive_maximum}"
             ));
         }
     }
@@ -1993,6 +2349,34 @@ mod tests {
     }
 
     #[test]
+    fn validates_nullable_scalar_object_properties_inside_structured_fields() {
+        let cfg = config_with(
+            r#""rows": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "customer": { "type": "string" },
+                  "discount": { "type": ["number", "null"] }
+                }
+              }
+            }"#,
+            "[]",
+        );
+
+        let definition = assert_runtime_and_codegen_accept(&cfg);
+
+        definition
+            .validate_provider_output(r#"{"rows":[{"customer":"Acme","discount":null}]}"#)
+            .expect("nullable structured field should accept null");
+
+        let error = definition
+            .validate_provider_output(r#"{"rows":[{"customer":"Acme","discount":"free"}]}"#)
+            .expect_err("non-numeric discount should fail");
+        assert!(error.contains("field `rows[0].discount` must be a number"));
+    }
+
+    #[test]
     fn structural_action_only_requires_named_inputs() {
         let error = RuntimeAgentDefinition::from_str(
             r#"{
@@ -2057,6 +2441,18 @@ mod tests {
         assert!(build_error.contains("expected `sequential` or `parallel`"));
         assert!(runtime_error.contains("$.action_execution"));
         assert!(runtime_error.contains("expected `sequential` or `parallel`"));
+    }
+
+    #[test]
+    fn matches_codegen_for_rejecting_top_level_nullable_fields() {
+        let cfg = config_with(r#""value": { "type": ["string", "null"] }"#, "[]");
+
+        let (build_error, runtime_error) = assert_runtime_and_codegen_reject(&cfg);
+
+        assert!(build_error.contains("$.agent_schema.properties.value.type"));
+        assert!(build_error.contains("union schema types are not supported yet"));
+        assert!(runtime_error.contains("$.agent_schema.properties.value.type"));
+        assert!(runtime_error.contains("union schema types are not supported yet"));
     }
 
     #[test]

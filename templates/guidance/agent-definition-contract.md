@@ -152,6 +152,8 @@ Supported top-level property `type` values:
 - `number`
 - `integer`
 - `boolean`
+ - `array`
+ - `object`
 
 Supported optional top-level property metadata and constraints:
 - `description` on any supported field
@@ -163,11 +165,21 @@ Constraint rules:
 - `enum` values are exact and case-sensitive
 - lower bounds may use `minimum` or `exclusiveMinimum`, but not both
 - upper bounds may use `maximum` or `exclusiveMaximum`, but not both
+- `array` fields must be homogeneous
+- `object` fields must declare their shape explicitly
+- arrays may contain supported scalar item types or declared-shape object items
+- object properties inside structured tool-bound fields may be scalar or `scalar | null`
 
 Unsupported schema shapes for the current MVP:
-- top-level arrays
-- nested objects
-- union types
+- nested arrays
+- deeper nested objects
+- union types other than `scalar | null` on object properties inside structured tool-bound fields
+
+Structured-value lane:
+- top-level `array` / `object` fields exist for structured tool consumption
+- nullable support is limited to `scalar | null` object properties inside those structured payloads
+- structured top-level fields may flow only into tool params as raw JSON
+- `logic`, `when`, `exec.args`, string-part interpolation, `email_me`, child `run_vars`, and other scalar-first substitution surfaces must reject structured field references
 
 Structural action-only rule:
 - If `agent_schema.properties` is empty, Cargo AI skips the initial model call and begins at the action layer.
@@ -248,7 +260,12 @@ Optional fields:
 
 Use `kind: "tool"` for Cargo AI-managed project-local tools created with `cargo ai add tool <name>`.
 
-`params` is an object whose values may be scalar literals (`string`, `boolean`, `integer`, or `number`) or variable references such as `{ "var": "runtime.symbol" }`. Cargo AI validates literal params during check/build and validates resolved variable params at runtime against the tool's `describe.params` contract.
+`params` is an object whose values may be JSON literals or variable references such as `{ "var": "runtime.symbol" }`. Tool params may declare `string`, `boolean`, `integer`, `number`, `array`, or `object`. Cargo AI validates literal params during check/build and validates resolved variable params at runtime against the tool's `describe.params` contract.
+
+For structured tool params in this slice:
+- Cargo AI validates only top-level kind compatibility (`array` vs `object`)
+- deeper item/object shape validation remains the tool's responsibility
+- structured values are passed to tools as raw JSON with no string coercion
 
 `output_variable` is optional. The tool's `describe.result` schema must be a nullable string, but if `output_variable` is set, the actual `invoke` response must contain a non-null string result.
 
@@ -411,8 +428,8 @@ For `kind: "agent"`:
 Expect `cargo ai hatch <agent-name> --config <config.json> --check` to reject at least these cases:
 - missing required top-level keys
 - malformed `version`
-- unsupported top-level `agent_schema` property types
-- top-level arrays, nested objects, or union types in `agent_schema`
+- unsupported `agent_schema` property types
+- nested arrays, deeper nested objects, or unsupported union types in `agent_schema`
 - invalid `description`, `enum`, or numeric-bound metadata on a property
 - unsupported run-step kind
 - missing required fields for a step kind

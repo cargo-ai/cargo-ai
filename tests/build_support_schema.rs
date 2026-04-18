@@ -251,18 +251,48 @@ fn rejects_unknown_named_child_input_reference() {
 }
 
 #[test]
-fn rejects_top_level_array_fields_with_actionable_path() {
+fn accepts_top_level_array_fields_and_arrays_of_objects() {
     let cfg = config_with(
-        r#""numbers": { "type": "array", "items": { "type": "integer" } }"#,
+        r#""rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "customer": { "type": "string" },
+              "amount": { "type": "number" }
+            }
+          }
+        }"#,
         "[]",
     );
 
-    let err = build_support::generate_agent_model_from_str(&cfg)
-        .unwrap_err()
-        .to_string();
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
 
-    assert!(err.contains("$.agent_schema.properties.numbers.type"));
-    assert!(err.contains("top-level array output fields are not supported in this story"));
+    assert!(generated.contains("pub rows: serde_json::Value,"));
+    assert!(generated.contains(r#"apply_property_schema_override("#));
+    assert!(generated.contains(r#""rows""#));
+    assert!(generated.contains(r#"\"customer\":{\"type\":\"string\"}"#));
+}
+
+#[test]
+fn accepts_nullable_scalar_object_properties_inside_structured_fields() {
+    let cfg = config_with(
+        r#""rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "customer": { "type": "string" },
+              "discount": { "type": ["number", "null"] }
+            }
+          }
+        }"#,
+        "[]",
+    );
+
+    let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
+
+    assert!(generated.contains(r#"\"discount\":{\"type\":[\"number\",\"null\"]}"#));
 }
 
 #[test]
@@ -279,8 +309,35 @@ fn rejects_nested_arrays_with_actionable_path() {
         .unwrap_err()
         .to_string();
 
-    assert!(err.contains("$.agent_schema.properties.matrix.type"));
-    assert!(err.contains("top-level array output fields are not supported in this story"));
+    assert!(err.contains("$.agent_schema.properties.matrix.items.type"));
+    assert!(err.contains("nested arrays are not supported in this story"));
+}
+
+#[test]
+fn rejects_nested_object_properties_inside_structured_fields() {
+    let cfg = config_with(
+        r#""payload": {
+          "type": "object",
+          "properties": {
+            "nested": {
+              "type": "object",
+              "properties": {
+                "value": { "type": "string" }
+              }
+            }
+          }
+        }"#,
+        "[]",
+    );
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.agent_schema.properties.payload.properties.nested.type"));
+    assert!(err.contains(
+        "nested object fields are not supported beyond one declared object layer in this story"
+    ));
 }
 
 #[test]
@@ -292,9 +349,8 @@ fn preserves_description_in_generated_schema_metadata() {
 
     let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
 
-    assert!(generated.contains(r#"apply_property_schema_metadata("#));
-    assert!(generated.contains(r#""answer""#));
-    assert!(generated.contains(r#"Some("The numeric answer.")"#));
+    assert!(generated.contains(r#"apply_property_schema_override("#));
+    assert!(generated.contains(r#"\"description\":\"The numeric answer.\""#));
 }
 
 #[test]
@@ -303,9 +359,8 @@ fn preserves_string_enum_in_generated_schema_and_runtime_validation() {
 
     let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
 
-    assert!(generated.contains(r#"validate_enum_field(&self.unit, "unit", &["F", "C"])?;"#));
-    assert!(generated.contains(r#""enum".to_string()"#));
-    assert!(generated.contains(r#"Some(vec!["F", "C"])"#));
+    assert!(generated.contains(r#"validate_schema_field("#));
+    assert!(generated.contains(r#"\"enum\":[\"F\",\"C\"]"#));
 }
 
 #[test]
@@ -336,17 +391,13 @@ fn preserves_numeric_bounds_in_generated_schema_and_runtime_validation() {
 
     let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
 
-    assert!(generated.contains(
-        r#"validate_f64_range(self.confidence, "confidence", Some(0.0), None, None, Some(1.0))?;"#
-    ));
-    assert!(generated.contains(r#""minimum".to_string()"#));
-    assert!(generated.contains(r#""exclusiveMaximum".to_string()"#));
-    assert!(generated.contains("fn validate_f64_range("));
-    assert!(!generated.contains("fn validate_i64_range("));
+    assert!(generated.contains(r#"\"minimum\":0"#));
+    assert!(generated.contains(r#"\"exclusiveMaximum\":1"#));
+    assert!(generated.contains("fn validate_number_constraints("));
 }
 
 #[test]
-fn emits_integer_range_helper_only_when_integer_bounds_exist() {
+fn preserves_integer_bounds_in_generated_schema_and_runtime_validation() {
     let cfg = config_with(
         r#""attempts": {
           "type": "integer",
@@ -358,11 +409,9 @@ fn emits_integer_range_helper_only_when_integer_bounds_exist() {
 
     let generated = build_support::generate_agent_model_from_str(&cfg).unwrap();
 
-    assert!(generated.contains(
-        r#"validate_i64_range(self.attempts, "attempts", Some(1), None, Some(3), None)?;"#
-    ));
-    assert!(generated.contains("fn validate_i64_range("));
-    assert!(!generated.contains("fn validate_f64_range("));
+    assert!(generated.contains(r#"\"minimum\":1"#));
+    assert!(generated.contains(r#"\"maximum\":3"#));
+    assert!(generated.contains("fn validate_integer_constraints("));
 }
 
 #[test]
@@ -382,6 +431,18 @@ fn rejects_conflicting_numeric_lower_bounds() {
 
     assert!(err.contains("$.agent_schema.properties.confidence.exclusiveMinimum"));
     assert!(err.contains("cannot be combined with `minimum`"));
+}
+
+#[test]
+fn rejects_top_level_nullable_fields() {
+    let cfg = config_with(r#""value": { "type": ["string", "null"] }"#, "[]");
+
+    let err = build_support::generate_agent_model_from_str(&cfg)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("$.agent_schema.properties.value.type"));
+    assert!(err.contains("union schema types are not supported yet"));
 }
 
 #[test]
@@ -2007,7 +2068,7 @@ fn rejects_unknown_action_arg_variable_with_actionable_path() {
 }
 
 #[test]
-fn rejects_top_level_arrays_before_action_variable_validation() {
+fn rejects_structured_action_arg_variables_after_array_fields_are_enabled() {
     let cfg = config_with(
         r#""numbers": { "type": "array", "items": { "type": "integer" } }"#,
         r#"[
@@ -2029,8 +2090,10 @@ fn rejects_top_level_arrays_before_action_variable_validation() {
         .unwrap_err()
         .to_string();
 
-    assert!(err.contains("$.agent_schema.properties.numbers.type"));
-    assert!(err.contains("top-level array output fields are not supported in this story"));
+    assert!(err.contains("$.actions[0].run[0].args[0].var"));
+    assert!(err.contains(
+        "structured field `numbers` cannot be used as an action arg variable in this story"
+    ));
 }
 
 #[test]

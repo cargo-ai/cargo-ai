@@ -1124,12 +1124,6 @@ fn resolve_tool_invoke_params(
                         action_name, name, variable
                     ));
                 };
-                if !(resolved.is_string() || resolved.is_boolean() || resolved.is_number()) {
-                    return Err(format!(
-                        "Action '{}' tool param '{}' references variable '{}', which resolved to a non-scalar value.",
-                        action_name, name, variable
-                    ));
-                }
                 resolved.clone()
             }
         };
@@ -1366,7 +1360,10 @@ fn validate_describe_document(
     }
 
     for (name, param) in &describe.params {
-        if !matches!(param.kind.as_str(), "string" | "boolean" | "integer" | "number") {
+        if !matches!(
+            param.kind.as_str(),
+            "string" | "boolean" | "integer" | "number" | "array" | "object"
+        ) {
             return Err(format!(
                 "Tool '{}' describe param '{}' uses unsupported type '{}'.",
                 resolved.tool_id, name, param.kind
@@ -1467,6 +1464,8 @@ fn json_value_matches_declared_type(value: &serde_json::Value, expected: &str) -
         "boolean" => value.is_boolean(),
         "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
         "number" => value.is_number(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
         _ => false,
     }
 }
@@ -1477,7 +1476,9 @@ fn display_type_name(kind: &str) -> &str {
         "boolean" => "a boolean",
         "integer" => "an integer",
         "number" => "a number",
-        _ => "a supported scalar value",
+        "array" => "an array",
+        "object" => "an object",
+        _ => "a supported value",
     }
 }
 

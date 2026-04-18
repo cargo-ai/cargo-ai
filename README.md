@@ -474,6 +474,16 @@ Add clearer field meaning with descriptions:
 ```
 
 `agent_schema` can include any number of top-level `string`, `integer`, `number`, and `boolean` fields, plus optional `description`, string `enum`, and numeric bounds where supported.
+It may also include top-level `array` and `object` fields for structured tool consumption.
+
+The narrow structured-data rule is:
+- arrays must be homogeneous
+- objects must declare their shape explicitly
+- arrays may contain supported scalar item types or declared-shape object items
+- object properties inside structured tool-bound fields may be scalar or `scalar | null`
+- structured top-level fields may flow only into tool params as raw JSON
+- nullable support is limited to `scalar | null` object properties inside those structured payloads
+- scalar-first surfaces such as `logic`, `when`, `exec.args`, string-part interpolation, `email_me`, and child `run_vars` reject structured field references
 
 <details>
 <summary>Expanded example: richer constraints and exact output choices</summary>
@@ -939,6 +949,8 @@ cargo ai tools check hello_tool
 `cargo ai tools lint <name>` is the static source/scaffold check for project-local source-backed tools. It checks Cargo AI-managed metadata linkage plus scaffold/layout expectations without executing the tool's business logic. Machine-only or binary-only tools are currently out of scope for linting.
 
 The tool `describe` result schema must be a nullable string. A step that sets `output_variable` still requires the actual `invoke` response to contain a non-null string result. For UI or background-process tools, keep rendering/artifact creation testable without launching the UI when practical, expose a smoke-test control such as `open_window=false`, and declare UI/process behavior in the tool `resource_profile`.
+
+Tool params may declare `string`, `boolean`, `integer`, `number`, `array`, or `object`. For `array` / `object` params, Cargo AI validates only the top-level kind before invocation and passes the resolved value through as raw JSON. The tool owns deeper item/object-shape deserialization and validation.
 
 When a parent agent calls a `kind: "tool"` step, new scaffolded tools also receive a Cargo AI-owned child-agent helper in `src/agent_bridge.rs`. That helper is available through the `InvocationContext` argument passed to `src/tool.rs`, so tool-authored Rust code can call one or more same-project child agents without hand-rolling subprocess flags, depth handling, or runtime-budget propagation. Tool execution itself does not consume an extra agent-depth hop; child-agent calls made from the tool consume depth exactly as if the parent had called those children directly.
 

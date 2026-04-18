@@ -457,12 +457,6 @@ pub(crate) fn resolve_tool_invoke_params(
                         action_name, name, variable
                     ));
                 };
-                if !(resolved.is_string() || resolved.is_boolean() || resolved.is_number()) {
-                    return Err(format!(
-                        "Action '{}' tool param '{}' references variable '{}', which resolved to a non-scalar value.",
-                        action_name, name, variable
-                    ));
-                }
                 resolved.clone()
             }
         };
@@ -1410,7 +1404,7 @@ fn validate_describe_document(
     for (name, param) in &describe.params {
         if !matches!(
             param.kind.as_str(),
-            "string" | "boolean" | "integer" | "number"
+            "string" | "boolean" | "integer" | "number" | "array" | "object"
         ) {
             return Err(format!(
                 "Tool '{}' describe param '{}' uses unsupported type '{}'.",
@@ -1519,6 +1513,8 @@ fn json_value_matches_declared_type(value: &Value, expected: &str) -> bool {
         "boolean" => value.is_boolean(),
         "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
         "number" => value.is_number(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
         _ => false,
     }
 }
@@ -1529,7 +1525,9 @@ fn display_type_name(kind: &str) -> &str {
         "boolean" => "a boolean",
         "integer" => "an integer",
         "number" => "a number",
-        _ => "a supported scalar value",
+        "array" => "an array",
+        "object" => "an object",
+        _ => "a supported value",
     }
 }
 
@@ -1741,7 +1739,7 @@ mod tests {
         copy_tool_bundle_for_export, lint_project_source_tool, maybe_find_project_root,
         render_binary_tool_manifest_json, render_source_tool_manifest_json, scaffold_local_tool,
         validate_describe_document, validate_local_tool_name, ResolvedTool, ToolDescribeDocument,
-        ToolDescribeExamples, ToolDescribeResourceProfile, ToolDescribeResult,
+        ToolDescribeExamples, ToolDescribeParam, ToolDescribeResourceProfile, ToolDescribeResult,
         ToolDescribeSelfTest, ToolResolver, ToolScope,
     };
     use serde_json::json;
@@ -2390,5 +2388,77 @@ pub(crate) fn invoke(
             .expect_err("non-nullable result should fail");
 
         assert!(error.contains("nullable string"));
+    }
+
+    #[test]
+    fn validate_describe_document_accepts_array_and_object_params() {
+        let root = temp_dir("describe-structured-params");
+        let tool_dir = root.join(".cargo-ai/tools/hello_tool");
+        let binary_path = tool_dir.join("bin/aarch64-apple-darwin/hello_tool");
+        let resolved = ResolvedTool {
+            tool_id: "hello_tool".to_string(),
+            scope: ToolScope::Project,
+            tool_dir: tool_dir.clone(),
+            manifest_path: tool_dir.join("tool.json"),
+            binary_name: "hello_tool".to_string(),
+            target_triple: "aarch64-apple-darwin".to_string(),
+            binary_path,
+        };
+        let describe = ToolDescribeDocument {
+            protocol_version: 1,
+            name: "hello_tool".to_string(),
+            description: "Example tool.".to_string(),
+            params: BTreeMap::from([
+                (
+                    "rows".to_string(),
+                    ToolDescribeParam {
+                        kind: "array".to_string(),
+                        required: true,
+                        description: None,
+                        default: None,
+                    },
+                ),
+                (
+                    "options".to_string(),
+                    ToolDescribeParam {
+                        kind: "object".to_string(),
+                        required: false,
+                        description: None,
+                        default: Some(json!({ "delimiter": "," })),
+                    },
+                ),
+            ]),
+            result: ToolDescribeResult {
+                kind: "string".to_string(),
+                nullable: true,
+                description: None,
+            },
+            resource_profile: ToolDescribeResourceProfile {
+                network: "none".to_string(),
+                filesystem_read: "none".to_string(),
+                filesystem_write: "none".to_string(),
+                subprocess: "none".to_string(),
+                env_read: "none".to_string(),
+                credential_access: "none".to_string(),
+            },
+            self_test: ToolDescribeSelfTest {
+                supported: false,
+                safe: false,
+                description: None,
+            },
+            examples: ToolDescribeExamples {
+                minimal_invoke: json!({ "protocol_version": 1, "params": { "rows": [] } }),
+                full_invoke: json!({
+                    "protocol_version": 1,
+                    "params": {
+                        "rows": [{ "customer": "Acme" }],
+                        "options": { "delimiter": "," }
+                    }
+                }),
+            },
+        };
+
+        validate_describe_document(&describe, &resolved)
+            .expect("array/object params should be accepted");
     }
 }
