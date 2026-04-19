@@ -921,6 +921,34 @@ allow_global_fallback = false
 
 If `allow_global_fallback` is missing, Cargo AI treats that as project-only lookup.
 
+When a project also wants an explicit assembled build root, keep that in the same file under a build profile:
+
+```toml
+format_version = 1
+
+[tools]
+allow_global_fallback = true
+
+[build.default]
+agent_definitions = ["agents/research.json"]
+hatched_agents = ["agents/report.json"]
+tools = ["hello_tool"]
+assets = ["assets/prompts/"]
+```
+
+Use that build section as a direct-edit contract:
+
+- `agent_definitions`
+  - JSON/config files copied into the build output as source definitions
+- `hatched_agents`
+  - JSON/config entrypoints hatched into target-specific binaries
+- `tools`
+  - project-attached tools that should be rebuilt and packaged into the build output
+- `assets`
+  - project-relative files or directories copied into the build output
+
+Keep the lists explicit. Cargo AI does not infer tools from agents during `cargo ai build`, and the same agent path may appear in both `agent_definitions` and `hatched_agents` when you want both the JSON definition and the compiled binary in the assembled output.
+
 That creates:
 
 - `.cargo-ai/project.toml`
@@ -981,6 +1009,21 @@ cargo ai hatch my_agent --config ./my_agent.json --check
 By default, `run`, `hatch --check`, and `hatch` perform an upfront tool audit against the tool `describe` contract. They resolve tools from the current Cargo AI project first and then from Cargo AI Home only when `.cargo-ai/project.toml` allows global fallback. Use `--ignore-tools` only when you intentionally want to skip that startup audit and accept failure later if a tool step is actually reached.
 
 Ordinary `cargo ai hatch` exports only the binary. It does not copy tool artifacts next to the output. When you run a hatched binary from inside a Cargo AI project, it uses the same project-first lookup contract. Outside a project context, it can use machine-installed tools but not project-only tools.
+
+When you want an explicit assembled local package root instead of a single exported binary, use:
+
+```bash
+cargo ai build --target aarch64-apple-darwin
+```
+
+`cargo ai build` reads `.cargo-ai/project.toml`, selects a build profile (defaults to `default`), and assembles a target-specific build root under `target/cargo-ai/build/<profile>/<target>/` unless you override it with `--output-dir`.
+
+Phase 2 build rules are intentionally strict:
+
+- only project-attached tools listed in `[build.<profile>].tools` are eligible
+- machine-only tools are not pulled into the build automatically
+- if a listed tool exists only in Cargo AI Home, `cargo ai build` fails and tells you to attach/install it into the project first
+- build outputs get their own generated `.cargo-ai/project.toml`, `.cargo-ai/tools/...`, copied agent definitions/assets, and root-level hatched binaries so the assembled folder is inspectable and runnable as a package root
 
 ## Account-Backed Flows
 

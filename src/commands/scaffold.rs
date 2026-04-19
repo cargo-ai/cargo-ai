@@ -564,6 +564,52 @@ existing = true\n",
     }
 
     #[test]
+    fn scaffold_init_preserves_existing_build_section() {
+        let dir = temp_dir_path("init-preserve-build");
+        let metadata_path = dir.join(".cargo-ai").join("project.toml");
+        fs::create_dir_all(
+            metadata_path
+                .parent()
+                .expect("metadata parent should exist"),
+        )
+        .expect("metadata dir should be created");
+        fs::write(
+            &metadata_path,
+            "format_version = 1\n\n[build.default]\nagent_definitions = [\"agents/demo.json\"]\nhatched_agents = [\"agents/cli.json\"]\ntools = [\"hello_tool\"]\nassets = [\"assets/prompts/\"]\n",
+        )
+        .expect("metadata fixture should be written");
+
+        let report = scaffold_init(&dir, VcsMode::None).expect("init should succeed");
+        assert_eq!(report.metadata_status, ManagedFileStatus::Updated);
+
+        let metadata_contents =
+            fs::read_to_string(&metadata_path).expect("metadata should be readable");
+        let parsed: Value = toml::from_str(&metadata_contents).expect("metadata should parse");
+        assert_eq!(
+            parsed
+                .get("build")
+                .and_then(Value::as_table)
+                .and_then(|build| build.get("default"))
+                .and_then(Value::as_table)
+                .and_then(|profile| profile.get("hatched_agents"))
+                .and_then(Value::as_array)
+                .and_then(|entries| entries.first())
+                .and_then(Value::as_str),
+            Some("agents/cli.json")
+        );
+        assert_eq!(
+            parsed
+                .get("tools")
+                .and_then(Value::as_table)
+                .and_then(|tools| tools.get("allow_global_fallback"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn scaffold_init_with_git_writes_vcs_and_gitignore_when_git_boundary_exists() {
         let dir = temp_dir_path("init-git");
         fs::create_dir_all(dir.join(".git")).expect("git dir should be created");

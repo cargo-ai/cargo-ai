@@ -4,6 +4,8 @@
 pub mod account;
 pub mod add;
 pub mod auth;
+#[cfg(feature = "developer-tools")]
+pub mod build;
 pub mod credentials;
 pub mod definition_source;
 #[cfg(feature = "developer-tools")]

@@ -130,6 +130,15 @@ For account-hosted definitions, remember the current split:
 - If Mermaid rendering is clearly supported, offer Mermaid as an option and ask whether the user wants it.
 - Use `cargo ai new` or `cargo ai init` when the workspace needs a Cargo AI project boundary before local tool authoring.
 - Use `cargo ai add guidance --style codex` after bootstrap when the workspace needs the Codex guidance bundle.
+- Treat `.cargo-ai/project.toml` as the source of truth for project build profiles. When a user wants `cargo ai build`, keep the profile explicit with:
+  - `agent_definitions`
+  - `hatched_agents`
+  - `tools`
+  - `assets`
+- Use `agent_definitions` when the build should ship the JSON/config file as source, and use `hatched_agents` when the build should emit a target-specific binary. The same path may appear in both lists when both forms should ship together.
+- Do not infer tools from agent JSON during build authoring. If an agent needs a tool in the assembled build root, list that tool explicitly under `[build.<profile>].tools`.
+- If `cargo ai build` fails because a tool exists only in Cargo AI Home, do not treat that as a build-profile success case. Update the project so the tool is attached to the project first, then keep the build profile explicit.
+- Prefer direct edits to `.cargo-ai/project.toml` over inventing a helper command flow. Keep the TOML shape simple and explain changes in plain language so the user can review them.
 
 ## Validation Loop
 
@@ -140,6 +149,7 @@ For account-hosted definitions, remember the current split:
 4. Fix schema, action, or contract errors before building.
 5. Build only after `--check` passes:
    - `cargo ai hatch <agent-name> --config <config.json>`
+   - when the project uses an explicit build profile, validate that path too with `cargo ai build [profile] --target <triple>`
 6. Rebuild with `--force` only when replacing an existing output is intentional.
 
 ## Editing Guidance

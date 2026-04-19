@@ -7,6 +7,8 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 mod account;
 mod add;
 mod auth;
+#[cfg(feature = "developer-tools")]
+mod build;
 mod credentials;
 #[cfg(feature = "developer-tools")]
 mod hatch;
@@ -37,7 +39,7 @@ fn cli_command(bin_name: &'static str) -> Command {
         .subcommand(run::command());
 
     #[cfg(feature = "developer-tools")]
-    let command = command.subcommand(hatch::command());
+    let command = command.subcommand(build::command()).subcommand(hatch::command());
 
     command
         .subcommand(new::command())
@@ -119,6 +121,8 @@ mod tests {
 
         if developer_tools_enabled() {
             assert!(index_of("run") < index_of("hatch"));
+            assert!(index_of("run") < index_of("build"));
+            assert!(index_of("build") < index_of("hatch"));
             assert!(index_of("hatch") < index_of("new"));
         }
         assert!(index_of("new") < index_of("init"));
@@ -141,6 +145,11 @@ mod tests {
         let help = String::from_utf8(help).expect("help should be utf8");
 
         assert!(help.contains("\n  run"));
+        if developer_tools_enabled() {
+            assert!(help.contains("\n  build"));
+        } else {
+            assert!(!help.contains("\n  build"));
+        }
         assert!(help.contains("\n  new"));
         assert!(help.contains("\n  init"));
         assert!(help.contains("\n  add"));
@@ -368,6 +377,59 @@ mod tests {
             .expect_err("conflicting flags should fail parsing");
 
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn build_target_flag_parses() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "build",
+                "default",
+                "--target",
+                "x86_64-pc-windows-msvc",
+            ])
+            .expect("build --target should parse");
+
+        let build_matches = matches
+            .subcommand_matches("build")
+            .expect("build subcommand should be available");
+
+        assert_eq!(
+            build_matches.get_one::<String>("profile").map(String::as_str),
+            Some("default")
+        );
+        assert_eq!(
+            build_matches.get_one::<String>("target").map(String::as_str),
+            Some("x86_64-pc-windows-msvc")
+        );
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn build_output_dir_and_force_flags_parse() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "build",
+                "--output-dir",
+                "./dist",
+                "--force",
+            ])
+            .expect("build flags should parse");
+
+        let build_matches = matches
+            .subcommand_matches("build")
+            .expect("build subcommand should be available");
+
+        assert_eq!(
+            build_matches
+                .get_one::<String>("output_dir")
+                .map(String::as_str),
+            Some("./dist")
+        );
+        assert!(build_matches.get_flag("force"));
     }
 
     #[cfg(feature = "developer-tools")]
@@ -1271,6 +1333,16 @@ mod tests {
             .expect_err("legacy --token flag should be rejected for profile add");
 
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[cfg(not(feature = "developer-tools"))]
+    #[test]
+    fn runtime_only_build_rejects_build_subcommand() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "build"])
+            .expect_err("runtime-only build should reject build");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     }
 
     #[cfg(not(feature = "developer-tools"))]
