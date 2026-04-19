@@ -60,7 +60,6 @@ pub(crate) struct HatchRequest {
     pub build_target: BuildTarget,
     pub output_dir: Option<PathBuf>,
     pub presentation: HatchPresentation,
-    pub resolved_tools: Vec<crate::commands::tools::ResolvedTool>,
 }
 
 impl HatchRequest {
@@ -83,31 +82,6 @@ impl HatchRequest {
             build_target,
             output_dir,
             presentation,
-            resolved_tools: Vec::new(),
-        }
-    }
-
-    pub(crate) fn new_with_tools(
-        project_name: String,
-        file_contents: String,
-        mode: HatchMode,
-        force_overwrite: bool,
-        keep_project: bool,
-        build_target: BuildTarget,
-        output_dir: Option<PathBuf>,
-        presentation: HatchPresentation,
-        resolved_tools: Vec<crate::commands::tools::ResolvedTool>,
-    ) -> Self {
-        Self {
-            project_name,
-            file_contents,
-            mode,
-            force_overwrite,
-            keep_project,
-            build_target,
-            output_dir,
-            presentation,
-            resolved_tools,
         }
     }
 }
@@ -194,7 +168,6 @@ where
         build_target,
         output_dir,
         presentation,
-        resolved_tools,
     } = request;
 
     let _agent_lock = match acquire_lock(project_name.as_str()) {
@@ -314,39 +287,6 @@ where
                         println!("! Failed to clean up workspace: {error}");
                     }
                     return false;
-                }
-            }
-
-            if let Some(binary_path) = binary_path.as_ref() {
-                let Some(export_dir) = binary_path.parent() else {
-                    println!(
-                        "x Export failed: exported binary path '{}' has no parent directory.",
-                        binary_path.display()
-                    );
-                    print_hatch_progress(workspace_progress_step(keep_project));
-                    if let WorkspaceSummaryStatus::CleanupFailed(error) =
-                        finalize_workspace(project_name.as_str(), keep_project)
-                    {
-                        println!("! Failed to clean up workspace: {error}");
-                    }
-                    return false;
-                };
-
-                for resolved_tool in &resolved_tools {
-                    if let Err(error) = crate::commands::tools::copy_tool_bundle_for_export(
-                        resolved_tool,
-                        export_dir,
-                        force_overwrite,
-                    ) {
-                        println!("x Export failed: {error}");
-                        print_hatch_progress(workspace_progress_step(keep_project));
-                        if let WorkspaceSummaryStatus::CleanupFailed(error) =
-                            finalize_workspace(project_name.as_str(), keep_project)
-                        {
-                            println!("! Failed to clean up workspace: {error}");
-                        }
-                        return false;
-                    }
                 }
             }
         }
@@ -688,7 +628,7 @@ mod tests {
     #[test]
     fn lock_conflict_fails_fast_before_project_mutation() {
         let result = run_hatch_pipeline_with_lock(
-            HatchRequest::new_with_tools(
+            HatchRequest::new(
                 "agent_lock_conflict_test".to_string(),
                 r#"{"version":"2026-03-03.r1"}"#.to_string(),
                 HatchMode::Check,
@@ -701,7 +641,6 @@ mod tests {
                         name: "agent_lock_conflict_test".to_string(),
                     },
                 },
-                Vec::new(),
             ),
             |_| {
                 Err(io::Error::new(

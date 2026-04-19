@@ -102,6 +102,12 @@ For troubleshooting, identify the first failing layer and work upward:
 
 Do not keep changing higher layers while a lower layer is still failing.
 
+Runtime lookup stays project-first:
+- `cargo ai run`, `cargo ai hatch --check`, and ordinary `cargo ai hatch` audit tools up front
+- they resolve tools from the current Cargo AI project first and only use Cargo AI Home when `.cargo-ai/project.toml` allows global fallback
+- ordinary `cargo ai hatch` exports only the binary; it does not copy tool artifacts next to the output
+- a hatched binary run from inside a project uses that same project-first lookup, while a run outside any project can only rely on machine-installed tools
+
 If `cargo ai init/new` was run with the default VCS mode, it will also initialize Git and create or update `.gitignore` for generated guidance and managed build state. If Git is unavailable, rerun with `--vcs none`.
 
 ## Guidance Map

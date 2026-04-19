@@ -218,9 +218,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         }
     };
 
-    let resolved_tools = if sub_m.get_flag("ignore_tools") {
-        Vec::new()
-    } else {
+    if !sub_m.get_flag("ignore_tools") {
         let definition = match crate::runtime_definition::RuntimeAgentDefinition::from_str(
             file_contents.as_str(),
         ) {
@@ -239,15 +237,15 @@ pub fn run(sub_m: &ArgMatches) -> bool {
             &resolver,
             current_hatch_platform_label(),
         ) {
-            Ok(resolved_tools) => resolved_tools,
+            Ok(_) => {}
             Err(error) => {
                 println!("x {error}");
                 return false;
             }
         }
-    };
+    }
 
-    let request = super::hatch_pipeline::HatchRequest::new_with_tools(
+    let request = super::hatch_pipeline::HatchRequest::new(
         new_project_name,
         file_contents,
         hatch_mode,
@@ -256,7 +254,6 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         build_target,
         output_dir,
         presentation,
-        resolved_tools,
     );
 
     super::hatch_pipeline::run_hatch_pipeline(request)

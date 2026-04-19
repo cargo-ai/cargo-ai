@@ -978,7 +978,9 @@ cargo ai tools check --config ./my_agent.json
 cargo ai hatch my_agent --config ./my_agent.json --check
 ```
 
-By default, `run`, `hatch --check`, and `hatch` perform an upfront tool audit against the tool `describe` contract. Use `--ignore-tools` only when you intentionally want to skip that startup audit and accept failure later if a tool step is actually reached.
+By default, `run`, `hatch --check`, and `hatch` perform an upfront tool audit against the tool `describe` contract. They resolve tools from the current Cargo AI project first and then from Cargo AI Home only when `.cargo-ai/project.toml` allows global fallback. Use `--ignore-tools` only when you intentionally want to skip that startup audit and accept failure later if a tool step is actually reached.
+
+Ordinary `cargo ai hatch` exports only the binary. It does not copy tool artifacts next to the output. When you run a hatched binary from inside a Cargo AI project, it uses the same project-first lookup contract. Outside a project context, it can use machine-installed tools but not project-only tools.
 
 ## Account-Backed Flows
 

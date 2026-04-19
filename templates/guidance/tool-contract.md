@@ -211,6 +211,12 @@ That means Cargo AI checks:
 
 It does not make a missing tool succeed. If execution reaches a tool step and the tool is still missing or incompatible, that step fails normally.
 
+Lookup stays local-execution-oriented in this phase:
+- the current Cargo AI project is checked first
+- Cargo AI Home is checked second only when `.cargo-ai/project.toml` allows global fallback
+- ordinary `cargo ai hatch` exports only the binary and does not copy tool artifacts next to that output
+- a hatched binary run from inside a project uses the same project-first lookup, while a run outside any project can only rely on machine-installed tools
+
 ## Current Storage Model
 
 - source:
