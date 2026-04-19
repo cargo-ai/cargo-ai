@@ -13,6 +13,8 @@ pub mod hatch;
 pub mod hatch_pipeline;
 pub mod init;
 pub mod new;
+#[cfg(feature = "developer-tools")]
+pub mod package;
 pub mod profile;
 pub mod run;
 pub mod runtime;

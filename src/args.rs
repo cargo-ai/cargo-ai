@@ -14,6 +14,8 @@ mod credentials;
 mod hatch;
 mod init;
 mod new;
+#[cfg(feature = "developer-tools")]
+mod package;
 mod profile;
 mod run;
 pub(crate) mod runtime_common;
@@ -39,7 +41,10 @@ fn cli_command(bin_name: &'static str) -> Command {
         .subcommand(run::command());
 
     #[cfg(feature = "developer-tools")]
-    let command = command.subcommand(build::command()).subcommand(hatch::command());
+    let command = command
+        .subcommand(build::command())
+        .subcommand(package::command())
+        .subcommand(hatch::command());
 
     command
         .subcommand(new::command())
@@ -123,6 +128,8 @@ mod tests {
             assert!(index_of("run") < index_of("hatch"));
             assert!(index_of("run") < index_of("build"));
             assert!(index_of("build") < index_of("hatch"));
+            assert!(index_of("build") < index_of("package"));
+            assert!(index_of("package") < index_of("hatch"));
             assert!(index_of("hatch") < index_of("new"));
         }
         assert!(index_of("new") < index_of("init"));
@@ -147,8 +154,10 @@ mod tests {
         assert!(help.contains("\n  run"));
         if developer_tools_enabled() {
             assert!(help.contains("\n  build"));
+            assert!(help.contains("\n  package"));
         } else {
             assert!(!help.contains("\n  build"));
+            assert!(!help.contains("\n  package"));
         }
         assert!(help.contains("\n  new"));
         assert!(help.contains("\n  init"));
@@ -397,11 +406,15 @@ mod tests {
             .expect("build subcommand should be available");
 
         assert_eq!(
-            build_matches.get_one::<String>("profile").map(String::as_str),
+            build_matches
+                .get_one::<String>("profile")
+                .map(String::as_str),
             Some("default")
         );
         assert_eq!(
-            build_matches.get_one::<String>("target").map(String::as_str),
+            build_matches
+                .get_one::<String>("target")
+                .map(String::as_str),
             Some("x86_64-pc-windows-msvc")
         );
     }
@@ -410,13 +423,7 @@ mod tests {
     #[test]
     fn build_output_dir_and_force_flags_parse() {
         let matches = cli_command("cargo-ai")
-            .try_get_matches_from([
-                "cargo-ai",
-                "build",
-                "--output-dir",
-                "./dist",
-                "--force",
-            ])
+            .try_get_matches_from(["cargo-ai", "build", "--output-dir", "./dist", "--force"])
             .expect("build flags should parse");
 
         let build_matches = matches
@@ -430,6 +437,39 @@ mod tests {
             Some("./dist")
         );
         assert!(build_matches.get_flag("force"));
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn package_output_dir_and_force_flags_parse() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "package",
+                "default",
+                "--output-dir",
+                "./pkg",
+                "--force",
+            ])
+            .expect("package flags should parse");
+
+        let package_matches = matches
+            .subcommand_matches("package")
+            .expect("package subcommand should be available");
+
+        assert_eq!(
+            package_matches
+                .get_one::<String>("profile")
+                .map(String::as_str),
+            Some("default")
+        );
+        assert_eq!(
+            package_matches
+                .get_one::<String>("output_dir")
+                .map(String::as_str),
+            Some("./pkg")
+        );
+        assert!(package_matches.get_flag("force"));
     }
 
     #[cfg(feature = "developer-tools")]
@@ -1333,6 +1373,16 @@ mod tests {
             .expect_err("legacy --token flag should be rejected for profile add");
 
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[cfg(not(feature = "developer-tools"))]
+    #[test]
+    fn runtime_only_build_rejects_package_subcommand() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "package"])
+            .expect_err("runtime-only build should reject package");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     }
 
     #[cfg(not(feature = "developer-tools"))]

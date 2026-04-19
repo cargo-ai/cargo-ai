@@ -72,6 +72,8 @@ async fn main() {
             commands::run::run(sub_m).await
         } else if let Some(command_succeeded) = try_run_build(&cmd_args) {
             command_succeeded
+        } else if let Some(command_succeeded) = try_run_package(&cmd_args) {
+            command_succeeded
         } else if let Some(command_succeeded) = try_run_hatch(&cmd_args) {
             command_succeeded
         } else if let Some(sub_m) = cmd_args.subcommand_matches("add") {
@@ -110,6 +112,18 @@ fn try_run_build(cmd_args: &clap::ArgMatches) -> Option<bool> {
 
 #[cfg(not(feature = "developer-tools"))]
 fn try_run_build(_cmd_args: &clap::ArgMatches) -> Option<bool> {
+    None
+}
+
+#[cfg(feature = "developer-tools")]
+fn try_run_package(cmd_args: &clap::ArgMatches) -> Option<bool> {
+    cmd_args
+        .subcommand_matches("package")
+        .map(crate::commands::package::run)
+}
+
+#[cfg(not(feature = "developer-tools"))]
+fn try_run_package(_cmd_args: &clap::ArgMatches) -> Option<bool> {
     None
 }
 

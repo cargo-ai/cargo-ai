@@ -110,6 +110,8 @@ Runtime lookup stays project-first:
 
 If a tool should ship inside an explicit project build root, list it under `.cargo-ai/project.toml` in `[build.<profile>].tools`. `cargo ai build` only packages project-attached tools named there; it does not infer tool dependencies from agents and it does not pull machine-only tools into the build automatically.
 
+If a tool should ship inside a portable project source package, use that same `[build.<profile>].tools` list with `cargo ai package`. The package step reuses the build profile directly, copies the tool crate source plus project tool metadata, and leaves built tool binaries out of the portable package root.
+
 If `cargo ai init/new` was run with the default VCS mode, it will also initialize Git and create or update `.gitignore` for generated guidance and managed build state. If Git is unavailable, rerun with `--vcs none`.
 
 ## Guidance Map

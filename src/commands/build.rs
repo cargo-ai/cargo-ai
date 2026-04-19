@@ -62,7 +62,9 @@ pub fn run(sub_m: &ArgMatches) -> bool {
     let project_root = match current_project_root() {
         Some(root) => root,
         None => {
-            eprintln!("x No Cargo AI project metadata was found from the current directory upward.");
+            eprintln!(
+                "x No Cargo AI project metadata was found from the current directory upward."
+            );
             return false;
         }
     };
@@ -139,7 +141,10 @@ fn current_project_root() -> Option<PathBuf> {
         .and_then(|dir| crate::commands::tools::maybe_find_project_root(dir.as_path()))
 }
 
-fn load_build_profile(project_root: &Path, profile_name: &str) -> Result<BuildProfileDocument, String> {
+fn load_build_profile(
+    project_root: &Path,
+    profile_name: &str,
+) -> Result<BuildProfileDocument, String> {
     let metadata_path = project_root.join(PROJECT_METADATA_RELATIVE_PATH);
     let contents = fs::read_to_string(&metadata_path).map_err(|error| {
         format!(
@@ -243,7 +248,12 @@ fn assemble_build_root(
 
     for tool_name in &tools {
         validate_tool_attached_to_project(project_root, tool_name)?;
-        materialize_build_tool(project_root, tool_name, build_target, output_root.path.as_path())?;
+        materialize_build_tool(
+            project_root,
+            tool_name,
+            build_target,
+            output_root.path.as_path(),
+        )?;
     }
 
     let tool_resolver = crate::commands::tools::ToolResolver::new(
@@ -256,20 +266,44 @@ fn assemble_build_root(
         &agent_definitions
             .iter()
             .cloned()
-            .chain(hatched_agents.iter().map(|entry| entry.relative_path.clone()))
+            .chain(
+                hatched_agents
+                    .iter()
+                    .map(|entry| entry.relative_path.clone()),
+            )
             .collect::<Vec<_>>(),
     ) {
-        audit_agent_definition(project_root, agent_path.as_str(), &tool_resolver, target_platform)?;
+        audit_agent_definition(
+            project_root,
+            agent_path.as_str(),
+            &tool_resolver,
+            target_platform,
+        )?;
     }
 
     for relative_path in &agent_definitions {
-        copy_declared_path(project_root, relative_path, output_root.path.as_path(), true)?;
+        copy_declared_path(
+            project_root,
+            relative_path,
+            output_root.path.as_path(),
+            true,
+        )?;
     }
     for relative_path in &assets {
-        copy_declared_path(project_root, relative_path, output_root.path.as_path(), false)?;
+        copy_declared_path(
+            project_root,
+            relative_path,
+            output_root.path.as_path(),
+            false,
+        )?;
     }
     for agent in &hatched_agents {
-        hatch_agent_into_build_root(project_root, agent, build_target, output_root.path.as_path())?;
+        hatch_agent_into_build_root(
+            project_root,
+            agent,
+            build_target,
+            output_root.path.as_path(),
+        )?;
     }
 
     let manifest = BuildManifestDocument {
@@ -449,14 +483,16 @@ fn audit_agent_definition(
     target_platform: Option<&str>,
 ) -> Result<(), String> {
     let source_path = resolve_agent_json_path(project_root, relative_path, "Agent")?;
-    let definition = crate::runtime_definition::RuntimeAgentDefinition::load_from_path(&source_path)
-        .map_err(|error| {
-            format!(
-                "Failed to load agent definition '{}': {}",
-                source_path.display(),
-                error
-            )
-        })?;
+    let definition = crate::runtime_definition::RuntimeAgentDefinition::load_from_path(
+        &source_path,
+    )
+    .map_err(|error| {
+        format!(
+            "Failed to load agent definition '{}': {}",
+            source_path.display(),
+            error
+        )
+    })?;
 
     crate::commands::tools::audit_actions_for_tools(
         &definition.actions(),
@@ -520,7 +556,8 @@ fn hatch_agent_into_build_root(
     build_target: &crate::agent_builder::build_target::BuildTarget,
     build_root: &Path,
 ) -> Result<(), String> {
-    let source_path = resolve_agent_json_path(project_root, agent.relative_path.as_str(), "Hatched agent")?;
+    let source_path =
+        resolve_agent_json_path(project_root, agent.relative_path.as_str(), "Hatched agent")?;
     let file_contents = fs::read_to_string(&source_path).map_err(|error| {
         format!(
             "Failed to read hatched agent definition '{}': {}",
@@ -529,20 +566,22 @@ fn hatch_agent_into_build_root(
         )
     })?;
 
-    let _agent_lock = crate::agent_builder::lock::try_acquire_agent_lock(agent.output_name.as_str())
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-                format!(
-                    "Agent '{}' is already running a hatch/build operation in another process.",
-                    agent.output_name
-                )
-            } else {
-                format!(
-                    "Failed to acquire lock for agent '{}': {}",
-                    agent.output_name, error
-                )
-            }
-        })?;
+    let _agent_lock = crate::agent_builder::lock::try_acquire_agent_lock(
+        agent.output_name.as_str(),
+    )
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            format!(
+                "Agent '{}' is already running a hatch/build operation in another process.",
+                agent.output_name
+            )
+        } else {
+            format!(
+                "Failed to acquire lock for agent '{}': {}",
+                agent.output_name, error
+            )
+        }
+    })?;
 
     if crate::agent_builder::agent_workspace_path(agent.output_name.as_str()).exists() {
         crate::agent_builder::cleanup::delete_agent_workspace(agent.output_name.as_str()).map_err(
@@ -619,7 +658,10 @@ fn copy_declared_path(
     build_root: &Path,
     require_json_file: bool,
 ) -> Result<(), String> {
-    validate_project_relative_path(relative_path, if require_json_file { "Agent" } else { "Asset" })?;
+    validate_project_relative_path(
+        relative_path,
+        if require_json_file { "Agent" } else { "Asset" },
+    )?;
     let source_path = project_root.join(relative_path);
     if !source_path.exists() {
         return Err(format!(
@@ -738,14 +780,21 @@ fn dedupe_preserve_order(values: &[String]) -> Vec<String> {
     deduped
 }
 
-fn resolve_agent_json_path(project_root: &Path, relative_path: &str, label: &str) -> Result<PathBuf, String> {
+fn resolve_agent_json_path(
+    project_root: &Path,
+    relative_path: &str,
+    label: &str,
+) -> Result<PathBuf, String> {
     validate_project_relative_path(relative_path, label)?;
     let path = project_root.join(relative_path);
     if !path.exists() {
         return Err(format!("{label} path '{}' was not found.", path.display()));
     }
     if !path.is_file() {
-        return Err(format!("{label} path '{}' must point to a JSON file.", path.display()));
+        return Err(format!(
+            "{label} path '{}' must point to a JSON file.",
+            path.display()
+        ));
     }
     let is_json = path
         .extension()
@@ -753,7 +802,10 @@ fn resolve_agent_json_path(project_root: &Path, relative_path: &str, label: &str
         .map(|ext| ext.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
     if !is_json {
-        return Err(format!("{label} path '{}' must point to a JSON file.", path.display()));
+        return Err(format!(
+            "{label} path '{}' must point to a JSON file.",
+            path.display()
+        ));
     }
     Ok(path)
 }
@@ -863,7 +915,10 @@ assets = ["assets/prompts/"]
         )
         .expect("metadata should parse");
 
-        let profile = parsed.build.get("default").expect("default profile should exist");
+        let profile = parsed
+            .build
+            .get("default")
+            .expect("default profile should exist");
         assert_eq!(
             profile,
             &BuildProfileDocument {

@@ -1025,6 +1025,22 @@ Phase 2 build rules are intentionally strict:
 - if a listed tool exists only in Cargo AI Home, `cargo ai build` fails and tells you to attach/install it into the project first
 - build outputs get their own generated `.cargo-ai/project.toml`, `.cargo-ai/tools/...`, copied agent definitions/assets, and root-level hatched binaries so the assembled folder is inspectable and runnable as a package root
 
+When you want a portable source package instead of a target-specific runnable build root, use:
+
+```bash
+cargo ai package
+```
+
+`cargo ai package` also reads `.cargo-ai/project.toml`, reuses the selected `[build.<profile>]` section directly, and assembles a source-portable package root under `target/cargo-ai/package/<profile>/` unless you override it with `--output-dir`.
+
+Phase 3A package rules stay narrow on purpose:
+
+- `package` does not invent a second selector; it reuses `agent_definitions`, `hatched_agents`, `tools`, and `assets` from the build profile
+- both `agent_definitions` and `hatched_agents` are copied into the package as JSON source definitions
+- listed tools must already be project-attached and source-backed; machine-only tools are rejected with attach/install guidance
+- packaged tools keep source metadata under `.cargo-ai/tools/...` and source crates under their project-relative paths, but they do not include built binaries
+- package outputs get their own generated `.cargo-ai/project.toml` plus `cargo-ai-package.toml` so the folder is inspectable and can be treated as a portable project snapshot
+
 ## Account-Backed Flows
 
 After registration, you can use Cargo AI as more than a local hatching tool:
