@@ -11,6 +11,7 @@ pub mod agents;
 pub mod confirm;
 pub mod handle;
 pub mod mail_preferences;
+pub mod projects;
 pub mod register;
 pub mod send_mail;
 pub mod status;

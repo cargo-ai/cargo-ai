@@ -1076,6 +1076,30 @@ cargo ai account hatch weather_test --check
 cargo ai account agents hatch weather_test --owner-handle alice
 ```
 
+Project packages use a separate account surface:
+
+```bash
+# List your published projects
+cargo ai account projects list
+
+# List another owner's public projects
+cargo ai account projects list --owner-handle alice
+
+# Publish the current project package (developer-tools build)
+cargo ai account projects publish
+
+# Pull the latest published package from another owner
+cargo ai account projects pull ai_integrations --owner-handle alice
+```
+
+Account-project rules are intentionally different from account agents:
+
+- `publish` packages the current project first, then uploads the resulting package archive
+- published project identity comes from `.cargo-ai/project.toml` `[project].name` and `[project].version`
+- `list` with `--owner-handle <handle>` only returns that owner's public projects
+- `pull` defaults to the latest published version unless you pass `--version <semver>`
+- pulled packages restore a project-shaped folder locally; they do not expose agent-style definition-path identities in the backend
+
 ## Where To Go Next
 
 When you want deeper details, use these files:

@@ -1168,6 +1168,101 @@ mod tests {
     }
 
     #[test]
+    fn account_projects_list_parses_owner_handle_and_limit() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "projects",
+                "list",
+                "--owner-handle",
+                "alice",
+                "--limit",
+                "7",
+            ])
+            .expect("account projects list should parse");
+
+        let projects = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("projects"))
+            .and_then(|m| m.subcommand_matches("list"))
+            .expect("account projects list should be available");
+
+        assert_eq!(
+            projects
+                .get_one::<String>("owner_handle")
+                .map(String::as_str),
+            Some("alice")
+        );
+        assert_eq!(projects.get_one::<u32>("limit").copied(), Some(7));
+        assert!(!projects.get_flag("include_archived"));
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn account_projects_publish_parses_profile() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "account", "projects", "publish", "release"])
+            .expect("account projects publish should parse");
+
+        let publish = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("projects"))
+            .and_then(|m| m.subcommand_matches("publish"))
+            .expect("account projects publish should be available");
+
+        assert_eq!(
+            publish.get_one::<String>("profile").map(String::as_str),
+            Some("release")
+        );
+    }
+
+    #[test]
+    fn account_projects_pull_parses_name_owner_handle_and_output_dir() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "projects",
+                "pull",
+                "ai_integrations",
+                "--owner-handle",
+                "shared",
+                "--version",
+                "0.2.0",
+                "--output-dir",
+                "./restored",
+                "--force",
+            ])
+            .expect("account projects pull should parse");
+
+        let pull = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("projects"))
+            .and_then(|m| m.subcommand_matches("pull"))
+            .expect("account projects pull should be available");
+
+        assert_eq!(
+            pull.get_one::<String>("name_positional")
+                .map(String::as_str),
+            Some("ai_integrations")
+        );
+        assert_eq!(
+            pull.get_one::<String>("owner_handle").map(String::as_str),
+            Some("shared")
+        );
+        assert_eq!(
+            pull.get_one::<String>("version").map(String::as_str),
+            Some("0.2.0")
+        );
+        assert_eq!(
+            pull.get_one::<String>("output_dir").map(String::as_str),
+            Some("./restored")
+        );
+        assert!(pull.get_flag("force"));
+    }
+
+    #[test]
     fn init_defaults_parse() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from(["cargo-ai", "init"])

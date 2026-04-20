@@ -5,6 +5,7 @@ use clap::{Arg, Command};
 
 mod agents;
 mod mail;
+mod projects;
 
 /// Builds the `account` command schema and all nested subcommands.
 pub fn command() -> Command {
@@ -45,6 +46,7 @@ pub fn command() -> Command {
                 ),
         )
         .subcommand(agents::run_command())
+        .subcommand(projects::command())
         .subcommand(agents::command());
 
     #[cfg(feature = "developer-tools")]

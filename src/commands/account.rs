@@ -9,6 +9,7 @@ mod confirm;
 mod handle;
 mod helpers;
 mod mail;
+mod projects;
 mod register;
 mod status;
 
@@ -24,6 +25,8 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         mail::run(mail_m).await
     } else if let Some(handle_m) = sub_m.subcommand_matches("handle") {
         handle::run(handle_m).await
+    } else if let Some(projects_m) = sub_m.subcommand_matches("projects") {
+        projects::run(projects_m).await
     } else if let Some(run_m) = sub_m.subcommand_matches("run") {
         agents::run_account_agent(run_m).await
     } else if cfg!(feature = "developer-tools") {
@@ -36,14 +39,14 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         }
 
         eprintln!(
-            "No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', 'cargo ai account mail test [--subject <text>] [--text <text>]', 'cargo ai account mail prefs [--disable-all|--enable-all]', 'cargo ai account handle [--set <handle>]', 'cargo ai account run <name>', 'cargo ai account hatch <name>', or 'cargo ai account agents <list|push|pull|run|hatch|visibility|archive>'."
+            "No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', 'cargo ai account mail test [--subject <text>] [--text <text>]', 'cargo ai account mail prefs [--disable-all|--enable-all]', 'cargo ai account handle [--set <handle>]', 'cargo ai account projects <list|publish|pull|visibility|archive>', 'cargo ai account run <name>', 'cargo ai account hatch <name>', or 'cargo ai account agents <list|push|pull|run|hatch|visibility|archive>'."
         );
         false
     } else if let Some(agents_m) = sub_m.subcommand_matches("agents") {
         agents::run(agents_m).await
     } else {
         eprintln!(
-            "No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', 'cargo ai account mail test [--subject <text>] [--text <text>]', 'cargo ai account mail prefs [--disable-all|--enable-all]', 'cargo ai account handle [--set <handle>]', 'cargo ai account run <name>', or 'cargo ai account agents <list|push|pull|run|visibility|archive>'."
+            "No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', 'cargo ai account mail test [--subject <text>] [--text <text>]', 'cargo ai account mail prefs [--disable-all|--enable-all]', 'cargo ai account handle [--set <handle>]', 'cargo ai account projects <list|pull|visibility|archive>', 'cargo ai account run <name>', or 'cargo ai account agents <list|push|pull|run|visibility|archive>'."
         );
         false
     }

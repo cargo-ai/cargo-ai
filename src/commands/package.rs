@@ -45,6 +45,14 @@ struct PackageOutputRoot {
     explicit: bool,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct AssembledPackage {
+    pub root_path: PathBuf,
+    pub manifest_project_name: Option<String>,
+    pub manifest_project_version: Option<String>,
+    pub manifest_value: serde_json::Value,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct PackageManifestDocument {
     format_version: u32,
@@ -107,61 +115,26 @@ struct LoadedProjectMetadata {
 }
 
 pub fn run(sub_m: &ArgMatches) -> bool {
-    let project_root = match current_project_root() {
-        Some(root) => root,
-        None => {
-            eprintln!(
-                "x No Cargo AI project metadata was found from the current directory upward."
-            );
-            return false;
-        }
-    };
     let profile_name = sub_m
         .get_one::<String>("profile")
         .map(String::as_str)
         .unwrap_or("default");
-    let loaded_metadata = match load_project_metadata(&project_root, profile_name) {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            eprintln!("x {error}");
-            return false;
-        }
-    };
-    let output_root = match resolve_package_output_root(
-        &project_root,
+    match assemble_current_project_package(
         profile_name,
         sub_m.get_one::<String>("output_dir").map(String::as_str),
-    ) {
-        Ok(output_root) => output_root,
-        Err(error) => {
-            eprintln!("x {error}");
-            return false;
-        }
-    };
-
-    println!("Packaging profile `{profile_name}`...");
-    println!("Project: {}", project_root.display());
-    println!("Output:  {}", output_root.path.display());
-    println!();
-
-    match assemble_package_root(
-        &project_root,
-        profile_name,
-        loaded_metadata.project_identity.as_ref(),
-        &loaded_metadata.build_profile,
-        &output_root,
         sub_m.get_flag("force"),
+        true,
     ) {
-        Ok(manifest) => {
+        Ok(assembled_package) => {
             println!("✓ Package assembled");
-            if let Some(project_name) = manifest.project_name.as_deref() {
+            if let Some(project_name) = assembled_package.manifest_project_name.as_deref() {
                 println!("Project: {}", project_name);
             }
-            if let Some(project_version) = manifest.project_version.as_deref() {
+            if let Some(project_version) = assembled_package.manifest_project_version.as_deref() {
                 println!("Version: {}", project_version);
             }
-            println!("Profile: {}", manifest.profile);
-            println!("Output:  {}", output_root.path.display());
+            println!("Profile: {}", profile_name);
+            println!("Output:  {}", assembled_package.root_path.display());
             true
         }
         Err(error) => {
@@ -175,6 +148,44 @@ fn current_project_root() -> Option<PathBuf> {
     std::env::current_dir()
         .ok()
         .and_then(|dir| crate::commands::tools::maybe_find_project_root(dir.as_path()))
+}
+
+pub(crate) fn assemble_current_project_package(
+    profile_name: &str,
+    raw_output_dir: Option<&str>,
+    force: bool,
+    print_banner: bool,
+) -> Result<AssembledPackage, String> {
+    let project_root = current_project_root().ok_or_else(|| {
+        "No Cargo AI project metadata was found from the current directory upward.".to_string()
+    })?;
+    let loaded_metadata = load_project_metadata(&project_root, profile_name)?;
+    let output_root = resolve_package_output_root(&project_root, profile_name, raw_output_dir)?;
+
+    if print_banner {
+        println!("Packaging profile `{profile_name}`...");
+        println!("Project: {}", project_root.display());
+        println!("Output:  {}", output_root.path.display());
+        println!();
+    }
+
+    let manifest = assemble_package_root(
+        &project_root,
+        profile_name,
+        loaded_metadata.project_identity.as_ref(),
+        &loaded_metadata.build_profile,
+        &output_root,
+        force,
+    )?;
+    let manifest_value = serde_json::to_value(&manifest)
+        .map_err(|error| format!("Failed to serialize package manifest JSON: {error}"))?;
+
+    Ok(AssembledPackage {
+        root_path: output_root.path.clone(),
+        manifest_project_name: manifest.project_name.clone(),
+        manifest_project_version: manifest.project_version.clone(),
+        manifest_value,
+    })
 }
 
 fn load_project_metadata(

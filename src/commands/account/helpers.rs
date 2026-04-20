@@ -180,6 +180,81 @@ pub fn apply_agents_list_display_limit(
     Some((shown, total))
 }
 
+/// Applies `--limit` output truncation to successful projects-list responses.
+pub fn apply_projects_list_display_limit(
+    response: &mut serde_json::Value,
+    display_limit: Option<usize>,
+) -> Option<(usize, usize)> {
+    let limit = display_limit?;
+    let response_type = response.get("type").and_then(|v| v.as_str());
+    if response_type != Some("account_projects_list_succeeded") {
+        return None;
+    }
+
+    let projects = response
+        .get_mut("projects")
+        .and_then(|v| v.as_array_mut())?;
+    let total = projects.len();
+    if total <= limit {
+        return None;
+    }
+
+    projects.truncate(limit);
+    let shown = projects.len();
+
+    if let Some(ui) = response.get_mut("ui") {
+        if let Some(summary) = ui.get_mut("summary") {
+            *summary = serde_json::json!(format!("Showing {shown} of {total} projects."));
+        }
+
+        if let Some(sections) = ui.get_mut("sections").and_then(|v| v.as_array_mut()) {
+            for section in sections.iter_mut() {
+                let is_list_section = section
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == "list")
+                    .unwrap_or(false);
+                let is_kv_section = section
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == "kv")
+                    .unwrap_or(false);
+
+                if is_list_section {
+                    if let Some(items) = section.get_mut("items").and_then(|v| v.as_array_mut()) {
+                        items.truncate(limit);
+                    }
+                }
+
+                if is_kv_section {
+                    if let Some(items) = section.get_mut("items").and_then(|v| v.as_array_mut()) {
+                        for item in items.iter_mut() {
+                            let is_count = item
+                                .get("label")
+                                .and_then(|v| v.as_str())
+                                .map(|label| label.eq_ignore_ascii_case("count"))
+                                .unwrap_or(false);
+
+                            if is_count {
+                                item["value"] = serde_json::json!(shown);
+                            }
+                        }
+                    }
+                }
+            }
+
+            sections.push(serde_json::json!({
+                "type": "notice",
+                "message": format!(
+                    "Showing {shown} of {total} projects. Use --limit <N> or --all to adjust output."
+                )
+            }));
+        }
+    }
+
+    Some((shown, total))
+}
+
 /// Fetches status for register-guard checks and retries once with refresh token
 /// when the initial access token is expired.
 pub async fn fetch_status_for_register_guard(
@@ -240,7 +315,10 @@ pub fn extract_status_account_email(status_response: &serde_json::Value) -> Opti
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_agents_list_display_limit, extract_status_account_email};
+    use super::{
+        apply_agents_list_display_limit, apply_projects_list_display_limit,
+        extract_status_account_email,
+    };
     use serde_json::json;
 
     fn sample_agents_list_response() -> serde_json::Value {
@@ -261,6 +339,38 @@ mod tests {
                             { "name": "agent-1" },
                             { "name": "agent-2" },
                             { "name": "agent-3" }
+                        ]
+                    },
+                    {
+                        "type": "kv",
+                        "items": [
+                            { "label": "count", "value": 3 },
+                            { "label": "owner", "value": "demo" }
+                        ]
+                    }
+                ]
+            }
+        })
+    }
+
+    fn sample_projects_list_response() -> serde_json::Value {
+        json!({
+            "status": "success",
+            "type": "account_projects_list_succeeded",
+            "projects": [
+                { "name": "project-1" },
+                { "name": "project-2" },
+                { "name": "project-3" }
+            ],
+            "ui": {
+                "summary": "Showing all projects.",
+                "sections": [
+                    {
+                        "type": "list",
+                        "items": [
+                            { "name": "project-1" },
+                            { "name": "project-2" },
+                            { "name": "project-3" }
                         ]
                     },
                     {
@@ -336,6 +446,24 @@ mod tests {
                     .unwrap_or(false)
         });
         assert!(has_notice);
+    }
+
+    #[test]
+    fn applies_projects_display_limit_and_keeps_response_shape_consistent() {
+        let mut response = sample_projects_list_response();
+
+        let truncation = apply_projects_list_display_limit(&mut response, Some(2));
+
+        assert_eq!(truncation, Some((2, 3)));
+        assert_eq!(response["projects"].as_array().map(Vec::len), Some(2));
+        assert_eq!(response["ui"]["summary"], "Showing 2 of 3 projects.");
+        assert_eq!(
+            response["ui"]["sections"][0]["items"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(response["ui"]["sections"][1]["items"][0]["value"], 2);
     }
 
     #[test]

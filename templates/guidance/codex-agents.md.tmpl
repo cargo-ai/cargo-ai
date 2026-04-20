@@ -71,6 +71,17 @@ For account-hosted definitions, remember the current split:
   - `cargo ai account agents run <name> --owner-handle <handle>`
 - frozen/export path:
   - `cargo ai account hatch <name>`
+- published project packages:
+  - `cargo ai account projects list`
+  - `cargo ai account projects list --owner-handle <handle>`
+  - `cargo ai account projects pull <name> --owner-handle <handle>`
+  - `cargo ai account projects publish`
+
+For account projects, keep the contract narrow:
+- `publish` packages the current project first, then uploads that package
+- publish identity comes from `.cargo-ai/project.toml` `[project].name` and `[project].version`
+- public lookup still uses owner handle plus project name until a later stable-link layer exists
+- pulled packages restore a project folder locally; they are not agent-definition records with a stored definition path
 
 ## Working Defaults
 
