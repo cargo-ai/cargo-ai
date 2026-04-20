@@ -130,7 +130,7 @@ For account-hosted definitions, remember the current split:
 - If Mermaid rendering is clearly supported, offer Mermaid as an option and ask whether the user wants it.
 - Use `cargo ai new` or `cargo ai init` when the workspace needs a Cargo AI project boundary before local tool authoring.
 - Use `cargo ai add guidance --style codex` after bootstrap when the workspace needs the Codex guidance bundle.
-- Treat `.cargo-ai/project.toml` as the source of truth for project build profiles. When a user wants `cargo ai build`, keep the profile explicit with:
+- Treat `.cargo-ai/project.toml` as the source of truth for project identity and build profiles. Keep top-level `[project]` metadata (`name`, `version`) intact, and when a user wants `cargo ai build`, keep the profile explicit with:
   - `agent_definitions`
   - `hatched_agents`
   - `tools`
@@ -139,6 +139,7 @@ For account-hosted definitions, remember the current split:
 - Do not infer tools from agent JSON during build authoring. If an agent needs a tool in the assembled build root, list that tool explicitly under `[build.<profile>].tools`.
 - If `cargo ai build` fails because a tool exists only in Cargo AI Home, do not treat that as a build-profile success case. Update the project so the tool is attached to the project first, then keep the build profile explicit.
 - Treat `cargo ai package` as the source-portable counterpart to `cargo ai build`. It should reuse the same `[build.<profile>]` selection directly instead of inventing a second package-only selector in the first slice.
+- When `.cargo-ai/project.toml` includes `[project].name` and `[project].version`, keep those fields intact and let `cargo-ai-package.toml` carry them forward as package identity metadata.
 - For `cargo ai package`, copy both `agent_definitions` and `hatched_agents` as JSON source definitions into the package output. Do not hatch binaries during package assembly.
 - When packaging tools, keep them source-backed and project-attached. Copy the tool crate source plus `.cargo-ai/tools/<tool>/tool.json`, and do not carry built tool artifacts into the portable package.
 - Prefer direct edits to `.cargo-ai/project.toml` over inventing a helper command flow. Keep the TOML shape simple and explain changes in plain language so the user can review them.

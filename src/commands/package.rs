@@ -12,7 +12,19 @@ const PACKAGE_MANIFEST_FILE_NAME: &str = "cargo-ai-package.toml";
 #[derive(Clone, Debug, Default, Deserialize)]
 struct ProjectMetadataDocument {
     #[serde(default)]
+    project: Option<ProjectIdentityDocument>,
+    #[serde(default)]
     build: BTreeMap<String, BuildProfileDocument>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct ProjectIdentityDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(flatten)]
+    extra: toml::Table,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -36,6 +48,10 @@ struct PackageOutputRoot {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct PackageManifestDocument {
     format_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_version: Option<String>,
     profile: String,
     agent_definitions: Vec<String>,
     hatched_agents: Vec<String>,
@@ -46,6 +62,8 @@ struct PackageManifestDocument {
 #[derive(Clone, Debug, Serialize)]
 struct GeneratedProjectMetadataDocument {
     format_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<ProjectIdentityDocument>,
     tools: GeneratedProjectToolsPolicyDocument,
     build: BTreeMap<String, BuildProfileDocument>,
 }
@@ -82,6 +100,12 @@ struct ProjectSourceToolContext {
     binary_name: String,
 }
 
+#[derive(Clone, Debug)]
+struct LoadedProjectMetadata {
+    project_identity: Option<ProjectIdentityDocument>,
+    build_profile: BuildProfileDocument,
+}
+
 pub fn run(sub_m: &ArgMatches) -> bool {
     let project_root = match current_project_root() {
         Some(root) => root,
@@ -96,8 +120,8 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         .get_one::<String>("profile")
         .map(String::as_str)
         .unwrap_or("default");
-    let build_profile = match load_build_profile(&project_root, profile_name) {
-        Ok(profile) => profile,
+    let loaded_metadata = match load_project_metadata(&project_root, profile_name) {
+        Ok(metadata) => metadata,
         Err(error) => {
             eprintln!("x {error}");
             return false;
@@ -123,12 +147,19 @@ pub fn run(sub_m: &ArgMatches) -> bool {
     match assemble_package_root(
         &project_root,
         profile_name,
-        &build_profile,
+        loaded_metadata.project_identity.as_ref(),
+        &loaded_metadata.build_profile,
         &output_root,
         sub_m.get_flag("force"),
     ) {
         Ok(manifest) => {
             println!("✓ Package assembled");
+            if let Some(project_name) = manifest.project_name.as_deref() {
+                println!("Project: {}", project_name);
+            }
+            if let Some(project_version) = manifest.project_version.as_deref() {
+                println!("Version: {}", project_version);
+            }
             println!("Profile: {}", manifest.profile);
             println!("Output:  {}", output_root.path.display());
             true
@@ -146,10 +177,10 @@ fn current_project_root() -> Option<PathBuf> {
         .and_then(|dir| crate::commands::tools::maybe_find_project_root(dir.as_path()))
 }
 
-fn load_build_profile(
+fn load_project_metadata(
     project_root: &Path,
     profile_name: &str,
-) -> Result<BuildProfileDocument, String> {
+) -> Result<LoadedProjectMetadata, String> {
     let metadata_path = project_root.join(PROJECT_METADATA_RELATIVE_PATH);
     let contents = fs::read_to_string(&metadata_path).map_err(|error| {
         format!(
@@ -158,7 +189,7 @@ fn load_build_profile(
             error
         )
     })?;
-    let metadata: ProjectMetadataDocument = toml::from_str(&contents).map_err(|error| {
+    let mut metadata: ProjectMetadataDocument = toml::from_str(&contents).map_err(|error| {
         format!(
             "Failed to parse project metadata '{}': {}",
             metadata_path.display(),
@@ -193,7 +224,10 @@ fn load_build_profile(
         ));
     }
 
-    Ok(profile)
+    Ok(LoadedProjectMetadata {
+        project_identity: normalize_project_identity(metadata.project.take()),
+        build_profile: profile,
+    })
 }
 
 fn resolve_package_output_root(
@@ -236,6 +270,7 @@ fn resolve_package_output_root(
 fn assemble_package_root(
     project_root: &Path,
     profile_name: &str,
+    project_identity: Option<&ProjectIdentityDocument>,
     build_profile: &BuildProfileDocument,
     output_root: &PackageOutputRoot,
     force: bool,
@@ -291,10 +326,17 @@ fn assemble_package_root(
         )?;
     }
 
-    write_generated_project_metadata(output_root.path.as_path(), profile_name, &build_profile)?;
+    write_generated_project_metadata(
+        output_root.path.as_path(),
+        project_identity,
+        profile_name,
+        &build_profile,
+    )?;
 
     let manifest = PackageManifestDocument {
         format_version: 1,
+        project_name: project_identity.and_then(|project| project.name.clone()),
+        project_version: project_identity.and_then(|project| project.version.clone()),
         profile: profile_name.to_string(),
         agent_definitions: build_profile.agent_definitions.clone(),
         hatched_agents: build_profile.hatched_agents.clone(),
@@ -502,6 +544,7 @@ fn write_package_tool_manifest(
 
 fn write_generated_project_metadata(
     package_root: &Path,
+    project_identity: Option<&ProjectIdentityDocument>,
     profile_name: &str,
     build_profile: &BuildProfileDocument,
 ) -> Result<(), String> {
@@ -520,6 +563,7 @@ fn write_generated_project_metadata(
     build.insert(profile_name.to_string(), build_profile.clone());
     let document = GeneratedProjectMetadataDocument {
         format_version: 1,
+        project: project_identity.cloned(),
         tools: GeneratedProjectToolsPolicyDocument {
             allow_global_fallback: false,
         },
@@ -534,6 +578,29 @@ fn write_generated_project_metadata(
             error
         )
     })
+}
+
+fn normalize_project_identity(
+    project_identity: Option<ProjectIdentityDocument>,
+) -> Option<ProjectIdentityDocument> {
+    let mut project_identity = project_identity?;
+    project_identity.name = normalize_optional_metadata_text(project_identity.name.take());
+    project_identity.version = normalize_optional_metadata_text(project_identity.version.take());
+
+    if project_identity.name.is_none()
+        && project_identity.version.is_none()
+        && project_identity.extra.is_empty()
+    {
+        None
+    } else {
+        Some(project_identity)
+    }
+}
+
+fn normalize_optional_metadata_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn write_package_manifest(
@@ -784,7 +851,7 @@ fn normalize_path(path: impl AsRef<Path>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        assemble_package_root, load_build_profile, resolve_package_output_root,
+        assemble_package_root, load_project_metadata, resolve_package_output_root,
         PackageManifestDocument,
     };
     use std::fs;
@@ -881,6 +948,30 @@ mod tests {
     }
 
     #[test]
+    fn load_project_metadata_allows_missing_project_identity() {
+        let project_root = temp_dir("no-project-identity");
+        write_project_metadata(
+            &project_root,
+            r#"
+format_version = 1
+
+[build.default]
+agent_definitions = ["agents/demo.json"]
+"#,
+        );
+
+        let loaded_metadata =
+            load_project_metadata(&project_root, "default").expect("profile should load");
+        assert!(loaded_metadata.project_identity.is_none());
+        assert_eq!(
+            loaded_metadata.build_profile.agent_definitions,
+            vec!["agents/demo.json".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(&project_root);
+    }
+
+    #[test]
     fn assembles_source_package_from_selected_build_profile() {
         let project_root = temp_dir("assemble");
         fs::create_dir_all(project_root.join("agents")).expect("agents dir should be created");
@@ -890,6 +981,10 @@ mod tests {
             &project_root,
             r#"
 format_version = 1
+
+[project]
+name = "hello_package"
+version = "0.1.0"
 
 [tools]
 allow_global_fallback = true
@@ -918,14 +1013,15 @@ assets = ["assets/prompts/"]
         .expect("asset should be written");
         write_source_tool_fixture(&project_root, "hello_tool", "tools/hello_tool/Cargo.toml");
 
-        let build_profile =
-            load_build_profile(&project_root, "default").expect("profile should load");
+        let loaded_metadata =
+            load_project_metadata(&project_root, "default").expect("profile should load");
         let output_root = resolve_package_output_root(&project_root, "default", None)
             .expect("output root should resolve");
         let manifest = assemble_package_root(
             &project_root,
             "default",
-            &build_profile,
+            loaded_metadata.project_identity.as_ref(),
+            &loaded_metadata.build_profile,
             &output_root,
             false,
         )
@@ -935,6 +1031,8 @@ assets = ["assets/prompts/"]
             manifest,
             PackageManifestDocument {
                 format_version: 1,
+                project_name: Some("hello_package".to_string()),
+                project_version: Some("0.1.0".to_string()),
                 profile: "default".to_string(),
                 agent_definitions: vec!["agents/definition_only.json".to_string()],
                 hatched_agents: vec!["agents/hello_runner.json".to_string()],
@@ -969,6 +1067,9 @@ assets = ["assets/prompts/"]
 
         let generated_project = fs::read_to_string(output_root.path.join(".cargo-ai/project.toml"))
             .expect("generated project metadata should exist");
+        assert!(generated_project.contains("[project]"));
+        assert!(generated_project.contains("name = \"hello_package\""));
+        assert!(generated_project.contains("version = \"0.1.0\""));
         assert!(generated_project.contains("allow_global_fallback = false"));
         assert!(generated_project.contains("[build.default]"));
         assert!(generated_project.contains("hatched_agents = [\"agents/hello_runner.json\"]"));
@@ -1029,14 +1130,15 @@ tools = ["machine_only"]
         );
         write_machine_tool_fixture(&cargo_ai_home, "machine_only");
 
-        let build_profile =
-            load_build_profile(&project_root, "default").expect("profile should load");
+        let loaded_metadata =
+            load_project_metadata(&project_root, "default").expect("profile should load");
         let output_root = resolve_package_output_root(&project_root, "default", None)
             .expect("output root should resolve");
         let error = assemble_package_root(
             &project_root,
             "default",
-            &build_profile,
+            loaded_metadata.project_identity.as_ref(),
+            &loaded_metadata.build_profile,
             &output_root,
             false,
         )

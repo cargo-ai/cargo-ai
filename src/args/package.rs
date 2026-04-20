@@ -29,7 +29,7 @@ pub fn command() -> Command {
                 .action(ArgAction::SetTrue),
         )
         .after_help(
-            "The package profile reuses `[build.<profile>]` from `.cargo-ai/project.toml`.\nPackage output stays source-portable: listed agent JSON, listed tool source plus metadata, listed assets, and generated package metadata. It does not include target binaries.",
+            "The package profile reuses `[build.<profile>]` from `.cargo-ai/project.toml`.\nPackage output stays source-portable: listed agent JSON, listed tool source plus metadata, listed assets, and generated package metadata. It does not include target binaries. When `[project].name` and `[project].version` are present, package output carries that identity into the generated manifests.",
         )
 }
 

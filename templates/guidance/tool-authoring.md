@@ -46,11 +46,15 @@ with:
 ```toml
 format_version = 1
 
+[project]
+name = "my-tool-project"
+version = "0.1.0"
+
 [tools]
 allow_global_fallback = true
 ```
 
-`cargo ai new/init` writes that default policy so new projects can reuse machine-level tools when desired. If you hand-author `project.toml` and omit `allow_global_fallback`, Cargo AI treats that as project-only lookup.
+`cargo ai new/init` writes that default policy plus starter project identity so new projects can reuse machine-level tools when desired and already have a package/publish identity. If you hand-author `project.toml` and omit `allow_global_fallback`, Cargo AI treats that as project-only lookup.
 
 ## Default Local Tool Workflow
 

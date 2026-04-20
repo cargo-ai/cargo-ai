@@ -926,6 +926,10 @@ When a project also wants an explicit assembled build root, keep that in the sam
 ```toml
 format_version = 1
 
+[project]
+name = "my_tool_project"
+version = "0.1.0"
+
 [tools]
 allow_global_fallback = true
 
@@ -953,6 +957,7 @@ That creates:
 
 - `.cargo-ai/project.toml`
   - Cargo AI project metadata and tool-resolution policy
+  - includes a top-level `[project]` section for project/package identity
   - `cargo ai new/init` writes `[tools] allow_global_fallback = true` by default
 - `.gitignore`
   - generated artifact ignore rules when VCS is enabled
@@ -1040,6 +1045,7 @@ Phase 3A package rules stay narrow on purpose:
 - listed tools must already be project-attached and source-backed; machine-only tools are rejected with attach/install guidance
 - packaged tools keep source metadata under `.cargo-ai/tools/...` and source crates under their project-relative paths, but they do not include built binaries
 - package outputs get their own generated `.cargo-ai/project.toml` plus `cargo-ai-package.toml` so the folder is inspectable and can be treated as a portable project snapshot
+- when the source project declares `[project].name` and `[project].version`, package output carries those values into both generated manifests for later publish/pull identity
 
 ## Account-Backed Flows
 
