@@ -1200,9 +1200,16 @@ fn resolve_tool_from_scope_root(
 
     let manifest = load_tool_manifest(&manifest_path, tool_id)?;
     let artifact = manifest.artifacts.get(target_triple).ok_or_else(|| {
+        let remediation = if scope == ToolScope::Project && manifest.source.is_some() {
+            format!(
+                " Materialize it with `cargo ai tools build {tool_id} --scope project --target {target_triple}` or assemble the full project with `cargo ai build --target {target_triple}`."
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "Tool '{}' does not have a materialized artifact for target '{}'.",
-            tool_id, target_triple
+            "Tool '{}' does not have a materialized artifact for target '{}'.{}",
+            tool_id, target_triple, remediation
         )
     })?;
     let binary_name = default_binary_name_for_manifest(&manifest);
@@ -1674,10 +1681,10 @@ fn step_matches_platform(platforms: Option<&[String]>, current_platform: Option<
 mod tests {
     use super::{
         lint_project_source_tool, maybe_find_project_root, render_binary_tool_manifest_json,
-        render_source_tool_manifest_json, scaffold_local_tool, validate_describe_document,
-        validate_local_tool_name, ResolvedTool, ToolDescribeDocument, ToolDescribeExamples,
-        ToolDescribeParam, ToolDescribeResourceProfile, ToolDescribeResult, ToolDescribeSelfTest,
-        ToolResolver, ToolScope,
+        render_source_tool_manifest_json, resolve_tool_from_scope_root, scaffold_local_tool,
+        validate_describe_document, validate_local_tool_name, ResolvedTool, ToolDescribeDocument,
+        ToolDescribeExamples, ToolDescribeParam, ToolDescribeResourceProfile, ToolDescribeResult,
+        ToolDescribeSelfTest, ToolResolver, ToolScope,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1769,6 +1776,37 @@ mod tests {
         .expect("tool manifest should be written");
 
         source_manifest_path
+    }
+
+    #[test]
+    fn project_source_tool_missing_artifact_suggests_materialization_commands() {
+        let project_root = temp_dir("missing-artifact-remediation");
+        let tool_dir = project_root.join(".cargo-ai/tools").join("hello_tool");
+        fs::create_dir_all(&tool_dir).expect("tool metadata dir should be created");
+        fs::write(
+            tool_dir.join("tool.json"),
+            render_source_tool_manifest_json(
+                "hello_tool",
+                "tools/hello_tool/Cargo.toml",
+                "hello_tool",
+            ),
+        )
+        .expect("tool manifest should be written");
+
+        let error = resolve_tool_from_scope_root(
+            &project_root.join(".cargo-ai/tools"),
+            ToolScope::Project,
+            "hello_tool",
+            "aarch64-apple-darwin",
+        )
+        .expect_err("missing artifact should fail");
+
+        assert!(error.contains(
+            "cargo ai tools build hello_tool --scope project --target aarch64-apple-darwin"
+        ));
+        assert!(error.contains("cargo ai build --target aarch64-apple-darwin"));
+
+        let _ = fs::remove_dir_all(project_root);
     }
 
     #[test]

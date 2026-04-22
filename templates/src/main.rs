@@ -3685,7 +3685,7 @@ async fn run_matching_action_steps(
                 named_inputs,
                 action_index,
                 &action.name,
-                &action_provider_context,
+                provider_context,
                 action_execution_override,
                 max_agent_depth,
                 runtime_budget,
