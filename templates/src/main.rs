@@ -37,6 +37,7 @@ const AGENT_ACTION_MAX_RUNTIME_SECS_ENV: &str = "CARGO_AI_AGENT_MAX_RUNTIME_SECS
 const AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_STARTED_AT_MS";
 const AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_DEADLINE_MS";
 const DEFAULT_AGENT_ACTION_MAX_DEPTH: u32 = 5;
+const DEFAULT_INFERENCE_TIMEOUT_IN_SEC: u64 = 60;
 const DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS: u64 = 600;
 const PROJECT_METADATA_RELATIVE_PATH: &str = ".cargo-ai/project.toml";
 const PROJECT_TOOLS_RELATIVE_PATH: &str = ".cargo-ai/tools";
@@ -841,7 +842,25 @@ struct ToolManifest {
 #[derive(Clone, Debug, Default, Deserialize)]
 struct ProjectMetadataDocument {
     #[serde(default)]
+    runtime: Option<ProjectRuntimeDocument>,
+    #[serde(default)]
     tools: Option<ProjectToolsPolicyDocument>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ProjectRuntimeDocument {
+    #[serde(default)]
+    defaults: Option<ProjectRuntimeDefaultsDocument>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ProjectRuntimeDefaultsDocument {
+    #[serde(default)]
+    inference_timeout_in_sec: Option<u64>,
+    #[serde(default)]
+    max_runtime_in_sec: Option<u64>,
+    #[serde(default)]
+    max_agent_depth: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1006,6 +1025,30 @@ fn project_allows_global_fallback(project_root: &Path) -> Result<bool, String> {
         .tools
         .and_then(|tools| tools.allow_global_fallback)
         .unwrap_or(false))
+}
+
+fn load_project_runtime_defaults(
+    project_root: Option<&Path>,
+) -> Result<Option<ProjectRuntimeDefaultsDocument>, String> {
+    let Some(project_root) = project_root else {
+        return Ok(None);
+    };
+    let metadata_path = project_root.join(PROJECT_METADATA_RELATIVE_PATH);
+    let contents = fs::read_to_string(&metadata_path).map_err(|error| {
+        format!(
+            "Failed to read project metadata '{}': {}",
+            metadata_path.display(),
+            error
+        )
+    })?;
+    let metadata: ProjectMetadataDocument = toml::from_str(&contents).map_err(|error| {
+        format!(
+            "Failed to parse project metadata '{}': {}",
+            metadata_path.display(),
+            error
+        )
+    })?;
+    Ok(metadata.runtime.and_then(|runtime| runtime.defaults))
 }
 
 fn maybe_find_project_root(start: &Path) -> Option<PathBuf> {
@@ -2809,12 +2852,22 @@ fn parse_runtime_var_value(
 async fn main() {
     let cmd_args = args::build_cli();
     let config = load_config();
+    let project_root = std::env::current_dir()
+        .ok()
+        .and_then(|dir| maybe_find_project_root(dir.as_path()));
+    let project_runtime_defaults = match load_project_runtime_defaults(project_root.as_deref()) {
+        Ok(defaults) => defaults,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            std::process::exit(1);
+        }
+    };
 
     let mut server = String::new();
     let mut model = String::new();
     let mut url = String::new();
     let mut token = String::new();
-    let mut inference_timeout_in_sec: u64 = 60;
+    let mut inference_timeout_in_sec: u64 = DEFAULT_INFERENCE_TIMEOUT_IN_SEC;
     let mut selected_profile: Option<SelectedProfile> = None;
     let mut loaded_profile_message: Option<(LoadedProfileKind, String)> = None;
     let mut use_openai_account_transport = false;
@@ -2839,6 +2892,13 @@ async fn main() {
         }
     }
 
+    if let Some(project_timeout) = project_runtime_defaults
+        .as_ref()
+        .and_then(|defaults| defaults.inference_timeout_in_sec)
+    {
+        inference_timeout_in_sec = project_timeout;
+    }
+
     if let Some(server_arg) = cmd_args.get_one::<String>("server") {
         server = server_arg.to_lowercase();
     }
@@ -2855,10 +2915,19 @@ async fn main() {
         inference_timeout_in_sec = timeout_arg;
     }
 
-    let max_agent_depth =
-        configured_agent_action_max_depth(cmd_args.get_one::<u32>("max_agent_depth").copied());
+    let max_agent_depth = configured_agent_action_max_depth_with_project_default(
+        cmd_args.get_one::<u32>("max_agent_depth").copied(),
+        project_runtime_defaults
+            .as_ref()
+            .and_then(|defaults| defaults.max_agent_depth),
+    );
     let runtime_budget =
-        configured_agent_action_runtime_budget(cmd_args.get_one::<u64>("max_runtime_in_sec").copied());
+        configured_agent_action_runtime_budget_with_project_default(
+            cmd_args.get_one::<u64>("max_runtime_in_sec").copied(),
+            project_runtime_defaults
+                .as_ref()
+                .and_then(|defaults| defaults.max_runtime_in_sec),
+        );
 
     let provider = match ProviderKind::from_server_value(&server) {
         Some(provider) => provider,
@@ -2952,9 +3021,7 @@ async fn main() {
     let ignore_tools = cmd_args.get_flag("ignore_tools");
     let tool_resolver = Arc::new(
         ToolResolver::new(
-            std::env::current_dir()
-                .ok()
-                .and_then(|dir| maybe_find_project_root(dir.as_path())),
+            project_root,
             current_tool_target_triple(),
         )
         .with_bundled_root(bundled_tools_root_from_executable()),
@@ -5727,10 +5794,19 @@ fn inherited_agent_action_runtime_budget() -> Option<InvocationRuntimeBudget> {
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn configured_agent_action_runtime_budget(cli_override: Option<u64>) -> InvocationRuntimeBudget {
+    configured_agent_action_runtime_budget_with_project_default(cli_override, None)
+}
+
+fn configured_agent_action_runtime_budget_with_project_default(
+    cli_override: Option<u64>,
+    project_default: Option<u64>,
+) -> InvocationRuntimeBudget {
     cli_override
         .map(new_runtime_budget)
         .or_else(inherited_agent_action_runtime_budget)
+        .or_else(|| project_default.map(new_runtime_budget))
         .unwrap_or_else(|| new_runtime_budget(DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS))
 }
 
@@ -5786,9 +5862,18 @@ fn inherited_agent_action_max_depth() -> Option<u32> {
         .and_then(|value| value.parse::<u32>().ok())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn configured_agent_action_max_depth(cli_override: Option<u32>) -> u32 {
+    configured_agent_action_max_depth_with_project_default(cli_override, None)
+}
+
+fn configured_agent_action_max_depth_with_project_default(
+    cli_override: Option<u32>,
+    project_default: Option<u32>,
+) -> u32 {
     cli_override
         .or_else(inherited_agent_action_max_depth)
+        .or(project_default)
         .unwrap_or(DEFAULT_AGENT_ACTION_MAX_DEPTH)
 }
 
