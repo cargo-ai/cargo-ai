@@ -159,6 +159,31 @@ fn build_publish_project_body(
     }))
 }
 
+pub(crate) fn estimate_publish_project_request_size(
+    access_token: &str,
+    project_name: &str,
+    project_version: &str,
+    package_manifest: Value,
+    package_sha256: &str,
+    package_size_bytes: i64,
+    package_archive_base64: &str,
+) -> Result<u64, String> {
+    let body = build_publish_project_body(
+        access_token,
+        project_name,
+        project_version,
+        package_manifest,
+        package_sha256,
+        package_size_bytes,
+        package_archive_base64,
+    );
+    let serialized = serde_json::to_vec(&body)
+        .map_err(|error| format!("Failed to estimate project publish request size: {error}"))?;
+    u64::try_from(serialized.len()).map_err(|_| {
+        "Estimated project publish request size exceeded supported limits.".to_string()
+    })
+}
+
 fn build_pull_project_body(
     access_token: &str,
     name: &str,

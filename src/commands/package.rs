@@ -1,4 +1,5 @@
 //! Runtime behavior for `cargo ai package`.
+use base64::Engine as _;
 use clap::ArgMatches;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,6 +14,8 @@ const PACKAGE_MANIFEST_FILE_NAME: &str = "cargo-ai-package.toml";
 struct ProjectMetadataDocument {
     #[serde(default)]
     project: Option<ProjectIdentityDocument>,
+    #[serde(default)]
+    runtime: Option<ProjectRuntimeDocument>,
     #[serde(default)]
     build: BTreeMap<String, BuildProfileDocument>,
 }
@@ -39,6 +42,22 @@ struct BuildProfileDocument {
     assets: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+struct ProjectRuntimeDocument {
+    #[serde(default)]
+    defaults: Option<ProjectRuntimeDefaultsDocument>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ProjectRuntimeDefaultsDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inference_timeout_in_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_runtime_in_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_agent_depth: Option<u32>,
+}
+
 #[derive(Clone, Debug)]
 struct PackageOutputRoot {
     path: PathBuf,
@@ -51,6 +70,10 @@ pub(crate) struct AssembledPackage {
     pub manifest_project_name: Option<String>,
     pub manifest_project_version: Option<String>,
     pub manifest_value: serde_json::Value,
+    pub archive_bytes: Vec<u8>,
+    pub assembled_size_bytes: u64,
+    pub archive_size_bytes: u64,
+    pub estimated_publish_request_size_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -72,6 +95,8 @@ struct GeneratedProjectMetadataDocument {
     format_version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     project: Option<ProjectIdentityDocument>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<ProjectRuntimeDocument>,
     tools: GeneratedProjectToolsPolicyDocument,
     build: BTreeMap<String, BuildProfileDocument>,
 }
@@ -111,6 +136,7 @@ struct ProjectSourceToolContext {
 #[derive(Clone, Debug)]
 struct LoadedProjectMetadata {
     project_identity: Option<ProjectIdentityDocument>,
+    runtime_defaults: Option<ProjectRuntimeDefaultsDocument>,
     build_profile: BuildProfileDocument,
 }
 
@@ -135,6 +161,20 @@ pub fn run(sub_m: &ArgMatches) -> bool {
             }
             println!("Profile: {}", profile_name);
             println!("Output:  {}", assembled_package.root_path.display());
+            println!(
+                "Package size on disk: {}",
+                crate::commands::account::format_bytes(assembled_package.assembled_size_bytes)
+            );
+            println!(
+                "Archive size:         {}",
+                crate::commands::account::format_bytes(assembled_package.archive_size_bytes)
+            );
+            println!(
+                "Estimated request:    {}",
+                crate::commands::account::format_bytes(
+                    assembled_package.estimated_publish_request_size_bytes
+                )
+            );
             true
         }
         Err(error) => {
@@ -173,18 +213,47 @@ pub(crate) fn assemble_current_project_package(
         &project_root,
         profile_name,
         loaded_metadata.project_identity.as_ref(),
+        loaded_metadata.runtime_defaults.as_ref(),
         &loaded_metadata.build_profile,
         &output_root,
         force,
     )?;
     let manifest_value = serde_json::to_value(&manifest)
         .map_err(|error| format!("Failed to serialize package manifest JSON: {error}"))?;
+    let assembled_size_bytes =
+        crate::commands::account::directory_size_bytes(output_root.path.as_path())?;
+    let archive_bytes =
+        crate::commands::account::create_package_archive_bytes(output_root.path.as_path())?;
+    let archive_size_bytes = u64::try_from(archive_bytes.len())
+        .map_err(|_| "Package archive size exceeded supported limits.".to_string())?;
+    let package_sha256 = crate::commands::account::sha256_hex(archive_bytes.as_slice());
+    let package_size_bytes = i64::try_from(archive_bytes.len())
+        .map_err(|_| "Package archive size exceeded supported limits.".to_string())?;
+    let package_archive_base64 =
+        base64::engine::general_purpose::STANDARD.encode(archive_bytes.as_slice());
+    let estimated_publish_request_size_bytes =
+        crate::infra_api::account::projects::estimate_publish_project_request_size(
+            "__publish-size-estimate__",
+            manifest
+                .project_name
+                .as_deref()
+                .unwrap_or("unknown_project"),
+            manifest.project_version.as_deref().unwrap_or("0.0.0"),
+            manifest_value.clone(),
+            package_sha256.as_str(),
+            package_size_bytes,
+            package_archive_base64.as_str(),
+        )?;
 
     Ok(AssembledPackage {
         root_path: output_root.path.clone(),
         manifest_project_name: manifest.project_name.clone(),
         manifest_project_version: manifest.project_version.clone(),
         manifest_value,
+        archive_bytes,
+        assembled_size_bytes,
+        archive_size_bytes,
+        estimated_publish_request_size_bytes,
     })
 }
 
@@ -237,6 +306,7 @@ fn load_project_metadata(
 
     Ok(LoadedProjectMetadata {
         project_identity: normalize_project_identity(metadata.project.take()),
+        runtime_defaults: metadata.runtime.and_then(|runtime| runtime.defaults),
         build_profile: profile,
     })
 }
@@ -282,6 +352,7 @@ fn assemble_package_root(
     project_root: &Path,
     profile_name: &str,
     project_identity: Option<&ProjectIdentityDocument>,
+    runtime_defaults: Option<&ProjectRuntimeDefaultsDocument>,
     build_profile: &BuildProfileDocument,
     output_root: &PackageOutputRoot,
     force: bool,
@@ -340,6 +411,7 @@ fn assemble_package_root(
     write_generated_project_metadata(
         output_root.path.as_path(),
         project_identity,
+        runtime_defaults,
         profile_name,
         &build_profile,
     )?;
@@ -556,6 +628,7 @@ fn write_package_tool_manifest(
 fn write_generated_project_metadata(
     package_root: &Path,
     project_identity: Option<&ProjectIdentityDocument>,
+    runtime_defaults: Option<&ProjectRuntimeDefaultsDocument>,
     profile_name: &str,
     build_profile: &BuildProfileDocument,
 ) -> Result<(), String> {
@@ -575,6 +648,11 @@ fn write_generated_project_metadata(
     let document = GeneratedProjectMetadataDocument {
         format_version: 1,
         project: project_identity.cloned(),
+        runtime: runtime_defaults
+            .cloned()
+            .map(|defaults| ProjectRuntimeDocument {
+                defaults: Some(defaults),
+            }),
         tools: GeneratedProjectToolsPolicyDocument {
             allow_global_fallback: false,
         },
@@ -1032,6 +1110,7 @@ assets = ["assets/prompts/"]
             &project_root,
             "default",
             loaded_metadata.project_identity.as_ref(),
+            loaded_metadata.runtime_defaults.as_ref(),
             &loaded_metadata.build_profile,
             &output_root,
             false,
@@ -1149,6 +1228,7 @@ tools = ["machine_only"]
             &project_root,
             "default",
             loaded_metadata.project_identity.as_ref(),
+            loaded_metadata.runtime_defaults.as_ref(),
             &loaded_metadata.build_profile,
             &output_root,
             false,

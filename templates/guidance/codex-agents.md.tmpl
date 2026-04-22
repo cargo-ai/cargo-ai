@@ -146,6 +146,10 @@ For account projects, keep the contract narrow:
   - `hatched_agents`
   - `tools`
   - `assets`
+- When the user wants repeated runtime guardrails without restating CLI flags, prefer a top-level `[runtime.defaults]` table in `.cargo-ai/project.toml` for:
+  - `inference_timeout_in_sec`
+  - `max_runtime_in_sec`
+  - `max_agent_depth`
 - Use `agent_definitions` when the build should ship the JSON/config file as source, and use `hatched_agents` when the build should emit a target-specific binary. The same path may appear in both lists when both forms should ship together.
 - Do not infer tools from agent JSON during build authoring. If an agent needs a tool in the assembled build root, list that tool explicitly under `[build.<profile>].tools`.
 - If `cargo ai build` fails because a tool exists only in Cargo AI Home, do not treat that as a build-profile success case. Update the project so the tool is attached to the project first, then keep the build profile explicit.
@@ -153,7 +157,12 @@ For account projects, keep the contract narrow:
 - When `.cargo-ai/project.toml` includes `[project].name` and `[project].version`, keep those fields intact and let `cargo-ai-package.toml` carry them forward as package identity metadata.
 - For `cargo ai package`, copy both `agent_definitions` and `hatched_agents` as JSON source definitions into the package output. Do not hatch binaries during package assembly.
 - When packaging tools, keep them source-backed and project-attached. Copy the tool crate source plus `.cargo-ai/tools/<tool>/tool.json`, and do not carry built tool artifacts into the portable package.
-- Prefer direct edits to `.cargo-ai/project.toml` over inventing a helper command flow. Keep the TOML shape simple and explain changes in plain language so the user can review them.
+- Prefer first-class Cargo AI commands for managed project mutations when they exist, such as `cargo ai new`, `cargo ai init`, `cargo ai add tool`, and `cargo ai add guidance`.
+- Edit `.cargo-ai/project.toml` directly only when no command exists yet, when the user explicitly wants manual control, or when the task is to inspect/repair broken managed state.
+- Avoid casual mutation of machine-global Cargo AI Home content for project-scoped work unless the user explicitly intends a machine-level install or change.
+- After `cargo ai account projects pull`, keep `.cargo-ai/project.toml` as the operative config and treat `.cargo-ai/origin/cargo-ai-package.toml` as provenance metadata rather than a second working manifest.
+- If a pulled project fails at runtime because a source-backed tool has not been materialized yet, first try `cargo ai tools build <tool-name>` for the needed tool or `cargo ai build` for the full runnable project root.
+- Keep published assets minimal. The current project-publish path works best when the final packaged output stays at or below about `5.5 MiB`.
 
 ## Validation Loop
 

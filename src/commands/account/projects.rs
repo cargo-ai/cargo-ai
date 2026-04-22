@@ -2,12 +2,17 @@
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use clap::ArgMatches;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Cursor, Write};
 use std::path::{Component, Path, PathBuf};
+use tar::{Archive, Builder, EntryType, HeaderMode};
 use uuid::Uuid;
 
 use crate::infra_api;
@@ -70,6 +75,13 @@ struct PublishPayload {
     package_size_bytes: i64,
     package_archive_base64: String,
 }
+
+const PULLED_PROJECT_METADATA_RELATIVE_PATH: &str = ".cargo-ai/project.toml";
+const PACKAGE_MANIFEST_FILE_NAME: &str = "cargo-ai-package.toml";
+const PULLED_PACKAGE_RECEIPT_RELATIVE_PATH: &str = ".cargo-ai/origin/cargo-ai-package.toml";
+const ESTIMATED_PUBLISH_ACCESS_TOKEN: &str = "__publish-size-estimate__";
+#[cfg(feature = "developer-tools")]
+const SAFE_PROJECT_PUBLISH_REQUEST_LIMIT_BYTES: u64 = 5_500_000;
 
 pub async fn run(projects_m: &ArgMatches) -> bool {
     let projects_command = if let Some(list_m) = projects_m.subcommand_matches("list") {
@@ -472,18 +484,32 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
 
 #[cfg(feature = "developer-tools")]
 fn prepare_publish_payload(profile_name: &str) -> Result<PublishPayload, String> {
-    let temp_output_dir = std::env::temp_dir().join(format!(
-        "cargo-ai-account-project-publish-{}",
-        Uuid::new_v4()
-    ));
-    let temp_output_dir_raw = temp_output_dir.to_string_lossy().to_string();
+    let project_root = current_project_root().ok_or_else(|| {
+        "No Cargo AI project metadata was found from the current directory upward.".to_string()
+    })?;
+    let staging_output_dir = project_root
+        .join("target")
+        .join("cargo-ai")
+        .join("publish-tmp")
+        .join(Uuid::new_v4().to_string());
+    let staging_output_dir_raw = staging_output_dir.to_string_lossy().to_string();
 
-    let assembled = crate::commands::package::assemble_current_project_package(
+    println!("Packaging profile `{profile_name}`...");
+    println!("Project: {}", project_root.display());
+
+    let assemble_result = crate::commands::package::assemble_current_project_package(
         profile_name,
-        Some(temp_output_dir_raw.as_str()),
+        Some(staging_output_dir_raw.as_str()),
         true,
-        true,
-    )?;
+        false,
+    );
+    let assembled = match assemble_result {
+        Ok(assembled) => assembled,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging_output_dir);
+            return Err(error);
+        }
+    };
 
     let project_name = assembled.manifest_project_name.ok_or_else(|| {
         "Project publish requires `.cargo-ai/project.toml` `[project].name`.".to_string()
@@ -499,13 +525,45 @@ fn prepare_publish_payload(profile_name: &str) -> Result<PublishPayload, String>
         )
     })?;
 
-    let archive_bytes = create_package_archive_bytes(assembled.root_path.as_path())?;
+    let archive_bytes = assembled.archive_bytes.clone();
     let package_sha256 = sha256_hex(archive_bytes.as_slice());
     let package_size_bytes = i64::try_from(archive_bytes.len())
         .map_err(|_| "Package archive size exceeded supported limits.".to_string())?;
     let package_archive_base64 = BASE64_STANDARD.encode(archive_bytes.as_slice());
+    let estimated_request_size_bytes =
+        crate::infra_api::account::projects::estimate_publish_project_request_size(
+            ESTIMATED_PUBLISH_ACCESS_TOKEN,
+            project_name.as_str(),
+            project_version.as_str(),
+            assembled.manifest_value.clone(),
+            package_sha256.as_str(),
+            package_size_bytes,
+            package_archive_base64.as_str(),
+        )?;
 
-    let _ = fs::remove_dir_all(&assembled.root_path);
+    println!(
+        "Package size on disk: {}",
+        format_bytes(assembled.assembled_size_bytes)
+    );
+    println!(
+        "Archive size:         {}",
+        format_bytes(assembled.archive_size_bytes)
+    );
+    println!(
+        "Estimated request:    {}",
+        format_bytes(estimated_request_size_bytes)
+    );
+    println!();
+
+    let _ = fs::remove_dir_all(&staging_output_dir);
+
+    if estimated_request_size_bytes > SAFE_PROJECT_PUBLISH_REQUEST_LIMIT_BYTES {
+        return Err(format!(
+            "Estimated publish request size {} exceeds the current safe project-publish ceiling of about {}. Keep packaged assets minimal and remove large sample files before publishing.",
+            format_bytes(estimated_request_size_bytes),
+            format_bytes(SAFE_PROJECT_PUBLISH_REQUEST_LIMIT_BYTES),
+        ));
+    }
 
     Ok(PublishPayload {
         project_name,
@@ -524,6 +582,12 @@ fn render_account_projects_response(response: &Value) {
             Err(_) => println!("{response:?}"),
         }
     }
+}
+
+fn current_project_root() -> Option<PathBuf> {
+    std::env::current_dir()
+        .ok()
+        .and_then(|dir| crate::commands::tools::maybe_find_project_root(dir.as_path()))
 }
 
 fn is_project_pull_success(response: &Value) -> bool {
@@ -575,7 +639,43 @@ fn restore_pulled_project(response: &Value, output_path: &Path, force: bool) -> 
     }
 
     prepare_output_directory(output_path, force)?;
-    extract_package_archive_bytes(archive_bytes.as_slice(), output_path)
+    extract_package_archive_bytes(archive_bytes.as_slice(), output_path)?;
+    relocate_pulled_package_receipt(output_path)
+}
+
+fn relocate_pulled_package_receipt(project_root: &Path) -> Result<(), String> {
+    let project_metadata_path = project_root.join(PULLED_PROJECT_METADATA_RELATIVE_PATH);
+    if !project_metadata_path.exists() {
+        return Err(format!(
+            "Pulled project is missing '{}'.",
+            project_metadata_path.display()
+        ));
+    }
+
+    let root_receipt_path = project_root.join(PACKAGE_MANIFEST_FILE_NAME);
+    if !root_receipt_path.exists() {
+        return Ok(());
+    }
+
+    let origin_receipt_path = project_root.join(PULLED_PACKAGE_RECEIPT_RELATIVE_PATH);
+    if let Some(parent) = origin_receipt_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create pulled-project receipt directory '{}': {}",
+                parent.display(),
+                error
+            )
+        })?;
+    }
+
+    fs::rename(&root_receipt_path, &origin_receipt_path).map_err(|error| {
+        format!(
+            "Failed to move pulled package receipt from '{}' to '{}': {}",
+            root_receipt_path.display(),
+            origin_receipt_path.display(),
+            error
+        )
+    })
 }
 
 fn prepare_output_directory(path: &Path, force: bool) -> Result<(), String> {
@@ -664,6 +764,7 @@ fn build_local_pull_ui(
                 "title_style": "plain",
                 "layout": "aligned",
                 "items": [
+                    {"label": "Build one tool", "value": "`cargo ai tools build <tool-name>`"},
                     {"label": "Build project", "value": "`cargo ai build`"},
                     {"label": "Package project", "value": "`cargo ai package`"}
                 ]
@@ -687,21 +788,23 @@ fn display_path(path: &Path) -> String {
     }
 }
 
-fn create_package_archive_bytes(package_root: &Path) -> Result<Vec<u8>, String> {
-    let mut entries = Vec::new();
-    collect_package_archive_entries(package_root, package_root, &mut entries)?;
-    let archive = PackageArchiveDocument {
-        format_version: 1,
-        entries,
-    };
-    serde_json::to_vec(&archive)
-        .map_err(|error| format!("Failed to serialize package archive bytes: {error}"))
+pub(crate) fn create_package_archive_bytes(package_root: &Path) -> Result<Vec<u8>, String> {
+    let encoder = GzEncoder::new(Vec::new(), Compression::default());
+    let mut archive_builder = Builder::new(encoder);
+    archive_builder.mode(HeaderMode::Deterministic);
+    append_compressed_archive_entries(&mut archive_builder, package_root, package_root)?;
+    let encoder = archive_builder
+        .into_inner()
+        .map_err(|error| format!("Failed to finalize compressed project archive: {error}"))?;
+    encoder
+        .finish()
+        .map_err(|error| format!("Failed to finish compressed project archive: {error}"))
 }
 
-fn collect_package_archive_entries(
+fn append_compressed_archive_entries<W: Write>(
+    archive_builder: &mut Builder<W>,
     package_root: &Path,
     current_path: &Path,
-    entries: &mut Vec<PackageArchiveEntry>,
 ) -> Result<(), String> {
     let mut children = fs::read_dir(current_path)
         .map_err(|error| {
@@ -736,25 +839,33 @@ fn collect_package_archive_entries(
             .replace('\\', "/");
 
         if child_path.is_dir() {
-            entries.push(PackageArchiveEntry {
-                path: relative_path,
-                kind: "dir".to_string(),
-                contents_base64: None,
-            });
-            collect_package_archive_entries(package_root, child_path.as_path(), entries)?;
+            archive_builder
+                .append_dir(relative_path.as_str(), child_path.as_path())
+                .map_err(|error| {
+                    format!(
+                        "Failed to append packaged directory '{}' to the compressed project archive: {}",
+                        child_path.display(),
+                        error
+                    )
+                })?;
+            append_compressed_archive_entries(archive_builder, package_root, child_path.as_path())?;
         } else {
-            let file_bytes = fs::read(child_path.as_path()).map_err(|error| {
+            let mut file = File::open(child_path.as_path()).map_err(|error| {
                 format!(
                     "Failed to read packaged file '{}' while building project archive: {}",
                     child_path.display(),
                     error
                 )
             })?;
-            entries.push(PackageArchiveEntry {
-                path: relative_path,
-                kind: "file".to_string(),
-                contents_base64: Some(BASE64_STANDARD.encode(file_bytes)),
-            });
+            archive_builder
+                .append_file(relative_path.as_str(), &mut file)
+                .map_err(|error| {
+                    format!(
+                        "Failed to append packaged file '{}' to the compressed project archive: {}",
+                        child_path.display(),
+                        error
+                    )
+                })?;
         }
     }
 
@@ -762,6 +873,80 @@ fn collect_package_archive_entries(
 }
 
 fn extract_package_archive_bytes(archive_bytes: &[u8], output_root: &Path) -> Result<(), String> {
+    match extract_compressed_package_archive_bytes(archive_bytes, output_root) {
+        Ok(()) => Ok(()),
+        Err(compressed_error) => extract_legacy_package_archive_bytes(archive_bytes, output_root)
+            .map_err(|legacy_error| {
+                format!(
+                    "Failed to parse project package archive as a compressed tarball ({compressed_error}) or legacy JSON archive ({legacy_error})."
+                )
+            }),
+    }
+}
+
+fn extract_compressed_package_archive_bytes(
+    archive_bytes: &[u8],
+    output_root: &Path,
+) -> Result<(), String> {
+    let decoder = GzDecoder::new(Cursor::new(archive_bytes));
+    let mut archive = Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .map_err(|error| format!("Failed to read compressed project archive entries: {error}"))?;
+
+    for entry in entries {
+        let mut entry = entry
+            .map_err(|error| format!("Failed to read compressed project archive entry: {error}"))?;
+        let entry_path = entry.path().map_err(|error| {
+            format!("Failed to read compressed project archive entry path: {error}")
+        })?;
+        let relative_path = entry_path.to_string_lossy().replace('\\', "/");
+        validate_relative_archive_path(relative_path.as_str())?;
+        let target_path = output_root.join(relative_path.as_str());
+        match entry.header().entry_type() {
+            EntryType::Directory => {
+                fs::create_dir_all(&target_path).map_err(|error| {
+                    format!(
+                        "Failed to create restored directory '{}': {}",
+                        target_path.display(),
+                        error
+                    )
+                })?;
+            }
+            EntryType::Regular => {
+                if let Some(parent) = target_path.parent() {
+                    fs::create_dir_all(parent).map_err(|error| {
+                        format!(
+                            "Failed to create restored parent directory '{}': {}",
+                            parent.display(),
+                            error
+                        )
+                    })?;
+                }
+                entry.unpack(&target_path).map_err(|error| {
+                    format!(
+                        "Failed to write restored file '{}': {}",
+                        target_path.display(),
+                        error
+                    )
+                })?;
+            }
+            other => {
+                return Err(format!(
+                    "Compressed archive entry '{}' has unsupported kind '{:?}'.",
+                    relative_path, other
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn extract_legacy_package_archive_bytes(
+    archive_bytes: &[u8],
+    output_root: &Path,
+) -> Result<(), String> {
     let archive: PackageArchiveDocument = serde_json::from_slice(archive_bytes)
         .map_err(|error| format!("Failed to parse project package archive: {error}"))?;
     if archive.format_version != 1 {
@@ -825,6 +1010,58 @@ fn extract_package_archive_bytes(archive_bytes: &[u8], output_root: &Path) -> Re
     Ok(())
 }
 
+pub(crate) fn directory_size_bytes(root: &Path) -> Result<u64, String> {
+    let metadata = fs::metadata(root).map_err(|error| {
+        format!(
+            "Failed to read packaged path metadata '{}' while measuring size: {}",
+            root.display(),
+            error
+        )
+    })?;
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+
+    let mut total = 0_u64;
+    let entries = fs::read_dir(root).map_err(|error| {
+        format!(
+            "Failed to read packaged directory '{}' while measuring size: {}",
+            root.display(),
+            error
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "Failed to read packaged directory entry under '{}' while measuring size: {}",
+                root.display(),
+                error
+            )
+        })?;
+        total = total
+            .checked_add(directory_size_bytes(entry.path().as_path())?)
+            .ok_or_else(|| "Packaged directory size exceeded supported limits.".to_string())?;
+    }
+    Ok(total)
+}
+
+pub(crate) fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+
+    let bytes_f64 = bytes as f64;
+    if bytes_f64 >= GIB {
+        format!("{:.1} GiB", bytes_f64 / GIB)
+    } else if bytes_f64 >= MIB {
+        format!("{:.1} MiB", bytes_f64 / MIB)
+    } else if bytes_f64 >= KIB {
+        format!("{:.1} KiB", bytes_f64 / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 fn validate_relative_archive_path(raw_path: &str) -> Result<(), String> {
     if raw_path.trim().is_empty() {
         return Err("Archive entry path cannot be empty.".to_string());
@@ -848,7 +1085,7 @@ fn validate_relative_archive_path(raw_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut digest = Sha256::new();
     digest.update(bytes);
     let hash = digest.finalize();
@@ -863,9 +1100,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_package_archive_bytes, extract_package_archive_bytes, sha256_hex,
-        PackageArchiveDocument,
+        create_package_archive_bytes, extract_package_archive_bytes,
+        relocate_pulled_package_receipt, sha256_hex, PackageArchiveDocument,
     };
+    use base64::Engine as _;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -900,18 +1138,26 @@ mod tests {
 
         let archive_bytes =
             create_package_archive_bytes(source_root.as_path()).expect("archive should serialize");
-        let parsed: PackageArchiveDocument =
-            serde_json::from_slice(&archive_bytes).expect("archive bytes should deserialize");
-        assert_eq!(parsed.format_version, 1);
 
         fs::create_dir_all(&dest_root).expect("dest root should be created");
         extract_package_archive_bytes(archive_bytes.as_slice(), dest_root.as_path())
             .expect("archive should restore");
+        relocate_pulled_package_receipt(dest_root.as_path())
+            .expect("receipt should move into pulled-project origin metadata");
 
         assert_eq!(
             fs::read_to_string(dest_root.join(".cargo-ai/project.toml"))
                 .expect("restored project metadata should be readable"),
             "format_version = 1\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dest_root.join(".cargo-ai/origin/cargo-ai-package.toml"))
+                .expect("restored receipt should be readable"),
+            "format_version = 1\n"
+        );
+        assert!(
+            !dest_root.join("cargo-ai-package.toml").exists(),
+            "root-level package receipt should be moved into origin metadata"
         );
         assert_eq!(
             fs::read_to_string(dest_root.join("assets/demo.txt"))
@@ -931,5 +1177,65 @@ mod tests {
             rendered,
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
+    }
+
+    #[test]
+    fn legacy_json_archive_still_restores_successfully() {
+        let source_root = temp_dir("legacy-archive-source");
+        let dest_root = temp_dir("legacy-archive-dest");
+        fs::create_dir_all(source_root.join(".cargo-ai"))
+            .expect("source metadata dir should be created");
+        fs::write(
+            source_root.join(".cargo-ai/project.toml"),
+            "format_version = 1\n",
+        )
+        .expect("project metadata should be written");
+        fs::write(
+            source_root.join("cargo-ai-package.toml"),
+            "format_version = 1\n",
+        )
+        .expect("package manifest should be written");
+        let legacy_archive = PackageArchiveDocument {
+            format_version: 1,
+            entries: vec![
+                super::PackageArchiveEntry {
+                    path: ".cargo-ai".to_string(),
+                    kind: "dir".to_string(),
+                    contents_base64: None,
+                },
+                super::PackageArchiveEntry {
+                    path: ".cargo-ai/project.toml".to_string(),
+                    kind: "file".to_string(),
+                    contents_base64: Some(
+                        base64::engine::general_purpose::STANDARD
+                            .encode("format_version = 1\n".as_bytes()),
+                    ),
+                },
+                super::PackageArchiveEntry {
+                    path: "cargo-ai-package.toml".to_string(),
+                    kind: "file".to_string(),
+                    contents_base64: Some(
+                        base64::engine::general_purpose::STANDARD
+                            .encode("format_version = 1\n".as_bytes()),
+                    ),
+                },
+            ],
+        };
+        let archive_bytes =
+            serde_json::to_vec(&legacy_archive).expect("legacy archive should serialize");
+
+        fs::create_dir_all(&dest_root).expect("dest root should be created");
+        extract_package_archive_bytes(archive_bytes.as_slice(), dest_root.as_path())
+            .expect("legacy archive should restore");
+        relocate_pulled_package_receipt(dest_root.as_path())
+            .expect("receipt should move into pulled-project origin metadata");
+
+        assert!(dest_root.join(".cargo-ai/project.toml").exists());
+        assert!(dest_root
+            .join(".cargo-ai/origin/cargo-ai-package.toml")
+            .exists());
+
+        let _ = fs::remove_dir_all(source_root);
+        let _ = fs::remove_dir_all(dest_root);
     }
 }

@@ -3685,6 +3685,7 @@ async fn run_matching_action_steps(
                 named_inputs,
                 action_index,
                 &action.name,
+                &action_provider_context,
                 action_execution_override,
                 max_agent_depth,
                 runtime_budget,
@@ -3950,6 +3951,7 @@ async fn run_tool_step(
                     "started_at_ms": runtime_budget.started_at_ms,
                     "deadline_ms": runtime_budget.deadline_ms,
                 },
+                "profile_name": provider_context.profile_name,
                 "action_execution": action_execution_override.map(|mode| match mode {
                     ActionExecutionMode::Sequential => "sequential",
                     ActionExecutionMode::Parallel => "parallel",
@@ -4612,6 +4614,7 @@ async fn run_agent_step(
     named_inputs: &BTreeMap<String, Input>,
     action_index: usize,
     action_name: &str,
+    provider_context: &ActionProviderContext,
     action_execution_override: Option<ActionExecutionMode>,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
@@ -4638,7 +4641,14 @@ async fn run_agent_step(
     if step.ignore_tools {
         command.arg("--ignore-tools");
     }
-    if let Some(profile_name) = resolve_step_profile_name(step.profile.as_ref(), data, action_name, "agent")? {
+    let inherited_profile_name = if artifact_is_json_definition(artifact) {
+        provider_context.profile_name.clone()
+    } else {
+        None
+    };
+    if let Some(profile_name) = resolve_step_profile_name(step.profile.as_ref(), data, action_name, "agent")?
+        .or(inherited_profile_name)
+    {
         let config_file = config_path();
         let Some(config) = load_config() else {
             return Err(format!(
@@ -4687,7 +4697,7 @@ async fn run_agent_step(
         runtime_budget.deadline_ms.to_string(),
     );
     command.stdout(Stdio::piped());
-    command.stderr(Stdio::null());
+    command.stderr(Stdio::piped());
 
     let remaining = remaining_runtime_duration(
         runtime_budget,
@@ -4726,6 +4736,19 @@ async fn run_agent_step(
             }
         })
     });
+    let child_stderr_reader = child.stderr.take().map(|stderr| {
+        tokio::spawn(async move {
+            let mut stderr_lines = Vec::new();
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    stderr_lines.push(trimmed.to_string());
+                }
+            }
+            stderr_lines
+        })
+    });
     print_action_line(
         action_index,
         action_name,
@@ -4737,6 +4760,9 @@ async fn run_agent_step(
             if let Some(task) = child_using_forwarder {
                 let _ = task.await;
             }
+            if let Some(task) = child_stderr_reader {
+                let _ = task.await;
+            }
             print_action_line(action_index, action_name, "child: completed successfully");
             Ok(StepExecutionOutcome::Completed)
         }
@@ -4744,17 +4770,27 @@ async fn run_agent_step(
             if let Some(task) = child_using_forwarder {
                 let _ = task.await;
             }
+            let child_stderr = match child_stderr_reader {
+                Some(task) => task.await.ok().unwrap_or_default(),
+                None => Vec::new(),
+            };
             print_action_line(
                 action_index,
                 action_name,
                 format!("child: exited with status {}", status).as_str(),
             );
+            let stderr_suffix = if child_stderr.is_empty() {
+                String::new()
+            } else {
+                format!(" Child error: {}", child_stderr.join(" | "))
+            };
             Err(format!(
-                "Action '{}' child agent '{}' exited with status {} at depth {}.",
+                "Action '{}' child agent '{}' exited with status {} at depth {}.{}",
                 action_name,
                 artifact,
                 status,
-                current_depth + 1
+                current_depth + 1,
+                stderr_suffix
             ))
         }
         Ok(Err(error)) => Err(format!(
@@ -4767,6 +4803,9 @@ async fn run_agent_step(
         Err(_) => {
             let _ = child.kill().await;
             if let Some(task) = child_using_forwarder {
+                let _ = task.await;
+            }
+            if let Some(task) = child_stderr_reader {
                 let _ = task.await;
             }
             print_action_line(

@@ -13,6 +13,10 @@ mod projects;
 mod register;
 mod status;
 
+pub(crate) use projects::{
+    create_package_archive_bytes, directory_size_bytes, format_bytes, sha256_hex,
+};
+
 /// Routes `cargo ai account ...` subcommands to their runtime handlers.
 pub async fn run(sub_m: &ArgMatches) -> bool {
     if let Some(reg_m) = sub_m.subcommand_matches("register") {

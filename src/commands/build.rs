@@ -8,11 +8,10 @@ use std::path::{Component, Path, PathBuf};
 const PROJECT_METADATA_RELATIVE_PATH: &str = ".cargo-ai/project.toml";
 const PROJECT_TOOLS_RELATIVE_PATH: &str = ".cargo-ai/tools";
 const BUILD_MANIFEST_FILE_NAME: &str = "cargo-ai-build.toml";
-const GENERATED_BUILD_PROJECT_METADATA: &str =
-    "format_version = 1\n\n[tools]\nallow_global_fallback = false\n";
-
 #[derive(Clone, Debug, Default, Deserialize)]
 struct ProjectMetadataDocument {
+    #[serde(default)]
+    runtime: Option<ProjectRuntimeDocument>,
     #[serde(default)]
     build: BTreeMap<String, BuildProfileDocument>,
 }
@@ -29,6 +28,35 @@ struct BuildProfileDocument {
     assets: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+struct ProjectRuntimeDocument {
+    #[serde(default)]
+    defaults: Option<ProjectRuntimeDefaultsDocument>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+struct ProjectRuntimeDefaultsDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inference_timeout_in_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_runtime_in_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_agent_depth: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct GeneratedProjectMetadataDocument {
+    format_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<ProjectRuntimeDocument>,
+    tools: GeneratedProjectToolsPolicyDocument,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct GeneratedProjectToolsPolicyDocument {
+    allow_global_fallback: bool,
+}
+
 #[derive(Clone, Debug)]
 struct BuildOutputRoot {
     path: PathBuf,
@@ -39,6 +67,12 @@ struct BuildOutputRoot {
 struct HatchedAgentEntry {
     relative_path: String,
     output_name: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LoadedProjectMetadata {
+    runtime_defaults: Option<ProjectRuntimeDefaultsDocument>,
+    build_profile: BuildProfileDocument,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -81,8 +115,8 @@ pub fn run(sub_m: &ArgMatches) -> bool {
             return false;
         }
     };
-    let build_profile = match load_build_profile(&project_root, profile_name) {
-        Ok(profile) => profile,
+    let loaded_metadata = match load_project_metadata(&project_root, profile_name) {
+        Ok(metadata) => metadata,
         Err(error) => {
             eprintln!("x {error}");
             return false;
@@ -110,7 +144,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
     match assemble_build_root(
         &project_root,
         profile_name,
-        &build_profile,
+        &loaded_metadata,
         &build_target,
         &output_root,
         sub_m.get_flag("force"),
@@ -141,10 +175,10 @@ fn current_project_root() -> Option<PathBuf> {
         .and_then(|dir| crate::commands::tools::maybe_find_project_root(dir.as_path()))
 }
 
-fn load_build_profile(
+fn load_project_metadata(
     project_root: &Path,
     profile_name: &str,
-) -> Result<BuildProfileDocument, String> {
+) -> Result<LoadedProjectMetadata, String> {
     let metadata_path = project_root.join(PROJECT_METADATA_RELATIVE_PATH);
     let contents = fs::read_to_string(&metadata_path).map_err(|error| {
         format!(
@@ -188,7 +222,10 @@ fn load_build_profile(
         ));
     }
 
-    Ok(profile)
+    Ok(LoadedProjectMetadata {
+        runtime_defaults: metadata.runtime.and_then(|runtime| runtime.defaults),
+        build_profile: profile,
+    })
 }
 
 fn resolve_build_output_root(
@@ -233,18 +270,22 @@ fn resolve_build_output_root(
 fn assemble_build_root(
     project_root: &Path,
     profile_name: &str,
-    build_profile: &BuildProfileDocument,
+    loaded_metadata: &LoadedProjectMetadata,
     build_target: &crate::agent_builder::build_target::BuildTarget,
     output_root: &BuildOutputRoot,
     force: bool,
 ) -> Result<BuildManifestDocument, String> {
+    let build_profile = &loaded_metadata.build_profile;
     let agent_definitions = dedupe_preserve_order(&build_profile.agent_definitions);
     let hatched_agents = resolve_hatched_agents(project_root, &build_profile.hatched_agents)?;
     let tools = dedupe_preserve_order(&build_profile.tools);
     let assets = dedupe_preserve_order(&build_profile.assets);
 
     prepare_output_root(output_root, force)?;
-    write_generated_project_metadata(output_root.path.as_path())?;
+    write_generated_project_metadata(
+        output_root.path.as_path(),
+        loaded_metadata.runtime_defaults.as_ref(),
+    )?;
 
     for tool_name in &tools {
         validate_tool_attached_to_project(project_root, tool_name)?;
@@ -375,7 +416,10 @@ fn remove_existing_output_root(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn write_generated_project_metadata(build_root: &Path) -> Result<(), String> {
+fn write_generated_project_metadata(
+    build_root: &Path,
+    runtime_defaults: Option<&ProjectRuntimeDefaultsDocument>,
+) -> Result<(), String> {
     let metadata_path = build_root.join(PROJECT_METADATA_RELATIVE_PATH);
     if let Some(parent) = metadata_path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -386,7 +430,20 @@ fn write_generated_project_metadata(build_root: &Path) -> Result<(), String> {
             )
         })?;
     }
-    fs::write(&metadata_path, GENERATED_BUILD_PROJECT_METADATA).map_err(|error| {
+    let document = GeneratedProjectMetadataDocument {
+        format_version: 1,
+        runtime: runtime_defaults
+            .cloned()
+            .map(|defaults| ProjectRuntimeDocument {
+                defaults: Some(defaults),
+            }),
+        tools: GeneratedProjectToolsPolicyDocument {
+            allow_global_fallback: false,
+        },
+    };
+    let rendered = toml::to_string_pretty(&document)
+        .map_err(|error| format!("Failed to render generated project metadata TOML: {error}"))?;
+    fs::write(&metadata_path, rendered).map_err(|error| {
         format!(
             "Failed to write generated project metadata '{}': {}",
             metadata_path.display(),

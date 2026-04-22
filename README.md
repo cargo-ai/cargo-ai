@@ -933,6 +933,11 @@ version = "0.1.0"
 [tools]
 allow_global_fallback = true
 
+[runtime.defaults]
+inference_timeout_in_sec = 600
+max_runtime_in_sec = 600
+max_agent_depth = 5
+
 [build.default]
 agent_definitions = ["agents/research.json"]
 hatched_agents = ["agents/report.json"]
@@ -952,6 +957,17 @@ Use that build section as a direct-edit contract:
   - project-relative files or directories copied into the build output
 
 Keep the lists explicit. Cargo AI does not infer tools from agents during `cargo ai build`, and the same agent path may appear in both `agent_definitions` and `hatched_agents` when you want both the JSON definition and the compiled binary in the assembled output.
+
+`[runtime.defaults]` is optional. When present, it sets project-level defaults for repeated `cargo ai run` workflows:
+
+- `inference_timeout_in_sec`
+  - CLI override first, then project default, then selected profile timeout, then built-in default
+- `max_runtime_in_sec`
+  - CLI override first, then project default, then built-in default
+- `max_agent_depth`
+  - CLI override first, then project default, then built-in default
+
+`max_runtime_in_sec` and `max_agent_depth` still cascade to child agents as invocation-tree guardrails. `inference_timeout_in_sec` stays invocation-local unless you explicitly set a different child profile or child invocation timeout.
 
 That creates:
 
@@ -1099,6 +1115,9 @@ Account-project rules are intentionally different from account agents:
 - `list` with `--owner-handle <handle>` only returns that owner's public projects
 - `pull` defaults to the latest published version unless you pass `--version <semver>`
 - pulled packages restore a project-shaped folder locally; they do not expose agent-style definition-path identities in the backend
+- after `pull`, `.cargo-ai/project.toml` remains the working project config and the pulled package receipt is preserved under `.cargo-ai/origin/cargo-ai-package.toml`
+- pulled tools are restored as source-backed project content; materialize a needed tool with `cargo ai tools build <tool-name>` or assemble the runnable build root with `cargo ai build`
+- the current publish path works best when the final package stays at or below about `5.5 MiB`; keep packaged assets minimal and avoid large sample inputs unless they are required in the package itself
 
 ## Where To Go Next
 
