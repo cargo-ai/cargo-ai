@@ -1118,6 +1118,7 @@ Account-project rules are intentionally different from account agents:
 - after `pull`, `.cargo-ai/project.toml` remains the working project config and the pulled package receipt is preserved under `.cargo-ai/origin/cargo-ai-package.toml`
 - pulled tools are restored as source-backed project content; materialize a needed tool with `cargo ai tools build <tool-name>` or assemble the runnable build root with `cargo ai build`
 - the current publish path works best when the final package stays at or below about `5.5 MiB`; keep packaged assets minimal and avoid large sample inputs unless they are required in the package itself
+- if you add non-trivial assets to `[build.<profile>].assets`, run `cargo ai package` and inspect the reported package, archive, and request sizes before treating the project as publish-ready
 
 ## Where To Go Next
 

@@ -163,6 +163,9 @@ For account projects, keep the contract narrow:
 - After `cargo ai account projects pull`, keep `.cargo-ai/project.toml` as the operative config and treat `.cargo-ai/origin/cargo-ai-package.toml` as provenance metadata rather than a second working manifest.
 - If a pulled project fails at runtime because a source-backed tool has not been materialized yet, first try `cargo ai tools build <tool-name>` for the needed tool or `cargo ai build` for the full runnable project root.
 - Keep published assets minimal. The current project-publish path works best when the final packaged output stays at or below about `5.5 MiB`.
+- When editing `[build.<profile>].assets`, default to the smallest publishable set. Do not add large sample files, raw media, or demo inputs unless the user explicitly wants them shipped in the package.
+- If added assets are more than trivial in size, run `cargo ai package` and inspect the reported package, archive, and request sizes before treating the project as publish-ready.
+- If the package is approaching the current publish ceiling, call that out and recommend excluding non-essential assets before publishing.
 
 ## Validation Loop
 
