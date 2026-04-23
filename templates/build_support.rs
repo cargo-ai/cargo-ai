@@ -4376,6 +4376,7 @@ pub fn actions() -> Vec<Action> {{
 
 fn render_validation_helpers() -> String {
     r#"
+#[allow(dead_code)]
 fn validate_schema_field(
     value: &serde_json::Value,
     field_name: &str,
@@ -4384,6 +4385,7 @@ fn validate_schema_field(
     validate_schema_value(value, field_name, schema)
 }
 
+#[allow(dead_code)]
 fn validate_schema_value(
     value: &serde_json::Value,
     path: &str,
@@ -4483,6 +4485,7 @@ fn validate_schema_value(
     }
 }
 
+#[allow(dead_code)]
 fn parse_generated_schema_type<'a>(
     schema: &'a serde_json::Map<String, serde_json::Value>,
     path: &str,
@@ -4526,6 +4529,7 @@ fn parse_generated_schema_type<'a>(
     }
 }
 
+#[allow(dead_code)]
 fn validate_integer_constraints(
     value: i64,
     path: &str,
@@ -4560,6 +4564,7 @@ fn validate_integer_constraints(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn validate_number_constraints(
     value: f64,
     path: &str,

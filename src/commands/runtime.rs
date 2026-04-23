@@ -1,6 +1,7 @@
 //! Shared interpreted runtime behavior for Cargo AI commands.
 use clap::ArgMatches;
-use std::path::PathBuf;
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +15,29 @@ use crate::providers::{
 
 const AGENT_ACTION_MAX_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_MAX_DEPTH";
 const DEFAULT_AGENT_ACTION_MAX_DEPTH: u32 = 5;
+const DEFAULT_INFERENCE_TIMEOUT_IN_SEC: u64 = 60;
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ProjectMetadataDocument {
+    #[serde(default)]
+    runtime: Option<ProjectRuntimeDocument>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ProjectRuntimeDocument {
+    #[serde(default)]
+    defaults: Option<ProjectRuntimeDefaultsDocument>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ProjectRuntimeDefaultsDocument {
+    #[serde(default)]
+    inference_timeout_in_sec: Option<u64>,
+    #[serde(default)]
+    max_runtime_in_sec: Option<u64>,
+    #[serde(default)]
+    max_agent_depth: Option<u32>,
+}
 
 fn unknown_server_messages(server: &str) -> Vec<String> {
     let display_server = if server.trim().is_empty() {
@@ -789,10 +813,43 @@ fn inherited_agent_action_max_depth() -> Option<u32> {
         .and_then(|value| value.parse::<u32>().ok())
 }
 
+#[allow(dead_code)]
 fn configured_agent_action_max_depth(cli_override: Option<u32>) -> u32 {
+    configured_agent_action_max_depth_with_project_default(cli_override, None)
+}
+
+fn configured_agent_action_max_depth_with_project_default(
+    cli_override: Option<u32>,
+    project_default: Option<u32>,
+) -> u32 {
     cli_override
         .or_else(inherited_agent_action_max_depth)
+        .or(project_default)
         .unwrap_or(DEFAULT_AGENT_ACTION_MAX_DEPTH)
+}
+
+fn load_project_runtime_defaults(
+    project_root: Option<&Path>,
+) -> Result<Option<ProjectRuntimeDefaultsDocument>, String> {
+    let Some(project_root) = project_root else {
+        return Ok(None);
+    };
+    let metadata_path = project_root.join(".cargo-ai").join("project.toml");
+    let contents = std::fs::read_to_string(&metadata_path).map_err(|error| {
+        format!(
+            "Failed to read project metadata '{}': {}",
+            metadata_path.display(),
+            error
+        )
+    })?;
+    let metadata: ProjectMetadataDocument = toml::from_str(&contents).map_err(|error| {
+        format!(
+            "Failed to parse project metadata '{}': {}",
+            metadata_path.display(),
+            error
+        )
+    })?;
+    Ok(metadata.runtime.and_then(|runtime| runtime.defaults))
 }
 
 fn remaining_runtime_duration(
@@ -852,7 +909,14 @@ pub(crate) async fn run_with_definition_in_context(
     let mut model = String::new();
     let mut url = String::new();
     let mut token = String::new();
-    let mut inference_timeout_in_sec: u64 = 60; // Default
+    let project_runtime_defaults = match load_project_runtime_defaults(project_root.as_deref()) {
+        Ok(defaults) => defaults,
+        Err(error) => {
+            eprintln!("x {error}");
+            return false;
+        }
+    };
+    let mut inference_timeout_in_sec: u64 = DEFAULT_INFERENCE_TIMEOUT_IN_SEC;
     let mut selected_profile: Option<SelectedProfile> = None;
     let mut loaded_profile_message: Option<(LoadedProfileKind, String)> = None;
     let mut use_openai_account_transport = false;
@@ -907,6 +971,13 @@ pub(crate) async fn run_with_definition_in_context(
         }
     }
 
+    if let Some(project_timeout) = project_runtime_defaults
+        .as_ref()
+        .and_then(|defaults| defaults.inference_timeout_in_sec)
+    {
+        inference_timeout_in_sec = project_timeout;
+    }
+
     // 2️⃣ Allow command-line args to override profile values
     if let Some(server_arg) = sub_m.get_one::<String>("server") {
         server = server_arg.to_lowercase();
@@ -928,11 +999,19 @@ pub(crate) async fn run_with_definition_in_context(
         inference_timeout_in_sec = timeout_arg;
     }
 
-    let max_agent_depth =
-        configured_agent_action_max_depth(sub_m.get_one::<u32>("max_agent_depth").copied());
-    let runtime_budget = super::runtime_actions::configured_agent_action_runtime_budget(
-        sub_m.get_one::<u64>("max_runtime_in_sec").copied(),
+    let max_agent_depth = configured_agent_action_max_depth_with_project_default(
+        sub_m.get_one::<u32>("max_agent_depth").copied(),
+        project_runtime_defaults
+            .as_ref()
+            .and_then(|defaults| defaults.max_agent_depth),
     );
+    let runtime_budget =
+        super::runtime_actions::configured_agent_action_runtime_budget_with_project_default(
+            sub_m.get_one::<u64>("max_runtime_in_sec").copied(),
+            project_runtime_defaults
+                .as_ref()
+                .and_then(|defaults| defaults.max_runtime_in_sec),
+        );
 
     let provider = match ProviderKind::from_server_value(&server) {
         Some(provider) => provider,

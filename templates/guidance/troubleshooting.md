@@ -69,6 +69,7 @@ Check for:
 - trying to run `cargo ai add tool <name>` outside a Cargo AI project with no `.cargo-ai/project.toml`
 - forgetting to bootstrap the project boundary first with `cargo ai init` or `cargo ai new <path>`
 - updating `tools/<tool_name>/src/tool.rs` but forgetting `cargo ai tools build <tool_name> --target <triple>`
+- pulling a published project and assuming source-backed tools are already materialized as runnable binaries
 - wiring agent JSON to a tool `name` that does not match the managed `tool.json`
 - using param names or scalar types that do not match the tool `describe` contract
 - setting `output_variable` on a tool step when the tool returns `result: null`

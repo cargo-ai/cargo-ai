@@ -921,10 +921,59 @@ allow_global_fallback = false
 
 If `allow_global_fallback` is missing, Cargo AI treats that as project-only lookup.
 
+When a project also wants an explicit assembled build root, keep that in the same file under a build profile:
+
+```toml
+format_version = 1
+
+[project]
+name = "my_tool_project"
+version = "0.1.0"
+
+[tools]
+allow_global_fallback = true
+
+[runtime.defaults]
+inference_timeout_in_sec = 600
+max_runtime_in_sec = 600
+max_agent_depth = 5
+
+[build.default]
+agent_definitions = ["agents/research.json"]
+hatched_agents = ["agents/report.json"]
+tools = ["hello_tool"]
+assets = ["assets/prompts/"]
+```
+
+Use that build section as a direct-edit contract:
+
+- `agent_definitions`
+  - JSON/config files copied into the build output as source definitions
+- `hatched_agents`
+  - JSON/config entrypoints hatched into target-specific binaries
+- `tools`
+  - project-attached tools that should be rebuilt and packaged into the build output
+- `assets`
+  - project-relative files or directories copied into the build output
+
+Keep the lists explicit. Cargo AI does not infer tools from agents during `cargo ai build`, and the same agent path may appear in both `agent_definitions` and `hatched_agents` when you want both the JSON definition and the compiled binary in the assembled output.
+
+`[runtime.defaults]` is optional. When present, it sets project-level defaults for repeated `cargo ai run` workflows:
+
+- `inference_timeout_in_sec`
+  - CLI override first, then project default, then selected profile timeout, then built-in default
+- `max_runtime_in_sec`
+  - CLI override first, then project default, then built-in default
+- `max_agent_depth`
+  - CLI override first, then project default, then built-in default
+
+`max_runtime_in_sec` and `max_agent_depth` still cascade to child agents as invocation-tree guardrails. `inference_timeout_in_sec` stays invocation-local unless you explicitly set a different child profile or child invocation timeout.
+
 That creates:
 
 - `.cargo-ai/project.toml`
   - Cargo AI project metadata and tool-resolution policy
+  - includes a top-level `[project]` section for project/package identity
   - `cargo ai new/init` writes `[tools] allow_global_fallback = true` by default
 - `.gitignore`
   - generated artifact ignore rules when VCS is enabled
@@ -978,7 +1027,41 @@ cargo ai tools check --config ./my_agent.json
 cargo ai hatch my_agent --config ./my_agent.json --check
 ```
 
-By default, `run`, `hatch --check`, and `hatch` perform an upfront tool audit against the tool `describe` contract. Use `--ignore-tools` only when you intentionally want to skip that startup audit and accept failure later if a tool step is actually reached.
+By default, `run`, `hatch --check`, and `hatch` perform an upfront tool audit against the tool `describe` contract. They resolve tools from the current Cargo AI project first and then from Cargo AI Home only when `.cargo-ai/project.toml` allows global fallback. Use `--ignore-tools` only when you intentionally want to skip that startup audit and accept failure later if a tool step is actually reached.
+
+Ordinary `cargo ai hatch` exports only the binary. It does not copy tool artifacts next to the output. When you run a hatched binary from inside a Cargo AI project, it uses the same project-first lookup contract. Outside a project context, it can use machine-installed tools but not project-only tools.
+
+When you want an explicit assembled local package root instead of a single exported binary, use:
+
+```bash
+cargo ai build --target aarch64-apple-darwin
+```
+
+`cargo ai build` reads `.cargo-ai/project.toml`, selects a build profile (defaults to `default`), and assembles a target-specific build root under `target/cargo-ai/build/<profile>/<target>/` unless you override it with `--output-dir`.
+
+Phase 2 build rules are intentionally strict:
+
+- only project-attached tools listed in `[build.<profile>].tools` are eligible
+- machine-only tools are not pulled into the build automatically
+- if a listed tool exists only in Cargo AI Home, `cargo ai build` fails and tells you to attach/install it into the project first
+- build outputs get their own generated `.cargo-ai/project.toml`, `.cargo-ai/tools/...`, copied agent definitions/assets, and root-level hatched binaries so the assembled folder is inspectable and runnable as a package root
+
+When you want a portable source package instead of a target-specific runnable build root, use:
+
+```bash
+cargo ai package
+```
+
+`cargo ai package` also reads `.cargo-ai/project.toml`, reuses the selected `[build.<profile>]` section directly, and assembles a source-portable package root under `target/cargo-ai/package/<profile>/` unless you override it with `--output-dir`.
+
+Phase 3A package rules stay narrow on purpose:
+
+- `package` does not invent a second selector; it reuses `agent_definitions`, `hatched_agents`, `tools`, and `assets` from the build profile
+- both `agent_definitions` and `hatched_agents` are copied into the package as JSON source definitions
+- listed tools must already be project-attached and source-backed; machine-only tools are rejected with attach/install guidance
+- packaged tools keep source metadata under `.cargo-ai/tools/...` and source crates under their project-relative paths, but they do not include built binaries
+- package outputs get their own generated `.cargo-ai/project.toml` plus `cargo-ai-package.toml` so the folder is inspectable and can be treated as a portable project snapshot
+- when the source project declares `[project].name` and `[project].version`, package output carries those values into both generated manifests for later publish/pull identity
 
 ## Account-Backed Flows
 
@@ -1008,6 +1091,34 @@ cargo ai account hatch weather_test --check
 # Hatch a public definition from another handle
 cargo ai account agents hatch weather_test --owner-handle alice
 ```
+
+Project packages use a separate account surface:
+
+```bash
+# List your published projects
+cargo ai account projects list
+
+# List another owner's public projects
+cargo ai account projects list --owner-handle alice
+
+# Publish the current project package (developer-tools build)
+cargo ai account projects publish
+
+# Pull the latest published package from another owner
+cargo ai account projects pull ai_integrations --owner-handle alice
+```
+
+Account-project rules are intentionally different from account agents:
+
+- `publish` packages the current project first, then uploads the resulting package archive
+- published project identity comes from `.cargo-ai/project.toml` `[project].name` and `[project].version`
+- `list` with `--owner-handle <handle>` only returns that owner's public projects
+- `pull` defaults to the latest published version unless you pass `--version <semver>`
+- pulled packages restore a project-shaped folder locally; they do not expose agent-style definition-path identities in the backend
+- after `pull`, `.cargo-ai/project.toml` remains the working project config and the pulled package receipt is preserved under `.cargo-ai/origin/cargo-ai-package.toml`
+- pulled tools are restored as source-backed project content; materialize a needed tool with `cargo ai tools build <tool-name>` or assemble the runnable build root with `cargo ai build`
+- the current publish path works best when the final package stays at or below about `5.5 MiB`; keep packaged assets minimal and avoid large sample inputs unless they are required in the package itself
+- if you add non-trivial assets to `[build.<profile>].assets`, run `cargo ai package` and inspect the reported package, archive, and request sizes before treating the project as publish-ready
 
 ## Where To Go Next
 

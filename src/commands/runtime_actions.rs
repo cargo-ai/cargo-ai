@@ -1295,12 +1295,13 @@ async fn run_matching_action_steps(
             .await
             .map(|outcome| (outcome, None))
         } else if step.kind.eq_ignore_ascii_case("agent") {
-            run_agent_step(
+            run_agent_step_with_provider_context(
                 step,
                 &action_data,
                 named_inputs,
                 action_index,
                 &action.name,
+                provider_context,
                 action_execution_override,
                 max_agent_depth,
                 runtime_budget,
@@ -1582,6 +1583,7 @@ async fn run_tool_step(
                     "started_at_ms": runtime_budget.started_at_ms,
                     "deadline_ms": runtime_budget.deadline_ms,
                 },
+                "profile_name": provider_context.profile_name,
                 "action_execution": action_execution_override.map(|mode| match mode {
                     crate::ActionExecutionMode::Sequential => "sequential",
                     crate::ActionExecutionMode::Parallel => "parallel",
@@ -2334,12 +2336,13 @@ fn profile_auth_mode_display(mode: ProfileAuthMode) -> &'static str {
     }
 }
 
-async fn run_agent_step(
+async fn run_agent_step_with_provider_context(
     step: &crate::RunStep,
     data: &serde_json::Value,
     named_inputs: &BTreeMap<String, crate::Input>,
     action_index: usize,
     action_name: &str,
+    provider_context: &ActionProviderContext,
     action_execution_override: Option<crate::ActionExecutionMode>,
     max_agent_depth: u32,
     runtime_budget: InvocationRuntimeBudget,
@@ -2365,8 +2368,14 @@ async fn run_agent_step(
     if step.ignore_tools {
         command.arg("--ignore-tools");
     }
+    let inherited_profile_name = if artifact_is_json_definition(artifact) {
+        provider_context.profile_name.clone()
+    } else {
+        None
+    };
     if let Some(profile_name) =
         resolve_step_profile_name(step.profile.as_ref(), data, action_name, "agent")?
+            .or(inherited_profile_name)
     {
         let config_file = config_path();
         let Some(config) = load_config() else {
@@ -2416,7 +2425,7 @@ async fn run_agent_step(
         runtime_budget.deadline_ms.to_string(),
     );
     command.stdout(Stdio::piped());
-    command.stderr(Stdio::null());
+    command.stderr(Stdio::piped());
 
     let remaining = remaining_runtime_duration(
         runtime_budget,
@@ -2451,6 +2460,19 @@ async fn run_agent_step(
             }
         })
     });
+    let child_stderr_reader = child.stderr.take().map(|stderr| {
+        tokio::spawn(async move {
+            let mut stderr_lines = Vec::new();
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    stderr_lines.push(trimmed.to_string());
+                }
+            }
+            stderr_lines
+        })
+    });
     print_action_line(
         action_index,
         action_name,
@@ -2462,6 +2484,9 @@ async fn run_agent_step(
             if let Some(task) = child_using_forwarder {
                 let _ = task.await;
             }
+            if let Some(task) = child_stderr_reader {
+                let _ = task.await;
+            }
             print_action_line(action_index, action_name, "child: completed successfully");
             Ok(StepExecutionOutcome::Completed)
         }
@@ -2469,17 +2494,27 @@ async fn run_agent_step(
             if let Some(task) = child_using_forwarder {
                 let _ = task.await;
             }
+            let child_stderr = match child_stderr_reader {
+                Some(task) => task.await.ok().unwrap_or_default(),
+                None => Vec::new(),
+            };
             print_action_line(
                 action_index,
                 action_name,
                 format!("child: exited with status {}", status).as_str(),
             );
+            let stderr_suffix = if child_stderr.is_empty() {
+                String::new()
+            } else {
+                format!(" Child error: {}", child_stderr.join(" | "))
+            };
             Err(format!(
-                "Action '{}' child agent '{}' exited with status {} at depth {}.",
+                "Action '{}' child agent '{}' exited with status {} at depth {}.{}",
                 action_name,
                 artifact,
                 status,
-                current_depth + 1
+                current_depth + 1,
+                stderr_suffix
             ))
         }
         Ok(Err(error)) => Err(format!(
@@ -2492,6 +2527,9 @@ async fn run_agent_step(
         Err(_) => {
             let _ = child.kill().await;
             if let Some(task) = child_using_forwarder {
+                let _ = task.await;
+            }
+            if let Some(task) = child_stderr_reader {
                 let _ = task.await;
             }
             print_action_line(
@@ -2511,6 +2549,43 @@ async fn run_agent_step(
         }
     };
     result
+}
+
+#[cfg(test)]
+async fn run_agent_step(
+    step: &crate::RunStep,
+    data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, crate::Input>,
+    action_index: usize,
+    action_name: &str,
+    action_execution_override: Option<crate::ActionExecutionMode>,
+    max_agent_depth: u32,
+    runtime_budget: InvocationRuntimeBudget,
+) -> Result<StepExecutionOutcome, String> {
+    let provider_context = ActionProviderContext {
+        provider: crate::providers::ProviderKind::OpenAi,
+        profile_name: None,
+        auth_mode: "none".to_string(),
+        model: String::new(),
+        url: crate::providers::ProviderKind::OpenAi
+            .default_url()
+            .to_string(),
+        token: String::new(),
+        inference_timeout_in_sec: 60,
+        tool_resolver: None,
+    };
+    run_agent_step_with_provider_context(
+        step,
+        data,
+        named_inputs,
+        action_index,
+        action_name,
+        &provider_context,
+        action_execution_override,
+        max_agent_depth,
+        runtime_budget,
+    )
+    .await
 }
 
 fn resolve_child_artifact_invocation(
@@ -3071,12 +3146,21 @@ fn inherited_agent_action_runtime_budget() -> Option<InvocationRuntimeBudget> {
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn configured_agent_action_runtime_budget(
     cli_override: Option<u64>,
+) -> InvocationRuntimeBudget {
+    configured_agent_action_runtime_budget_with_project_default(cli_override, None)
+}
+
+pub(crate) fn configured_agent_action_runtime_budget_with_project_default(
+    cli_override: Option<u64>,
+    project_default: Option<u64>,
 ) -> InvocationRuntimeBudget {
     cli_override
         .map(new_runtime_budget)
         .or_else(inherited_agent_action_runtime_budget)
+        .or_else(|| project_default.map(new_runtime_budget))
         .unwrap_or_else(|| new_runtime_budget(DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS))
 }
 

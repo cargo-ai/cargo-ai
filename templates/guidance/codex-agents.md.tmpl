@@ -71,6 +71,17 @@ For account-hosted definitions, remember the current split:
   - `cargo ai account agents run <name> --owner-handle <handle>`
 - frozen/export path:
   - `cargo ai account hatch <name>`
+- published project packages:
+  - `cargo ai account projects list`
+  - `cargo ai account projects list --owner-handle <handle>`
+  - `cargo ai account projects pull <name> --owner-handle <handle>`
+  - `cargo ai account projects publish`
+
+For account projects, keep the contract narrow:
+- `publish` packages the current project first, then uploads that package
+- publish identity comes from `.cargo-ai/project.toml` `[project].name` and `[project].version`
+- public lookup still uses owner handle plus project name until a later stable-link layer exists
+- pulled packages restore a project folder locally; they are not agent-definition records with a stored definition path
 
 ## Working Defaults
 
@@ -130,6 +141,31 @@ For account-hosted definitions, remember the current split:
 - If Mermaid rendering is clearly supported, offer Mermaid as an option and ask whether the user wants it.
 - Use `cargo ai new` or `cargo ai init` when the workspace needs a Cargo AI project boundary before local tool authoring.
 - Use `cargo ai add guidance --style codex` after bootstrap when the workspace needs the Codex guidance bundle.
+- Treat `.cargo-ai/project.toml` as the source of truth for project identity and build profiles. Keep top-level `[project]` metadata (`name`, `version`) intact, and when a user wants `cargo ai build`, keep the profile explicit with:
+  - `agent_definitions`
+  - `hatched_agents`
+  - `tools`
+  - `assets`
+- When the user wants repeated runtime guardrails without restating CLI flags, prefer a top-level `[runtime.defaults]` table in `.cargo-ai/project.toml` for:
+  - `inference_timeout_in_sec`
+  - `max_runtime_in_sec`
+  - `max_agent_depth`
+- Use `agent_definitions` when the build should ship the JSON/config file as source, and use `hatched_agents` when the build should emit a target-specific binary. The same path may appear in both lists when both forms should ship together.
+- Do not infer tools from agent JSON during build authoring. If an agent needs a tool in the assembled build root, list that tool explicitly under `[build.<profile>].tools`.
+- If `cargo ai build` fails because a tool exists only in Cargo AI Home, do not treat that as a build-profile success case. Update the project so the tool is attached to the project first, then keep the build profile explicit.
+- Treat `cargo ai package` as the source-portable counterpart to `cargo ai build`. It should reuse the same `[build.<profile>]` selection directly instead of inventing a second package-only selector in the first slice.
+- When `.cargo-ai/project.toml` includes `[project].name` and `[project].version`, keep those fields intact and let `cargo-ai-package.toml` carry them forward as package identity metadata.
+- For `cargo ai package`, copy both `agent_definitions` and `hatched_agents` as JSON source definitions into the package output. Do not hatch binaries during package assembly.
+- When packaging tools, keep them source-backed and project-attached. Copy the tool crate source plus `.cargo-ai/tools/<tool>/tool.json`, and do not carry built tool artifacts into the portable package.
+- Prefer first-class Cargo AI commands for managed project mutations when they exist, such as `cargo ai new`, `cargo ai init`, `cargo ai add tool`, and `cargo ai add guidance`.
+- Edit `.cargo-ai/project.toml` directly only when no command exists yet, when the user explicitly wants manual control, or when the task is to inspect/repair broken managed state.
+- Avoid casual mutation of machine-global Cargo AI Home content for project-scoped work unless the user explicitly intends a machine-level install or change.
+- After `cargo ai account projects pull`, keep `.cargo-ai/project.toml` as the operative config and treat `.cargo-ai/origin/cargo-ai-package.toml` as provenance metadata rather than a second working manifest.
+- If a pulled project fails at runtime because a source-backed tool has not been materialized yet, first try `cargo ai tools build <tool-name>` for the needed tool or `cargo ai build` for the full runnable project root.
+- Keep published assets minimal. The current project-publish path works best when the final packaged output stays at or below about `5.5 MiB`.
+- When editing `[build.<profile>].assets`, default to the smallest publishable set. Do not add large sample files, raw media, or demo inputs unless the user explicitly wants them shipped in the package.
+- If added assets are more than trivial in size, run `cargo ai package` and inspect the reported package, archive, and request sizes before treating the project as publish-ready.
+- If the package is approaching the current publish ceiling, call that out and recommend excluding non-essential assets before publishing.
 
 ## Validation Loop
 
@@ -140,6 +176,7 @@ For account-hosted definitions, remember the current split:
 4. Fix schema, action, or contract errors before building.
 5. Build only after `--check` passes:
    - `cargo ai hatch <agent-name> --config <config.json>`
+   - when the project uses an explicit build profile, validate that path too with `cargo ai build [profile] --target <triple>`
 6. Rebuild with `--force` only when replacing an existing output is intentional.
 
 ## Editing Guidance

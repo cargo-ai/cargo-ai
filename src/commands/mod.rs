@@ -4,6 +4,8 @@
 pub mod account;
 pub mod add;
 pub mod auth;
+#[cfg(feature = "developer-tools")]
+pub mod build;
 pub mod credentials;
 pub mod definition_source;
 #[cfg(feature = "developer-tools")]
@@ -11,6 +13,8 @@ pub mod hatch;
 pub mod hatch_pipeline;
 pub mod init;
 pub mod new;
+#[cfg(feature = "developer-tools")]
+pub mod package;
 pub mod profile;
 pub mod run;
 pub mod runtime;

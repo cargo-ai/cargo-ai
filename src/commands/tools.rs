@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -160,7 +159,6 @@ struct ToolInvokeResponse {
 pub(crate) struct ResolvedTool {
     pub(crate) tool_id: String,
     pub(crate) scope: ToolScope,
-    pub(crate) tool_dir: PathBuf,
     #[allow(dead_code)]
     manifest_path: PathBuf,
     pub(crate) binary_name: String,
@@ -498,40 +496,6 @@ pub(crate) fn project_tools_root(project_root: &Path) -> PathBuf {
 
 pub(crate) fn machine_tools_root() -> PathBuf {
     crate::config::paths::cargo_ai_root().join("tools")
-}
-
-pub(crate) fn bundled_tools_root_for_export(dest_dir: &Path) -> PathBuf {
-    dest_dir.join(PROJECT_TOOLS_RELATIVE_PATH)
-}
-
-pub(crate) fn tool_bundle_destination_for_export(dest_dir: &Path, tool_id: &str) -> PathBuf {
-    bundled_tools_root_for_export(dest_dir).join(tool_id)
-}
-
-pub(crate) fn copy_tool_bundle_for_export(
-    resolved: &ResolvedTool,
-    dest_dir: &Path,
-    force_overwrite: bool,
-) -> io::Result<()> {
-    let destination = tool_bundle_destination_for_export(dest_dir, &resolved.tool_id);
-    if existing_paths_are_same(&resolved.tool_dir, &destination)? {
-        return Ok(());
-    }
-
-    if destination.exists() {
-        if !force_overwrite {
-            return Err(io::Error::new(
-                ErrorKind::AlreadyExists,
-                format!(
-                    "Bundled tool output already exists at '{}'. Re-run with --force to overwrite.",
-                    destination.display()
-                ),
-            ));
-        }
-        fs::remove_dir_all(&destination)?;
-    }
-
-    copy_directory_recursive(&resolved.tool_dir, &destination)
 }
 
 pub(crate) fn scaffold_local_tool(project_root: &Path, tool_name: &str) -> Result<(), String> {
@@ -1236,9 +1200,16 @@ fn resolve_tool_from_scope_root(
 
     let manifest = load_tool_manifest(&manifest_path, tool_id)?;
     let artifact = manifest.artifacts.get(target_triple).ok_or_else(|| {
+        let remediation = if scope == ToolScope::Project && manifest.source.is_some() {
+            format!(
+                " Materialize it with `cargo ai tools build {tool_id} --scope project --target {target_triple}` or assemble the full project with `cargo ai build --target {target_triple}`."
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "Tool '{}' does not have a materialized artifact for target '{}'.",
-            tool_id, target_triple
+            "Tool '{}' does not have a materialized artifact for target '{}'.{}",
+            tool_id, target_triple, remediation
         )
     })?;
     let binary_name = default_binary_name_for_manifest(&manifest);
@@ -1254,7 +1225,6 @@ fn resolve_tool_from_scope_root(
     Ok(Some(ResolvedTool {
         tool_id: tool_id.to_string(),
         scope,
-        tool_dir,
         manifest_path,
         binary_name,
         target_triple: target_triple.to_string(),
@@ -1707,37 +1677,11 @@ fn step_matches_platform(platforms: Option<&[String]>, current_platform: Option<
     }
 }
 
-fn copy_directory_recursive(source: &Path, destination: &Path) -> io::Result<()> {
-    fs::create_dir_all(destination)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_directory_recursive(&source_path, &destination_path)?;
-        } else {
-            if let Some(parent) = destination_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(&source_path, &destination_path)?;
-        }
-    }
-    Ok(())
-}
-
-fn existing_paths_are_same(left: &Path, right: &Path) -> io::Result<bool> {
-    if !left.exists() || !right.exists() {
-        return Ok(false);
-    }
-
-    Ok(fs::canonicalize(left)? == fs::canonicalize(right)?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_tool_bundle_for_export, lint_project_source_tool, maybe_find_project_root,
-        render_binary_tool_manifest_json, render_source_tool_manifest_json, scaffold_local_tool,
+        lint_project_source_tool, maybe_find_project_root, render_binary_tool_manifest_json,
+        render_source_tool_manifest_json, resolve_tool_from_scope_root, scaffold_local_tool,
         validate_describe_document, validate_local_tool_name, ResolvedTool, ToolDescribeDocument,
         ToolDescribeExamples, ToolDescribeParam, ToolDescribeResourceProfile, ToolDescribeResult,
         ToolDescribeSelfTest, ToolResolver, ToolScope,
@@ -1832,6 +1776,37 @@ mod tests {
         .expect("tool manifest should be written");
 
         source_manifest_path
+    }
+
+    #[test]
+    fn project_source_tool_missing_artifact_suggests_materialization_commands() {
+        let project_root = temp_dir("missing-artifact-remediation");
+        let tool_dir = project_root.join(".cargo-ai/tools").join("hello_tool");
+        fs::create_dir_all(&tool_dir).expect("tool metadata dir should be created");
+        fs::write(
+            tool_dir.join("tool.json"),
+            render_source_tool_manifest_json(
+                "hello_tool",
+                "tools/hello_tool/Cargo.toml",
+                "hello_tool",
+            ),
+        )
+        .expect("tool manifest should be written");
+
+        let error = resolve_tool_from_scope_root(
+            &project_root.join(".cargo-ai/tools"),
+            ToolScope::Project,
+            "hello_tool",
+            "aarch64-apple-darwin",
+        )
+        .expect_err("missing artifact should fail");
+
+        assert!(error.contains(
+            "cargo ai tools build hello_tool --scope project --target aarch64-apple-darwin"
+        ));
+        assert!(error.contains("cargo ai build --target aarch64-apple-darwin"));
+
+        let _ = fs::remove_dir_all(project_root);
     }
 
     #[test]
@@ -2312,36 +2287,6 @@ pub(crate) fn invoke(
     }
 
     #[test]
-    fn export_copy_preserves_managed_tool_dir_when_destination_is_same_path() {
-        let root = temp_dir("same-tool-export");
-        let tool_dir = root.join(".cargo-ai/tools/hello_tool");
-        let bin_dir = tool_dir.join("bin/aarch64-apple-darwin");
-        fs::create_dir_all(&bin_dir).expect("tool artifact dir should be created");
-        fs::write(tool_dir.join("tool.json"), "{}").expect("tool manifest should be written");
-        fs::write(bin_dir.join("hello_tool"), "binary").expect("tool binary should be written");
-
-        let resolved = ResolvedTool {
-            tool_id: "hello_tool".to_string(),
-            scope: ToolScope::Project,
-            tool_dir: tool_dir.clone(),
-            manifest_path: tool_dir.join("tool.json"),
-            binary_name: "hello_tool".to_string(),
-            target_triple: "aarch64-apple-darwin".to_string(),
-            binary_path: bin_dir.join("hello_tool"),
-        };
-
-        copy_tool_bundle_for_export(&resolved, &root, false)
-            .expect("same-path export should be a no-op without force");
-        copy_tool_bundle_for_export(&resolved, &root, true)
-            .expect("same-path export should be a no-op with force");
-
-        assert!(tool_dir.join("tool.json").exists());
-        assert!(bin_dir.join("hello_tool").exists());
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn validate_describe_document_rejects_non_nullable_string_result() {
         let root = temp_dir("describe-result");
         let tool_dir = root.join(".cargo-ai/tools/hello_tool");
@@ -2349,7 +2294,6 @@ pub(crate) fn invoke(
         let resolved = ResolvedTool {
             tool_id: "hello_tool".to_string(),
             scope: ToolScope::Project,
-            tool_dir: tool_dir.clone(),
             manifest_path: tool_dir.join("tool.json"),
             binary_name: "hello_tool".to_string(),
             target_triple: "aarch64-apple-darwin".to_string(),
@@ -2398,7 +2342,6 @@ pub(crate) fn invoke(
         let resolved = ResolvedTool {
             tool_id: "hello_tool".to_string(),
             scope: ToolScope::Project,
-            tool_dir: tool_dir.clone(),
             manifest_path: tool_dir.join("tool.json"),
             binary_name: "hello_tool".to_string(),
             target_triple: "aarch64-apple-darwin".to_string(),

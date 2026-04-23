@@ -25,6 +25,7 @@ pub(crate) struct InvocationContext {
     agent_bridge: Option<AgentBridgeContext>,
 }
 
+#[allow(dead_code)]
 impl InvocationContext {
     pub(crate) fn can_invoke_agents(&self) -> bool {
         self.agent_bridge.is_some()
@@ -48,6 +49,8 @@ struct AgentBridgeContext {
     current_depth: u32,
     max_depth: u32,
     runtime_budget: RuntimeBudget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     action_execution: Option<ActionExecutionMode>,
 }
@@ -75,7 +78,14 @@ impl AgentBridgeContext {
         if request.ignore_tools {
             command.arg("--ignore-tools");
         }
-        if let Some(profile) = request.profile.as_ref() {
+        let inherited_profile = if request.profile.is_none()
+            && request.artifact.ends_with(".json")
+        {
+            self.profile_name.as_ref()
+        } else {
+            None
+        };
+        if let Some(profile) = request.profile.as_ref().or(inherited_profile) {
             command.arg("--profile");
             command.arg(profile);
         }
@@ -120,11 +130,25 @@ impl AgentBridgeContext {
         emit_child_output(&output)?;
 
         if !output.status.success() {
+            let stderr_suffix = if output.stderr.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " Child error: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                        .lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                )
+            };
             return Err(ToolError::new(format!(
-                "Child agent '{}' exited with status {} at depth {}.",
+                "Child agent '{}' exited with status {} at depth {}.{}",
                 request.artifact,
                 output.status,
-                self.current_depth.saturating_add(1)
+                self.current_depth.saturating_add(1),
+                stderr_suffix
             )));
         }
 
@@ -157,6 +181,7 @@ struct RuntimeBudget {
     deadline_ms: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct ChildAgentRequest {
     artifact: String,
@@ -169,6 +194,7 @@ pub(crate) struct ChildAgentRequest {
     input_overrides: BTreeMap<String, String>,
 }
 
+#[allow(dead_code)]
 impl ChildAgentRequest {
     pub(crate) fn new(artifact: impl Into<String>) -> Self {
         Self {
@@ -281,6 +307,7 @@ impl ChildAgentRequest {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum ChildAgentInput {
     Text(String),
@@ -289,6 +316,7 @@ enum ChildAgentInput {
     File(String),
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct ChildAgentOutcome {
     pub(crate) stdout: String,

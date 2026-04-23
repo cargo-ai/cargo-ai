@@ -94,8 +94,20 @@ struct ProjectMetadataDocument {
     format_version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     vcs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<ProjectIdentityDocument>,
     #[serde(default)]
     tools: Option<ProjectToolsPolicyDocument>,
+    #[serde(flatten)]
+    extra: toml::Table,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct ProjectIdentityDocument {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
     #[serde(flatten)]
     extra: toml::Table,
 }
@@ -182,7 +194,11 @@ fn scaffold_in_place(
         })?;
     }
 
-    let metadata_status = write_project_metadata(&metadata_path, include_git_metadata)?;
+    let metadata_status = write_project_metadata(
+        &metadata_path,
+        include_git_metadata,
+        default_project_name(target_dir),
+    )?;
     let gitignore_status = ensure_gitignore(&gitignore_path, include_git_metadata)?;
 
     Ok(ScaffoldReport {
@@ -257,6 +273,7 @@ fn setup_git(target_dir: &Path, vcs_mode: VcsMode) -> Result<GitSetup, String> {
 fn write_project_metadata(
     metadata_path: &Path,
     include_git_metadata: bool,
+    default_project_name: String,
 ) -> Result<ManagedFileStatus, String> {
     let existing = match fs::read_to_string(metadata_path) {
         Ok(contents) => Some(contents),
@@ -269,7 +286,11 @@ fn write_project_metadata(
             ))
         }
     };
-    let rendered = render_project_metadata(existing.as_deref(), include_git_metadata);
+    let rendered = render_project_metadata(
+        existing.as_deref(),
+        include_git_metadata,
+        default_project_name.as_str(),
+    );
 
     let status = match existing.as_deref() {
         None => ManagedFileStatus::Created,
@@ -290,7 +311,11 @@ fn write_project_metadata(
     Ok(status)
 }
 
-fn render_project_metadata(existing: Option<&str>, include_git_metadata: bool) -> String {
+fn render_project_metadata(
+    existing: Option<&str>,
+    include_git_metadata: bool,
+    default_project_name: &str,
+) -> String {
     let mut document = existing
         .and_then(|contents| toml::from_str::<ProjectMetadataDocument>(contents).ok())
         .unwrap_or_default();
@@ -307,6 +332,27 @@ fn render_project_metadata(existing: Option<&str>, include_git_metadata: bool) -
         tools.allow_global_fallback = Some(true);
     }
     document.tools = Some(tools);
+
+    let mut project = document.project.unwrap_or_default();
+    if project
+        .name
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        project.name = Some(default_project_name.to_string());
+    }
+    if project
+        .version
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        project.version = Some("0.1.0".to_string());
+    }
+    document.project = Some(project);
 
     let mut rendered =
         toml::to_string_pretty(&document).expect("project metadata should serialize to TOML");
@@ -383,6 +429,16 @@ fn render_gitignore_block() -> String {
     format!("{}\n", lines.join("\n"))
 }
 
+fn default_project_name(target_dir: &Path) -> String {
+    target_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("cargo-ai-project")
+        .to_string()
+}
+
 fn gitignore_has_required_entries(contents: &str) -> bool {
     GITIGNORE_ENTRIES
         .iter()
@@ -429,9 +485,26 @@ mod tests {
         let metadata_contents =
             fs::read_to_string(&report.metadata_path).expect("metadata should be readable");
         let parsed: Value = toml::from_str(&metadata_contents).expect("metadata should parse");
+        let expected_project_name = super::default_project_name(&dir);
         assert_eq!(
             parsed.get("format_version").and_then(Value::as_integer),
             Some(1)
+        );
+        assert_eq!(
+            parsed
+                .get("project")
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("name"))
+                .and_then(Value::as_str),
+            Some(expected_project_name.as_str())
+        );
+        assert_eq!(
+            parsed
+                .get("project")
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("version"))
+                .and_then(Value::as_str),
+            Some("0.1.0")
         );
         assert_eq!(
             parsed
@@ -470,9 +543,26 @@ mod tests {
         let metadata_contents =
             fs::read_to_string(&metadata_path).expect("metadata should be readable");
         let parsed: Value = toml::from_str(&metadata_contents).expect("metadata should parse");
+        let expected_project_name = super::default_project_name(&dir);
         assert_eq!(
             parsed.get("format_version").and_then(Value::as_integer),
             Some(1)
+        );
+        assert_eq!(
+            parsed
+                .get("project")
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("name"))
+                .and_then(Value::as_str),
+            Some(expected_project_name.as_str())
+        );
+        assert_eq!(
+            parsed
+                .get("project")
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("version"))
+                .and_then(Value::as_str),
+            Some("0.1.0")
         );
         assert_eq!(
             parsed
@@ -512,9 +602,26 @@ existing = true\n",
         let metadata_contents =
             fs::read_to_string(&metadata_path).expect("metadata should be readable");
         let parsed: Value = toml::from_str(&metadata_contents).expect("metadata should parse");
+        let expected_project_name = super::default_project_name(&dir);
         assert_eq!(
             parsed.get("format_version").and_then(Value::as_integer),
             Some(1)
+        );
+        assert_eq!(
+            parsed
+                .get("project")
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("name"))
+                .and_then(Value::as_str),
+            Some(expected_project_name.as_str())
+        );
+        assert_eq!(
+            parsed
+                .get("project")
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("version"))
+                .and_then(Value::as_str),
+            Some("0.1.0")
         );
         assert_eq!(parsed.get("existing").and_then(Value::as_bool), Some(true));
         assert_eq!(
@@ -546,11 +653,12 @@ existing = true\n",
         .expect("metadata fixture should be written");
 
         let report = scaffold_init(&dir, VcsMode::None).expect("init should succeed");
-        assert_eq!(report.metadata_status, ManagedFileStatus::Unchanged);
+        assert_eq!(report.metadata_status, ManagedFileStatus::Updated);
 
         let metadata_contents =
             fs::read_to_string(&metadata_path).expect("metadata should be readable");
         let parsed: Value = toml::from_str(&metadata_contents).expect("metadata should parse");
+        let expected_project_name = super::default_project_name(&dir);
         assert_eq!(
             parsed
                 .get("tools")
@@ -558,6 +666,135 @@ existing = true\n",
                 .and_then(|tools| tools.get("allow_global_fallback"))
                 .and_then(Value::as_bool),
             Some(false)
+        );
+        assert_eq!(
+            parsed
+                .get("project")
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("name"))
+                .and_then(Value::as_str),
+            Some(expected_project_name.as_str())
+        );
+        assert_eq!(
+            parsed
+                .get("project")
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("version"))
+                .and_then(Value::as_str),
+            Some("0.1.0")
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scaffold_init_preserves_existing_build_section() {
+        let dir = temp_dir_path("init-preserve-build");
+        let metadata_path = dir.join(".cargo-ai").join("project.toml");
+        fs::create_dir_all(
+            metadata_path
+                .parent()
+                .expect("metadata parent should exist"),
+        )
+        .expect("metadata dir should be created");
+        fs::write(
+            &metadata_path,
+            "format_version = 1\n\n[build.default]\nagent_definitions = [\"agents/demo.json\"]\nhatched_agents = [\"agents/cli.json\"]\ntools = [\"hello_tool\"]\nassets = [\"assets/prompts/\"]\n",
+        )
+        .expect("metadata fixture should be written");
+
+        let report = scaffold_init(&dir, VcsMode::None).expect("init should succeed");
+        assert_eq!(report.metadata_status, ManagedFileStatus::Updated);
+
+        let metadata_contents =
+            fs::read_to_string(&metadata_path).expect("metadata should be readable");
+        let parsed: Value = toml::from_str(&metadata_contents).expect("metadata should parse");
+        let expected_project_name = super::default_project_name(&dir);
+        assert_eq!(
+            parsed
+                .get("build")
+                .and_then(Value::as_table)
+                .and_then(|build| build.get("default"))
+                .and_then(Value::as_table)
+                .and_then(|profile| profile.get("hatched_agents"))
+                .and_then(Value::as_array)
+                .and_then(|entries| entries.first())
+                .and_then(Value::as_str),
+            Some("agents/cli.json")
+        );
+        assert_eq!(
+            parsed
+                .get("tools")
+                .and_then(Value::as_table)
+                .and_then(|tools| tools.get("allow_global_fallback"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            parsed
+                .get("project")
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("name"))
+                .and_then(Value::as_str),
+            Some(expected_project_name.as_str())
+        );
+        assert_eq!(
+            parsed
+                .get("project")
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("version"))
+                .and_then(Value::as_str),
+            Some("0.1.0")
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scaffold_init_preserves_existing_project_identity() {
+        let dir = temp_dir_path("init-preserve-project");
+        let metadata_path = dir.join(".cargo-ai").join("project.toml");
+        fs::create_dir_all(
+            metadata_path
+                .parent()
+                .expect("metadata parent should exist"),
+        )
+        .expect("metadata dir should be created");
+        fs::write(
+            &metadata_path,
+            "format_version = 1\n\n[project]\nname = \"shared_tools\"\nversion = \"1.2.3\"\n",
+        )
+        .expect("metadata fixture should be written");
+
+        let report = scaffold_init(&dir, VcsMode::None).expect("init should succeed");
+        assert_eq!(report.metadata_status, ManagedFileStatus::Updated);
+
+        let metadata_contents =
+            fs::read_to_string(&metadata_path).expect("metadata should be readable");
+        let parsed: Value = toml::from_str(&metadata_contents).expect("metadata should parse");
+        assert_eq!(
+            parsed
+                .get("project")
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("name"))
+                .and_then(Value::as_str),
+            Some("shared_tools")
+        );
+        assert_eq!(
+            parsed
+                .get("project")
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("version"))
+                .and_then(Value::as_str),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            parsed
+                .get("tools")
+                .and_then(Value::as_table)
+                .and_then(|tools| tools.get("allow_global_fallback"))
+                .and_then(Value::as_bool),
+            Some(true)
         );
 
         let _ = fs::remove_dir_all(dir);
@@ -576,11 +813,28 @@ existing = true\n",
         let metadata_contents =
             fs::read_to_string(&report.metadata_path).expect("metadata should be readable");
         let parsed: Value = toml::from_str(&metadata_contents).expect("metadata should parse");
+        let expected_project_name = super::default_project_name(&dir);
         assert_eq!(
             parsed.get("format_version").and_then(Value::as_integer),
             Some(1)
         );
         assert_eq!(parsed.get("vcs").and_then(Value::as_str), Some("git"));
+        assert_eq!(
+            parsed
+                .get("project")
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("name"))
+                .and_then(Value::as_str),
+            Some(expected_project_name.as_str())
+        );
+        assert_eq!(
+            parsed
+                .get("project")
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("version"))
+                .and_then(Value::as_str),
+            Some("0.1.0")
+        );
         assert_eq!(
             parsed
                 .get("tools")

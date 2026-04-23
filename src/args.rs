@@ -7,11 +7,15 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 mod account;
 mod add;
 mod auth;
+#[cfg(feature = "developer-tools")]
+mod build;
 mod credentials;
 #[cfg(feature = "developer-tools")]
 mod hatch;
 mod init;
 mod new;
+#[cfg(feature = "developer-tools")]
+mod package;
 mod profile;
 mod run;
 pub(crate) mod runtime_common;
@@ -37,7 +41,10 @@ fn cli_command(bin_name: &'static str) -> Command {
         .subcommand(run::command());
 
     #[cfg(feature = "developer-tools")]
-    let command = command.subcommand(hatch::command());
+    let command = command
+        .subcommand(build::command())
+        .subcommand(package::command())
+        .subcommand(hatch::command());
 
     command
         .subcommand(new::command())
@@ -119,6 +126,10 @@ mod tests {
 
         if developer_tools_enabled() {
             assert!(index_of("run") < index_of("hatch"));
+            assert!(index_of("run") < index_of("build"));
+            assert!(index_of("build") < index_of("hatch"));
+            assert!(index_of("build") < index_of("package"));
+            assert!(index_of("package") < index_of("hatch"));
             assert!(index_of("hatch") < index_of("new"));
         }
         assert!(index_of("new") < index_of("init"));
@@ -141,6 +152,13 @@ mod tests {
         let help = String::from_utf8(help).expect("help should be utf8");
 
         assert!(help.contains("\n  run"));
+        if developer_tools_enabled() {
+            assert!(help.contains("\n  build"));
+            assert!(help.contains("\n  package"));
+        } else {
+            assert!(!help.contains("\n  build"));
+            assert!(!help.contains("\n  package"));
+        }
         assert!(help.contains("\n  new"));
         assert!(help.contains("\n  init"));
         assert!(help.contains("\n  add"));
@@ -368,6 +386,90 @@ mod tests {
             .expect_err("conflicting flags should fail parsing");
 
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn build_target_flag_parses() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "build",
+                "default",
+                "--target",
+                "x86_64-pc-windows-msvc",
+            ])
+            .expect("build --target should parse");
+
+        let build_matches = matches
+            .subcommand_matches("build")
+            .expect("build subcommand should be available");
+
+        assert_eq!(
+            build_matches
+                .get_one::<String>("profile")
+                .map(String::as_str),
+            Some("default")
+        );
+        assert_eq!(
+            build_matches
+                .get_one::<String>("target")
+                .map(String::as_str),
+            Some("x86_64-pc-windows-msvc")
+        );
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn build_output_dir_and_force_flags_parse() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "build", "--output-dir", "./dist", "--force"])
+            .expect("build flags should parse");
+
+        let build_matches = matches
+            .subcommand_matches("build")
+            .expect("build subcommand should be available");
+
+        assert_eq!(
+            build_matches
+                .get_one::<String>("output_dir")
+                .map(String::as_str),
+            Some("./dist")
+        );
+        assert!(build_matches.get_flag("force"));
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn package_output_dir_and_force_flags_parse() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "package",
+                "default",
+                "--output-dir",
+                "./pkg",
+                "--force",
+            ])
+            .expect("package flags should parse");
+
+        let package_matches = matches
+            .subcommand_matches("package")
+            .expect("package subcommand should be available");
+
+        assert_eq!(
+            package_matches
+                .get_one::<String>("profile")
+                .map(String::as_str),
+            Some("default")
+        );
+        assert_eq!(
+            package_matches
+                .get_one::<String>("output_dir")
+                .map(String::as_str),
+            Some("./pkg")
+        );
+        assert!(package_matches.get_flag("force"));
     }
 
     #[cfg(feature = "developer-tools")]
@@ -1066,6 +1168,101 @@ mod tests {
     }
 
     #[test]
+    fn account_projects_list_parses_owner_handle_and_limit() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "projects",
+                "list",
+                "--owner-handle",
+                "alice",
+                "--limit",
+                "7",
+            ])
+            .expect("account projects list should parse");
+
+        let projects = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("projects"))
+            .and_then(|m| m.subcommand_matches("list"))
+            .expect("account projects list should be available");
+
+        assert_eq!(
+            projects
+                .get_one::<String>("owner_handle")
+                .map(String::as_str),
+            Some("alice")
+        );
+        assert_eq!(projects.get_one::<u32>("limit").copied(), Some(7));
+        assert!(!projects.get_flag("include_archived"));
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn account_projects_publish_parses_profile() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "account", "projects", "publish", "release"])
+            .expect("account projects publish should parse");
+
+        let publish = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("projects"))
+            .and_then(|m| m.subcommand_matches("publish"))
+            .expect("account projects publish should be available");
+
+        assert_eq!(
+            publish.get_one::<String>("profile").map(String::as_str),
+            Some("release")
+        );
+    }
+
+    #[test]
+    fn account_projects_pull_parses_name_owner_handle_and_output_dir() {
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "account",
+                "projects",
+                "pull",
+                "ai_integrations",
+                "--owner-handle",
+                "shared",
+                "--version",
+                "0.2.0",
+                "--output-dir",
+                "./restored",
+                "--force",
+            ])
+            .expect("account projects pull should parse");
+
+        let pull = matches
+            .subcommand_matches("account")
+            .and_then(|m| m.subcommand_matches("projects"))
+            .and_then(|m| m.subcommand_matches("pull"))
+            .expect("account projects pull should be available");
+
+        assert_eq!(
+            pull.get_one::<String>("name_positional")
+                .map(String::as_str),
+            Some("ai_integrations")
+        );
+        assert_eq!(
+            pull.get_one::<String>("owner_handle").map(String::as_str),
+            Some("shared")
+        );
+        assert_eq!(
+            pull.get_one::<String>("version").map(String::as_str),
+            Some("0.2.0")
+        );
+        assert_eq!(
+            pull.get_one::<String>("output_dir").map(String::as_str),
+            Some("./restored")
+        );
+        assert!(pull.get_flag("force"));
+    }
+
+    #[test]
     fn init_defaults_parse() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from(["cargo-ai", "init"])
@@ -1271,6 +1468,26 @@ mod tests {
             .expect_err("legacy --token flag should be rejected for profile add");
 
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[cfg(not(feature = "developer-tools"))]
+    #[test]
+    fn runtime_only_build_rejects_package_subcommand() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "package"])
+            .expect_err("runtime-only build should reject package");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[cfg(not(feature = "developer-tools"))]
+    #[test]
+    fn runtime_only_build_rejects_build_subcommand() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "build"])
+            .expect_err("runtime-only build should reject build");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     }
 
     #[cfg(not(feature = "developer-tools"))]

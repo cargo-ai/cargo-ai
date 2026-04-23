@@ -46,11 +46,15 @@ with:
 ```toml
 format_version = 1
 
+[project]
+name = "my-tool-project"
+version = "0.1.0"
+
 [tools]
 allow_global_fallback = true
 ```
 
-`cargo ai new/init` writes that default policy so new projects can reuse machine-level tools when desired. If you hand-author `project.toml` and omit `allow_global_fallback`, Cargo AI treats that as project-only lookup.
+`cargo ai new/init` writes that default policy plus starter project identity so new projects can reuse machine-level tools when desired and already have a package/publish identity. If you hand-author `project.toml` and omit `allow_global_fallback`, Cargo AI treats that as project-only lookup.
 
 ## Default Local Tool Workflow
 
@@ -101,6 +105,16 @@ For troubleshooting, identify the first failing layer and work upward:
 - side effects last
 
 Do not keep changing higher layers while a lower layer is still failing.
+
+Runtime lookup stays project-first:
+- `cargo ai run`, `cargo ai hatch --check`, and ordinary `cargo ai hatch` audit tools up front
+- they resolve tools from the current Cargo AI project first and only use Cargo AI Home when `.cargo-ai/project.toml` allows global fallback
+- ordinary `cargo ai hatch` exports only the binary; it does not copy tool artifacts next to the output
+- a hatched binary run from inside a project uses that same project-first lookup, while a run outside any project can only rely on machine-installed tools
+
+If a tool should ship inside an explicit project build root, list it under `.cargo-ai/project.toml` in `[build.<profile>].tools`. `cargo ai build` only packages project-attached tools named there; it does not infer tool dependencies from agents and it does not pull machine-only tools into the build automatically.
+
+If a tool should ship inside a portable project source package, use that same `[build.<profile>].tools` list with `cargo ai package`. The package step reuses the build profile directly, copies the tool crate source plus project tool metadata, and leaves built tool binaries out of the portable package root.
 
 If `cargo ai init/new` was run with the default VCS mode, it will also initialize Git and create or update `.gitignore` for generated guidance and managed build state. If Git is unavailable, rerun with `--vcs none`.
 
