@@ -20,14 +20,6 @@ pub fn command() -> Command {
                         .help("Rust target triple to pass through to cargo build")
                         .value_name("TRIPLE")
                         .num_args(1),
-                )
-                .arg(
-                    Arg::new("scope")
-                        .long("scope")
-                        .help("Where to materialize the managed tool artifact")
-                        .value_name("SCOPE")
-                        .value_parser(["project", "machine"])
-                        .default_value("project"),
                 ),
         )
         .subcommand(
@@ -96,7 +88,7 @@ pub fn command() -> Command {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn build_supports_target_and_scope() {
+    fn build_supports_target() {
         let matches = super::command()
             .try_get_matches_from([
                 "tools",
@@ -104,8 +96,6 @@ mod tests {
                 "render_cover_image",
                 "--target",
                 "aarch64-apple-darwin",
-                "--scope",
-                "machine",
             ])
             .expect("tools build should parse");
 
@@ -119,10 +109,6 @@ mod tests {
         assert_eq!(
             build.get_one::<String>("target").map(String::as_str),
             Some("aarch64-apple-darwin")
-        );
-        assert_eq!(
-            build.get_one::<String>("scope").map(String::as_str),
-            Some("machine")
         );
     }
 

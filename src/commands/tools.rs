@@ -996,23 +996,7 @@ fn run_build(sub_m: &ArgMatches) -> bool {
             return false;
         }
     };
-    let scope = match sub_m
-        .get_one::<String>("scope")
-        .map(String::as_str)
-        .unwrap_or("project")
-    {
-        "project" => ToolScope::Project,
-        "machine" => ToolScope::Machine,
-        other => {
-            eprintln!(
-                "x Unsupported tool scope '{}'. Use `project` or `machine`.",
-                other
-            );
-            return false;
-        }
-    };
-
-    match build_source_tool(name, &build_target, scope, &project_root) {
+    match build_source_tool(name, &build_target, ToolScope::Project, &project_root) {
         Ok(resolved) => {
             println!("✓ Tool built");
             println!("Tool:   {}", resolved.tool_id);
@@ -1202,7 +1186,7 @@ fn resolve_tool_from_scope_root(
     let artifact = manifest.artifacts.get(target_triple).ok_or_else(|| {
         let remediation = if scope == ToolScope::Project && manifest.source.is_some() {
             format!(
-                " Materialize it with `cargo ai tools build {tool_id} --scope project --target {target_triple}` or assemble the full project with `cargo ai build --target {target_triple}`."
+                " Materialize it with `cargo ai tools build {tool_id} --target {target_triple}` or assemble the full project with `cargo ai build --target {target_triple}`."
             )
         } else {
             String::new()
@@ -1801,9 +1785,7 @@ mod tests {
         )
         .expect_err("missing artifact should fail");
 
-        assert!(error.contains(
-            "cargo ai tools build hello_tool --scope project --target aarch64-apple-darwin"
-        ));
+        assert!(error.contains("cargo ai tools build hello_tool --target aarch64-apple-darwin"));
         assert!(error.contains("cargo ai build --target aarch64-apple-darwin"));
 
         let _ = fs::remove_dir_all(project_root);
