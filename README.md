@@ -995,6 +995,8 @@ cargo ai tools lint hello_tool
 cargo ai tools check hello_tool
 ```
 
+`cargo ai tools build <name>` is a project-local authoring/build step. It materializes the managed artifact inside the current project only. Reusable machine-scope installs are reserved for a later package-backed install flow rather than direct promotion from a local project tool.
+
 `cargo ai tools lint <name>` is the static source/scaffold check for project-local source-backed tools. It checks Cargo AI-managed metadata linkage plus scaffold/layout expectations without executing the tool's business logic. Machine-only or binary-only tools are currently out of scope for linting.
 
 The tool `describe` result schema must be a nullable string. A step that sets `output_variable` still requires the actual `invoke` response to contain a non-null string result. For UI or background-process tools, keep rendering/artifact creation testable without launching the UI when practical, expose a smoke-test control such as `open_window=false`, and declare UI/process behavior in the tool `resource_profile`.
