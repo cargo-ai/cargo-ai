@@ -1128,6 +1128,7 @@ When you want deeper details, use these files:
 
 - Versioning and releases:
   - [VERSIONING.md](./VERSIONING.md)
+  - [releases/0.3.0.md](./releases/0.3.0.md)
   - [releases/0.2.0.md](./releases/0.2.0.md)
 - Examples:
   - [adder_test.json](./adder_test.json)
