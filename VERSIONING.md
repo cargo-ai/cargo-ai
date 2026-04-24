@@ -31,18 +31,20 @@ Implementation details may change underneath those surfaces, but changes that ma
 
 `1.0.0` should mean Cargo AI is ready to stand behind a stable core public contract across the surfaces above. That does not mean the product stops evolving. It means compatibility changes become rarer, more deliberate, and more tightly managed.
 
-## Why The Next Release Is 0.2.0
+## Why This Release Is 0.3.0
 
-The next release is `0.2.0` because Cargo AI has evolved meaningfully since `0.1.0` in user-visible ways, including:
+The `0.3.0` release is a pre-`1.0.0` contract release because Cargo AI has evolved meaningfully since `0.2.0` in user-visible ways, including:
 
-- typed `runtime_vars` for invocation-scoped action and run-step control
-- structural action-only workers that can skip the initial model pass when the definition uses the empty-schema no-input shape
-- Ollama-compatible image generation for the existing `generate_image` run-step contract
-- additive parent/child workflow contract improvements such as named reusable inputs and child runtime-var forwarding
-- parallel top-level action execution as an explicit orchestration mode
-- related runtime and validator alignment that changes what valid authored agent definitions can do
+- direct interpreted execution with `cargo ai run`
+- inline and stdin definition sources for fast scripted authoring flows
+- explicit runtime output rendering controls
+- project-local tool authoring, linting, checking, and build materialization
+- project build and source-portable package assembly
+- account-backed project list, publish, pull, visibility, and archive workflows
+- structured tool parameter support for validated array and object values
+- install, Cargo AI Home, package, and release-facing documentation updates
 
-That is larger than a patch-level `0.1.1` release, but it is not yet a `1.0.0` stability promise.
+That is larger than a patch-level `0.2.1` release, but it is not yet a `1.0.0` stability promise.
 
 ## Upgrade Guidance
 
