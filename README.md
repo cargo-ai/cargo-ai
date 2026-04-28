@@ -6,7 +6,7 @@
 
 Build declarative AI agents. Ship them as local CLI apps.
 
-Define inputs, structured outputs, actions, and tool connections in JSON. Create custom Rust tools your agents can call, then run directly, hatch native executables, inspect what ships, and share on your terms.
+Cargo AI is a Rust harness builder for creating declarative AI agents and the custom Rust tools they call. Define inputs, structured outputs, actions, and tool connections in JSON, then run directly, hatch native executables, inspect what ships, and share on your terms.
 
 Cargo AI is an open-source CLI for building auditable AI-powered CLI tools from a single JSON definition. Define inputs, schema, and actions once, run the JSON directly with `cargo ai run --config`, or hatch a native executable with `cargo ai hatch`, then inspect, run, and share it on your terms.
 
