@@ -4,9 +4,9 @@
 [![Multi-OS CI](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml/badge.svg)](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml)
 [![Status: Stable – Ongoing Development](https://img.shields.io/badge/Status-Stable_–_Ongoing_Development-blue)](https://github.com/analyzer1/cargo-ai)
 
-Build AI-powered CLI tools from a single JSON definition locally.
+Build declarative AI agents. Ship them as local CLI apps.
 
-Define declarative agents in JSON, hatch native executables locally, and share them in minutes.
+Define inputs, structured outputs, actions, and custom tool connections in one readable JSON file. Run agents directly, hatch native executables, inspect what ships, and share on your terms.
 
 Cargo AI is an open-source CLI for building auditable AI-powered CLI tools from a single JSON definition. Define inputs, schema, and actions once, run the JSON directly with `cargo ai run --config`, or hatch a native executable with `cargo ai hatch`, then inspect, run, and share it on your terms.
 
