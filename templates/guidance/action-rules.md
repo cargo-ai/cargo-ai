@@ -76,10 +76,28 @@ These documented step kinds and helper fields are exhaustive for the current MVP
   - `reference_images` may contain one or more `{ "input": "<named image input>" }` or `{ "path": "./assets/reference.png" }` entries
   - `reference_images[*].input` must point to a declared top-level input with `type: "image"`
   - `reference_images[*].path` must stay at the current level or below; absolute paths and `..` traversal are rejected
+  - `reference_images` order is preserved; put the primary source/edit-target image first, then supporting detail, style, color, or material references
+  - When using more than one reference image, label the roles in the prompt, such as "Image 1 is the source photo; Images 2 and 3 are style references only."
   - OpenAI API-key profiles send `reference_images` through the OpenAI image edit/reference-image path; OpenAI account profiles include them as Responses image input parts
   - For Ollama's experimental OpenAI-compatible `/v1/images/generations` endpoint, use an Ollama image model on an Ollama profile such as `x/flux2-klein:4b`
   - The current Ollama compatibility slice uses Ollama's documented `b64_json` response path, so Ollama-backed `generate_image` steps currently require a `.png` output path and do not support `reference_images`
   - Current-at-ship-date note: official OpenAI docs list `gpt-image-2` for image generation and editing, including high-fidelity image inputs. Verified: 2026-05-22.
+
+  Example reference-image step:
+
+  ```json
+  {
+    "kind": "generate_image",
+    "profile": "openai_api_key",
+    "model": "gpt-image-2",
+    "prompt": "Image 1 is the source photo. Image 2 is style reference only. Remove furniture from Image 1.",
+    "reference_images": [
+      { "input": "source_photo" },
+      { "path": "./assets/style-reference.png" }
+    ],
+    "path": "./artifacts/edited.png"
+  }
+  ```
 
 ## Optional Control Fields
 - `when`

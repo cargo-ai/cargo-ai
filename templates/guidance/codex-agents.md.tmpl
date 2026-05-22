@@ -137,6 +137,8 @@ For account projects, keep the contract narrow:
 - If a `--run-var` value contains spaces or shell-sensitive characters, quote it normally for the caller's shell.
 - For `generate_image.model`, prefer a runtime-backed string such as `{ "var": "runtime.hero_image_model" }` when the operator should choose the image model at invocation time.
 - For `generate_image.reference_images`, prefer `{ "input": "<named image input>" }` when the caller should supply or override the reference image, and `{ "path": "./assets/reference.png" }` when the definition owns the local asset.
+- Preserve `reference_images` order intentionally: put the source/edit-target image first, supporting references after it, and label those roles in the prompt.
+- When drafting for a user, show both the top-level named image input and the step-level `reference_images` array so `{ "input": "source_photo" }` is visibly tied to `inputs[].name`.
 - Recommend a same-name sidecar Markdown file when the JSON becomes structurally complex.
 - Prefer boxed ASCII diagrams for flow explanations.
 - If Mermaid rendering is clearly supported, offer Mermaid as an option and ask whether the user wants it.

@@ -23,7 +23,8 @@ Each example is meant to be validated and hatched into a CLI executable.
   - Shows step-level `when` gating and branching inside one action.
 - `runtime-vars-image-gating.json`
   - Shows top-level `runtime_vars`, `--run-var`-driven action gating, typed runtime vars in JSON Logic, and runtime-backed `generate_image.model`.
-  - Add `generate_image.reference_images` when the image step should use named top-level image inputs or definition-owned local image paths as visual references.
+  - Shows `generate_image.reference_images` with both `{ "input": "source_photo" }` for a named top-level image input and `{ "path": "./assets/style-reference.png" }` for a definition-owned local asset.
+  - Keep the source/edit-target image first in `reference_images`, then add supporting detail, style, color, or material references.
 
 ## How To Use The Examples
 
