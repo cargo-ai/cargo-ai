@@ -723,14 +723,20 @@ Use `run` to sequence multiple side effects in order. `exec` steps can capture o
 
 Cargo AI always prints one root `using:` line near run start. In append-only output, it also prints another action-prefixed `using:` line when a provider-backed or child-agent step changes the effective `profile`, `auth`, `server`, or `model`. Interactive live mode keeps the parent dashboard at the orchestration level and does not surface child or step-level `using:` lines there.
 
-For the default OpenAI account transport, use a tool-capable mainline model such as `gpt-5.2`. For a direct OpenAI API token and URL, prefer GPT Image models such as `gpt-image-1.5` or `gpt-image-1-mini`. Official OpenAI docs list `gpt-image-1.5` as the latest GPT Image model, and the image-generation guide lists `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini` for direct image generation. Verified: 2026-03-28. For Ollama's experimental OpenAI-compatible `/v1/images/generations` endpoint, use an Ollama image model such as `x/flux2-klein:4b` on a step-level Ollama profile. The current Cargo AI compatibility slice uses Ollama's documented `b64_json` response path, so Ollama-backed `generate_image` steps currently require a `.png` output path.
+For the default OpenAI account transport, use a tool-capable mainline model such as `gpt-5.2`. For a direct OpenAI API token and URL, prefer GPT Image models such as `gpt-image-2`, `gpt-image-1.5`, or `gpt-image-1-mini`. Official OpenAI docs list `gpt-image-2` for image generation and editing, including high-fidelity image inputs. Verified: 2026-05-22. For Ollama's experimental OpenAI-compatible `/v1/images/generations` endpoint, use an Ollama image model such as `x/flux2-klein:4b` on a step-level Ollama profile. The current Cargo AI compatibility slice uses Ollama's documented `b64_json` response path, so Ollama-backed `generate_image` steps currently require a `.png` output path and do not support `reference_images`.
+
+`generate_image.reference_images` accepts one or more local image references. Use `{ "input": "<name>" }` to reuse a named top-level image input, or `{ "path": "./assets/reference.png" }` for a definition-owned local image. Local reference paths must stay at the current level or below; absolute paths and parent traversal (`..`) are rejected. OpenAI API-key profiles send reference images through OpenAI image edits, while OpenAI account profiles send them as Responses `input_image` content. Unsupported providers fail clearly instead of silently falling back to prompt-only generation.
 
 ```json
 {
   "kind": "generate_image",
   "profile": { "var": "runtime.image_profile" },
-  "model": { "var": "runtime.hero_image_model" },
+  "model": "gpt-image-2",
   "prompt": ["Create a product render for ", { "var": "reason" }],
+  "reference_images": [
+    { "input": "front_photo" },
+    { "path": "./assets/detail.png" }
+  ],
   "path": "./artifacts/product_render.png"
 }
 ```

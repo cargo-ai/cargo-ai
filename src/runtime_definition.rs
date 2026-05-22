@@ -66,9 +66,10 @@ impl RuntimeAgentDefinition {
         let schema_properties = parse_schema_properties(root_obj)?;
         let has_output_schema_properties = !schema_properties.is_empty();
         let named_inputs = parse_inputs(root_obj, has_output_schema_properties)?;
+        let named_input_kinds = named_input_kinds(&named_inputs);
         let runtime_var_specs = parse_runtime_vars(root_obj)?;
         let action_execution = parse_action_execution(root_obj)?;
-        let actions = parse_actions(root_obj)?;
+        let actions = parse_actions(root_obj, &named_input_kinds)?;
 
         Ok(Self {
             named_inputs,
@@ -296,6 +297,16 @@ fn parse_inputs(
     }
 
     Ok(parsed)
+}
+
+fn named_input_kinds(inputs: &[crate::Input]) -> BTreeMap<String, crate::InputKind> {
+    let mut kinds = BTreeMap::new();
+    for input in inputs {
+        if let Some(name) = input.name.as_ref() {
+            kinds.insert(name.clone(), input.kind);
+        }
+    }
+    kinds
 }
 
 fn parse_runtime_vars(root_obj: &Map<String, Value>) -> Result<Vec<crate::RuntimeVarSpec>, String> {
@@ -796,7 +807,10 @@ fn parse_numeric_constraint(
     }
 }
 
-fn parse_actions(root_obj: &Map<String, Value>) -> Result<Vec<crate::Action>, String> {
+fn parse_actions(
+    root_obj: &Map<String, Value>,
+    named_input_kinds: &BTreeMap<String, crate::InputKind>,
+) -> Result<Vec<crate::Action>, String> {
     let actions = required_array(root_obj, "actions", "$")?;
     let mut parsed = Vec::with_capacity(actions.len());
     for (action_index, raw_action) in actions.iter().enumerate() {
@@ -821,7 +835,11 @@ fn parse_actions(root_obj: &Map<String, Value>) -> Result<Vec<crate::Action>, St
         let mut steps = Vec::with_capacity(run_steps.len());
         for (step_index, raw_step) in run_steps.iter().enumerate() {
             let run_path = format!("{action_path}.run[{step_index}]");
-            steps.push(parse_run_step(raw_step, run_path.as_str())?);
+            steps.push(parse_run_step(
+                raw_step,
+                run_path.as_str(),
+                named_input_kinds,
+            )?);
         }
 
         parsed.push(crate::Action {
@@ -834,7 +852,11 @@ fn parse_actions(root_obj: &Map<String, Value>) -> Result<Vec<crate::Action>, St
     Ok(parsed)
 }
 
-fn parse_run_step(value: &Value, path: &str) -> Result<crate::RunStep, String> {
+fn parse_run_step(
+    value: &Value,
+    path: &str,
+    named_input_kinds: &BTreeMap<String, crate::InputKind>,
+) -> Result<crate::RunStep, String> {
     let run_obj = expect_object(value, path)?;
     let kind = required_string(run_obj, "kind", path)?.to_string();
     let status_variable = optional_capture_name(run_obj, "status_variable", path)?;
@@ -865,6 +887,7 @@ fn parse_run_step(value: &Value, path: &str) -> Result<crate::RunStep, String> {
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             ignore_tools: false,
             platforms,
@@ -890,6 +913,7 @@ fn parse_run_step(value: &Value, path: &str) -> Result<crate::RunStep, String> {
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             ignore_tools: false,
             platforms,
@@ -923,6 +947,7 @@ fn parse_run_step(value: &Value, path: &str) -> Result<crate::RunStep, String> {
                 run_vars: optional_action_run_vars(run_obj, path)?,
                 input_overrides: optional_action_input_overrides(run_obj, path)?,
                 inputs,
+                reference_images: None,
                 input_mode,
                 ignore_tools: optional_boolean_field(run_obj, "ignore_tools", path)?.unwrap_or(false),
                 platforms,
@@ -949,6 +974,7 @@ fn parse_run_step(value: &Value, path: &str) -> Result<crate::RunStep, String> {
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             ignore_tools: false,
             platforms,
@@ -988,6 +1014,11 @@ fn parse_run_step(value: &Value, path: &str) -> Result<crate::RunStep, String> {
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
+                reference_images: optional_generate_image_reference_images(
+                    run_obj,
+                    path,
+                    named_input_kinds,
+                )?,
                 input_mode: None,
                 ignore_tools: false,
                 platforms,
@@ -1406,6 +1437,97 @@ fn optional_action_inputs(
         .map(|(index, input)| parse_action_input(input, format!("{path}.inputs[{index}]").as_str()))
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
+}
+
+fn optional_generate_image_reference_images(
+    run_obj: &Map<String, Value>,
+    path: &str,
+    named_input_kinds: &BTreeMap<String, crate::InputKind>,
+) -> Result<Option<Vec<crate::GenerateImageReference>>, String> {
+    let Some(value) = run_obj.get("reference_images") else {
+        return Ok(None);
+    };
+    let references = value.as_array().ok_or_else(|| {
+        format!("{path}.reference_images: expected an array of reference image entries")
+    })?;
+    if references.is_empty() {
+        return Err(format!(
+            "{path}.reference_images: must contain at least one reference image"
+        ));
+    }
+
+    references
+        .iter()
+        .enumerate()
+        .map(|(index, reference)| {
+            parse_generate_image_reference_image(
+                reference,
+                format!("{path}.reference_images[{index}]").as_str(),
+                named_input_kinds,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn parse_generate_image_reference_image(
+    value: &Value,
+    path: &str,
+    named_input_kinds: &BTreeMap<String, crate::InputKind>,
+) -> Result<crate::GenerateImageReference, String> {
+    let entry_obj = expect_object(value, path)?;
+    if let Some(named_input) = entry_obj.get("input") {
+        if entry_obj.len() != 1 {
+            return Err(format!(
+                "{path}: named reference image entries must use exactly `{{ \"input\": \"<name>\" }}`"
+            ));
+        }
+        let input_name = named_input
+            .as_str()
+            .ok_or_else(|| format!("{path}.input: expected a string"))?
+            .trim()
+            .to_string();
+        validate_flat_identifier(
+            input_name.as_str(),
+            format!("{path}.input").as_str(),
+            "named input",
+        )?;
+        match named_input_kinds.get(input_name.as_str()) {
+            Some(crate::InputKind::Image) => {}
+            Some(_) => {
+                return Err(format!(
+                    "{path}.input: named top-level input `{input_name}` must have type `image` for `reference_images`"
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "{path}.input: unknown named top-level input `{input_name}`"
+                ));
+            }
+        }
+        return Ok(crate::GenerateImageReference::Named { input: input_name });
+    }
+
+    if let Some(path_value) = entry_obj.get("path") {
+        if entry_obj.len() != 1 {
+            return Err(format!(
+                "{path}: path reference image entries must use exactly `{{ \"path\": \"./image.png\" }}`"
+            ));
+        }
+        let path_parts = parse_string_parts_value(path_value, format!("{path}.path").as_str())?;
+        if let Some(literal_path) = resolve_literal_run_args(&path_parts) {
+            validate_definition_owned_local_path(
+                literal_path.as_str(),
+                format!("{path}.path").as_str(),
+                "reference image",
+            )?;
+        }
+        return Ok(crate::GenerateImageReference::Path { path: path_parts });
+    }
+
+    Err(format!(
+        "{path}: expected `{{ \"input\": \"<name>\" }}` or `{{ \"path\": \"./image.png\" }}`"
+    ))
 }
 
 fn parse_action_input(value: &Value, path: &str) -> Result<crate::ActionInput, String> {
@@ -2509,6 +2631,82 @@ mod tests {
             .input_overrides
             .as_ref()
             .is_some_and(|overrides| overrides.len() == 2));
+    }
+
+    #[test]
+    fn matches_codegen_for_generate_image_reference_images() {
+        let cfg = config_with_optional_inputs(
+            r#""product": { "type": "string" }"#,
+            "",
+            r#"[
+          {
+            "name": "render_product",
+            "logic": { "==": [ { "var": "product" }, "Widget" ] },
+            "run": [
+              {
+                "kind": "generate_image",
+                "model": "gpt-image-2",
+                "prompt": "Create a product render.",
+                "reference_images": [
+                  { "input": "front_photo" },
+                  { "path": "./assets/detail.png" }
+                ],
+                "path": "./artifacts/product.png"
+              }
+            ]
+          }
+        ]"#,
+            Some(
+                r#"[
+        { "name": "front_photo", "type": "image", "path": "./assets/front.png" }
+    ]"#,
+            ),
+            None,
+        );
+
+        let definition = assert_runtime_and_codegen_accept(&cfg);
+        let step = &definition.actions()[0].run[0];
+
+        assert!(step
+            .reference_images
+            .as_ref()
+            .is_some_and(|references| references.len() == 2));
+    }
+
+    #[test]
+    fn matches_codegen_for_rejecting_non_image_reference_input() {
+        let cfg = config_with_optional_inputs(
+            r#""product": { "type": "string" }"#,
+            "",
+            r#"[
+          {
+            "name": "render_product",
+            "logic": { "==": [ { "var": "product" }, "Widget" ] },
+            "run": [
+              {
+                "kind": "generate_image",
+                "model": "gpt-image-2",
+                "prompt": "Create a product render.",
+                "reference_images": [
+                  { "input": "product_note" }
+                ],
+                "path": "./artifacts/product.png"
+              }
+            ]
+          }
+        ]"#,
+            Some(
+                r#"[
+        { "name": "product_note", "type": "text", "text": "Use the product." }
+    ]"#,
+            ),
+            None,
+        );
+
+        let (build_error, runtime_error) = assert_runtime_and_codegen_reject(&cfg);
+
+        assert!(build_error.contains("must have type `image` for `reference_images`"));
+        assert!(runtime_error.contains("must have type `image` for `reference_images`"));
     }
 
     #[test]

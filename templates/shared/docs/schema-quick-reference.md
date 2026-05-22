@@ -62,6 +62,8 @@ These should fail fast during `hatch --check`:
 - run steps may use `kind: "exec"`, `kind: "agent"`, `kind: "tool"`, `kind: "email_me"`, or `kind: "generate_image"`
 - `run[*].args` must be an array of literal strings and/or `{ "var": "field_name" }` objects
 - `run[*].args[*].var` must reference a top-level field declared in `agent_schema.properties`
+- `generate_image.reference_images` is optional and may contain `{ "input": "<named image input>" }` or `{ "path": "./assets/reference.png" }`
+- `generate_image.reference_images[*].path` must stay at the current level or below; absolute paths and `..` traversal are rejected
 - structured top-level fields may flow only into tool params
 - scalar-first surfaces such as `logic`, `when`, `run[*].args`, string-part interpolation, and child `run_vars` reject structured field references
 - `run[*].platform` is optional

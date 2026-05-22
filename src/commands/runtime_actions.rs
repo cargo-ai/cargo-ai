@@ -1325,6 +1325,7 @@ async fn run_matching_action_steps(
             run_generate_image_step(
                 step,
                 &action_data,
+                named_inputs,
                 action_index,
                 &action.name,
                 provider_context,
@@ -1925,6 +1926,7 @@ async fn run_email_me_step(
 async fn run_generate_image_step(
     step: &crate::RunStep,
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, crate::Input>,
     action_index: usize,
     action_name: &str,
     provider_context: &ActionProviderContext,
@@ -1987,6 +1989,17 @@ async fn run_generate_image_step(
         output_format,
         action_name,
     )?;
+    validate_generate_image_reference_support_for_provider(
+        effective_provider_context.provider,
+        step.reference_images.as_deref(),
+        action_name,
+    )?;
+    let reference_images = resolve_generate_image_reference_images(
+        step.reference_images.as_deref(),
+        data,
+        action_name,
+        named_inputs,
+    )?;
 
     let remaining = remaining_runtime_duration(
         runtime_budget,
@@ -2006,6 +2019,7 @@ async fn run_generate_image_step(
                     effective_provider_context.inference_timeout_in_sec,
                     &effective_provider_context.token,
                     output_format,
+                    &reference_images,
                 )
                 .await
             }
@@ -3710,6 +3724,120 @@ fn validate_generate_image_output_format_for_provider(
     Ok(())
 }
 
+fn resolve_generate_image_reference_images(
+    references: Option<&[crate::GenerateImageReference]>,
+    data: &serde_json::Value,
+    action_name: &str,
+    named_inputs: &BTreeMap<String, crate::Input>,
+) -> Result<Vec<crate::providers::ImageReference>, String> {
+    let Some(references) = references else {
+        return Ok(Vec::new());
+    };
+
+    let mut resolved = Vec::with_capacity(references.len());
+    for (index, reference) in references.iter().enumerate() {
+        let path = match reference {
+            crate::GenerateImageReference::Path { path } => resolve_string_parts(
+                path,
+                data,
+                action_name,
+                &format!("reference_images[{}].path", index),
+            )
+            .map_err(|error| format!("Action '{}': {error}", action_name))?,
+            crate::GenerateImageReference::Named { input } => {
+                let named_input = named_inputs.get(input).ok_or_else(|| {
+                    format!(
+                        "Action '{}' generate_image reference image {} named input '{}' is not available.",
+                        action_name,
+                        index + 1,
+                        input
+                    )
+                })?;
+                if named_input.kind != crate::InputKind::Image {
+                    return Err(format!(
+                        "Action '{}' generate_image reference image {} named input '{}' must have type `image`.",
+                        action_name,
+                        index + 1,
+                        input
+                    ));
+                }
+                named_input.value.as_deref().ok_or_else(|| {
+                    format!(
+                        "Action '{}' generate_image reference image {} named input '{}' is required but unresolved for this invocation.",
+                        action_name,
+                        index + 1,
+                        input
+                    )
+                })?.to_string()
+            }
+        };
+
+        validate_generate_image_reference_path(path.as_str(), action_name, index + 1)?;
+        resolved.push(
+            crate::providers::load_image_reference(path.as_str()).map_err(|error| {
+                format!(
+                    "Action '{}' generate_image reference image {} could not be loaded: {}",
+                    action_name,
+                    index + 1,
+                    error
+                )
+            })?,
+        );
+    }
+
+    Ok(resolved)
+}
+
+fn validate_generate_image_reference_support_for_provider(
+    provider: crate::providers::ProviderKind,
+    reference_images: Option<&[crate::GenerateImageReference]>,
+    action_name: &str,
+) -> Result<(), String> {
+    if provider == crate::providers::ProviderKind::Ollama
+        && reference_images.is_some_and(|images| !images.is_empty())
+    {
+        return Err(format!(
+            "Action '{}' generate_image reference_images are not supported by provider 'ollama' for this profile. Remove reference_images or use an OpenAI image profile.",
+            action_name
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_generate_image_reference_path(
+    path: &str,
+    action_name: &str,
+    input_index: usize,
+) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' generate_image reference image {} must resolve to a non-empty relative path.",
+            action_name, input_index
+        ));
+    }
+
+    let candidate = Path::new(path);
+    if candidate.is_absolute() {
+        return Err(format!(
+            "Action '{}' generate_image reference image {} must stay at the current level or below; absolute paths are not allowed.",
+            action_name, input_index
+        ));
+    }
+
+    if candidate
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "Action '{}' generate_image reference image {} must stay at the current level or below; parent traversal (`..`) is not allowed.",
+            action_name, input_index
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_child_input_url(
     url: &str,
     action_name: &str,
@@ -4089,6 +4217,7 @@ mod tests {
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: platforms.map(|platforms| {
                 platforms
@@ -5147,6 +5276,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -5190,6 +5320,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -5266,6 +5397,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -5284,6 +5416,7 @@ auth_mode = "{auth_mode}"
         let result = run_generate_image_step(
             &step,
             &json!({ "customer": "Acme" }),
+            &no_named_inputs(),
             0,
             "generate_art",
             &provider_context,
@@ -5300,6 +5433,162 @@ auth_mode = "{auth_mode}"
             std::fs::read(&output_name).expect("generated image file should be written");
         let _ = std::fs::remove_file(&output_name);
         assert_eq!(written_bytes, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_sends_named_reference_images_to_openai_edits() {
+        use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+
+        let mut server = mockito::Server::new_async().await;
+        let expected_bytes = b"fake-png-edit";
+        let encoded_image = BASE64_STANDARD.encode(expected_bytes);
+        let _mock = server
+            .mock("POST", "/v1/images/edits")
+            .match_header(
+                "content-type",
+                mockito::Matcher::Regex("multipart/form-data; boundary=".into()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"data":[{{"b64_json":"{}"}}]}}"#,
+                encoded_image
+            ))
+            .create_async()
+            .await;
+
+        let reference_name = format!(".tmp-cai2097-reference-{}.png", std::process::id());
+        std::fs::write(&reference_name, b"fake-reference")
+            .expect("reference image fixture should write");
+        let output_name = format!(
+            ".tmp-cai2097-generated-image-edit-{}.png",
+            std::process::id()
+        );
+        let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
+            kind: "generate_image".to_string(),
+            program: None,
+            model: Some(crate::RunArg::Literal("gpt-image-2".to_string())),
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![crate::RunArg::Literal(
+                "Create an image using the reference".to_string(),
+            )]),
+            path: Some(vec![crate::RunArg::Literal(output_name.clone())]),
+            subject: None,
+            text: None,
+            agent: None,
+            run_vars: None,
+            input_overrides: None,
+            inputs: None,
+            reference_images: Some(vec![crate::GenerateImageReference::Named {
+                input: "front_photo".to_string(),
+            }]),
+            input_mode: None,
+            platforms: None,
+        };
+        let named_inputs = std::collections::BTreeMap::from([(
+            "front_photo".to_string(),
+            crate::Input {
+                name: Some("front_photo".to_string()),
+                kind: crate::InputKind::Image,
+                value: Some(reference_name.clone()),
+            },
+        )]);
+        let provider_context = ActionProviderContext {
+            provider: ProviderKind::OpenAi,
+            profile_name: Some("test_profile".to_string()),
+            auth_mode: "api_key".to_string(),
+            model: "gpt-5.2".to_string(),
+            url: format!("{}/v1/chat/completions", server.url()),
+            token: "test-token".to_string(),
+            inference_timeout_in_sec: 60,
+            tool_resolver: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let result = run_generate_image_step(
+            &step,
+            &json!({}),
+            &named_inputs,
+            0,
+            "generate_art",
+            &provider_context,
+            runtime_budget,
+        )
+        .await;
+
+        let _ = std::fs::remove_file(&reference_name);
+        assert!(
+            result.is_ok(),
+            "reference-image generation should succeed: {result:?}"
+        );
+
+        let written_bytes =
+            std::fs::read(&output_name).expect("generated image file should be written");
+        let _ = std::fs::remove_file(&output_name);
+        assert_eq!(written_bytes, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_rejects_missing_reference_image() {
+        let missing_reference =
+            format!(".tmp-cai2097-missing-reference-{}.png", std::process::id());
+        let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
+            kind: "generate_image".to_string(),
+            program: None,
+            model: Some(crate::RunArg::Literal("gpt-image-2".to_string())),
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![crate::RunArg::Literal(
+                "Create an image using the reference".to_string(),
+            )]),
+            path: Some(vec![crate::RunArg::Literal(
+                "./artifacts/reference-output.png".to_string(),
+            )]),
+            subject: None,
+            text: None,
+            agent: None,
+            run_vars: None,
+            input_overrides: None,
+            inputs: None,
+            reference_images: Some(vec![crate::GenerateImageReference::Path {
+                path: vec![crate::RunArg::Literal(missing_reference)],
+            }]),
+            input_mode: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = run_generate_image_step(
+            &step,
+            &json!({}),
+            &no_named_inputs(),
+            0,
+            "generate_art",
+            &provider_context(),
+            runtime_budget,
+        )
+        .await
+        .expect_err("missing reference image should fail before provider request");
+
+        assert!(error.contains("reference image 1 could not be loaded"));
+        assert!(error.contains("Failed to read reference image"));
     }
 
     #[tokio::test]
@@ -5351,6 +5640,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -5373,6 +5663,7 @@ auth_mode = "{auth_mode}"
                     "image_model": "gpt-image-1"
                 }
             }),
+            &no_named_inputs(),
             0,
             "generate_art",
             &provider_context,
@@ -5440,6 +5731,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -5458,6 +5750,7 @@ auth_mode = "{auth_mode}"
         let result = run_generate_image_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "generate_art",
             &provider_context,
@@ -5504,6 +5797,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -5522,6 +5816,7 @@ auth_mode = "{auth_mode}"
         let error = run_generate_image_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "generate_art",
             &provider_context,
@@ -5590,6 +5885,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -5604,6 +5900,7 @@ auth_mode = "{auth_mode}"
                 run_generate_image_step(
                     &step,
                     &json!({}),
+                    &no_named_inputs(),
                     0,
                     "generate_art",
                     &provider_context(),
@@ -5711,6 +6008,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -5718,6 +6016,7 @@ auth_mode = "{auth_mode}"
         let result = run_generate_image_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "generate_art",
             &provider_context(),
@@ -5771,6 +6070,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -5778,6 +6078,7 @@ auth_mode = "{auth_mode}"
         let error = run_generate_image_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "generate_art",
             &provider_context(),
@@ -5787,6 +6088,61 @@ auth_mode = "{auth_mode}"
         .expect_err("missing profile should fail");
 
         assert!(error.contains("unknown profile 'missing_profile'"));
+    }
+
+    #[tokio::test]
+    async fn generate_image_step_rejects_reference_images_for_ollama() {
+        let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
+            kind: "generate_image".to_string(),
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: Some(vec![crate::RunArg::Literal(
+                "Create an image for Acme".to_string(),
+            )]),
+            path: Some(vec![crate::RunArg::Literal(
+                "./artifacts/generated.png".to_string(),
+            )]),
+            subject: None,
+            text: None,
+            agent: None,
+            run_vars: None,
+            input_overrides: None,
+            inputs: None,
+            reference_images: Some(vec![crate::GenerateImageReference::Path {
+                path: vec![crate::RunArg::Literal("./reference.png".to_string())],
+            }]),
+            input_mode: None,
+            platforms: None,
+        };
+
+        let runtime_budget = configured_agent_action_runtime_budget(Some(600));
+        let error = run_generate_image_step(
+            &step,
+            &json!({}),
+            &no_named_inputs(),
+            0,
+            "generate_art",
+            &ollama_provider_context(
+                "http://localhost:11434/v1/chat/completions",
+                "x/flux2-klein:4b",
+            ),
+            runtime_budget,
+        )
+        .await
+        .expect_err("ollama reference-image generation should fail clearly");
+
+        assert!(error.contains("reference_images are not supported by provider 'ollama'"));
+        assert!(error.contains("use an OpenAI image profile"));
     }
 
     #[tokio::test]
@@ -5836,6 +6192,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -5844,6 +6201,7 @@ auth_mode = "{auth_mode}"
         let result = run_generate_image_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "generate_art",
             &ollama_provider_context(
@@ -5919,6 +6277,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -5927,6 +6286,7 @@ auth_mode = "{auth_mode}"
         let result = run_generate_image_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "generate_art",
             &provider_context(),
@@ -5973,6 +6333,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -5981,6 +6342,7 @@ auth_mode = "{auth_mode}"
         let error = run_generate_image_step(
             &step,
             &json!({}),
+            &no_named_inputs(),
             0,
             "generate_art",
             &ollama_provider_context(
@@ -6063,6 +6425,7 @@ auth_mode = "{auth_mode}"
                     ],
                 },
             ]),
+            reference_images: None,
             input_mode: Some(crate::ActionInputMode::Append),
             platforms: None,
         };
@@ -6157,6 +6520,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -6266,6 +6630,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -6354,6 +6719,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -6447,6 +6813,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -6477,6 +6844,7 @@ auth_mode = "{auth_mode}"
                     crate::RunArg::Variable("report_listing".to_string()),
                 ],
             }]),
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -6570,6 +6938,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -6681,6 +7050,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -6777,6 +7147,7 @@ auth_mode = "{auth_mode}"
             inputs: Some(vec![crate::ActionInput::Text {
                 text: vec![crate::RunArg::Literal("hello".to_string())],
             }]),
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -6861,6 +7232,7 @@ auth_mode = "{auth_mode}"
             inputs: Some(vec![crate::ActionInput::Text {
                 text: vec![crate::RunArg::Literal("hello".to_string())],
             }]),
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -6930,6 +7302,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -6978,6 +7351,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -7023,6 +7397,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -7068,6 +7443,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -7130,6 +7506,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -7199,6 +7576,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -7224,6 +7602,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -7302,6 +7681,7 @@ auth_mode = "{auth_mode}"
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
+                reference_images: None,
                 input_mode: None,
                 platforms: None,
             }],
@@ -7331,6 +7711,7 @@ auth_mode = "{auth_mode}"
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
+                reference_images: None,
                 input_mode: None,
                 platforms: None,
             }],
@@ -7406,6 +7787,7 @@ auth_mode = "{auth_mode}"
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
+                reference_images: None,
                 input_mode: None,
                 platforms: None,
             }],
@@ -7441,6 +7823,7 @@ auth_mode = "{auth_mode}"
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
+                reference_images: None,
                 input_mode: None,
                 platforms: None,
             }],
@@ -7526,6 +7909,7 @@ auth_mode = "{auth_mode}"
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
+                reference_images: None,
                 input_mode: None,
                 platforms: None,
             }],
@@ -7558,6 +7942,7 @@ auth_mode = "{auth_mode}"
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
+                reference_images: None,
                 input_mode: None,
                 platforms: None,
             }],
@@ -7642,6 +8027,7 @@ auth_mode = "{auth_mode}"
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
+                    reference_images: None,
                     input_mode: None,
                     platforms: None,
                 },
@@ -7667,6 +8053,7 @@ auth_mode = "{auth_mode}"
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
+                    reference_images: None,
                     input_mode: None,
                     platforms: None,
                 },
@@ -7697,6 +8084,7 @@ auth_mode = "{auth_mode}"
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
+                reference_images: None,
                 input_mode: None,
                 platforms: None,
             }],
@@ -7769,6 +8157,7 @@ auth_mode = "{auth_mode}"
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
+                    reference_images: None,
                     input_mode: None,
                     platforms: None,
                 },
@@ -7797,6 +8186,7 @@ auth_mode = "{auth_mode}"
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
+                    reference_images: None,
                     input_mode: None,
                     platforms: None,
                 },
@@ -7831,6 +8221,7 @@ auth_mode = "{auth_mode}"
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
+                    reference_images: None,
                     input_mode: None,
                     platforms: None,
                 },
@@ -7862,6 +8253,7 @@ auth_mode = "{auth_mode}"
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
+                    reference_images: None,
                     input_mode: None,
                     platforms: None,
                 },
@@ -7942,6 +8334,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -7967,6 +8360,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -8042,6 +8436,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };
@@ -8120,6 +8515,7 @@ auth_mode = "{auth_mode}"
             run_vars: None,
             input_overrides: None,
             inputs: None,
+            reference_images: None,
             input_mode: None,
             platforms: None,
         };

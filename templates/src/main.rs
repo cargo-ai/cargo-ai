@@ -3776,6 +3776,7 @@ async fn run_matching_action_steps(
             run_generate_image_step(
                 step,
                 &action_data,
+                named_inputs,
                 action_index,
                 &action.name,
                 provider_context,
@@ -4278,6 +4279,7 @@ async fn run_email_me_step(
 async fn run_generate_image_step(
     step: &RunStep,
     data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, Input>,
     action_index: usize,
     action_name: &str,
     provider_context: &ActionProviderContext,
@@ -4339,6 +4341,17 @@ async fn run_generate_image_step(
         output_format,
         action_name,
     )?;
+    validate_generate_image_reference_support_for_provider(
+        effective_provider_context.provider,
+        step.reference_images.as_deref(),
+        action_name,
+    )?;
+    let reference_images = resolve_generate_image_reference_images(
+        step.reference_images.as_deref(),
+        data,
+        action_name,
+        named_inputs,
+    )?;
 
     let remaining = remaining_runtime_duration(
         runtime_budget,
@@ -4364,6 +4377,7 @@ async fn run_generate_image_step(
                         effective_provider_context.inference_timeout_in_sec,
                         &effective_provider_context.token,
                         output_format,
+                        &reference_images,
                     )
                     .await
                 }
@@ -5678,6 +5692,123 @@ fn validate_generate_image_output_format_for_provider(
         return Err(format!(
             "Action '{}' generate_image step targeting Ollama currently requires a `.png` output path because the current Ollama compatibility slice only guarantees `b64_json` image payloads, not OpenAI-style output-format selection.",
             action_name
+        ));
+    }
+
+    Ok(())
+}
+
+fn resolve_generate_image_reference_images(
+    references: Option<&[GenerateImageReference]>,
+    data: &serde_json::Value,
+    action_name: &str,
+    named_inputs: &BTreeMap<String, Input>,
+) -> Result<Vec<providers::ImageReference>, String> {
+    let Some(references) = references else {
+        return Ok(Vec::new());
+    };
+
+    let mut resolved = Vec::with_capacity(references.len());
+    for (index, reference) in references.iter().enumerate() {
+        let path = match reference {
+            GenerateImageReference::Path { path } => {
+                resolve_string_parts(
+                    path,
+                    data,
+                    action_name,
+                    &format!("reference_images[{}].path", index),
+                )
+                .map_err(|error| format!("Action '{}': {error}", action_name))?
+            }
+            GenerateImageReference::Named { input } => {
+                let named_input = named_inputs.get(input).ok_or_else(|| {
+                    format!(
+                        "Action '{}' generate_image reference image {} named input '{}' is not available.",
+                        action_name,
+                        index + 1,
+                        input
+                    )
+                })?;
+                if named_input.kind != InputKind::Image {
+                    return Err(format!(
+                        "Action '{}' generate_image reference image {} named input '{}' must have type `image`.",
+                        action_name,
+                        index + 1,
+                        input
+                    ));
+                }
+                named_input
+                    .value
+                    .as_deref()
+                    .ok_or_else(|| {
+                        format!(
+                            "Action '{}' generate_image reference image {} named input '{}' is required but unresolved for this invocation.",
+                            action_name,
+                            index + 1,
+                            input
+                        )
+                    })?
+                    .to_string()
+            }
+        };
+
+        validate_generate_image_reference_path(path.as_str(), action_name, index + 1)?;
+        resolved.push(providers::load_image_reference(path.as_str()).map_err(|error| {
+            format!(
+                "Action '{}' generate_image reference image {} could not be loaded: {}",
+                action_name,
+                index + 1,
+                error
+            )
+        })?);
+    }
+
+    Ok(resolved)
+}
+
+fn validate_generate_image_reference_support_for_provider(
+    provider: ProviderKind,
+    reference_images: Option<&[GenerateImageReference]>,
+    action_name: &str,
+) -> Result<(), String> {
+    if provider == ProviderKind::Ollama && reference_images.is_some_and(|images| !images.is_empty())
+    {
+        return Err(format!(
+            "Action '{}' generate_image reference_images are not supported by provider 'ollama' for this profile. Remove reference_images or use an OpenAI image profile.",
+            action_name
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_generate_image_reference_path(
+    path: &str,
+    action_name: &str,
+    input_index: usize,
+) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' generate_image reference image {} must resolve to a non-empty relative path.",
+            action_name, input_index
+        ));
+    }
+
+    let candidate = Path::new(path);
+    if candidate.is_absolute() {
+        return Err(format!(
+            "Action '{}' generate_image reference image {} must stay at the current level or below; absolute paths are not allowed.",
+            action_name, input_index
+        ));
+    }
+
+    if candidate
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "Action '{}' generate_image reference image {} must stay at the current level or below; parent traversal (`..`) is not allowed.",
+            action_name, input_index
         ));
     }
 

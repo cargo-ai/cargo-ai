@@ -59,7 +59,7 @@ These documented step kinds and helper fields are exhaustive for the current MVP
   - Required: `kind`, `subject`, `text`
 - `generate_image`
   - Required: `kind`, `prompt`, `path`
-  - Optional: `model`, `profile`
+  - Optional: `model`, `profile`, `reference_images`
   - First slice: direct OpenAI image transport, OpenAI account transport, and Ollama's experimental OpenAI-compatible image transport
   - If `model` is omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override.
   - If `profile` is present, Cargo AI resolves that profile at step runtime and uses it for the image step's provider/url/token context.
@@ -72,10 +72,14 @@ These documented step kinds and helper fields are exhaustive for the current MVP
     - a single top-level string output field such as `{ "var": "image_model" }`
   - `generate_image.model` may not read captured `output_variable`, `status_variable`, or `error_variable` values
   - Use a tool-capable mainline model such as `gpt-5.2` for OpenAI account transport
-  - For a direct OpenAI API token and URL, prefer GPT Image models such as `gpt-image-1.5` or `gpt-image-1-mini`
+  - For a direct OpenAI API token and URL, prefer GPT Image models such as `gpt-image-2`, `gpt-image-1.5`, or `gpt-image-1-mini`
+  - `reference_images` may contain one or more `{ "input": "<named image input>" }` or `{ "path": "./assets/reference.png" }` entries
+  - `reference_images[*].input` must point to a declared top-level input with `type: "image"`
+  - `reference_images[*].path` must stay at the current level or below; absolute paths and `..` traversal are rejected
+  - OpenAI API-key profiles send `reference_images` through the OpenAI image edit/reference-image path; OpenAI account profiles include them as Responses image input parts
   - For Ollama's experimental OpenAI-compatible `/v1/images/generations` endpoint, use an Ollama image model on an Ollama profile such as `x/flux2-klein:4b`
-  - The current Ollama compatibility slice uses Ollama's documented `b64_json` response path, so Ollama-backed `generate_image` steps currently require a `.png` output path
-  - Current-at-ship-date note: official OpenAI docs list `gpt-image-1.5` as the latest GPT Image model, and the image-generation guide lists `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini` for direct image generation. Verified: 2026-03-28.
+  - The current Ollama compatibility slice uses Ollama's documented `b64_json` response path, so Ollama-backed `generate_image` steps currently require a `.png` output path and do not support `reference_images`
+  - Current-at-ship-date note: official OpenAI docs list `gpt-image-2` for image generation and editing, including high-fidelity image inputs. Verified: 2026-05-22.
 
 ## Optional Control Fields
 - `when`

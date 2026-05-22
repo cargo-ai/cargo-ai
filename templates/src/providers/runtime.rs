@@ -13,6 +13,15 @@ pub(crate) enum ContentPart {
     File { filename: String, file_data: String },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ImageReference {
+    pub(crate) source: String,
+    pub(crate) filename: String,
+    pub(crate) media_type: String,
+    pub(crate) data_url: String,
+    pub(crate) bytes: Vec<u8>,
+}
+
 pub(crate) trait ValidatedResponse {
     fn validate_response(&self) -> Result<(), String>;
 }
@@ -151,6 +160,38 @@ fn load_image_data_url(path: &str) -> Result<String, String> {
     let media_type = image_media_type(image_path)?;
     let encoded = BASE64_STANDARD.encode(image_bytes);
     Ok(format!("data:{media_type};base64,{encoded}"))
+}
+
+pub(crate) fn load_image_reference(path: &str) -> Result<ImageReference, String> {
+    let image_path = Path::new(path);
+    let image_bytes = fs::read(image_path).map_err(|error| {
+        format!(
+            "Failed to read reference image '{}': {error}",
+            image_path.display()
+        )
+    })?;
+    let media_type = image_media_type(image_path)?;
+    let encoded = BASE64_STANDARD.encode(&image_bytes);
+    let filename = image_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!(
+                "Reference image '{}' must include a filename.",
+                image_path.display()
+            )
+        })?;
+
+    Ok(ImageReference {
+        source: image_path.display().to_string(),
+        filename,
+        media_type: media_type.to_string(),
+        data_url: format!("data:{media_type};base64,{encoded}"),
+        bytes: image_bytes,
+    })
 }
 
 fn load_supported_file_content(path: &str) -> Result<ContentPart, String> {

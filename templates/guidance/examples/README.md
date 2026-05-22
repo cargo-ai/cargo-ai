@@ -23,6 +23,7 @@ Each example is meant to be validated and hatched into a CLI executable.
   - Shows step-level `when` gating and branching inside one action.
 - `runtime-vars-image-gating.json`
   - Shows top-level `runtime_vars`, `--run-var`-driven action gating, typed runtime vars in JSON Logic, and runtime-backed `generate_image.model`.
+  - Add `generate_image.reference_images` when the image step should use named top-level image inputs or definition-owned local image paths as visual references.
 
 ## How To Use The Examples
 
@@ -38,7 +39,7 @@ Each example is meant to be validated and hatched into a CLI executable.
 - Prefer the smallest example that matches the user's goal.
 - Keep using the action-flow examples for `when`, `failure_mode`, and captured-variable behavior. Use `schema-features.json` when the main question is how to express the supported output fields and constraints.
 - Use `runtime-file-local-exec.json` when the main question is how file summarization, returned output, and a platform-specific local exec step fit together.
-- Use `runtime-vars-image-gating.json` when the main question is how caller-supplied typed runtime vars control action behavior or image-model selection.
+- Use `runtime-vars-image-gating.json` when the main question is how caller-supplied typed runtime vars control action behavior, image-model selection, or reference-image generation.
 - For named reusable parent inputs and child forwarding, start from `child-agent.json` plus the named-input examples in the main README. Use top-level named `inputs` when one value should be reusable by child steps or overrideable with `--input-override NAME=VALUE`.
 - When you add named input objects, keep them visually readable as `name`, then `type`, then the value-bearing field.
 - When a parent is filling one declared named child slot directly, prefer child `input_overrides`. Keep child `inputs` for extra anonymous context and use child `input_mode` only for that anonymous child-input list.

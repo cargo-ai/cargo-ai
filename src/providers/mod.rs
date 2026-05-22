@@ -18,7 +18,8 @@ pub(crate) use openai::{
     send_image_request as send_openai_image_request, send_request as send_openai_request,
 };
 pub(crate) use runtime::{
-    resolve_inputs as resolve_provider_inputs, Cargo as AgentCargo, ValidatedResponse,
+    load_image_reference, resolve_inputs as resolve_provider_inputs, Cargo as AgentCargo,
+    ImageReference, ValidatedResponse,
 };
 
 /// Default temperature used for model requests when not explicitly overridden.

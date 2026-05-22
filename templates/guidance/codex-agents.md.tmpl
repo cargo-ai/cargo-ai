@@ -25,7 +25,7 @@ If no agent JSON exists yet:
 5. Near the end, ask where it should run:
    - on the user's current machine
    - or portable across macOS, Windows, and Linux
-6. Ask whether the caller should control any behavior at runtime, such as gating an action, choosing a threshold, or selecting an image model.
+6. Ask whether the caller should control any behavior at runtime, such as gating an action, choosing a threshold, selecting an image model, or supplying reference images.
 7. If the runtime exposes the current OS, treat that as a hint only. Still confirm whether the user wants local-only behavior or cross-platform portability.
 8. Infer the right Cargo AI pattern using `.cargo-ai/guidance/pattern-selection.md`.
 9. Do not ask the user to choose between "single agent", "action agent", or "parent/child" unless the user already understands those terms.
@@ -136,6 +136,7 @@ For account projects, keep the contract narrow:
 - Reference declared runtime vars as `runtime.<name>` and pass them with repeatable `--run-var name=value` flags.
 - If a `--run-var` value contains spaces or shell-sensitive characters, quote it normally for the caller's shell.
 - For `generate_image.model`, prefer a runtime-backed string such as `{ "var": "runtime.hero_image_model" }` when the operator should choose the image model at invocation time.
+- For `generate_image.reference_images`, prefer `{ "input": "<named image input>" }` when the caller should supply or override the reference image, and `{ "path": "./assets/reference.png" }` when the definition owns the local asset.
 - Recommend a same-name sidecar Markdown file when the JSON becomes structurally complex.
 - Prefer boxed ASCII diagrams for flow explanations.
 - If Mermaid rendering is clearly supported, offer Mermaid as an option and ask whether the user wants it.
