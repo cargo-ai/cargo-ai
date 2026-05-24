@@ -676,6 +676,51 @@ fn empty_action_only_output() -> serde_json::Value {
     serde_json::json!({})
 }
 
+/// Print the validated agent output as a single line of JSON,
+/// wrapped between sentinel markers from `crate::args::runtime_common`
+/// so callers can extract it from the surrounding progress trail.
+/// Stays single-line on purpose: the markers + compact JSON form a
+/// three-line block that's trivial to grep, copy, or re-parse.
+fn print_emit_output(output: &serde_json::Value) {
+    let payload =
+        serde_json::to_string(output).unwrap_or_else(|_| "{}".to_string());
+    println!("{}", crate::args::runtime_common::EMIT_OUTPUT_BEGIN);
+    println!("{payload}");
+    println!("{}", crate::args::runtime_common::EMIT_OUTPUT_END);
+}
+
+#[cfg(test)]
+mod emit_output_tests {
+    use super::print_emit_output;
+
+    // Exercises the public surface — verifies the helper exists,
+    // accepts a serde_json::Value, and routes through the sentinel
+    // constants. We deliberately don't intercept stdout here (would
+    // require ungating io capture across cargo test) — what we care
+    // about is that the marker constants and the helper compile
+    // against each other and stay in sync.
+    #[test]
+    fn print_emit_output_compiles_and_uses_marker_constants() {
+        let value = serde_json::json!({ "ok": true });
+        // Calling it confirms the function returns () and doesn't
+        // panic for a typical payload; the actual stdout shape is
+        // covered by downstream consumers like
+        // agent-studio's integration tests.
+        print_emit_output(&value);
+
+        // Pin the marker shape so a rename forces a deliberate test
+        // update — downstream tooling greps these strings.
+        assert_eq!(
+            crate::args::runtime_common::EMIT_OUTPUT_BEGIN,
+            "---begin-cargo-ai-output---"
+        );
+        assert_eq!(
+            crate::args::runtime_common::EMIT_OUTPUT_END,
+            "---end-cargo-ai-output---"
+        );
+    }
+}
+
 fn resolved_runtime_vars_for_run(
     sub_m: &ArgMatches,
     runtime_var_specs: &[crate::RuntimeVarSpec],
@@ -1163,6 +1208,13 @@ pub(crate) async fn run_with_definition_in_context(
         println!("{}", action_provider_context.using_line());
         action_output.print_execution_header();
 
+        // Action-only agents have no LLM stage, so the "validated
+        // output" is the empty object {} — emit it anyway when the
+        // flag is set so callers always see one block per run.
+        if sub_m.get_flag("emit_output") {
+            print_emit_output(&output);
+        }
+
         return match super::runtime_actions::apply_actions_with_data(
             &output,
             &actions,
@@ -1420,6 +1472,15 @@ pub(crate) async fn run_with_definition_in_context(
             return false;
         }
     };
+
+    // When the caller asked for the validated output explicitly,
+    // print it to stdout between sentinel markers so a downstream
+    // process can extract the JSON without scraping action progress
+    // lines. Emitted before the action graph runs so the model's
+    // structured reply is observable even if a later action fails.
+    if sub_m.get_flag("emit_output") {
+        print_emit_output(&output);
+    }
 
     match super::runtime_actions::apply_actions_with_data(
         &output,

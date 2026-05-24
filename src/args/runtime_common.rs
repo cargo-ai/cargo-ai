@@ -142,10 +142,57 @@ pub(crate) fn runtime_command(name: &'static str, about: &'static str) -> Comman
                 .help("Skip upfront tool contract checks and fail only if a tool step is reached")
                 .action(ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("emit_output")
+                .long("emit-output")
+                .help(
+                    "Print the validated agent output as JSON between sentinel markers \
+                     so programmatic callers can parse it without scraping action progress lines",
+                )
+                .action(ArgAction::SetTrue),
+        )
 }
+
+/// Sentinel markers that bracket the JSON written by `--emit-output`.
+/// Stable identifiers (not free-text) so downstream tooling can grep
+/// them out of the surrounding progress trail. Kept in this module
+/// so flag plumbing and consumers share one source of truth.
+pub const EMIT_OUTPUT_BEGIN: &str = "---begin-cargo-ai-output---";
+pub const EMIT_OUTPUT_END: &str = "---end-cargo-ai-output---";
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn help_describes_emit_output_flag() {
+        let mut command = super::runtime_command("runtime-test", "Runtime test command");
+        let mut help = Vec::new();
+        command
+            .write_long_help(&mut help)
+            .expect("runtime help should render");
+        let help = String::from_utf8(help).expect("help should be utf8");
+
+        assert!(help.contains("--emit-output"));
+        assert!(help.contains("Print the validated agent output as JSON"));
+    }
+
+    #[test]
+    fn emit_output_flag_parses_as_boolean() {
+        let command = super::runtime_command("runtime-test", "Runtime test command");
+        let matches = command
+            .try_get_matches_from(["runtime-test", "--emit-output"])
+            .expect("--emit-output should parse cleanly");
+        assert!(matches.get_flag("emit_output"));
+    }
+
+    #[test]
+    fn emit_output_defaults_to_false() {
+        let command = super::runtime_command("runtime-test", "Runtime test command");
+        let matches = command
+            .try_get_matches_from(["runtime-test"])
+            .expect("runtime command should parse with no flags");
+        assert!(!matches.get_flag("emit_output"));
+    }
+
     #[test]
     fn help_describes_input_file_as_supported_file_path() {
         let mut command = super::runtime_command("runtime-test", "Runtime test command");
