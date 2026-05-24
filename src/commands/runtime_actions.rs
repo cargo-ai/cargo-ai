@@ -782,6 +782,7 @@ fn provider_server_name(provider: crate::providers::ProviderKind) -> &'static st
     match provider {
         crate::providers::ProviderKind::Ollama => "ollama",
         crate::providers::ProviderKind::OpenAi => "openai",
+        crate::providers::ProviderKind::Anthropic => "anthropic",
     }
 }
 
@@ -2019,6 +2020,16 @@ async fn run_generate_image_step(
                 )
                 .await
             }
+            // Anthropic's Messages API doesn't generate images today.
+            // Surface that as an InvalidRequest so the action fails
+            // with a clear hint rather than producing junk bytes.
+            crate::providers::ProviderKind::Anthropic => {
+                Err(crate::providers::ProviderError::invalid_response(
+                    crate::providers::ProviderKind::Anthropic,
+                    "Anthropic provider does not support image generation. \
+                     Route generate_image steps to an OpenAI or Ollama provider.",
+                ))
+            }
         }
     })
     .await
@@ -2230,6 +2241,16 @@ async fn resolve_generate_image_step_profile_context(
                     ProfileAuthMode::None.as_str(),
                     ProfileAuthMode::ApiKey.as_str(),
                     ProfileAuthMode::OpenaiAccount.as_str()
+                ));
+            }
+            // generate_image is a request to draw a picture, not to
+            // route through Anthropic's Messages API. Even if a
+            // future Claude vision endpoint produced images, the
+            // step's purpose here is fundamentally OpenAI/Ollama.
+            crate::providers::ProviderKind::Anthropic => {
+                return Err(format!(
+                    "Action '{}' generate_image step targets server '{}', which does not support image generation. Route this step to an OpenAI or Ollama profile.",
+                    action_name, profile.server,
                 ));
             }
         },

@@ -116,6 +116,7 @@ fn provider_display_name(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Ollama => "ollama",
         ProviderKind::OpenAi => "openai",
+        ProviderKind::Anthropic => "anthropic",
     }
 }
 
@@ -432,6 +433,27 @@ fn resolved_invocation_auth_mode(
             } else {
                 "none"
             }
+        }
+        ProviderKind::Anthropic => {
+            // Anthropic supports api-key auth only (no OAuth /
+            // account-transport equivalent), so the resolution
+            // collapses to "api_key" when a token is present from
+            // any source, "none" otherwise.
+            if explicit_token_override {
+                return "api_key";
+            }
+            if let Some(profile) = selected_profile {
+                return match profile.auth_mode {
+                    ProfileAuthMode::None => "none",
+                    ProfileAuthMode::ApiKey => "api_key",
+                    // OpenAI account transport isn't valid for Anthropic;
+                    // map it back to api_key so a profile misconfigured
+                    // with the wrong auth mode still routes through the
+                    // token path rather than crashing.
+                    ProfileAuthMode::OpenaiAccount => "api_key",
+                };
+            }
+            "none"
         }
     }
 }
@@ -1349,6 +1371,85 @@ pub(crate) async fn run_with_definition_in_context(
         match tokio::time::timeout(
             remaining,
             crate::providers::send_openai_request(
+                &url,
+                &model,
+                &content_parts,
+                inference_timeout_in_sec,
+                &token,
+                fmt,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(r)) => response.push_str(&r),
+            Ok(Err(error)) => {
+                let details = provider_error_messages(&error);
+                let summary = details
+                    .first()
+                    .map(|line| normalize_cli_issue(line))
+                    .unwrap_or_else(|| "Issue communicating with the AI server.".to_string());
+                print_runtime_failure(
+                    summary.as_str(),
+                    Some(&action_provider_context),
+                    &[],
+                    Some("Details"),
+                    &details[1..],
+                    &[(
+                        "Retry request",
+                        "Check connectivity or credentials, then retry the run.".to_string(),
+                    )],
+                );
+                return false;
+            }
+            Err(_) => {
+                print_runtime_failure(
+                    "The provider did not return a response before the runtime budget expired.",
+                    Some(&action_provider_context),
+                    &[current_agent_runtime_timeout_message(
+                        runtime_budget,
+                        "while waiting for the model response",
+                    )],
+                    None,
+                    &[],
+                    &[(
+                        "Reduce runtime",
+                        "Shorten the request or increase the allowed runtime budget.".to_string(),
+                    )],
+                );
+                return false;
+            }
+        };
+    } else if provider == ProviderKind::Anthropic {
+        // Anthropic uses tool-use to deliver structured output. We
+        // build the OpenAI-flavoured `json_schema` wrapper the same
+        // way and let send_anthropic_request peel the schema out of
+        // it and forward it as the synthetic output tool's
+        // input_schema.
+        let schema = definition.json_schema_value();
+        let fmt = serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "Output",
+                "schema": schema,
+                "strict": true,
+            },
+        });
+
+        let remaining =
+            match remaining_runtime_duration(runtime_budget, "before starting inference") {
+                Ok(remaining) => remaining,
+                Err(error) => {
+                    eprintln!(
+                        "x {}",
+                        current_agent_runtime_timeout_message(runtime_budget, error.as_str())
+                    );
+                    return false;
+                }
+            };
+
+        match tokio::time::timeout(
+            remaining,
+            crate::providers::send_anthropic_request(
                 &url,
                 &model,
                 &content_parts,
