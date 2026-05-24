@@ -2,11 +2,13 @@
 //!
 //! These modules are implementation details for `cargo-ai` command execution.
 //! They are intentionally kept out of a public SDK contract.
+mod anthropic;
 mod error;
 mod ollama;
 mod openai;
 mod runtime;
 
+pub(crate) use anthropic::send_request as send_anthropic_request;
 pub(crate) use error::{
     provider_error_messages, validate_provider_content_parts, validate_provider_request,
     ProviderError, ProviderKind,

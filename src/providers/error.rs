@@ -8,6 +8,7 @@ use std::fmt;
 pub(crate) enum ProviderKind {
     Ollama,
     OpenAi,
+    Anthropic,
 }
 
 impl ProviderKind {
@@ -15,6 +16,7 @@ impl ProviderKind {
         match server.trim().to_ascii_lowercase().as_str() {
             "ollama" => Some(Self::Ollama),
             "openai" => Some(Self::OpenAi),
+            "anthropic" => Some(Self::Anthropic),
             _ => None,
         }
     }
@@ -23,6 +25,7 @@ impl ProviderKind {
         match self {
             Self::Ollama => "Ollama",
             Self::OpenAi => "OpenAI",
+            Self::Anthropic => "Anthropic",
         }
     }
 
@@ -30,6 +33,7 @@ impl ProviderKind {
         match self {
             Self::Ollama => "http://localhost:11434/v1/chat/completions",
             Self::OpenAi => "https://api.openai.com/v1/chat/completions",
+            Self::Anthropic => "https://api.anthropic.com/v1/messages",
         }
     }
 }
@@ -141,6 +145,9 @@ fn provider_hint(
             ProviderKind::OpenAi => {
                 Some("Verify the model name and confirm your account has access to it.")
             }
+            ProviderKind::Anthropic => Some(
+                "Verify the Anthropic model id (e.g. `claude-sonnet-4-6`) and confirm your account has access to it.",
+            ),
         },
         ProviderErrorKind::Unauthorized => match provider {
             ProviderKind::OpenAi => {
@@ -148,6 +155,9 @@ fn provider_hint(
             }
             ProviderKind::Ollama => Some(
                 "Verify your Ollama endpoint and credentials (if your deployment requires auth).",
+            ),
+            ProviderKind::Anthropic => Some(
+                "Verify your Anthropic API key (`--token <sk-ant-...>` or profile token) and confirm it has access to the model.",
             ),
         },
         ProviderErrorKind::RateLimited => match provider {
@@ -157,6 +167,9 @@ fn provider_hint(
             ProviderKind::Ollama => Some(
                 "Ollama appears rate-limited; retry shortly or reduce concurrent local requests.",
             ),
+            ProviderKind::Anthropic => Some(
+                "Anthropic rate limit reached; retry later or adjust your account/model limits.",
+            ),
         },
         ProviderErrorKind::Connectivity => match provider {
             ProviderKind::Ollama => {
@@ -165,12 +178,18 @@ fn provider_hint(
             ProviderKind::OpenAi => Some(
                 "Check network connectivity and ensure the configured OpenAI URL is reachable.",
             ),
+            ProviderKind::Anthropic => Some(
+                "Check network connectivity and ensure the configured Anthropic URL is reachable.",
+            ),
         },
         ProviderErrorKind::Timeout => match provider {
             ProviderKind::Ollama => {
                 Some("Request timed out; ensure Ollama/model is responsive or increase `--inference-timeout-in-sec`.")
             }
             ProviderKind::OpenAi => {
+                Some("Request timed out; retry later or increase `--inference-timeout-in-sec`.")
+            }
+            ProviderKind::Anthropic => {
                 Some("Request timed out; retry later or increase `--inference-timeout-in-sec`.")
             }
         },
@@ -238,6 +257,13 @@ pub(crate) fn validate_provider_request(
     if provider == ProviderKind::OpenAi && token.trim().is_empty() {
         issues.push(
             "❌ Missing OpenAI token. Provide `--token <TOKEN>`, run `cargo ai auth login openai`, or configure `cargo ai profile set <name> --token <TOKEN> --auth api_key`."
+                .to_string(),
+        );
+    }
+
+    if provider == ProviderKind::Anthropic && token.trim().is_empty() {
+        issues.push(
+            "❌ Missing Anthropic API key. Provide `--token <sk-ant-...>` or configure `cargo ai profile set <name> --token <TOKEN> --auth api_key`."
                 .to_string(),
         );
     }
