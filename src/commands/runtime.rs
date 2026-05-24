@@ -1258,6 +1258,10 @@ pub(crate) async fn run_with_definition_in_context(
     let content_parts = ai_cargo.content_parts();
 
     let mut response = String::new(); // Holds the LLM response
+    // Usage is provider-dependent. OpenAI populates it on the
+    // chat/completions path; other providers / endpoints leave it
+    // as None and we report tokens accordingly downstream.
+    let mut llm_usage: Option<crate::providers::LlmUsage> = None;
 
     if provider == ProviderKind::Ollama {
         let remaining =
@@ -1359,7 +1363,10 @@ pub(crate) async fn run_with_definition_in_context(
         )
         .await
         {
-            Ok(Ok(r)) => response.push_str(&r),
+            Ok(Ok(reply)) => {
+                response.push_str(&reply.text);
+                llm_usage = reply.usage;
+            }
             Ok(Err(error)) => {
                 let details = provider_error_messages(&error);
                 let summary = details
@@ -1397,6 +1404,19 @@ pub(crate) async fn run_with_definition_in_context(
                 return false;
             }
         };
+    }
+
+    // Surface token usage between the LLM call and the action graph
+    // so it lands in the run transcript next to "using: …" / "run:
+    // …" — useful for cost accounting, easy to grep, and ordered so
+    // a failed action graph still shows the cost of the model call.
+    if let Some(usage) = llm_usage {
+        println!(
+            "tokens · {} → {} ({} total)",
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.total_tokens()
+        );
     }
 
     let output = match definition.validate_provider_output(response.as_str()) {

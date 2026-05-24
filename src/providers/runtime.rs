@@ -13,6 +13,38 @@ pub(crate) enum ContentPart {
     File { filename: String, file_data: String },
 }
 
+/// Provider-neutral usage shape returned alongside an LLM reply.
+/// Counts are in tokens (input vs. output); both providers either
+/// emit these or omit them — wrap the call site in `Option<LlmUsage>`
+/// so missing data degrades cleanly.
+///
+/// Producers normalise their wire formats into this shape:
+/// OpenAI's `prompt_tokens` / `completion_tokens`, Ollama's
+/// `prompt_eval_count` / `eval_count`. Consumers (the runtime
+/// completion line, downstream cost estimation) don't care which
+/// provider answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LlmUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl LlmUsage {
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+}
+
+/// Bundles an LLM reply with whatever usage metadata the provider
+/// returned. `usage` is `None` when the provider response omitted
+/// the field — common with older Ollama builds, custom-proxied
+/// OpenAI-compatible endpoints, etc.
+#[derive(Clone, Debug)]
+pub struct LlmReply {
+    pub text: String,
+    pub usage: Option<LlmUsage>,
+}
+
 pub(crate) trait ValidatedResponse {
     fn validate_response(&self) -> Result<(), String>;
 }
@@ -277,10 +309,49 @@ fn image_media_type(path: &Path) -> Result<&'static str, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cargo, ContentPart, ValidatedResponse};
+    use super::{Cargo, ContentPart, LlmReply, LlmUsage, ValidatedResponse};
     use base64::Engine as _;
     use serde::{Deserialize, Serialize};
     use std::path::Path;
+
+    #[test]
+    fn llm_usage_total_tokens_sums_input_and_output() {
+        let u = LlmUsage {
+            input_tokens: 412,
+            output_tokens: 89,
+        };
+        assert_eq!(u.total_tokens(), 501);
+    }
+
+    #[test]
+    fn llm_usage_total_saturates_at_u64_max() {
+        // Defensive: a malformed provider response that reports
+        // absurd token counts shouldn't panic the runtime.
+        let u = LlmUsage {
+            input_tokens: u64::MAX,
+            output_tokens: 1,
+        };
+        assert_eq!(u.total_tokens(), u64::MAX);
+    }
+
+    #[test]
+    fn llm_reply_carries_optional_usage() {
+        let with_usage = LlmReply {
+            text: "hello".to_string(),
+            usage: Some(LlmUsage {
+                input_tokens: 10,
+                output_tokens: 4,
+            }),
+        };
+        assert_eq!(with_usage.text, "hello");
+        assert_eq!(with_usage.usage.unwrap().total_tokens(), 14);
+
+        let without_usage = LlmReply {
+            text: "hi".to_string(),
+            usage: None,
+        };
+        assert!(without_usage.usage.is_none());
+    }
 
     #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
     struct SampleOutput {

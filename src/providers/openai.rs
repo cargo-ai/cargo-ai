@@ -212,7 +212,7 @@ async fn send_chat_completions_request(
     timeout_in_sec: u64,
     token: &String,
     response_format: serde_json::Value,
-) -> Result<String, ProviderError> {
+) -> Result<super::LlmReply, ProviderError> {
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()
@@ -272,7 +272,21 @@ async fn send_chat_completions_request(
     };
 
     match response.choices.first() {
-        Some(choice) => Ok(choice.message.content.clone()),
+        Some(choice) => {
+            // OpenAI always populates `usage` on a successful
+            // chat/completions response; we map zero into Some(0)
+            // rather than dropping the field, so downstream usage
+            // accounting stays accurate even on cached / replayed
+            // requests where the provider may return zeros.
+            let usage = super::LlmUsage {
+                input_tokens: u64::from(response.usage.prompt_tokens),
+                output_tokens: u64::from(response.usage.completion_tokens),
+            };
+            Ok(super::LlmReply {
+                text: choice.message.content.clone(),
+                usage: Some(usage),
+            })
+        }
         None => Err(ProviderError::invalid_response(
             ProviderKind::OpenAi,
             "No ChatGPT response choice at index 0.",
@@ -287,7 +301,7 @@ async fn send_chatgpt_codex_responses_request(
     timeout_in_sec: u64,
     token: &String,
     response_format: serde_json::Value,
-) -> Result<String, ProviderError> {
+) -> Result<super::LlmReply, ProviderError> {
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()
@@ -390,13 +404,17 @@ async fn send_chatgpt_codex_responses_request(
         }
     }
 
+    // The ChatGPT Codex Responses streaming protocol doesn't
+    // include a token-usage block on the events we currently
+    // consume, so we report `None`. A follow-up PR can wire it
+    // up once we add the `response.completed` summary parsing.
     if let Some(done) = completed_text {
-        return Ok(done);
+        return Ok(super::LlmReply { text: done, usage: None });
     }
 
     let fallback = accumulated_text.trim().to_string();
     if !fallback.is_empty() {
-        return Ok(fallback);
+        return Ok(super::LlmReply { text: fallback, usage: None });
     }
 
     Err(ProviderError::invalid_response(
@@ -526,7 +544,7 @@ pub async fn send_request(
     timeout_in_sec: u64,
     token: &String,
     response_format: serde_json::Value,
-) -> Result<String, ProviderError> {
+) -> Result<super::LlmReply, ProviderError> {
     if is_chatgpt_codex_responses_endpoint(url) {
         send_chatgpt_codex_responses_request(
             url,
@@ -765,10 +783,69 @@ mod tests {
             }
         });
 
-        let response = send_request(&url, &model, &content_parts, 10, &token, response_format)
+        let reply = send_request(&url, &model, &content_parts, 10, &token, response_format)
             .await
             .expect("stream response should parse");
-        assert_eq!(response, "{\"answer\":\"hi\"}");
+        assert_eq!(reply.text, "{\"answer\":\"hi\"}");
+        // The Codex Responses streaming path doesn't currently
+        // include a usage block on the events we consume — surface
+        // that as None rather than fabricating zeros.
+        assert!(reply.usage.is_none());
+    }
+
+    #[tokio::test]
+    async fn chat_completions_response_carries_token_usage() {
+        let mut server = mockito::Server::new_async().await;
+        // Minimal valid /v1/chat/completions response body with a
+        // populated `usage` block. The runtime should propagate the
+        // counts through LlmReply.usage.
+        let body = serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1_700_000_000u64,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "{\"answer\":\"hi\"}" },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 412,
+                "completion_tokens": 89,
+                "total_tokens": 501
+            }
+        })
+        .to_string();
+
+        let _mock = server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let url = format!("{}/v1/chat/completions", server.url());
+        let model = "gpt-4o-mini".to_string();
+        let content_parts = vec![ContentPart::Text("return json".to_string())];
+        let token = "test-token".to_string();
+        let response_format = serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "Output",
+                "schema": { "type": "object", "properties": { "answer": { "type": "string" } } },
+                "strict": true
+            }
+        });
+
+        let reply = send_request(&url, &model, &content_parts, 10, &token, response_format)
+            .await
+            .expect("chat completions response should parse");
+        assert_eq!(reply.text, "{\"answer\":\"hi\"}");
+        let usage = reply.usage.expect("usage should be present on OpenAI chat responses");
+        assert_eq!(usage.input_tokens, 412);
+        assert_eq!(usage.output_tokens, 89);
+        assert_eq!(usage.total_tokens(), 501);
     }
 
     #[tokio::test]
