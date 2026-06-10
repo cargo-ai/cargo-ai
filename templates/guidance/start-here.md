@@ -21,6 +21,7 @@ If the runtime exposes the current OS, treat that as a hint for the local-machin
 When files, URLs, or images are involved, also clarify:
 - should this content be baked into the JSON as a fixed default?
 - or should the caller supply it at runtime with flags such as `--input-file` or `--input-url`?
+- for generated images, should any images be passed as `generate_image.reference_images` instead of only as model-facing input context?
 
 When action behavior may vary by invocation, also clarify:
 - should the caller gate the action or adjust a threshold at runtime?

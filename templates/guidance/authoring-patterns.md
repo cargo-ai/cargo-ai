@@ -34,6 +34,7 @@ Keep input objects easy to scan:
 
 - named input objects: `name`, then `type`, then the value field such as `text`, `url`, or `path`
 - unnamed literal inputs: `type`, then the value field
+- `generate_image.reference_images`: source/edit-target image first, then supporting detail, style, color, or material references
 
 ## Naming Patterns
 

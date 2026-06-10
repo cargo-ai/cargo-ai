@@ -2,8 +2,13 @@
   "version": "2026-03-28.r1",
   "inputs": [
     {
+      "name": "source_photo",
+      "type": "image",
+      "path": "./assets/source-photo.png"
+    },
+    {
       "type": "text",
-      "text": "Return product_name, product_slug, and score for this launch asset request."
+      "text": "Return product_name, product_slug, and score for this launch asset request. Use source_photo as the main visual reference when image generation is enabled."
     }
   ],
   "runtime_vars": {
@@ -55,8 +60,17 @@
           "kind": "generate_image",
           "model": { "var": "runtime.hero_image_model" },
           "prompt": [
+            "Image 1 is the source photo. Image 2 is style reference only. ",
             "Create a polished hero render for ",
             { "var": "product_name" }
+          ],
+          "reference_images": [
+            {
+              "input": "source_photo"
+            },
+            {
+              "path": "./assets/style-reference.png"
+            }
           ],
           "path": [
             "./artifacts/",

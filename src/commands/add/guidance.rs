@@ -87,6 +87,9 @@ const EXAMPLE_RUNTIME_VARS_IMAGE_GATING: &str = include_str!(concat!(
     "/templates/guidance/examples/runtime-vars-image-gating.json"
 ));
 
+const ROOT_AGENTS_PATH: &str = "AGENTS.md";
+const BUNDLE_ENTRY_PATH: &str = ".cargo-ai/guidance/codex-agents.md";
+
 #[derive(Clone, Copy)]
 struct GuidanceArtifact {
     relative_path: &'static str,
@@ -95,7 +98,7 @@ struct GuidanceArtifact {
 
 const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 20] = [
     GuidanceArtifact {
-        relative_path: "AGENTS.md",
+        relative_path: BUNDLE_ENTRY_PATH,
         contents: CODEX_GUIDANCE_TEMPLATE,
     },
     GuidanceArtifact {
@@ -179,8 +182,10 @@ const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 20] = [
 #[derive(Debug)]
 struct GuidanceBundleReport {
     root_output_path: PathBuf,
+    guidance_entry_path: PathBuf,
     guidance_root: PathBuf,
     artifact_paths: Vec<PathBuf>,
+    root_output_written: bool,
 }
 
 fn display_path(path: &Path) -> String {
@@ -199,35 +204,61 @@ fn display_path(path: &Path) -> String {
 }
 
 fn guidance_success_ui_response(report: &GuidanceBundleReport) -> serde_json::Value {
+    let mut sections = vec![json!({
+        "type": "kv",
+        "title": "Output",
+        "title_style": "plain",
+        "layout": "aligned",
+        "items": [
+            {
+                "label": "Entry file",
+                "value": format!(
+                    "`{}`",
+                    display_path(
+                        if report.root_output_written {
+                            report.root_output_path.as_path()
+                        } else {
+                            report.guidance_entry_path.as_path()
+                        }
+                    )
+                )
+            },
+            {
+                "label": "Bundle",
+                "value": format!("`{}`", display_path(report.guidance_root.as_path()))
+            },
+            {
+                "label": "Files written",
+                "value": report.artifact_paths.len()
+            }
+        ]
+    })];
+
+    if !report.root_output_written {
+        sections.push(json!({
+            "type": "notice",
+            "title": "Existing AGENTS.md",
+            "title_style": "plain",
+            "message": format!(
+                "Existing `{}` was left unchanged. Add this section to it when you want Codex to load Cargo AI guidance:\n\n## Cargo AI Guidance\n\nWhen creating or editing Cargo AI agents in this repo, read `{}` first.\n\nValidate agent definitions with:\n\n`cargo ai hatch <agent-name> --config <config.json> --check`",
+                display_path(report.root_output_path.as_path()),
+                display_path(report.guidance_entry_path.as_path())
+            )
+        }));
+    }
+
     json!({
         "ui": {
             "schema": "1.0",
             "kind": "success",
             "icon": "✓",
             "title": "Guidance added",
-            "summary": "Installed the Codex guidance bundle in this workspace.",
-            "sections": [
-                {
-                    "type": "kv",
-                    "title": "Output",
-                    "title_style": "plain",
-                    "layout": "aligned",
-                    "items": [
-                        {
-                            "label": "Entry file",
-                            "value": format!("`{}`", display_path(report.root_output_path.as_path()))
-                        },
-                        {
-                            "label": "Bundle",
-                            "value": format!("`{}`", display_path(report.guidance_root.as_path()))
-                        },
-                        {
-                            "label": "Files",
-                            "value": report.artifact_paths.len()
-                        }
-                    ]
-                }
-            ]
+            "summary": if report.root_output_written {
+                "Installed the Codex guidance bundle in this workspace."
+            } else {
+                "Installed the Codex guidance bundle and left the existing AGENTS.md unchanged."
+            },
+            "sections": sections
         }
     })
 }
@@ -251,9 +282,12 @@ impl GuidanceStyle {
         }
     }
 
-    fn output_file_name(self) -> &'static str {
+    fn root_artifact(self) -> GuidanceArtifact {
         match self {
-            Self::Codex => "AGENTS.md",
+            Self::Codex => GuidanceArtifact {
+                relative_path: ROOT_AGENTS_PATH,
+                contents: CODEX_GUIDANCE_TEMPLATE,
+            },
         }
     }
 
@@ -287,39 +321,58 @@ fn write_guidance_bundle(
     target_dir: &Path,
     style: GuidanceStyle,
 ) -> Result<GuidanceBundleReport, String> {
-    let artifact_paths = style
+    let root_artifact = style.root_artifact();
+    let root_output_path = target_dir.join(root_artifact.relative_path);
+    let root_output_written = !root_output_path.exists();
+
+    let bundle_artifact_paths = style
         .artifacts()
         .iter()
         .map(|artifact| target_dir.join(artifact.relative_path))
         .collect::<Vec<_>>();
 
-    ensure_no_conflicts(&artifact_paths)?;
+    ensure_no_conflicts(&bundle_artifact_paths)?;
 
-    for (artifact, output_path) in style.artifacts().iter().zip(artifact_paths.iter()) {
-        if let Some(parent) = output_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                format!(
-                    "Failed to create guidance directory '{}': {}",
-                    parent.display(),
-                    error
-                )
-            })?;
-        }
+    let mut artifact_paths = Vec::new();
 
-        fs::write(output_path, artifact.contents).map_err(|error| {
+    if root_output_written {
+        write_guidance_artifact(root_artifact, &root_output_path)?;
+        artifact_paths.push(root_output_path.clone());
+    }
+
+    for (artifact, output_path) in style.artifacts().iter().zip(bundle_artifact_paths.iter()) {
+        write_guidance_artifact(*artifact, output_path)?;
+        artifact_paths.push(output_path.clone());
+    }
+
+    Ok(GuidanceBundleReport {
+        root_output_path,
+        guidance_entry_path: target_dir.join(BUNDLE_ENTRY_PATH),
+        guidance_root: target_dir.join(".cargo-ai").join("guidance"),
+        artifact_paths,
+        root_output_written,
+    })
+}
+
+fn write_guidance_artifact(artifact: GuidanceArtifact, output_path: &Path) -> Result<(), String> {
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
             format!(
-                "Failed to write guidance file '{}': {}",
-                output_path.display(),
+                "Failed to create guidance directory '{}': {}",
+                parent.display(),
                 error
             )
         })?;
     }
 
-    Ok(GuidanceBundleReport {
-        root_output_path: target_dir.join(style.output_file_name()),
-        guidance_root: target_dir.join(".cargo-ai").join("guidance"),
-        artifact_paths,
-    })
+    fs::write(output_path, artifact.contents).map_err(|error| {
+        format!(
+            "Failed to write guidance file '{}': {}",
+            output_path.display(),
+            error
+        )
+    })?;
+    Ok(())
 }
 
 /// Executes the `guidance` subcommand flow from parsed CLI arguments.
@@ -373,7 +426,10 @@ mod tests {
                 .and_then(|name| name.to_str()),
             Some("AGENTS.md")
         );
-        assert_eq!(report.artifact_paths.len(), 20);
+        assert!(report.root_output_written);
+        assert_eq!(report.artifact_paths.len(), 21);
+        assert!(dir.join("AGENTS.md").exists());
+        assert!(dir.join(".cargo-ai/guidance/codex-agents.md").exists());
         assert!(dir
             .join(".cargo-ai/guidance/agent-definition-contract.md")
             .exists());
@@ -430,6 +486,11 @@ mod tests {
         assert!(guidance.contains("cargo ai hatch <agent-name> --config <config.json> --check"));
         assert!(guidance.contains("portable across macOS, Windows, and Linux"));
 
+        let bundle_entry = fs::read_to_string(&report.guidance_entry_path)
+            .expect("bundle entry guidance should be readable");
+        assert!(bundle_entry.contains("Cargo AI Agent Authoring (Codex)"));
+        assert!(bundle_entry.contains(".cargo-ai/guidance/start-here.md"));
+
         let rules = fs::read_to_string(dir.join(".cargo-ai/guidance/action-rules.md"))
             .expect("action rules should be readable");
         assert!(rules.contains("failure_mode"));
@@ -484,16 +545,40 @@ mod tests {
     }
 
     #[test]
-    fn write_guidance_bundle_fails_when_agents_md_exists() {
+    fn write_guidance_bundle_preserves_existing_agents_md_and_writes_bundle() {
         let dir = temp_dir_path("conflict");
         fs::create_dir_all(&dir).expect("test dir should be created");
         fs::write(dir.join("AGENTS.md"), "existing guidance\n")
             .expect("existing guidance file should be written");
 
-        let error = write_guidance_bundle(&dir, GuidanceStyle::Codex)
-            .expect_err("existing file should fail");
-        assert!(error.contains("AGENTS.md"));
-        assert!(error.contains("already exist"));
+        let report =
+            write_guidance_bundle(&dir, GuidanceStyle::Codex).expect("guidance write should work");
+        assert!(!report.root_output_written);
+        assert_eq!(report.artifact_paths.len(), 20);
+        assert_eq!(
+            fs::read_to_string(dir.join("AGENTS.md")).expect("existing AGENTS should be readable"),
+            "existing guidance\n"
+        );
+        assert!(dir.join(".cargo-ai/guidance/codex-agents.md").exists());
+        assert!(dir.join(".cargo-ai/guidance/action-rules.md").exists());
+
+        let response = guidance_success_ui_response(&report);
+        assert_eq!(
+            response["ui"]["summary"].as_str(),
+            Some("Installed the Codex guidance bundle and left the existing AGENTS.md unchanged.")
+        );
+        assert_eq!(
+            response["ui"]["sections"][0]["items"][0]["label"].as_str(),
+            Some("Entry file")
+        );
+        assert!(response["ui"]["sections"][0]["items"][0]["value"]
+            .as_str()
+            .expect("entry file value should be rendered")
+            .contains(".cargo-ai/guidance/codex-agents.md"));
+        assert!(response["ui"]["sections"][1]["message"]
+            .as_str()
+            .expect("merge guidance should be present")
+            .contains(".cargo-ai/guidance/codex-agents.md"));
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -523,11 +608,13 @@ mod tests {
     fn guidance_success_ui_uses_compact_output_section() {
         let report = GuidanceBundleReport {
             root_output_path: PathBuf::from("./AGENTS.md"),
+            guidance_entry_path: PathBuf::from("./.cargo-ai/guidance/codex-agents.md"),
             guidance_root: PathBuf::from("./.cargo-ai/guidance"),
             artifact_paths: vec![
                 PathBuf::from("./AGENTS.md"),
                 PathBuf::from("./.cargo-ai/guidance/start-here.md"),
             ],
+            root_output_written: true,
         };
 
         let response = guidance_success_ui_response(&report);
@@ -542,5 +629,30 @@ mod tests {
             Some("`./.cargo-ai/guidance`")
         );
         assert_eq!(response["ui"]["sections"][0]["items"][2]["value"], 2);
+    }
+
+    #[test]
+    fn guidance_success_ui_includes_merge_snippet_when_agents_md_is_preserved() {
+        let report = GuidanceBundleReport {
+            root_output_path: PathBuf::from("./AGENTS.md"),
+            guidance_entry_path: PathBuf::from("./.cargo-ai/guidance/codex-agents.md"),
+            guidance_root: PathBuf::from("./.cargo-ai/guidance"),
+            artifact_paths: vec![PathBuf::from("./.cargo-ai/guidance/codex-agents.md")],
+            root_output_written: false,
+        };
+
+        let response = guidance_success_ui_response(&report);
+
+        assert_eq!(
+            response["ui"]["sections"][0]["items"][0]["value"].as_str(),
+            Some("`./.cargo-ai/guidance/codex-agents.md`")
+        );
+        assert_eq!(response["ui"]["sections"][0]["items"][2]["value"], 1);
+        let message = response["ui"]["sections"][1]["message"]
+            .as_str()
+            .expect("merge snippet should be rendered");
+        assert!(message.contains("Existing `./AGENTS.md` was left unchanged"));
+        assert!(message.contains("## Cargo AI Guidance"));
+        assert!(message.contains("cargo ai hatch <agent-name> --config <config.json> --check"));
     }
 }

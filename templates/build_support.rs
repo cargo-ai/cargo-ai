@@ -116,6 +116,12 @@ enum ActionInputSpec {
 }
 
 #[derive(Debug, Clone)]
+enum GenerateImageReferenceSpec {
+    Path { path: Vec<RunArg> },
+    Named { input: String },
+}
+
+#[derive(Debug, Clone)]
 struct ActionInputOverrideSpec {
     name: String,
     value: ActionInputOverrideValueSpec,
@@ -168,6 +174,7 @@ struct RunStep {
     run_vars: Option<Vec<ActionRunVarSpec>>,
     input_overrides: Option<Vec<ActionInputOverrideSpec>>,
     inputs: Option<Vec<ActionInputSpec>>,
+    reference_images: Option<Vec<GenerateImageReferenceSpec>>,
     input_mode: Option<ActionInputMode>,
     ignore_tools: bool,
     platforms: Option<Vec<String>>,
@@ -859,6 +866,12 @@ fn parse_actions(
                             "`inputs` is only supported for `agent` actions",
                         ));
                     }
+                    if run_obj.contains_key("reference_images") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.reference_images"),
+                            "`reference_images` is only supported for `generate_image` actions",
+                        ));
+                    }
                     if run_obj.contains_key("input_overrides") {
                         return Err(BuildError::config(
                             format!("{run_path}.input_overrides"),
@@ -915,6 +928,7 @@ fn parse_actions(
                         run_vars: None,
                         input_overrides: None,
                         inputs: None,
+                        reference_images: None,
                         input_mode: None,
                         ignore_tools: false,
                         platforms,
@@ -973,6 +987,12 @@ fn parse_actions(
                         return Err(BuildError::config(
                             format!("{run_path}.inputs"),
                             "`inputs` is not supported for `email_me` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("reference_images") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.reference_images"),
+                            "`reference_images` is only supported for `generate_image` actions",
                         ));
                     }
                     if run_obj.contains_key("input_overrides") {
@@ -1034,6 +1054,7 @@ fn parse_actions(
                         run_vars: None,
                         input_overrides: None,
                         inputs: None,
+                        reference_images: None,
                         input_mode: None,
                         ignore_tools: false,
                         platforms,
@@ -1098,6 +1119,12 @@ fn parse_actions(
                         return Err(BuildError::config(
                             format!("{run_path}.params"),
                             "`params` is only supported for `tool` actions",
+                        ));
+                    }
+                    if run_obj.contains_key("reference_images") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.reference_images"),
+                            "`reference_images` is only supported for `generate_image` actions",
                         ));
                     }
 
@@ -1165,6 +1192,7 @@ fn parse_actions(
                         run_vars,
                         input_overrides,
                         inputs,
+                        reference_images: None,
                         input_mode,
                         ignore_tools,
                         platforms,
@@ -1237,6 +1265,12 @@ fn parse_actions(
                             "`inputs` is only supported for `agent` actions",
                         ));
                     }
+                    if run_obj.contains_key("reference_images") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.reference_images"),
+                            "`reference_images` is only supported for `generate_image` actions",
+                        ));
+                    }
                     if run_obj.contains_key("input_overrides") {
                         return Err(BuildError::config(
                             format!("{run_path}.input_overrides"),
@@ -1294,6 +1328,7 @@ fn parse_actions(
                         run_vars: None,
                         input_overrides: None,
                         inputs: None,
+                        reference_images: None,
                         input_mode: None,
                         ignore_tools: false,
                         platforms,
@@ -1414,6 +1449,12 @@ fn parse_actions(
                             "generated image output",
                         )?;
                     }
+                    let reference_images = parse_optional_generate_image_reference_images(
+                        run_obj,
+                        &run_path,
+                        &available_field_types,
+                        named_input_kinds,
+                    )?;
 
                     RunStep {
                         kind,
@@ -1436,6 +1477,7 @@ fn parse_actions(
                         run_vars: None,
                         input_overrides: None,
                         inputs: None,
+                        reference_images,
                         input_mode: None,
                         ignore_tools: false,
                         platforms,
@@ -2358,6 +2400,108 @@ fn parse_action_input_spec(
             ),
         )),
     }
+}
+
+fn parse_optional_generate_image_reference_images(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+    named_input_kinds: &BTreeMap<String, InputKind>,
+) -> Result<Option<Vec<GenerateImageReferenceSpec>>, BuildError> {
+    let Some(value) = run_obj.get("reference_images") else {
+        return Ok(None);
+    };
+
+    let references_path = format!("{run_path}.reference_images");
+    let references = value.as_array().ok_or_else(|| {
+        BuildError::config(
+            &references_path,
+            "expected an array of reference image entries",
+        )
+    })?;
+    if references.is_empty() {
+        return Err(BuildError::config(
+            &references_path,
+            "must contain at least one reference image",
+        ));
+    }
+
+    let mut parsed = Vec::with_capacity(references.len());
+    for (index, reference) in references.iter().enumerate() {
+        parsed.push(parse_generate_image_reference_image_spec(
+            reference,
+            &format!("{references_path}[{index}]"),
+            schema_field_types,
+            named_input_kinds,
+        )?);
+    }
+
+    Ok(Some(parsed))
+}
+
+fn parse_generate_image_reference_image_spec(
+    entry: &Value,
+    path: &str,
+    schema_field_types: &BTreeMap<String, FieldType>,
+    named_input_kinds: &BTreeMap<String, InputKind>,
+) -> Result<GenerateImageReferenceSpec, BuildError> {
+    let entry_obj = expect_object(entry, path)?;
+    if let Some(named_input_value) = entry_obj.get("input") {
+        if entry_obj.len() != 1 {
+            return Err(BuildError::config(
+                path,
+                "named reference image entries must use exactly `{ \"input\": \"<name>\" }`",
+            ));
+        }
+        let input_name = named_input_value
+            .as_str()
+            .ok_or_else(|| BuildError::config(format!("{path}.input"), "expected a string"))?;
+        validate_named_input_name(input_name, &format!("{path}.input"))?;
+        match named_input_kinds.get(input_name) {
+            Some(InputKind::Image) => {}
+            Some(_) => {
+                return Err(BuildError::config(
+                    format!("{path}.input"),
+                    format!(
+                        "named top-level input `{input_name}` must have type `image` for `reference_images`"
+                    ),
+                ));
+            }
+            None => {
+                return Err(BuildError::config(
+                    format!("{path}.input"),
+                    format!("unknown named top-level input `{input_name}`"),
+                ));
+            }
+        }
+        return Ok(GenerateImageReferenceSpec::Named {
+            input: input_name.to_string(),
+        });
+    }
+
+    if let Some(path_value) = entry_obj.get("path") {
+        if entry_obj.len() != 1 {
+            return Err(BuildError::config(
+                path,
+                "path reference image entries must use exactly `{ \"path\": \"./image.png\" }`",
+            ));
+        }
+        let path_parts =
+            parse_string_parts_value(path_value, &format!("{path}.path"), schema_field_types)?;
+        if let Some(resolved_path) = resolve_literal_run_args(&path_parts) {
+            validate_definition_owned_local_path(
+                &resolved_path,
+                &format!("{path}.path"),
+                "reference image",
+            )?;
+        }
+        return Ok(GenerateImageReferenceSpec::Path { path: path_parts });
+    }
+
+    Err(BuildError::config(
+        path,
+        "expected `{ \"input\": \"<name>\" }` or `{ \"path\": \"./image.png\" }`",
+    ))
 }
 
 fn parse_string_parts_field(
@@ -3770,6 +3914,19 @@ fn render_action_input_spec(input: &ActionInputSpec) -> String {
     }
 }
 
+fn render_generate_image_reference_spec(reference: &GenerateImageReferenceSpec) -> String {
+    match reference {
+        GenerateImageReferenceSpec::Path { path } => format!(
+            "GenerateImageReference::Path {{ path: vec![{}] }}",
+            render_run_arg_parts(path)
+        ),
+        GenerateImageReferenceSpec::Named { input } => format!(
+            "GenerateImageReference::Named {{ input: {}.to_string() }}",
+            rust_string_literal(input)
+        ),
+    }
+}
+
 fn render_action_input_override_value(value: &ActionInputOverrideValueSpec) -> String {
     match value {
         ActionInputOverrideValueSpec::Literal(literal) => format!(
@@ -4001,6 +4158,18 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         format!("Some(vec![{}])", rendered)
                     })
                     .unwrap_or_else(|| "None".to_string());
+                let reference_images = run_step
+                    .reference_images
+                    .as_ref()
+                    .map(|reference_images| {
+                        let rendered = reference_images
+                            .iter()
+                            .map(render_generate_image_reference_spec)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("Some(vec![{}])", rendered)
+                    })
+                    .unwrap_or_else(|| "None".to_string());
                 let input_overrides = run_step
                     .input_overrides
                     .as_ref()
@@ -4065,6 +4234,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         run_vars: {},
                         input_overrides: {},
                         inputs: {},
+                        reference_images: {},
                         input_mode: {},
                         ignore_tools: {},
                         platforms: {},
@@ -4095,6 +4265,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     run_vars,
                     input_overrides,
                     inputs,
+                    reference_images,
                     input_mode,
                     run_step.ignore_tools,
                     platforms
@@ -4273,6 +4444,12 @@ pub enum ActionInput {{
 }}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum GenerateImageReference {{
+    Path {{ path: Vec<RunArg> }},
+    Named {{ input: String }},
+}}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum ActionInputOverrideValue {{
     Literal(String),
     Variable(String),
@@ -4339,6 +4516,7 @@ pub struct RunStep {{
     run_vars: Option<Vec<ActionRunVar>>,
     input_overrides: Option<Vec<ActionInputOverride>>,
     inputs: Option<Vec<ActionInput>>,
+    reference_images: Option<Vec<GenerateImageReference>>,
     input_mode: Option<ActionInputMode>,
     ignore_tools: bool,
     platforms: Option<Vec<String>>,

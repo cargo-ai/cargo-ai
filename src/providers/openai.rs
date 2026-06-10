@@ -1,5 +1,8 @@
 // External Crates
-use super::{runtime::ContentPart, ProviderError, ProviderKind};
+use super::{
+    runtime::{ContentPart, ImageReference},
+    ProviderError, ProviderKind,
+};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use reqwest::ClientBuilder;
 use serde::{Deserialize, Serialize};
@@ -113,6 +116,19 @@ fn normalize_openai_images_url(url: &str) -> Result<String, ProviderError> {
         Ok(format!("{trimmed}/images/generations"))
     } else {
         Ok(format!("{trimmed}/v1/images/generations"))
+    }
+}
+
+fn normalize_openai_image_edits_url(url: &str) -> Result<String, ProviderError> {
+    let trimmed = url.trim_end_matches('/');
+    if let Some(index) = trimmed.find("/v1/") {
+        return Ok(format!("{}/v1/images/edits", &trimmed[..index]));
+    }
+
+    if trimmed.ends_with("/v1") {
+        Ok(format!("{trimmed}/images/edits"))
+    } else {
+        Ok(format!("{trimmed}/v1/images/edits"))
     }
 }
 
@@ -412,11 +428,24 @@ async fn send_chatgpt_codex_image_request(
     timeout_in_sec: u64,
     token: &String,
     output_format: &str,
+    reference_images: &[ImageReference],
 ) -> Result<Vec<u8>, ProviderError> {
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()
         .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
+
+    let mut content = Vec::with_capacity(reference_images.len() + 1);
+    content.push(serde_json::json!({
+        "type": "input_text",
+        "text": prompt
+    }));
+    for reference_image in reference_images {
+        content.push(serde_json::json!({
+            "type": "input_image",
+            "image_url": reference_image.data_url.clone()
+        }));
+    }
 
     let request_payload = serde_json::json!({
         "model": model,
@@ -424,12 +453,7 @@ async fn send_chatgpt_codex_image_request(
         "input": [
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": prompt
-                    }
-                ]
+                "content": content
             }
         ],
         "tools": [
@@ -519,79 +543,121 @@ async fn send_chatgpt_codex_image_request(
     })
 }
 
-pub async fn send_request(
-    url: &String,
-    model: &String,
-    content_parts: &[ContentPart],
-    timeout_in_sec: u64,
-    token: &String,
-    response_format: serde_json::Value,
-) -> Result<String, ProviderError> {
-    if is_chatgpt_codex_responses_endpoint(url) {
-        send_chatgpt_codex_responses_request(
-            url,
-            model,
-            content_parts,
-            timeout_in_sec,
-            token,
-            response_format,
-        )
-        .await
-    } else {
-        send_chat_completions_request(
-            url,
-            model,
-            content_parts,
-            timeout_in_sec,
-            token,
-            response_format,
-        )
-        .await
-    }
-}
-
-pub async fn send_image_request(
+async fn send_image_edit_request(
     url: &String,
     model: &String,
     prompt: &str,
     timeout_in_sec: u64,
     token: &String,
     output_format: &str,
+    reference_images: &[ImageReference],
 ) -> Result<Vec<u8>, ProviderError> {
-    if is_chatgpt_codex_responses_endpoint(url) {
-        return send_chatgpt_codex_image_request(
-            url,
-            model,
-            prompt,
-            timeout_in_sec,
-            token,
-            output_format,
-        )
-        .await;
-    }
-
-    let endpoint = normalize_openai_images_url(url)?;
+    let endpoint = normalize_openai_image_edits_url(url)?;
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()
         .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
 
-    let request = ImageGenerationRequest {
-        model: model.clone(),
-        prompt: prompt.to_string(),
-        n: 1,
-        output_format: output_format.to_string(),
-    };
+    let boundary = multipart_boundary();
+    let body = image_edit_multipart_body(
+        boundary.as_str(),
+        model,
+        prompt,
+        output_format,
+        reference_images,
+    );
 
     let http_resp = client
         .post(endpoint.as_str())
         .header("Authorization", format!("Bearer {}", token))
-        .header("Content-Type", "application/json")
-        .json(&request)
+        .header(
+            "Content-Type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(body)
         .send()
         .await
         .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
 
+    decode_image_generation_response(http_resp).await
+}
+
+fn multipart_boundary() -> String {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    format!("cargo-ai-image-{millis}-{}", std::process::id())
+}
+
+fn image_edit_multipart_body(
+    boundary: &str,
+    model: &str,
+    prompt: &str,
+    output_format: &str,
+    reference_images: &[ImageReference],
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    push_multipart_text(&mut body, boundary, "model", model);
+    push_multipart_text(&mut body, boundary, "prompt", prompt);
+    push_multipart_text(&mut body, boundary, "output_format", output_format);
+
+    for reference_image in reference_images {
+        push_multipart_file(
+            &mut body,
+            boundary,
+            "image[]",
+            reference_image.filename.as_str(),
+            reference_image.media_type.as_str(),
+            &reference_image.bytes,
+        );
+    }
+
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    body
+}
+
+fn push_multipart_text(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+    );
+    body.extend_from_slice(value.as_bytes());
+    body.extend_from_slice(b"\r\n");
+}
+
+fn push_multipart_file(
+    body: &mut Vec<u8>,
+    boundary: &str,
+    name: &str,
+    filename: &str,
+    media_type: &str,
+    bytes: &[u8],
+) {
+    let filename = sanitize_multipart_filename(filename);
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
+    );
+    body.extend_from_slice(format!("Content-Type: {media_type}\r\n\r\n").as_bytes());
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(b"\r\n");
+}
+
+fn sanitize_multipart_filename(filename: &str) -> String {
+    filename
+        .chars()
+        .map(|ch| match ch {
+            '"' | '\\' | '\r' | '\n' => '_',
+            other => other,
+        })
+        .collect()
+}
+
+async fn decode_image_generation_response(
+    http_resp: reqwest::Response,
+) -> Result<Vec<u8>, ProviderError> {
     let status = http_resp.status();
     let body_bytes = http_resp
         .bytes()
@@ -634,6 +700,97 @@ pub async fn send_image_request(
             format!("Failed to decode generated image bytes: {error}"),
         )
     })
+}
+
+pub async fn send_request(
+    url: &String,
+    model: &String,
+    content_parts: &[ContentPart],
+    timeout_in_sec: u64,
+    token: &String,
+    response_format: serde_json::Value,
+) -> Result<String, ProviderError> {
+    if is_chatgpt_codex_responses_endpoint(url) {
+        send_chatgpt_codex_responses_request(
+            url,
+            model,
+            content_parts,
+            timeout_in_sec,
+            token,
+            response_format,
+        )
+        .await
+    } else {
+        send_chat_completions_request(
+            url,
+            model,
+            content_parts,
+            timeout_in_sec,
+            token,
+            response_format,
+        )
+        .await
+    }
+}
+
+pub async fn send_image_request(
+    url: &String,
+    model: &String,
+    prompt: &str,
+    timeout_in_sec: u64,
+    token: &String,
+    output_format: &str,
+    reference_images: &[ImageReference],
+) -> Result<Vec<u8>, ProviderError> {
+    if is_chatgpt_codex_responses_endpoint(url) {
+        return send_chatgpt_codex_image_request(
+            url,
+            model,
+            prompt,
+            timeout_in_sec,
+            token,
+            output_format,
+            reference_images,
+        )
+        .await;
+    }
+
+    if !reference_images.is_empty() {
+        return send_image_edit_request(
+            url,
+            model,
+            prompt,
+            timeout_in_sec,
+            token,
+            output_format,
+            reference_images,
+        )
+        .await;
+    }
+
+    let endpoint = normalize_openai_images_url(url)?;
+    let client = ClientBuilder::new()
+        .timeout(Duration::from_secs(timeout_in_sec))
+        .build()
+        .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
+
+    let request = ImageGenerationRequest {
+        model: model.clone(),
+        prompt: prompt.to_string(),
+        n: 1,
+        output_format: output_format.to_string(),
+    };
+
+    let http_resp = client
+        .post(endpoint.as_str())
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
+
+    decode_image_generation_response(http_resp).await
 }
 
 fn chat_request_content_parts(content_parts: &[ContentPart]) -> Vec<ChatRequestContentPart> {
@@ -689,7 +846,7 @@ mod tests {
         chat_request_content_parts, responses_request_content_parts, send_image_request,
         send_request, ChatRequestContentPart,
     };
-    use crate::providers::runtime::ContentPart;
+    use crate::providers::runtime::{ContentPart, ImageReference};
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 
     #[test]
@@ -791,9 +948,55 @@ mod tests {
         let model = "gpt-image-1".to_string();
         let token = "test-token".to_string();
 
-        let image = send_image_request(&url, &model, "draw a square", 10, &token, "png")
+        let image = send_image_request(&url, &model, "draw a square", 10, &token, "png", &[])
             .await
             .expect("image request should decode");
+
+        assert_eq!(image, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn image_request_with_references_uses_image_edits_endpoint() {
+        let mut server = mockito::Server::new_async().await;
+        let expected_bytes = b"fake-png-edit";
+        let encoded_image = BASE64_STANDARD.encode(expected_bytes);
+        let _mock = server
+            .mock("POST", "/v1/images/edits")
+            .match_header(
+                "content-type",
+                mockito::Matcher::Regex("multipart/form-data; boundary=".into()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"data":[{{"b64_json":"{}"}}]}}"#,
+                encoded_image
+            ))
+            .create_async()
+            .await;
+
+        let url = format!("{}/v1/chat/completions", server.url());
+        let model = "gpt-image-2".to_string();
+        let token = "test-token".to_string();
+        let reference_images = vec![ImageReference {
+            source: "./reference.png".to_string(),
+            filename: "reference.png".to_string(),
+            media_type: "image/png".to_string(),
+            data_url: "data:image/png;base64,ZmFrZS1yZWY=".to_string(),
+            bytes: b"fake-ref".to_vec(),
+        }];
+
+        let image = send_image_request(
+            &url,
+            &model,
+            "draw a square using the reference",
+            10,
+            &token,
+            "png",
+            &reference_images,
+        )
+        .await
+        .expect("image edit request should decode");
 
         assert_eq!(image, expected_bytes);
     }
@@ -831,9 +1034,54 @@ data: [DONE]\n",
         let model = "gpt-5.2".to_string();
         let token = "test-token".to_string();
 
-        let image = send_image_request(&url, &model, "draw a square", 10, &token, "webp")
+        let image = send_image_request(&url, &model, "draw a square", 10, &token, "webp", &[])
             .await
             .expect("chatgpt account transport should decode image bytes");
+
+        assert_eq!(image, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn chatgpt_image_request_sends_reference_images_as_input_images() {
+        let mut server = mockito::Server::new_async().await;
+        let expected_bytes = b"fake-webp-reference";
+        let encoded_image = BASE64_STANDARD.encode(expected_bytes);
+        let _mock = server
+            .mock("POST", "/chatgpt.com/backend-api/codex/responses")
+            .match_body(mockito::Matcher::Regex("\"type\":\"input_image\"".into()))
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(format!(
+                "event: response.output_item.done\n\
+data: {{\"item\":{{\"type\":\"image_generation_call\",\"result\":\"{}\"}}}}\n\n\
+data: [DONE]\n",
+                encoded_image,
+            ))
+            .create_async()
+            .await;
+
+        let url = format!("{}/chatgpt.com/backend-api/codex", server.url());
+        let model = "gpt-5.2".to_string();
+        let token = "test-token".to_string();
+        let reference_images = vec![ImageReference {
+            source: "./reference.png".to_string(),
+            filename: "reference.png".to_string(),
+            media_type: "image/png".to_string(),
+            data_url: "data:image/png;base64,ZmFrZS1yZWY=".to_string(),
+            bytes: b"fake-ref".to_vec(),
+        }];
+
+        let image = send_image_request(
+            &url,
+            &model,
+            "draw a square using the reference",
+            10,
+            &token,
+            "webp",
+            &reference_images,
+        )
+        .await
+        .expect("chatgpt account transport should include image references");
 
         assert_eq!(image, expected_bytes);
     }

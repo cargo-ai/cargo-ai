@@ -20,6 +20,7 @@ Use this file after the user describes the outcome they want. The user should no
 
 - the caller should gate actions or tune thresholds at runtime
 - the caller should choose an image model at invocation time
+- the image step may need reference images from named image inputs or definition-owned local paths
 - the agent needs `runtime.*` in `logic`, `when`, string substitution, or `generate_image.model`
 
 ### Start with `basic-agent.json` when:
