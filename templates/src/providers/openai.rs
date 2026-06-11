@@ -1,6 +1,6 @@
 // External Crates
 use super::{
-    runtime::{ContentPart, ImageReference},
+    runtime::{ContentPart, ImageReference, ProviderImageResponse, ProviderTextResponse, ProviderUsage},
     ProviderError, ProviderKind,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -54,11 +54,27 @@ struct ImageGenerationRequest {
 #[derive(Deserialize, Debug)]
 struct ImageGenerationResponse {
     data: Vec<ImageGenerationData>,
+    #[serde(default)]
+    usage: Option<ImageUsage>,
 }
 
 #[derive(Deserialize, Debug)]
 struct ImageGenerationData {
     b64_json: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct ImageUsage {
+    #[serde(default)]
+    input_tokens: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
+    #[serde(default)]
+    total_tokens: Option<u64>,
+    #[serde(default)]
+    input_tokens_details: Option<serde_json::Value>,
+    #[serde(default)]
+    output_tokens_details: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -75,7 +91,8 @@ pub struct ChatCompletionsResponse {
     pub created: u64,
     pub model: String,
     pub choices: Vec<Choice>,
-    pub usage: Usage,
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -88,9 +105,16 @@ pub struct Choice {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Usage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub total_tokens: u32,
+    #[serde(default)]
+    pub prompt_tokens: Option<u64>,
+    #[serde(default)]
+    pub completion_tokens: Option<u64>,
+    #[serde(default)]
+    pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub prompt_tokens_details: Option<serde_json::Value>,
+    #[serde(default)]
+    pub completion_tokens_details: Option<serde_json::Value>,
 }
 
 fn is_chatgpt_codex_responses_endpoint(url: &str) -> bool {
@@ -201,9 +225,8 @@ fn parse_stream_failure_message(payload: &serde_json::Value) -> Option<String> {
 fn find_image_generation_result(payload: &serde_json::Value) -> Option<&str> {
     match payload {
         serde_json::Value::Object(map) => {
-            let is_image_generation_call =
-                map.get("type").and_then(serde_json::Value::as_str)
-                    == Some("image_generation_call");
+            let is_image_generation_call = map.get("type").and_then(serde_json::Value::as_str)
+                == Some("image_generation_call");
             if is_image_generation_call {
                 if let Some(result) = map
                     .get("result")
@@ -222,6 +245,43 @@ fn find_image_generation_result(payload: &serde_json::Value) -> Option<&str> {
     }
 }
 
+fn normalize_chat_usage(usage: Option<Usage>) -> Option<ProviderUsage> {
+    usage.map(|usage| ProviderUsage {
+        input_tokens: usage.prompt_tokens,
+        output_tokens: usage.completion_tokens,
+        total_tokens: usage.total_tokens,
+        input_token_details: usage.prompt_tokens_details,
+        output_token_details: usage.completion_tokens_details,
+    })
+}
+
+fn normalize_image_usage(usage: Option<ImageUsage>) -> Option<ProviderUsage> {
+    usage.map(|usage| ProviderUsage {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        total_tokens: usage.total_tokens,
+        input_token_details: usage.input_tokens_details,
+        output_token_details: usage.output_tokens_details,
+    })
+}
+
+fn normalize_responses_usage(payload: &serde_json::Value) -> Option<ProviderUsage> {
+    let usage = payload
+        .get("response")
+        .and_then(|response| response.get("usage"))
+        .or_else(|| payload.get("usage"))?;
+
+    Some(ProviderUsage {
+        input_tokens: usage.get("input_tokens").and_then(serde_json::Value::as_u64),
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(serde_json::Value::as_u64),
+        total_tokens: usage.get("total_tokens").and_then(serde_json::Value::as_u64),
+        input_token_details: usage.get("input_tokens_details").cloned(),
+        output_token_details: usage.get("output_tokens_details").cloned(),
+    })
+}
+
 async fn send_chat_completions_request(
     url: &String,
     model: &String,
@@ -229,7 +289,7 @@ async fn send_chat_completions_request(
     timeout_in_sec: u64,
     token: &String,
     response_format: serde_json::Value,
-) -> Result<String, ProviderError> {
+) -> Result<ProviderTextResponse, ProviderError> {
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()
@@ -288,8 +348,13 @@ async fn send_chat_completions_request(
         }
     };
 
-    match response.choices.first() {
-        Some(choice) => Ok(choice.message.content.clone()),
+    let ChatCompletionsResponse { choices, usage, .. } = response;
+    let usage = normalize_chat_usage(usage);
+    match choices.first() {
+        Some(choice) => Ok(ProviderTextResponse {
+            text: choice.message.content.clone(),
+            usage,
+        }),
         None => Err(ProviderError::invalid_response(
             ProviderKind::OpenAi,
             "No ChatGPT response choice at index 0.",
@@ -304,7 +369,7 @@ async fn send_chatgpt_codex_responses_request(
     timeout_in_sec: u64,
     token: &String,
     response_format: serde_json::Value,
-) -> Result<String, ProviderError> {
+) -> Result<ProviderTextResponse, ProviderError> {
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()
@@ -356,6 +421,7 @@ async fn send_chatgpt_codex_responses_request(
 
     let mut accumulated_text = String::new();
     let mut completed_text: Option<String> = None;
+    let mut usage: Option<ProviderUsage> = None;
 
     for raw_line in raw_stream.lines() {
         let line = raw_line.trim_end_matches('\r');
@@ -377,6 +443,10 @@ async fn send_chatgpt_codex_responses_request(
             .get("type")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
+
+        if let Some(event_usage) = normalize_responses_usage(&event_json) {
+            usage = Some(event_usage);
+        }
 
         if event_type == "response.output_text.delta" {
             if let Some(delta) = event_json.get("delta").and_then(serde_json::Value::as_str) {
@@ -408,12 +478,15 @@ async fn send_chatgpt_codex_responses_request(
     }
 
     if let Some(done) = completed_text {
-        return Ok(done);
+        return Ok(ProviderTextResponse { text: done, usage });
     }
 
     let fallback = accumulated_text.trim().to_string();
     if !fallback.is_empty() {
-        return Ok(fallback);
+        return Ok(ProviderTextResponse {
+            text: fallback,
+            usage,
+        });
     }
 
     Err(ProviderError::invalid_response(
@@ -430,7 +503,7 @@ async fn send_chatgpt_codex_image_request(
     token: &String,
     output_format: &str,
     reference_images: &[ImageReference],
-) -> Result<Vec<u8>, ProviderError> {
+) -> Result<ProviderImageResponse, ProviderError> {
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()
@@ -492,6 +565,7 @@ async fn send_chatgpt_codex_image_request(
     }
 
     let mut encoded_image: Option<String> = None;
+    let mut usage: Option<ProviderUsage> = None;
 
     for raw_line in raw_stream.lines() {
         let line = raw_line.trim_end_matches('\r');
@@ -519,6 +593,10 @@ async fn send_chatgpt_codex_image_request(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
+        if let Some(event_usage) = normalize_responses_usage(&event_json) {
+            usage = Some(event_usage);
+        }
+
         if event_type == "response.failed" || event_type == "error" {
             let detail =
                 parse_stream_failure_message(&event_json).unwrap_or_else(|| payload.to_string());
@@ -536,12 +614,14 @@ async fn send_chatgpt_codex_image_request(
         )
     })?;
 
-    BASE64_STANDARD.decode(encoded_image).map_err(|error| {
+    let bytes = BASE64_STANDARD.decode(encoded_image).map_err(|error| {
         ProviderError::invalid_response(
             ProviderKind::OpenAi,
             format!("Failed to decode generated image bytes: {error}"),
         )
-    })
+    })?;
+
+    Ok(ProviderImageResponse { bytes, usage })
 }
 
 async fn send_image_edit_request(
@@ -552,7 +632,7 @@ async fn send_image_edit_request(
     token: &String,
     output_format: &str,
     reference_images: &[ImageReference],
-) -> Result<Vec<u8>, ProviderError> {
+) -> Result<ProviderImageResponse, ProviderError> {
     let endpoint = normalize_openai_image_edits_url(url)?;
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
@@ -638,10 +718,8 @@ fn push_multipart_file(
     let filename = sanitize_multipart_filename(filename);
     body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
     body.extend_from_slice(
-        format!(
-            "Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n"
-        )
-        .as_bytes(),
+        format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
     );
     body.extend_from_slice(format!("Content-Type: {media_type}\r\n\r\n").as_bytes());
     body.extend_from_slice(bytes);
@@ -660,7 +738,7 @@ fn sanitize_multipart_filename(filename: &str) -> String {
 
 async fn decode_image_generation_response(
     http_resp: reqwest::Response,
-) -> Result<Vec<u8>, ProviderError> {
+) -> Result<ProviderImageResponse, ProviderError> {
     let status = http_resp.status();
     let body_bytes = http_resp
         .bytes()
@@ -697,11 +775,16 @@ async fn decode_image_generation_response(
             )
         })?;
 
-    BASE64_STANDARD.decode(encoded_image).map_err(|error| {
+    let bytes = BASE64_STANDARD.decode(encoded_image).map_err(|error| {
         ProviderError::invalid_response(
             ProviderKind::OpenAi,
             format!("Failed to decode generated image bytes: {error}"),
         )
+    })?;
+
+    Ok(ProviderImageResponse {
+        bytes,
+        usage: normalize_image_usage(response.usage),
     })
 }
 
@@ -712,7 +795,7 @@ pub async fn send_request(
     timeout_in_sec: u64,
     token: &String,
     response_format: serde_json::Value,
-) -> Result<String, ProviderError> {
+) -> Result<ProviderTextResponse, ProviderError> {
     if is_chatgpt_codex_responses_endpoint(url) {
         send_chatgpt_codex_responses_request(
             url,
@@ -744,7 +827,7 @@ pub async fn send_image_request(
     token: &String,
     output_format: &str,
     reference_images: &[ImageReference],
-) -> Result<Vec<u8>, ProviderError> {
+) -> Result<ProviderImageResponse, ProviderError> {
     if is_chatgpt_codex_responses_endpoint(url) {
         return send_chatgpt_codex_image_request(
             url,
@@ -841,4 +924,251 @@ fn responses_request_content_parts(content_parts: &[ContentPart]) -> Vec<serde_j
             }),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        chat_request_content_parts, responses_request_content_parts, send_image_request,
+        send_request, ChatRequestContentPart,
+    };
+    use crate::providers::runtime::{ContentPart, ImageReference};
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+
+    #[test]
+    fn chat_request_content_parts_encode_pdf_files() {
+        let parts = chat_request_content_parts(&[ContentPart::File {
+            filename: "report.pdf".to_string(),
+            file_data: "data:application/pdf;base64,JVBERi0xLjQK".to_string(),
+        }]);
+
+        match &parts[0] {
+            ChatRequestContentPart::File { file } => {
+                assert_eq!(file.filename, "report.pdf");
+                assert_eq!(file.file_data, "data:application/pdf;base64,JVBERi0xLjQK");
+            }
+            other => panic!("expected file content part, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn responses_request_content_parts_encode_pdf_files() {
+        let parts = responses_request_content_parts(&[ContentPart::File {
+            filename: "report.pdf".to_string(),
+            file_data: "data:application/pdf;base64,JVBERi0xLjQK".to_string(),
+        }]);
+
+        assert_eq!(
+            parts,
+            vec![serde_json::json!({
+                "type": "input_file",
+                "filename": "report.pdf",
+                "file_data": "data:application/pdf;base64,JVBERi0xLjQK"
+            })]
+        );
+    }
+
+    #[tokio::test]
+    async fn parses_chatgpt_codex_stream_done_payload() {
+        let mut server = mockito::Server::new_async().await;
+        let stream_body = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"answer\\\":\\\"\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+            "event: response.output_text.done\n",
+            "data: {\"type\":\"response.output_text.done\",\"text\":\"{\\\"answer\\\":\\\"hi\\\"}\"}\n\n"
+        );
+
+        let _mock = server
+            .mock("POST", "/chatgpt.com/backend-api/codex/responses")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(stream_body)
+            .create_async()
+            .await;
+
+        let url = format!("{}/chatgpt.com/backend-api/codex", server.url());
+        let model = "gpt-5".to_string();
+        let content_parts = vec![ContentPart::Text("return json".to_string())];
+        let token = "test-token".to_string();
+        let response_format = serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "Output",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "answer": { "type": "string" }
+                    },
+                    "required": ["answer"],
+                    "additionalProperties": false
+                },
+                "strict": true
+            }
+        });
+
+        let response = send_request(&url, &model, &content_parts, 10, &token, response_format)
+            .await
+            .expect("stream response should parse");
+        assert_eq!(response, "{\"answer\":\"hi\"}");
+    }
+
+    #[tokio::test]
+    async fn image_request_uses_images_endpoint_and_decodes_bytes() {
+        let mut server = mockito::Server::new_async().await;
+        let expected_bytes = b"fake-png";
+        let encoded_image = BASE64_STANDARD.encode(expected_bytes);
+        let _mock = server
+            .mock("POST", "/v1/images/generations")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"data":[{{"b64_json":"{}"}}]}}"#,
+                encoded_image
+            ))
+            .create_async()
+            .await;
+
+        let url = format!("{}/v1/chat/completions", server.url());
+        let model = "gpt-image-1".to_string();
+        let token = "test-token".to_string();
+
+        let image = send_image_request(&url, &model, "draw a square", 10, &token, "png", &[])
+            .await
+            .expect("image request should decode");
+
+        assert_eq!(image, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn image_request_with_references_uses_image_edits_endpoint() {
+        let mut server = mockito::Server::new_async().await;
+        let expected_bytes = b"fake-png-edit";
+        let encoded_image = BASE64_STANDARD.encode(expected_bytes);
+        let _mock = server
+            .mock("POST", "/v1/images/edits")
+            .match_header(
+                "content-type",
+                mockito::Matcher::Regex("multipart/form-data; boundary=".into()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"data":[{{"b64_json":"{}"}}]}}"#,
+                encoded_image
+            ))
+            .create_async()
+            .await;
+
+        let url = format!("{}/v1/chat/completions", server.url());
+        let model = "gpt-image-2".to_string();
+        let token = "test-token".to_string();
+        let reference_images = vec![ImageReference {
+            source: "./reference.png".to_string(),
+            filename: "reference.png".to_string(),
+            media_type: "image/png".to_string(),
+            data_url: "data:image/png;base64,ZmFrZS1yZWY=".to_string(),
+            bytes: b"fake-ref".to_vec(),
+        }];
+
+        let image = send_image_request(
+            &url,
+            &model,
+            "draw a square using the reference",
+            10,
+            &token,
+            "png",
+            &reference_images,
+        )
+        .await
+        .expect("image edit request should decode");
+
+        assert_eq!(image, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn image_request_uses_chatgpt_responses_tool_and_decodes_bytes() {
+        let mut server = mockito::Server::new_async().await;
+        let expected_bytes = b"fake-webp";
+        let encoded_image = BASE64_STANDARD.encode(expected_bytes);
+        let _mock = server
+            .mock("POST", "/chatgpt.com/backend-api/codex/responses")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "model": "gpt-5.2",
+                "tools": [
+                    {
+                        "type": "image_generation",
+                        "output_format": "webp"
+                    }
+                ],
+                "store": false,
+                "stream": true
+            })))
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(format!(
+                "event: response.output_item.done\n\
+data: {{\"item\":{{\"type\":\"image_generation_call\",\"result\":\"{}\"}}}}\n\n\
+data: [DONE]\n",
+                encoded_image,
+            ))
+            .create_async()
+            .await;
+
+        let url = format!("{}/chatgpt.com/backend-api/codex", server.url());
+        let model = "gpt-5.2".to_string();
+        let token = "test-token".to_string();
+
+        let image = send_image_request(&url, &model, "draw a square", 10, &token, "webp", &[])
+            .await
+            .expect("chatgpt account transport should decode image bytes");
+
+        assert_eq!(image, expected_bytes);
+    }
+
+    #[tokio::test]
+    async fn chatgpt_image_request_sends_reference_images_as_input_images() {
+        let mut server = mockito::Server::new_async().await;
+        let expected_bytes = b"fake-webp-reference";
+        let encoded_image = BASE64_STANDARD.encode(expected_bytes);
+        let _mock = server
+            .mock("POST", "/chatgpt.com/backend-api/codex/responses")
+            .match_body(mockito::Matcher::Regex("\"type\":\"input_image\"".into()))
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(format!(
+                "event: response.output_item.done\n\
+data: {{\"item\":{{\"type\":\"image_generation_call\",\"result\":\"{}\"}}}}\n\n\
+data: [DONE]\n",
+                encoded_image,
+            ))
+            .create_async()
+            .await;
+
+        let url = format!("{}/chatgpt.com/backend-api/codex", server.url());
+        let model = "gpt-5.2".to_string();
+        let token = "test-token".to_string();
+        let reference_images = vec![ImageReference {
+            source: "./reference.png".to_string(),
+            filename: "reference.png".to_string(),
+            media_type: "image/png".to_string(),
+            data_url: "data:image/png;base64,ZmFrZS1yZWY=".to_string(),
+            bytes: b"fake-ref".to_vec(),
+        }];
+
+        let image = send_image_request(
+            &url,
+            &model,
+            "draw a square using the reference",
+            10,
+            &token,
+            "webp",
+            &reference_images,
+        )
+        .await
+        .expect("chatgpt account transport should include image references");
+
+        assert_eq!(image, expected_bytes);
+    }
 }

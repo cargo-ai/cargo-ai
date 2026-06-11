@@ -754,6 +754,7 @@ pub(crate) struct ActionProviderContext {
     pub(crate) token: String,
     pub(crate) inference_timeout_in_sec: u64,
     pub(crate) tool_resolver: Option<std::sync::Arc<crate::commands::tools::ToolResolver>>,
+    pub(crate) usage_log: Option<crate::usage_log::UsageLogContext>,
 }
 
 impl ActionProviderContext {
@@ -810,6 +811,21 @@ fn using_line_url(provider: crate::providers::ProviderKind, url: &str) -> Option
     }
 
     Some(trimmed.to_string())
+}
+
+fn usage_provider_profile(context: &ActionProviderContext) -> Option<&str> {
+    context.profile_name.as_deref()
+}
+
+fn usage_provider_error(error: &crate::providers::ProviderError) -> crate::usage_log::UsageError {
+    crate::usage_log::UsageError::redacted(
+        format!("{:?}", error.kind()).to_ascii_lowercase(),
+        "Provider request failed.",
+    )
+}
+
+fn usage_timeout_error() -> crate::usage_log::UsageError {
+    crate::usage_log::UsageError::redacted("timeout", "Provider request timed out.")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1301,6 +1317,7 @@ async fn run_matching_action_steps(
                 named_inputs,
                 action_index,
                 &action.name,
+                step_index + 1,
                 provider_context,
                 action_execution_override,
                 max_agent_depth,
@@ -1314,6 +1331,7 @@ async fn run_matching_action_steps(
                 &action_data,
                 action_index,
                 &action.name,
+                step_index + 1,
                 provider_context,
                 action_execution_override,
                 max_agent_depth,
@@ -1328,6 +1346,7 @@ async fn run_matching_action_steps(
                 named_inputs,
                 action_index,
                 &action.name,
+                step_index + 1,
                 provider_context,
                 runtime_budget,
             )
@@ -1547,6 +1566,7 @@ async fn run_tool_step(
     data: &serde_json::Value,
     action_index: usize,
     action_name: &str,
+    step_index: usize,
     provider_context: &ActionProviderContext,
     action_execution_override: Option<crate::ActionExecutionMode>,
     max_agent_depth: u32,
@@ -1558,6 +1578,13 @@ async fn run_tool_step(
             action_name
         )
     })?;
+    let mut usage_tool_guard = provider_context.usage_log.as_ref().map(|usage_log| {
+        usage_log.start_tool_run(crate::usage_log::UsageTool {
+            name: tool_name.to_string(),
+            action: action_name.to_string(),
+            step_index: Some(step_index),
+        })
+    });
     let resolver = provider_context.tool_resolver.as_ref().ok_or_else(|| {
         format!(
             "Action '{}' tool step '{}' cannot resolve tools because no tool resolver is available.",
@@ -1572,6 +1599,10 @@ async fn run_tool_step(
         &contract.describe,
     )?;
     let current_depth = current_agent_action_depth();
+    let usage_log_bridge_context = provider_context
+        .usage_log
+        .as_ref()
+        .map(|usage_log| usage_log.tool_bridge_context(tool_name, action_name, Some(step_index)));
     let request = serde_json::json!({
         "protocol_version": 1,
         "params": params,
@@ -1589,6 +1620,7 @@ async fn run_tool_step(
                     crate::ActionExecutionMode::Sequential => "sequential",
                     crate::ActionExecutionMode::Parallel => "parallel",
                 }),
+                "usage_log": usage_log_bridge_context,
             }
         },
     });
@@ -1674,6 +1706,9 @@ async fn run_tool_step(
             action_name,
             format!("stored tool result in variable '{}'.", output_variable).as_str(),
         );
+        if let Some(guard) = usage_tool_guard.as_mut() {
+            guard.finish_success();
+        }
         Ok(Some((output_variable.to_string(), value)))
     } else {
         if let Some(result) = result {
@@ -1682,6 +1717,9 @@ async fn run_tool_step(
                 action_name,
                 format!("tool '{}' returned '{}'.", tool_name, result).as_str(),
             );
+        }
+        if let Some(guard) = usage_tool_guard.as_mut() {
+            guard.finish_success();
         }
         Ok(None)
     }
@@ -1929,6 +1967,7 @@ async fn run_generate_image_step(
     named_inputs: &BTreeMap<String, crate::Input>,
     action_index: usize,
     action_name: &str,
+    step_index: usize,
     provider_context: &ActionProviderContext,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
@@ -2009,7 +2048,8 @@ async fn run_generate_image_step(
         action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
     })?;
 
-    let image_bytes = match tokio::time::timeout(remaining, async {
+    let provider_started_at = Instant::now();
+    let image_response = match tokio::time::timeout(remaining, async {
         match effective_provider_context.provider {
             crate::providers::ProviderKind::OpenAi => {
                 crate::providers::send_openai_image_request(
@@ -2037,8 +2077,44 @@ async fn run_generate_image_step(
     })
     .await
     {
-        Ok(Ok(bytes)) => bytes,
+        Ok(Ok(response)) => {
+            if let Some(usage_log) = provider_context.usage_log.as_ref() {
+                usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                    provider: effective_provider_context.provider,
+                    profile_name: usage_provider_profile(effective_provider_context),
+                    auth_mode: effective_provider_context.auth_mode.as_str(),
+                    model: model.as_str(),
+                    step: crate::usage_log::UsageStep {
+                        kind: "generate_image",
+                        action: Some(action_name.to_string()),
+                        step_index: Some(step_index),
+                    },
+                    usage: response.usage.as_ref(),
+                    duration: provider_started_at.elapsed(),
+                    status: crate::usage_log::UsageStatus::Success,
+                    error: None,
+                });
+            }
+            response
+        }
         Ok(Err(error)) => {
+            if let Some(usage_log) = provider_context.usage_log.as_ref() {
+                usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                    provider: effective_provider_context.provider,
+                    profile_name: usage_provider_profile(effective_provider_context),
+                    auth_mode: effective_provider_context.auth_mode.as_str(),
+                    model: model.as_str(),
+                    step: crate::usage_log::UsageStep {
+                        kind: "generate_image",
+                        action: Some(action_name.to_string()),
+                        step_index: Some(step_index),
+                    },
+                    usage: None,
+                    duration: provider_started_at.elapsed(),
+                    status: crate::usage_log::UsageStatus::Failed,
+                    error: Some(usage_provider_error(&error)),
+                });
+            }
             let mut lines = vec![format!(
                 "Action '{}' generate_image step failed.",
                 action_name
@@ -2047,6 +2123,23 @@ async fn run_generate_image_step(
             return Err(lines.join("\n"));
         }
         Err(_) => {
+            if let Some(usage_log) = provider_context.usage_log.as_ref() {
+                usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                    provider: effective_provider_context.provider,
+                    profile_name: usage_provider_profile(effective_provider_context),
+                    auth_mode: effective_provider_context.auth_mode.as_str(),
+                    model: model.as_str(),
+                    step: crate::usage_log::UsageStep {
+                        kind: "generate_image",
+                        action: Some(action_name.to_string()),
+                        step_index: Some(step_index),
+                    },
+                    usage: None,
+                    duration: provider_started_at.elapsed(),
+                    status: crate::usage_log::UsageStatus::Failed,
+                    error: Some(usage_timeout_error()),
+                });
+            }
             return Err(action_runtime_timeout_message(
                 action_name,
                 runtime_budget,
@@ -2054,6 +2147,7 @@ async fn run_generate_image_step(
             ));
         }
     };
+    let image_bytes = image_response.bytes;
 
     let output_path_ref = Path::new(output_path.as_str());
     validate_generated_image_output_path(output_path_ref, action_name)?;
@@ -2268,6 +2362,7 @@ async fn resolve_generate_image_step_profile_context(
         token,
         inference_timeout_in_sec: invocation_timeout_in_sec,
         tool_resolver: None,
+        usage_log: None,
     }))
 }
 
@@ -2356,6 +2451,7 @@ async fn run_agent_step_with_provider_context(
     named_inputs: &BTreeMap<String, crate::Input>,
     action_index: usize,
     action_name: &str,
+    step_index: usize,
     provider_context: &ActionProviderContext,
     action_execution_override: Option<crate::ActionExecutionMode>,
     max_agent_depth: u32,
@@ -2438,6 +2534,16 @@ async fn run_agent_step_with_provider_context(
         AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV,
         runtime_budget.deadline_ms.to_string(),
     );
+    if let Some(usage_log) = provider_context.usage_log.as_ref() {
+        for (key, value) in usage_log.direct_child_env(crate::usage_log::UsageLaunchedBy {
+            kind: "agent_step",
+            action: Some(action_name.to_string()),
+            tool: None,
+            step_index: Some(step_index),
+        }) {
+            command.env(key, value);
+        }
+    }
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
@@ -2587,6 +2693,7 @@ async fn run_agent_step(
         token: String::new(),
         inference_timeout_in_sec: 60,
         tool_resolver: None,
+        usage_log: None,
     };
     run_agent_step_with_provider_context(
         step,
@@ -2594,6 +2701,7 @@ async fn run_agent_step(
         named_inputs,
         action_index,
         action_name,
+        1,
         &provider_context,
         action_execution_override,
         max_agent_depth,
@@ -3909,7 +4017,7 @@ fn validate_child_file_extension(
     }
 }
 
-fn current_agent_action_depth() -> u32 {
+pub(crate) fn current_agent_action_depth() -> u32 {
     std::env::var(AGENT_ACTION_DEPTH_ENV)
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
@@ -4238,6 +4346,7 @@ mod tests {
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            usage_log: None,
         }
     }
 
@@ -4283,6 +4392,7 @@ auth_mode = "{auth_mode}"
             token: String::new(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            usage_log: None,
         }
     }
 
@@ -5160,6 +5270,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            usage_log: None,
         };
 
         assert_eq!(
@@ -5179,6 +5290,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            usage_log: None,
         };
 
         assert_eq!(
@@ -5410,6 +5522,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            usage_log: None,
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
@@ -5419,6 +5532,7 @@ auth_mode = "{auth_mode}"
             &no_named_inputs(),
             0,
             "generate_art",
+            1,
             &provider_context,
             runtime_budget,
         )
@@ -5511,6 +5625,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            usage_log: None,
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
@@ -5520,6 +5635,7 @@ auth_mode = "{auth_mode}"
             &named_inputs,
             0,
             "generate_art",
+            1,
             &provider_context,
             runtime_budget,
         )
@@ -5581,6 +5697,7 @@ auth_mode = "{auth_mode}"
             &no_named_inputs(),
             0,
             "generate_art",
+            1,
             &provider_context(),
             runtime_budget,
         )
@@ -5653,6 +5770,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            usage_log: None,
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
@@ -5666,6 +5784,7 @@ auth_mode = "{auth_mode}"
             &no_named_inputs(),
             0,
             "generate_art",
+            1,
             &provider_context,
             runtime_budget,
         )
@@ -5744,6 +5863,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            usage_log: None,
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
@@ -5753,6 +5873,7 @@ auth_mode = "{auth_mode}"
             &no_named_inputs(),
             0,
             "generate_art",
+            1,
             &provider_context,
             runtime_budget,
         )
@@ -5810,6 +5931,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            usage_log: None,
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
@@ -5819,6 +5941,7 @@ auth_mode = "{auth_mode}"
             &no_named_inputs(),
             0,
             "generate_art",
+            1,
             &provider_context,
             runtime_budget,
         )
@@ -5903,6 +6026,7 @@ auth_mode = "{auth_mode}"
                     &no_named_inputs(),
                     0,
                     "generate_art",
+                    1,
                     &provider_context(),
                     runtime_budget,
                 )
@@ -6019,6 +6143,7 @@ auth_mode = "{auth_mode}"
             &no_named_inputs(),
             0,
             "generate_art",
+            1,
             &provider_context(),
             runtime_budget,
         )
@@ -6081,6 +6206,7 @@ auth_mode = "{auth_mode}"
             &no_named_inputs(),
             0,
             "generate_art",
+            1,
             &provider_context(),
             runtime_budget,
         )
@@ -6132,6 +6258,7 @@ auth_mode = "{auth_mode}"
             &no_named_inputs(),
             0,
             "generate_art",
+            1,
             &ollama_provider_context(
                 "http://localhost:11434/v1/chat/completions",
                 "x/flux2-klein:4b",
@@ -6204,6 +6331,7 @@ auth_mode = "{auth_mode}"
             &no_named_inputs(),
             0,
             "generate_art",
+            1,
             &ollama_provider_context(
                 format!("{}/v1/chat/completions", server.url()).as_str(),
                 "x/flux2-klein:4b",
@@ -6289,6 +6417,7 @@ auth_mode = "{auth_mode}"
             &no_named_inputs(),
             0,
             "generate_art",
+            1,
             &provider_context(),
             runtime_budget,
         )
@@ -6345,6 +6474,7 @@ auth_mode = "{auth_mode}"
             &no_named_inputs(),
             0,
             "generate_art",
+            1,
             &ollama_provider_context(
                 "http://localhost:11434/v1/chat/completions",
                 "x/flux2-klein:4b",
@@ -7067,6 +7197,7 @@ auth_mode = "{auth_mode}"
             &json!({}),
             0,
             "bridge_action",
+            1,
             &provider_context,
             Some(crate::ActionExecutionMode::Sequential),
             4,

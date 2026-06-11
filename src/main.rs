@@ -14,6 +14,7 @@ mod runtime_definition;
 mod schema_version;
 mod ui;
 mod update_check;
+mod usage_log;
 mod web_resources;
 
 use serde::{Deserialize, Serialize};

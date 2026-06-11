@@ -27,6 +27,7 @@ context.invoke_agent(request)?;
 - tool execution itself does not consume an extra agent-depth hop
 - a child-agent call from the tool consumes depth exactly as if the parent had called that child directly
 - the helper carries the remaining runtime budget through to the child-agent invocation
+- when the parent run enables `--usage-log` or `CARGO_AI_USAGE_LOG`, the helper carries the usage-ledger path, root run id, parent agent run id, and tool-launch metadata into child-agent invocations
 - manual direct `describe` or `invoke` calls outside a parent Cargo AI tool step will not include child-agent bridge context
 - keep custom orchestration in `src/tool.rs`; do not rewrite `src/agent_bridge.rs`
 
@@ -35,3 +36,4 @@ context.invoke_agent(request)?;
 - keep the tool responsible for deterministic orchestration and splitting
 - keep the child agent responsible for model-driven work
 - prefer the helper over hand-rolled subprocess flags, depth propagation, or runtime-budget forwarding
+- keep custom business logging inside tool code when needed; Cargo AI's built-in usage log records only usage/timing metadata and never tool arguments, stdout/stderr, or child-agent payloads

@@ -42,6 +42,10 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
         source: "src/args.rs",
     },
     TemplateSource {
+        destination: "src/usage_log.rs",
+        source: "src/usage_log.rs",
+    },
+    TemplateSource {
         destination: "src/web_resources.rs",
         source: "src/web_resources.rs",
     },

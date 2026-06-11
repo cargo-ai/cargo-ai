@@ -18,6 +18,9 @@ const MAIN_RS_TEMPLATE: &str = include_str!("src/main.rs");
 const ARGS_RS_NAME: &str = "src/args.rs";
 const ARGS_RS_TEMPLATE: &str = include_str!("src/args.rs");
 
+const USAGE_LOG_RS_NAME: &str = "src/usage_log.rs";
+const USAGE_LOG_RS_TEMPLATE: &str = include_str!("src/usage_log.rs");
+
 const PROVIDERS_MOD_RS_NAME: &str = "src/providers/mod.rs";
 const PROVIDERS_MOD_RS_TEMPLATE: &str = include_str!("src/providers/mod.rs");
 
@@ -49,13 +52,14 @@ const CREDENTIALS_STORE_RS_NAME: &str = "src/credentials/store.rs";
 const CREDENTIALS_STORE_RS_TEMPLATE: &str = include_str!("src/credentials/store.rs");
 
 /// Template files emitted into a newly scaffolded agent workspace.
-pub const TEMPLATES: [(&str, &str); 16] = [
+pub const TEMPLATES: [(&str, &str); 17] = [
     (BUILD_RS_NAME, BUILD_RS_TEMPLATE),
     (BUILD_SUPPORT_RS_NAME, BUILD_SUPPORT_RS_TEMPLATE),
     (AGENTCFG_NAME, AGENTCFG_TEMPLATE),
     (MANIFEST_NAME, MANIFEST_TEMPLATE),
     (MAIN_RS_NAME, MAIN_RS_TEMPLATE),
     (ARGS_RS_NAME, ARGS_RS_TEMPLATE),
+    (USAGE_LOG_RS_NAME, USAGE_LOG_RS_TEMPLATE),
     (PROVIDERS_MOD_RS_NAME, PROVIDERS_MOD_RS_TEMPLATE),
     (PROVIDERS_RUNTIME_RS_NAME, PROVIDERS_RUNTIME_RS_TEMPLATE),
     (PROVIDERS_OPENAI_RS_NAME, PROVIDERS_OPENAI_RS_TEMPLATE),

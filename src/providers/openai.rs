@@ -1,6 +1,8 @@
 // External Crates
 use super::{
-    runtime::{ContentPart, ImageReference},
+    runtime::{
+        ContentPart, ImageReference, ProviderImageResponse, ProviderTextResponse, ProviderUsage,
+    },
     ProviderError, ProviderKind,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -54,11 +56,27 @@ struct ImageGenerationRequest {
 #[derive(Deserialize, Debug)]
 struct ImageGenerationResponse {
     data: Vec<ImageGenerationData>,
+    #[serde(default)]
+    usage: Option<ImageUsage>,
 }
 
 #[derive(Deserialize, Debug)]
 struct ImageGenerationData {
     b64_json: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct ImageUsage {
+    #[serde(default)]
+    input_tokens: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
+    #[serde(default)]
+    total_tokens: Option<u64>,
+    #[serde(default)]
+    input_tokens_details: Option<serde_json::Value>,
+    #[serde(default)]
+    output_tokens_details: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -75,7 +93,8 @@ pub struct ChatCompletionsResponse {
     pub created: u64,
     pub model: String,
     pub choices: Vec<Choice>,
-    pub usage: Usage,
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -88,9 +107,16 @@ pub struct Choice {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Usage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub total_tokens: u32,
+    #[serde(default)]
+    pub prompt_tokens: Option<u64>,
+    #[serde(default)]
+    pub completion_tokens: Option<u64>,
+    #[serde(default)]
+    pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub prompt_tokens_details: Option<serde_json::Value>,
+    #[serde(default)]
+    pub completion_tokens_details: Option<serde_json::Value>,
 }
 
 fn is_chatgpt_codex_responses_endpoint(url: &str) -> bool {
@@ -221,6 +247,47 @@ fn find_image_generation_result(payload: &serde_json::Value) -> Option<&str> {
     }
 }
 
+fn normalize_chat_usage(usage: Option<Usage>) -> Option<ProviderUsage> {
+    usage.map(|usage| ProviderUsage {
+        input_tokens: usage.prompt_tokens,
+        output_tokens: usage.completion_tokens,
+        total_tokens: usage.total_tokens,
+        input_token_details: usage.prompt_tokens_details,
+        output_token_details: usage.completion_tokens_details,
+    })
+}
+
+fn normalize_image_usage(usage: Option<ImageUsage>) -> Option<ProviderUsage> {
+    usage.map(|usage| ProviderUsage {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        total_tokens: usage.total_tokens,
+        input_token_details: usage.input_tokens_details,
+        output_token_details: usage.output_tokens_details,
+    })
+}
+
+fn normalize_responses_usage(payload: &serde_json::Value) -> Option<ProviderUsage> {
+    let usage = payload
+        .get("response")
+        .and_then(|response| response.get("usage"))
+        .or_else(|| payload.get("usage"))?;
+
+    Some(ProviderUsage {
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(serde_json::Value::as_u64),
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(serde_json::Value::as_u64),
+        total_tokens: usage
+            .get("total_tokens")
+            .and_then(serde_json::Value::as_u64),
+        input_token_details: usage.get("input_tokens_details").cloned(),
+        output_token_details: usage.get("output_tokens_details").cloned(),
+    })
+}
+
 async fn send_chat_completions_request(
     url: &String,
     model: &String,
@@ -228,7 +295,7 @@ async fn send_chat_completions_request(
     timeout_in_sec: u64,
     token: &String,
     response_format: serde_json::Value,
-) -> Result<String, ProviderError> {
+) -> Result<ProviderTextResponse, ProviderError> {
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()
@@ -287,8 +354,13 @@ async fn send_chat_completions_request(
         }
     };
 
-    match response.choices.first() {
-        Some(choice) => Ok(choice.message.content.clone()),
+    let ChatCompletionsResponse { choices, usage, .. } = response;
+    let usage = normalize_chat_usage(usage);
+    match choices.first() {
+        Some(choice) => Ok(ProviderTextResponse {
+            text: choice.message.content.clone(),
+            usage,
+        }),
         None => Err(ProviderError::invalid_response(
             ProviderKind::OpenAi,
             "No ChatGPT response choice at index 0.",
@@ -303,7 +375,7 @@ async fn send_chatgpt_codex_responses_request(
     timeout_in_sec: u64,
     token: &String,
     response_format: serde_json::Value,
-) -> Result<String, ProviderError> {
+) -> Result<ProviderTextResponse, ProviderError> {
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()
@@ -355,6 +427,7 @@ async fn send_chatgpt_codex_responses_request(
 
     let mut accumulated_text = String::new();
     let mut completed_text: Option<String> = None;
+    let mut usage: Option<ProviderUsage> = None;
 
     for raw_line in raw_stream.lines() {
         let line = raw_line.trim_end_matches('\r');
@@ -376,6 +449,10 @@ async fn send_chatgpt_codex_responses_request(
             .get("type")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
+
+        if let Some(event_usage) = normalize_responses_usage(&event_json) {
+            usage = Some(event_usage);
+        }
 
         if event_type == "response.output_text.delta" {
             if let Some(delta) = event_json.get("delta").and_then(serde_json::Value::as_str) {
@@ -407,12 +484,15 @@ async fn send_chatgpt_codex_responses_request(
     }
 
     if let Some(done) = completed_text {
-        return Ok(done);
+        return Ok(ProviderTextResponse { text: done, usage });
     }
 
     let fallback = accumulated_text.trim().to_string();
     if !fallback.is_empty() {
-        return Ok(fallback);
+        return Ok(ProviderTextResponse {
+            text: fallback,
+            usage,
+        });
     }
 
     Err(ProviderError::invalid_response(
@@ -429,7 +509,7 @@ async fn send_chatgpt_codex_image_request(
     token: &String,
     output_format: &str,
     reference_images: &[ImageReference],
-) -> Result<Vec<u8>, ProviderError> {
+) -> Result<ProviderImageResponse, ProviderError> {
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()
@@ -491,6 +571,7 @@ async fn send_chatgpt_codex_image_request(
     }
 
     let mut encoded_image: Option<String> = None;
+    let mut usage: Option<ProviderUsage> = None;
 
     for raw_line in raw_stream.lines() {
         let line = raw_line.trim_end_matches('\r');
@@ -518,6 +599,10 @@ async fn send_chatgpt_codex_image_request(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
+        if let Some(event_usage) = normalize_responses_usage(&event_json) {
+            usage = Some(event_usage);
+        }
+
         if event_type == "response.failed" || event_type == "error" {
             let detail =
                 parse_stream_failure_message(&event_json).unwrap_or_else(|| payload.to_string());
@@ -535,12 +620,14 @@ async fn send_chatgpt_codex_image_request(
         )
     })?;
 
-    BASE64_STANDARD.decode(encoded_image).map_err(|error| {
+    let bytes = BASE64_STANDARD.decode(encoded_image).map_err(|error| {
         ProviderError::invalid_response(
             ProviderKind::OpenAi,
             format!("Failed to decode generated image bytes: {error}"),
         )
-    })
+    })?;
+
+    Ok(ProviderImageResponse { bytes, usage })
 }
 
 async fn send_image_edit_request(
@@ -551,7 +638,7 @@ async fn send_image_edit_request(
     token: &String,
     output_format: &str,
     reference_images: &[ImageReference],
-) -> Result<Vec<u8>, ProviderError> {
+) -> Result<ProviderImageResponse, ProviderError> {
     let endpoint = normalize_openai_image_edits_url(url)?;
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
@@ -657,7 +744,7 @@ fn sanitize_multipart_filename(filename: &str) -> String {
 
 async fn decode_image_generation_response(
     http_resp: reqwest::Response,
-) -> Result<Vec<u8>, ProviderError> {
+) -> Result<ProviderImageResponse, ProviderError> {
     let status = http_resp.status();
     let body_bytes = http_resp
         .bytes()
@@ -694,11 +781,16 @@ async fn decode_image_generation_response(
             )
         })?;
 
-    BASE64_STANDARD.decode(encoded_image).map_err(|error| {
+    let bytes = BASE64_STANDARD.decode(encoded_image).map_err(|error| {
         ProviderError::invalid_response(
             ProviderKind::OpenAi,
             format!("Failed to decode generated image bytes: {error}"),
         )
+    })?;
+
+    Ok(ProviderImageResponse {
+        bytes,
+        usage: normalize_image_usage(response.usage),
     })
 }
 
@@ -709,7 +801,7 @@ pub async fn send_request(
     timeout_in_sec: u64,
     token: &String,
     response_format: serde_json::Value,
-) -> Result<String, ProviderError> {
+) -> Result<ProviderTextResponse, ProviderError> {
     if is_chatgpt_codex_responses_endpoint(url) {
         send_chatgpt_codex_responses_request(
             url,
@@ -741,7 +833,7 @@ pub async fn send_image_request(
     token: &String,
     output_format: &str,
     reference_images: &[ImageReference],
-) -> Result<Vec<u8>, ProviderError> {
+) -> Result<ProviderImageResponse, ProviderError> {
     if is_chatgpt_codex_responses_endpoint(url) {
         return send_chatgpt_codex_image_request(
             url,
@@ -925,7 +1017,7 @@ mod tests {
         let response = send_request(&url, &model, &content_parts, 10, &token, response_format)
             .await
             .expect("stream response should parse");
-        assert_eq!(response, "{\"answer\":\"hi\"}");
+        assert_eq!(response.text, "{\"answer\":\"hi\"}");
     }
 
     #[tokio::test]
@@ -952,7 +1044,8 @@ mod tests {
             .await
             .expect("image request should decode");
 
-        assert_eq!(image, expected_bytes);
+        assert_eq!(image.bytes, expected_bytes);
+        assert_eq!(image.usage, None);
     }
 
     #[tokio::test]
@@ -998,7 +1091,7 @@ mod tests {
         .await
         .expect("image edit request should decode");
 
-        assert_eq!(image, expected_bytes);
+        assert_eq!(image.bytes, expected_bytes);
     }
 
     #[tokio::test]
@@ -1038,7 +1131,7 @@ data: [DONE]\n",
             .await
             .expect("chatgpt account transport should decode image bytes");
 
-        assert_eq!(image, expected_bytes);
+        assert_eq!(image.bytes, expected_bytes);
     }
 
     #[tokio::test]
@@ -1083,6 +1176,6 @@ data: [DONE]\n",
         .await
         .expect("chatgpt account transport should include image references");
 
-        assert_eq!(image, expected_bytes);
+        assert_eq!(image.bytes, expected_bytes);
     }
 }

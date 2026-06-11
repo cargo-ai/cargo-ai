@@ -3,6 +3,7 @@ mod web_resources;
 mod config;
 mod credentials;
 mod providers;
+mod usage_log;
 
 use jsonlogic::apply;
 use serde::{Deserialize, Serialize};
@@ -794,6 +795,7 @@ struct ActionProviderContext {
     token: String,
     inference_timeout_in_sec: u64,
     tool_resolver: Option<Arc<ToolResolver>>,
+    usage_log: Option<usage_log::UsageLogContext>,
 }
 
 impl ActionProviderContext {
@@ -1568,6 +1570,37 @@ fn using_line_url(provider: ProviderKind, url: &str) -> Option<String> {
     }
 
     Some(trimmed.to_string())
+}
+
+fn generated_usage_agent_info() -> serde_json::Value {
+    let artifact = std::env::current_exe()
+        .ok()
+        .map(|path| path.display().to_string());
+    let name = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_string_lossy().to_string()));
+
+    serde_json::json!({
+        "source": "hatched_agent",
+        "artifact": artifact,
+        "name": name,
+        "generated": true,
+    })
+}
+
+fn usage_provider_profile(context: &ActionProviderContext) -> Option<&str> {
+    context.profile_name.as_deref()
+}
+
+fn usage_provider_error(error: &providers::ProviderError) -> usage_log::UsageError {
+    usage_log::UsageError::redacted(
+        format!("{:?}", error.kind()).to_ascii_lowercase(),
+        "Provider request failed.",
+    )
+}
+
+fn usage_timeout_error() -> usage_log::UsageError {
+    usage_log::UsageError::redacted("timeout", "Provider request timed out.")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2855,11 +2888,21 @@ async fn main() {
     let project_root = std::env::current_dir()
         .ok()
         .and_then(|dir| maybe_find_project_root(dir.as_path()));
+    let full_run_started_at = Instant::now();
+    let mut usage_agent_guard: Option<usage_log::UsageAgentRunGuard> = None;
+    macro_rules! exit_failure {
+        () => {{
+            if let Some(guard) = usage_agent_guard.as_mut() {
+                guard.finish_failed();
+            }
+            std::process::exit(1);
+        }};
+    }
     let project_runtime_defaults = match load_project_runtime_defaults(project_root.as_deref()) {
         Ok(defaults) => defaults,
         Err(error) => {
             eprintln!("❌ {error}");
-            std::process::exit(1);
+            exit_failure!();
         }
     };
 
@@ -2871,7 +2914,6 @@ async fn main() {
     let mut selected_profile: Option<SelectedProfile> = None;
     let mut loaded_profile_message: Option<(LoadedProfileKind, String)> = None;
     let mut use_openai_account_transport = false;
-    let full_run_started_at = Instant::now();
 
     let explicit_profile_name = cmd_args.get_one::<String>("profile").map(String::as_str);
     match resolve_loaded_profile(config.as_ref(), explicit_profile_name) {
@@ -2888,7 +2930,7 @@ async fn main() {
         Ok(None) => {}
         Err(error) => {
             eprintln!("❌ {error}");
-            std::process::exit(1);
+            exit_failure!();
         }
     }
 
@@ -2935,7 +2977,7 @@ async fn main() {
             for line in unknown_server_messages(&server) {
                 eprintln!("{line}");
             }
-            std::process::exit(1);
+            exit_failure!();
         }
     };
 
@@ -2967,7 +3009,7 @@ async fn main() {
             }
             Err(error) => {
                 eprintln!("❌ {error}");
-                std::process::exit(1);
+                exit_failure!();
             }
         };
     }
@@ -2984,35 +3026,35 @@ async fn main() {
         Ok(named_inputs) => named_inputs,
         Err(error) => {
             eprintln!("❌ {error}");
-            std::process::exit(1);
+            exit_failure!();
         }
     };
     let selected_inputs = match resolved_inputs_for_run(&cmd_args, &named_inputs) {
         Ok(selected_inputs) => selected_inputs,
         Err(error) => {
             eprintln!("❌ {error}");
-            std::process::exit(1);
+            exit_failure!();
         }
     };
     let runtime_vars = match resolved_runtime_vars_for_run(&cmd_args) {
         Ok(runtime_vars) => runtime_vars,
         Err(error) => {
             eprintln!("❌ {error}");
-            std::process::exit(1);
+            exit_failure!();
         }
     };
     let action_execution_override = match resolved_action_execution_override_for_run(&cmd_args) {
         Ok(action_execution_override) => action_execution_override,
         Err(error) => {
             eprintln!("❌ {error}");
-            std::process::exit(1);
+            exit_failure!();
         }
     };
     let requested_render_mode = match resolved_render_mode_for_run(&cmd_args) {
         Ok(requested_render_mode) => requested_render_mode,
         Err(error) => {
             eprintln!("❌ {error}");
-            std::process::exit(1);
+            exit_failure!();
         }
     };
     let effective_action_execution = effective_action_execution_for_run(action_execution_override);
@@ -3026,6 +3068,26 @@ async fn main() {
         )
         .with_bundled_root(bundled_tools_root_from_executable()),
     );
+    let usage_log_arg = cmd_args.get_one::<String>("usage_log").map(String::as_str);
+    let usage_agent_info = generated_usage_agent_info();
+    let usage_log_setup = match usage_log::UsageLogContext::from_runtime(
+        usage_log_arg,
+        current_agent_action_depth(),
+        Some(usage_agent_info),
+    ) {
+        Ok(setup) => setup,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            exit_failure!();
+        }
+    };
+    let usage_log_context = match usage_log_setup {
+        Some((context, guard)) => {
+            usage_agent_guard = Some(guard);
+            Some(context)
+        }
+        None => None,
+    };
     if !ignore_tools {
         if let Err(error) = audit_actions_for_tools(
             &actions,
@@ -3033,7 +3095,7 @@ async fn main() {
             current_action_platform(),
         ) {
             eprintln!("❌ {error}");
-            std::process::exit(1);
+            exit_failure!();
         }
     }
     let action_provider_context = ActionProviderContext {
@@ -3051,6 +3113,7 @@ async fn main() {
         token: token.clone(),
         inference_timeout_in_sec,
         tool_resolver: Some(tool_resolver),
+        usage_log: usage_log_context.clone(),
     };
 
     if let Err(error) =
@@ -3061,7 +3124,7 @@ async fn main() {
         )
     {
         eprintln!("❌ {error}");
-        std::process::exit(1);
+        exit_failure!();
     }
 
     if !has_output_schema_properties {
@@ -3069,7 +3132,7 @@ async fn main() {
             Ok(output) => output,
             Err(error) => {
                 eprintln!("❌ {error}");
-                std::process::exit(1);
+                exit_failure!();
             }
         };
         let action_output = ActionOutput::new(
@@ -3099,7 +3162,10 @@ async fn main() {
             .await
         {
             eprintln!("❌ {error}");
-            std::process::exit(1);
+            exit_failure!();
+        }
+        if let Some(guard) = usage_agent_guard.as_mut() {
+            guard.finish_success();
         }
         return;
     }
@@ -3108,7 +3174,7 @@ async fn main() {
         for issue in validation_issues {
             eprintln!("{issue}");
         }
-        std::process::exit(1);
+        exit_failure!();
     }
 
     let action_output = ActionOutput::new(
@@ -3123,7 +3189,7 @@ async fn main() {
         Err(error) => {
             eprintln!("❌ Failed to resolve runtime inputs.");
             eprintln!("Reason: {error}");
-            std::process::exit(1);
+            exit_failure!();
         }
     };
 
@@ -3133,7 +3199,7 @@ async fn main() {
         for issue in validation_issues {
             eprintln!("{issue}");
         }
-        std::process::exit(1);
+        exit_failure!();
     }
     println!("{}", action_provider_context.using_line());
 
@@ -3153,10 +3219,11 @@ async fn main() {
                     "❌ {}",
                     current_agent_runtime_timeout_message(runtime_budget, error.as_str())
                 );
-                std::process::exit(1);
+                exit_failure!();
             }
         };
 
+        let provider_started_at = Instant::now();
         match tokio::time::timeout(
             remaining,
             crate::providers::send_ollama_request(
@@ -3169,14 +3236,67 @@ async fn main() {
         )
         .await
         {
-            Ok(Ok(r)) => response.push_str(&r),
+            Ok(Ok(r)) => {
+                if let Some(usage_log) = usage_log_context.as_ref() {
+                    usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                        provider,
+                        profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
+                        auth_mode: action_provider_context.auth_mode.as_str(),
+                        model: model.as_str(),
+                        step: usage_log::UsageStep {
+                            kind: "agent_inference",
+                            action: None,
+                            step_index: None,
+                        },
+                        usage: r.usage.as_ref(),
+                        duration: provider_started_at.elapsed(),
+                        status: usage_log::UsageStatus::Success,
+                        error: None,
+                    });
+                }
+                response.push_str(&r.text)
+            }
             Ok(Err(error)) => {
+                if let Some(usage_log) = usage_log_context.as_ref() {
+                    usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                        provider,
+                        profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
+                        auth_mode: action_provider_context.auth_mode.as_str(),
+                        model: model.as_str(),
+                        step: usage_log::UsageStep {
+                            kind: "agent_inference",
+                            action: None,
+                            step_index: None,
+                        },
+                        usage: None,
+                        duration: provider_started_at.elapsed(),
+                        status: usage_log::UsageStatus::Failed,
+                        error: Some(usage_provider_error(&error)),
+                    });
+                }
                 for line in provider_error_messages(&error) {
                     eprintln!("{line}");
                 }
-                std::process::exit(1);
+                exit_failure!();
             }
             Err(_) => {
+                if let Some(usage_log) = usage_log_context.as_ref() {
+                    usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                        provider,
+                        profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
+                        auth_mode: action_provider_context.auth_mode.as_str(),
+                        model: model.as_str(),
+                        step: usage_log::UsageStep {
+                            kind: "agent_inference",
+                            action: None,
+                            step_index: None,
+                        },
+                        usage: None,
+                        duration: provider_started_at.elapsed(),
+                        status: usage_log::UsageStatus::Failed,
+                        error: Some(usage_timeout_error()),
+                    });
+                }
                 eprintln!(
                     "❌ {}",
                     current_agent_runtime_timeout_message(
@@ -3184,7 +3304,7 @@ async fn main() {
                         "while waiting for the model response"
                     )
                 );
-                std::process::exit(1);
+                exit_failure!();
             }
         }
     } else if provider == ProviderKind::OpenAi {
@@ -3209,10 +3329,11 @@ async fn main() {
                     "❌ {}",
                     current_agent_runtime_timeout_message(runtime_budget, error.as_str())
                 );
-                std::process::exit(1);
+                exit_failure!();
             }
         };
 
+        let provider_started_at = Instant::now();
         match tokio::time::timeout(
             remaining,
             crate::providers::send_openai_request(
@@ -3226,14 +3347,67 @@ async fn main() {
         )
         .await
         {
-            Ok(Ok(r)) => response.push_str(&r),
+            Ok(Ok(r)) => {
+                if let Some(usage_log) = usage_log_context.as_ref() {
+                    usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                        provider,
+                        profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
+                        auth_mode: action_provider_context.auth_mode.as_str(),
+                        model: model.as_str(),
+                        step: usage_log::UsageStep {
+                            kind: "agent_inference",
+                            action: None,
+                            step_index: None,
+                        },
+                        usage: r.usage.as_ref(),
+                        duration: provider_started_at.elapsed(),
+                        status: usage_log::UsageStatus::Success,
+                        error: None,
+                    });
+                }
+                response.push_str(&r.text)
+            }
             Ok(Err(error)) => {
+                if let Some(usage_log) = usage_log_context.as_ref() {
+                    usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                        provider,
+                        profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
+                        auth_mode: action_provider_context.auth_mode.as_str(),
+                        model: model.as_str(),
+                        step: usage_log::UsageStep {
+                            kind: "agent_inference",
+                            action: None,
+                            step_index: None,
+                        },
+                        usage: None,
+                        duration: provider_started_at.elapsed(),
+                        status: usage_log::UsageStatus::Failed,
+                        error: Some(usage_provider_error(&error)),
+                    });
+                }
                 for line in provider_error_messages(&error) {
                     eprintln!("{line}");
                 }
-                std::process::exit(1);
+                exit_failure!();
             }
             Err(_) => {
+                if let Some(usage_log) = usage_log_context.as_ref() {
+                    usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                        provider,
+                        profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
+                        auth_mode: action_provider_context.auth_mode.as_str(),
+                        model: model.as_str(),
+                        step: usage_log::UsageStep {
+                            kind: "agent_inference",
+                            action: None,
+                            step_index: None,
+                        },
+                        usage: None,
+                        duration: provider_started_at.elapsed(),
+                        status: usage_log::UsageStatus::Failed,
+                        error: Some(usage_timeout_error()),
+                    });
+                }
                 eprintln!(
                     "❌ {}",
                     current_agent_runtime_timeout_message(
@@ -3241,7 +3415,7 @@ async fn main() {
                         "while waiting for the model response"
                     )
                 );
-                std::process::exit(1);
+                exit_failure!();
             }
         };
     }
@@ -3249,7 +3423,7 @@ async fn main() {
     if !ai_cargo.set_response(response.clone()) {
         eprintln!("❌ LLM output did NOT conform to the required JSON schema.");
         eprintln!("Raw output received from server:\n{}\n", response);
-        std::process::exit(1);
+        exit_failure!();
     }
 
     let output = match ai_cargo.get_response() {
@@ -3257,7 +3431,7 @@ async fn main() {
         None => {
             eprintln!("❌ Internal error: response was expected but missing.");
             eprintln!("Raw output received from server:\n{}\n", response);
-            std::process::exit(1);
+            exit_failure!();
         }
     };
 
@@ -3281,7 +3455,10 @@ async fn main() {
         .await
     {
         eprintln!("❌ {error}");
-        std::process::exit(1);
+        exit_failure!();
+    }
+    if let Some(guard) = usage_agent_guard.as_mut() {
+        guard.finish_success();
     }
 }
 
@@ -3752,6 +3929,7 @@ async fn run_matching_action_steps(
                 named_inputs,
                 action_index,
                 &action.name,
+                step_index + 1,
                 provider_context,
                 action_execution_override,
                 max_agent_depth,
@@ -3765,6 +3943,7 @@ async fn run_matching_action_steps(
                 &action_data,
                 action_index,
                 &action.name,
+                step_index + 1,
                 provider_context,
                 action_execution_override,
                 max_agent_depth,
@@ -3779,6 +3958,7 @@ async fn run_matching_action_steps(
                 named_inputs,
                 action_index,
                 &action.name,
+                step_index + 1,
                 provider_context,
                 runtime_budget,
             )
@@ -3987,6 +4167,7 @@ async fn run_tool_step(
     data: &serde_json::Value,
     action_index: usize,
     action_name: &str,
+    step_index: usize,
     provider_context: &ActionProviderContext,
     action_execution_override: Option<ActionExecutionMode>,
     max_agent_depth: u32,
@@ -3998,6 +4179,15 @@ async fn run_tool_step(
             action_name
         )
     })?;
+    let mut usage_tool_guard =
+        provider_context
+            .usage_log
+            .as_ref()
+            .map(|usage_log| usage_log.start_tool_run(usage_log::UsageTool {
+                name: tool_name.to_string(),
+                action: action_name.to_string(),
+                step_index: Some(step_index),
+            }));
     let resolver = provider_context.tool_resolver.as_ref().ok_or_else(|| {
         format!(
             "Action '{}' tool step '{}' cannot resolve tools because no tool resolver is available.",
@@ -4007,6 +4197,10 @@ async fn run_tool_step(
     let contract = resolver.resolve_contract(tool_name)?;
     let params = resolve_tool_invoke_params(step, data, action_name, &contract.describe)?;
     let current_depth = current_agent_action_depth();
+    let usage_log_bridge_context = provider_context
+        .usage_log
+        .as_ref()
+        .map(|usage_log| usage_log.tool_bridge_context(tool_name, action_name, Some(step_index)));
     let request = serde_json::json!({
         "protocol_version": 1,
         "params": params,
@@ -4024,6 +4218,7 @@ async fn run_tool_step(
                     ActionExecutionMode::Sequential => "sequential",
                     ActionExecutionMode::Parallel => "parallel",
                 }),
+                "usage_log": usage_log_bridge_context,
             }
         },
     });
@@ -4108,6 +4303,9 @@ async fn run_tool_step(
             action_name,
             format!("stored tool result in variable '{}'.", output_variable).as_str(),
         );
+        if let Some(guard) = usage_tool_guard.as_mut() {
+            guard.finish_success();
+        }
         Ok(Some((output_variable.to_string(), value)))
     } else {
         if let Some(result) = result {
@@ -4116,6 +4314,9 @@ async fn run_tool_step(
                 action_name,
                 format!("tool '{}' returned '{}'.", tool_name, result).as_str(),
             );
+        }
+        if let Some(guard) = usage_tool_guard.as_mut() {
+            guard.finish_success();
         }
         Ok(None)
     }
@@ -4282,6 +4483,7 @@ async fn run_generate_image_step(
     named_inputs: &BTreeMap<String, Input>,
     action_index: usize,
     action_name: &str,
+    step_index: usize,
     provider_context: &ActionProviderContext,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
@@ -4365,7 +4567,8 @@ async fn run_generate_image_step(
         )
     })?;
 
-    let image_bytes = match tokio::time::timeout(
+    let provider_started_at = Instant::now();
+    let image_response = match tokio::time::timeout(
         remaining,
         async {
             match effective_provider_context.provider {
@@ -4396,14 +4599,67 @@ async fn run_generate_image_step(
     )
     .await
     {
-        Ok(Ok(bytes)) => bytes,
+        Ok(Ok(response)) => {
+            if let Some(usage_log) = provider_context.usage_log.as_ref() {
+                usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                    provider: effective_provider_context.provider,
+                    profile_name: usage_provider_profile(effective_provider_context),
+                    auth_mode: effective_provider_context.auth_mode.as_str(),
+                    model: model.as_str(),
+                    step: usage_log::UsageStep {
+                        kind: "generate_image",
+                        action: Some(action_name.to_string()),
+                        step_index: Some(step_index),
+                    },
+                    usage: response.usage.as_ref(),
+                    duration: provider_started_at.elapsed(),
+                    status: usage_log::UsageStatus::Success,
+                    error: None,
+                });
+            }
+            response
+        }
         Ok(Err(error)) => {
+            if let Some(usage_log) = provider_context.usage_log.as_ref() {
+                usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                    provider: effective_provider_context.provider,
+                    profile_name: usage_provider_profile(effective_provider_context),
+                    auth_mode: effective_provider_context.auth_mode.as_str(),
+                    model: model.as_str(),
+                    step: usage_log::UsageStep {
+                        kind: "generate_image",
+                        action: Some(action_name.to_string()),
+                        step_index: Some(step_index),
+                    },
+                    usage: None,
+                    duration: provider_started_at.elapsed(),
+                    status: usage_log::UsageStatus::Failed,
+                    error: Some(usage_provider_error(&error)),
+                });
+            }
             let mut lines =
                 vec![format!("Action '{}' generate_image step failed.", action_name)];
             lines.extend(provider_error_messages(&error));
             return Err(lines.join("\n"));
         }
         Err(_) => {
+            if let Some(usage_log) = provider_context.usage_log.as_ref() {
+                usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                    provider: effective_provider_context.provider,
+                    profile_name: usage_provider_profile(effective_provider_context),
+                    auth_mode: effective_provider_context.auth_mode.as_str(),
+                    model: model.as_str(),
+                    step: usage_log::UsageStep {
+                        kind: "generate_image",
+                        action: Some(action_name.to_string()),
+                        step_index: Some(step_index),
+                    },
+                    usage: None,
+                    duration: provider_started_at.elapsed(),
+                    status: usage_log::UsageStatus::Failed,
+                    error: Some(usage_timeout_error()),
+                });
+            }
             return Err(action_runtime_timeout_message(
                 action_name,
                 runtime_budget,
@@ -4411,6 +4667,7 @@ async fn run_generate_image_step(
             ));
         }
     };
+    let image_bytes = image_response.bytes;
 
     let output_path_ref = Path::new(output_path.as_str());
     validate_generated_image_output_path(output_path_ref, action_name)?;
@@ -4607,6 +4864,7 @@ async fn resolve_generate_image_step_profile_context(
         token: resolved_token.token,
         inference_timeout_in_sec: invocation_timeout_in_sec,
         tool_resolver: None,
+        usage_log: None,
     }))
 }
 
@@ -4695,6 +4953,7 @@ async fn run_agent_step(
     named_inputs: &BTreeMap<String, Input>,
     action_index: usize,
     action_name: &str,
+    step_index: usize,
     provider_context: &ActionProviderContext,
     action_execution_override: Option<ActionExecutionMode>,
     max_agent_depth: u32,
@@ -4777,6 +5036,16 @@ async fn run_agent_step(
         AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV,
         runtime_budget.deadline_ms.to_string(),
     );
+    if let Some(usage_log) = provider_context.usage_log.as_ref() {
+        for (key, value) in usage_log.direct_child_env(usage_log::UsageLaunchedBy {
+            kind: "agent_step",
+            action: Some(action_name.to_string()),
+            tool: None,
+            step_index: Some(step_index),
+        }) {
+            command.env(key, value);
+        }
+    }
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
