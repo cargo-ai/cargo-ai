@@ -913,6 +913,15 @@ pub(crate) async fn run_with_definition_in_context(
     definition: &dyn InvocationDefinition,
     project_root: Option<PathBuf>,
 ) -> bool {
+    run_with_definition_in_context_and_usage_agent(sub_m, definition, project_root, None).await
+}
+
+pub(crate) async fn run_with_definition_in_context_and_usage_agent(
+    sub_m: &ArgMatches,
+    definition: &dyn InvocationDefinition,
+    project_root: Option<PathBuf>,
+    usage_agent_info: Option<serde_json::Value>,
+) -> bool {
     let full_run_started_at = std::time::Instant::now();
 
     // Begin: Argument assignments
@@ -1081,7 +1090,8 @@ pub(crate) async fn run_with_definition_in_context(
     let has_output_schema_properties = definition.has_output_schema_properties();
     let actions = definition.actions();
     let ignore_tools = sub_m.get_flag("ignore_tools");
-    let usage_agent_info = interpreted_usage_agent_info(project_root.as_deref());
+    let usage_agent_info =
+        usage_agent_info.unwrap_or_else(|| interpreted_usage_agent_info(project_root.as_deref()));
     let tool_resolver = Arc::new(crate::commands::tools::ToolResolver::new(
         project_root,
         crate::cargo_ai_metadata::current_build_target(),
