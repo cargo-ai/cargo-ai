@@ -1,5 +1,8 @@
 // External Crates
-use super::{runtime::ContentPart, ProviderError, ProviderKind};
+use super::{
+    runtime::{ContentPart, ProviderImageResponse, ProviderTextResponse, ProviderUsage},
+    ProviderError, ProviderKind,
+};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use reqwest::ClientBuilder;
 use serde::{Deserialize, Serialize};
@@ -55,6 +58,22 @@ struct Choice {
 #[derive(Deserialize, Debug)]
 struct Response {
     choices: Vec<Choice>,
+    #[serde(default)]
+    usage: Option<Usage>,
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+    #[serde(default)]
+    eval_count: Option<u64>,
+}
+
+#[derive(Deserialize, Debug)]
+struct Usage {
+    #[serde(default)]
+    prompt_tokens: Option<u64>,
+    #[serde(default)]
+    completion_tokens: Option<u64>,
+    #[serde(default)]
+    total_tokens: Option<u64>,
 }
 
 #[derive(Serialize, Debug)]
@@ -69,11 +88,45 @@ struct ImageGenerationRequest {
 #[derive(Deserialize, Debug)]
 struct ImageGenerationResponse {
     data: Vec<ImageGenerationData>,
+    #[serde(default)]
+    usage: Option<Usage>,
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+    #[serde(default)]
+    eval_count: Option<u64>,
 }
 
 #[derive(Deserialize, Debug)]
 struct ImageGenerationData {
     b64_json: String,
+}
+
+fn normalize_usage(
+    usage: Option<Usage>,
+    prompt_eval_count: Option<u64>,
+    eval_count: Option<u64>,
+) -> Option<ProviderUsage> {
+    if let Some(usage) = usage {
+        return Some(ProviderUsage {
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+            input_token_details: None,
+            output_token_details: None,
+        });
+    }
+
+    if prompt_eval_count.is_none() && eval_count.is_none() {
+        return None;
+    }
+
+    Some(ProviderUsage {
+        input_tokens: prompt_eval_count,
+        output_tokens: eval_count,
+        total_tokens: prompt_eval_count.and_then(|input| eval_count.map(|output| input + output)),
+        input_token_details: None,
+        output_token_details: None,
+    })
 }
 
 fn normalize_response_format(response_format: serde_json::Value) -> serde_json::Value {
@@ -101,7 +154,7 @@ pub async fn send_request(
     content_parts: &[ContentPart],
     timeout_in_sec: u64,
     response_format: serde_json::Value,
-) -> Result<String, ProviderError> {
+) -> Result<ProviderTextResponse, ProviderError> {
     let request = Request {
         model: model.clone(),
         messages: vec![RequestMessage {
@@ -150,8 +203,18 @@ pub async fn send_request(
         }
     };
 
-    match reply.choices.first() {
-        Some(choice) => Ok(choice.message.content.clone()),
+    let Response {
+        choices,
+        usage,
+        prompt_eval_count,
+        eval_count,
+    } = reply;
+    let usage = normalize_usage(usage, prompt_eval_count, eval_count);
+    match choices.first() {
+        Some(choice) => Ok(ProviderTextResponse {
+            text: choice.message.content.clone(),
+            usage,
+        }),
         None => Err(ProviderError::invalid_response(
             ProviderKind::Ollama,
             "Ollama returned no chat completion choices.",
@@ -178,7 +241,7 @@ pub async fn send_image_request(
     prompt: &str,
     timeout_in_sec: u64,
     token: &str,
-) -> Result<Vec<u8>, ProviderError> {
+) -> Result<ProviderImageResponse, ProviderError> {
     let request = ImageGenerationRequest {
         model: model.clone(),
         prompt: prompt.to_string(),
@@ -242,11 +305,20 @@ pub async fn send_image_request(
             )
         })?;
 
-    BASE64_STANDARD.decode(encoded_image).map_err(|error| {
+    let bytes = BASE64_STANDARD.decode(encoded_image).map_err(|error| {
         ProviderError::invalid_response(
             ProviderKind::Ollama,
             format!("Failed to decode generated image bytes: {error}"),
         )
+    })?;
+
+    Ok(ProviderImageResponse {
+        bytes,
+        usage: normalize_usage(
+            response.usage,
+            response.prompt_eval_count,
+            response.eval_count,
+        ),
     })
 }
 
@@ -276,6 +348,7 @@ fn request_content_parts(content_parts: &[ContentPart]) -> Vec<RequestContentPar
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
 
     #[test]
     fn wraps_plain_schema_response_format_for_ollama_chat_completions() {
@@ -299,5 +372,85 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[tokio::test]
+    async fn test_send_request_with_mock() {
+        let mut server = Server::new_async().await;
+        let mock_path = "/v1/chat/completions";
+
+        let _m = server
+            .mock("POST", mock_path)
+            .match_header("content-type", "application/json")
+            .with_status(200)
+            .with_body(
+                r#"{
+                 "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Mocked response"
+                        }
+                    }
+                 ]
+             }"#,
+            )
+            .create();
+
+        let result = send_request(
+            &format!("{}{}", server.url(), mock_path),
+            &"test-model".to_string(),
+            &[ContentPart::Text("test prompt".to_string())],
+            5,
+            serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "Output",
+                    "schema": {
+                        "type": "object",
+                        "properties": { "ok": { "type": "boolean" } },
+                        "required": ["ok"]
+                    },
+                    "strict": true
+                }
+            }),
+        )
+        .await
+        .expect("send_request failed");
+
+        assert_eq!(result, "Mocked response");
+    }
+
+    #[tokio::test]
+    async fn image_request_uses_images_endpoint_and_decodes_bytes() {
+        let mut server = Server::new_async().await;
+        let expected_bytes = b"fake-png";
+        let encoded_image = BASE64_STANDARD.encode(expected_bytes);
+        let _mock = server
+            .mock("POST", "/v1/images/generations")
+            .match_body(Matcher::PartialJson(serde_json::json!({
+                "model": "x/flux2-klein:4b",
+                "prompt": "draw a square",
+                "n": 1,
+                "size": "1024x1024",
+                "response_format": "b64_json"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"data":[{{"b64_json":"{}"}}]}}"#,
+                encoded_image
+            ))
+            .create_async()
+            .await;
+
+        let url = format!("{}/v1/chat/completions", server.url());
+        let model = "x/flux2-klein:4b".to_string();
+
+        let image = send_image_request(&url, &model, "draw a square", 10, "")
+            .await
+            .expect("image request should decode");
+
+        assert_eq!(image, expected_bytes);
     }
 }

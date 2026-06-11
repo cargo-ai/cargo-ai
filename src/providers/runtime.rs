@@ -32,6 +32,32 @@ impl ValidatedResponse for serde_json::Value {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ProviderUsage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) total_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) input_token_details: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) output_token_details: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderTextResponse {
+    pub(crate) text: String,
+    pub(crate) usage: Option<ProviderUsage>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderImageResponse {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) usage: Option<ProviderUsage>,
+}
+
 #[derive(Debug)]
 pub struct Cargo<T: for<'de> Deserialize<'de> + Serialize + Clone + ValidatedResponse> {
     inputs: Vec<ContentPart>,

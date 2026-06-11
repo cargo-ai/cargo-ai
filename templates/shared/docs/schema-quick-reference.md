@@ -26,6 +26,14 @@ Use this as a concise reference while authoring agent configs.
 - if runtime input flags are provided without `--input-mode`, they replace config-defined `inputs`
 - `--input-mode append` keeps baked inputs first; `--input-mode prepend` keeps runtime inputs first
 
+## Runtime usage logging
+- use `--usage-log <path>` or `CARGO_AI_USAGE_LOG=<path>` to write an opt-in usage ledger
+- prefer `.ndjson` or `.jsonl`; each line is one complete JSON object
+- usage events are metadata-only and may include run ids, parent agent ids, provider/model/profile, normalized token counters, status, and duration
+- interpreted local JSON runs include source-aware agent metadata such as `agent.source`, `agent.artifact`, `agent.name`, and `agent.definition_sha256` when available
+- usage events do not include prompts, model output text, generated image bytes, tool arguments, tool stdout/stderr, credentials, or raw provider response bodies
+- child agents and tool-bridge-launched child agents inherit the same root run id when launched through Cargo AI
+
 ## `agent_schema` expectations
 - `agent_schema.type` must be `"object"`
 - `agent_schema.properties` must be an object

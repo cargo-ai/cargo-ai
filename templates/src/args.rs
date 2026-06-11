@@ -104,6 +104,12 @@ pub fn build_cli() -> ArgMatches {
                 .value_parser(["auto", "live", "append-only"])
         )
         .arg(
+            Arg::new("usage_log")
+                .long("usage-log")
+                .help("Write Cargo AI usage events as newline-delimited JSON (.ndjson/.jsonl)")
+                .value_name("PATH")
+        )
+        .arg(
             Arg::new("input_mode")
                 .long("input-mode")
                 .help("How runtime input flags combine with baked inputs: replace, append, or prepend")

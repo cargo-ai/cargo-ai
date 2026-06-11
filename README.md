@@ -641,6 +641,20 @@ That only changes scheduling across top-level actions. Each individual action st
 
 Cargo AI prints one root `using:` line near run start that shows the effective `profile`, `auth`, `server`, and `model` for that invocation. When a profile seeds the invocation, it also prints `loaded profile: ...`, and when CLI flags replace profile-sourced values, it prints `applied overrides: ...` before the final `using:` line. It only adds `url=...` when the effective URL is custom or materially different from the standard transport. Cargo AI also prints one run-level mode header before actions start. When output is redirected, piped, or running in simpler terminals, it prefixes parent-visible action output with deterministic labels such as `[Action 1: first_action]`, long-running steps emit a step-start liveness line such as `step 2/2 generate_image started; waiting for provider response...`, and terminal lane summaries plus the root run footer include wall-clock durations such as `completed · 31s` and `Run complete · 32s total`. Short runs now stay millisecond-aware instead of collapsing to `0s`. The root completion footer is separated from action lanes by a blank line so it reads as a run-level summary instead of another action row. When attached directly to an interactive terminal, it switches to a compact live dashboard that groups each action by label, running or terminal status with elapsed time, terminal step marker/current step, and the last high-level lifecycle message only. Child-agent steps stay minimal in the parent view with start/completion or exit summaries instead of recursively inlining child detail.
 
+To capture machine-readable provider usage and runtime timing, opt in with `--usage-log <path>` or `CARGO_AI_USAGE_LOG=<path>`:
+
+```bash
+cargo ai run ./my_agent.json --profile openai-account --usage-log ./usage.ndjson
+CARGO_AI_USAGE_LOG=./usage.jsonl cargo ai run ./my_agent.json --profile local-ollama
+./my_agent --usage-log ./usage.ndjson
+```
+
+The file is newline-delimited JSON, also called JSON Lines: one complete JSON object per line. Cargo AI writes metadata-only events such as `usage_log_started`, `agent_run_started`, `provider_request_completed`, `tool_run_completed`, `agent_run_completed`, and `root_run_completed`. Provider usage is normalized to `input_tokens`, `output_tokens`, and `total_tokens` when OpenAI or Ollama reports counters; when a provider does not report usage, Cargo AI records timing/status and leaves usage null instead of estimating. The same `root_run_id` is propagated to direct child agents and tool-bridge-launched child agents, while each execution gets its own `agent_run_id` and `parent_agent_run_id` so repeated or recursive agents remain reconstructable.
+
+Agent metadata identifies the best-known source for each event. Interpreted local JSON runs include `agent.source: "local_path"`, the JSON `artifact` path, a derived `name`, and a canonical `definition_sha256` when available. Registry, inline JSON, and stdin runs use matching source labels, and hatched agents report `agent.source: "hatched_agent"`, `generated: true`, and the executable artifact/name. Use `agent_run_id` for one execution, `definition_sha256` for exact interpreted-definition provenance, and `parent_agent_run_id` plus `depth` to render the run tree.
+
+Usage logs do not include prompts, model output text, generated image bytes, tool arguments, tool stdout/stderr, profile tokens, access tokens, or raw provider response bodies. If you need custom business logs, decision traces, or writes to a logging backend, implement that explicitly in a tool.
+
 Use `--render-mode auto|live|append-only` to control that behavior explicitly:
 - `auto` preserves the current terminal-sensitive default
 - `append-only` forces incremental labeled output even in an interactive terminal

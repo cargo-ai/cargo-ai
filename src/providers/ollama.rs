@@ -1,5 +1,8 @@
 // External Crates
-use super::{runtime::ContentPart, ProviderError, ProviderKind};
+use super::{
+    runtime::{ContentPart, ProviderImageResponse, ProviderTextResponse, ProviderUsage},
+    ProviderError, ProviderKind,
+};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use reqwest::ClientBuilder;
 use serde::{Deserialize, Serialize};
@@ -55,6 +58,22 @@ struct Choice {
 #[derive(Deserialize, Debug)]
 struct Response {
     choices: Vec<Choice>,
+    #[serde(default)]
+    usage: Option<Usage>,
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+    #[serde(default)]
+    eval_count: Option<u64>,
+}
+
+#[derive(Deserialize, Debug)]
+struct Usage {
+    #[serde(default)]
+    prompt_tokens: Option<u64>,
+    #[serde(default)]
+    completion_tokens: Option<u64>,
+    #[serde(default)]
+    total_tokens: Option<u64>,
 }
 
 #[derive(Serialize, Debug)]
@@ -69,11 +88,45 @@ struct ImageGenerationRequest {
 #[derive(Deserialize, Debug)]
 struct ImageGenerationResponse {
     data: Vec<ImageGenerationData>,
+    #[serde(default)]
+    usage: Option<Usage>,
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+    #[serde(default)]
+    eval_count: Option<u64>,
 }
 
 #[derive(Deserialize, Debug)]
 struct ImageGenerationData {
     b64_json: String,
+}
+
+fn normalize_usage(
+    usage: Option<Usage>,
+    prompt_eval_count: Option<u64>,
+    eval_count: Option<u64>,
+) -> Option<ProviderUsage> {
+    if let Some(usage) = usage {
+        return Some(ProviderUsage {
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+            input_token_details: None,
+            output_token_details: None,
+        });
+    }
+
+    if prompt_eval_count.is_none() && eval_count.is_none() {
+        return None;
+    }
+
+    Some(ProviderUsage {
+        input_tokens: prompt_eval_count,
+        output_tokens: eval_count,
+        total_tokens: prompt_eval_count.and_then(|input| eval_count.map(|output| input + output)),
+        input_token_details: None,
+        output_token_details: None,
+    })
 }
 
 fn normalize_response_format(response_format: serde_json::Value) -> serde_json::Value {
@@ -101,7 +154,7 @@ pub async fn send_request(
     content_parts: &[ContentPart],
     timeout_in_sec: u64,
     response_format: serde_json::Value,
-) -> Result<String, ProviderError> {
+) -> Result<ProviderTextResponse, ProviderError> {
     let request = Request {
         model: model.clone(),
         messages: vec![RequestMessage {
@@ -150,8 +203,18 @@ pub async fn send_request(
         }
     };
 
-    match reply.choices.first() {
-        Some(choice) => Ok(choice.message.content.clone()),
+    let Response {
+        choices,
+        usage,
+        prompt_eval_count,
+        eval_count,
+    } = reply;
+    let usage = normalize_usage(usage, prompt_eval_count, eval_count);
+    match choices.first() {
+        Some(choice) => Ok(ProviderTextResponse {
+            text: choice.message.content.clone(),
+            usage,
+        }),
         None => Err(ProviderError::invalid_response(
             ProviderKind::Ollama,
             "Ollama returned no chat completion choices.",
@@ -178,7 +241,7 @@ pub async fn send_image_request(
     prompt: &str,
     timeout_in_sec: u64,
     token: &str,
-) -> Result<Vec<u8>, ProviderError> {
+) -> Result<ProviderImageResponse, ProviderError> {
     let request = ImageGenerationRequest {
         model: model.clone(),
         prompt: prompt.to_string(),
@@ -242,11 +305,20 @@ pub async fn send_image_request(
             )
         })?;
 
-    BASE64_STANDARD.decode(encoded_image).map_err(|error| {
+    let bytes = BASE64_STANDARD.decode(encoded_image).map_err(|error| {
         ProviderError::invalid_response(
             ProviderKind::Ollama,
             format!("Failed to decode generated image bytes: {error}"),
         )
+    })?;
+
+    Ok(ProviderImageResponse {
+        bytes,
+        usage: normalize_usage(
+            response.usage,
+            response.prompt_eval_count,
+            response.eval_count,
+        ),
     })
 }
 
@@ -320,7 +392,12 @@ mod tests {
                             "content": "Mocked response"
                         }
                     }
-                 ]
+                 ],
+                 "usage": {
+                    "prompt_tokens": 8,
+                    "completion_tokens": 3,
+                    "total_tokens": 11
+                 }
              }"#,
             )
             .create();
@@ -346,7 +423,11 @@ mod tests {
         .await
         .expect("send_request failed");
 
-        assert_eq!(result, "Mocked response");
+        assert_eq!(result.text, "Mocked response");
+        let usage = result.usage.expect("usage should map");
+        assert_eq!(usage.input_tokens, Some(8));
+        assert_eq!(usage.output_tokens, Some(3));
+        assert_eq!(usage.total_tokens, Some(11));
     }
 
     #[tokio::test]
@@ -379,6 +460,7 @@ mod tests {
             .await
             .expect("image request should decode");
 
-        assert_eq!(image, expected_bytes);
+        assert_eq!(image.bytes, expected_bytes);
+        assert_eq!(image.usage, None);
     }
 }

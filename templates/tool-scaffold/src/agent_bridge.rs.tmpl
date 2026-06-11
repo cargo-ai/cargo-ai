@@ -18,6 +18,13 @@ const AGENT_ACTION_MAX_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_MAX_DEPTH";
 const AGENT_ACTION_MAX_RUNTIME_SECS_ENV: &str = "CARGO_AI_AGENT_MAX_RUNTIME_SECS";
 const AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_STARTED_AT_MS";
 const AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV: &str = "CARGO_AI_AGENT_RUNTIME_DEADLINE_MS";
+const USAGE_LOG_ENV: &str = "CARGO_AI_USAGE_LOG";
+const USAGE_ROOT_RUN_ID_ENV: &str = "CARGO_AI_USAGE_ROOT_RUN_ID";
+const USAGE_PARENT_AGENT_RUN_ID_ENV: &str = "CARGO_AI_USAGE_PARENT_AGENT_RUN_ID";
+const USAGE_LAUNCHED_BY_TYPE_ENV: &str = "CARGO_AI_USAGE_LAUNCHED_BY_TYPE";
+const USAGE_LAUNCHED_BY_ACTION_ENV: &str = "CARGO_AI_USAGE_LAUNCHED_BY_ACTION";
+const USAGE_LAUNCHED_BY_TOOL_ENV: &str = "CARGO_AI_USAGE_LAUNCHED_BY_TOOL";
+const USAGE_LAUNCHED_BY_STEP_INDEX_ENV: &str = "CARGO_AI_USAGE_LAUNCHED_BY_STEP_INDEX";
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub(crate) struct InvocationContext {
@@ -53,6 +60,28 @@ struct AgentBridgeContext {
     profile_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     action_execution: Option<ActionExecutionMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    usage_log: Option<ToolUsageLogContext>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct ToolUsageLogContext {
+    path: String,
+    root_run_id: String,
+    parent_agent_run_id: String,
+    launched_by: ToolUsageLaunchedBy,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct ToolUsageLaunchedBy {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    step_index: Option<usize>,
 }
 
 impl AgentBridgeContext {
@@ -109,6 +138,24 @@ impl AgentBridgeContext {
             AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV,
             self.runtime_budget.deadline_ms.to_string(),
         );
+        if let Some(usage_log) = self.usage_log.as_ref() {
+            command.env(USAGE_LOG_ENV, usage_log.path.as_str());
+            command.env(USAGE_ROOT_RUN_ID_ENV, usage_log.root_run_id.as_str());
+            command.env(
+                USAGE_PARENT_AGENT_RUN_ID_ENV,
+                usage_log.parent_agent_run_id.as_str(),
+            );
+            command.env(USAGE_LAUNCHED_BY_TYPE_ENV, usage_log.launched_by.kind.as_str());
+            if let Some(action) = usage_log.launched_by.action.as_deref() {
+                command.env(USAGE_LAUNCHED_BY_ACTION_ENV, action);
+            }
+            if let Some(tool) = usage_log.launched_by.tool.as_deref() {
+                command.env(USAGE_LAUNCHED_BY_TOOL_ENV, tool);
+            }
+            if let Some(step_index) = usage_log.launched_by.step_index {
+                command.env(USAGE_LAUNCHED_BY_STEP_INDEX_ENV, step_index.to_string());
+            }
+        }
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
 

@@ -80,6 +80,13 @@ pub(crate) fn runtime_command(name: &'static str, about: &'static str) -> Comman
                 .value_parser(["auto", "live", "append-only"]),
         )
         .arg(
+            Arg::new("usage_log")
+                .long("usage-log")
+                .value_name("PATH")
+                .help("Write Cargo AI usage events as newline-delimited JSON (.ndjson/.jsonl)")
+                .required(false),
+        )
+        .arg(
             Arg::new("input_mode")
                 .long("input-mode")
                 .value_name("MODE")
@@ -202,6 +209,19 @@ mod tests {
         assert!(help.contains(
             "Terminal render mode for action progress (auto, live, append-only) [default: auto]"
         ));
+    }
+
+    #[test]
+    fn help_describes_usage_log_path() {
+        let mut command = super::runtime_command("runtime-test", "Runtime test command");
+        let mut help = Vec::new();
+        command
+            .write_long_help(&mut help)
+            .expect("runtime help should render");
+        let help = String::from_utf8(help).expect("help should be utf8");
+
+        assert!(help.contains("--usage-log <PATH>"));
+        assert!(help.contains("newline-delimited JSON"));
     }
 
     #[test]

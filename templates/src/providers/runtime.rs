@@ -26,10 +26,43 @@ pub(crate) trait ValidatedResponse {
     fn validate_response(&self) -> Result<(), String>;
 }
 
+impl ValidatedResponse for serde_json::Value {
+    fn validate_response(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ProviderUsage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) total_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) input_token_details: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) output_token_details: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderTextResponse {
+    pub(crate) text: String,
+    pub(crate) usage: Option<ProviderUsage>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderImageResponse {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) usage: Option<ProviderUsage>,
+}
+
 #[derive(Debug)]
 pub struct Cargo<T: for<'de> Deserialize<'de> + Serialize + Clone + ValidatedResponse> {
     inputs: Vec<ContentPart>,
     context: String,
+    #[cfg_attr(not(test), allow(dead_code))]
     response: Option<T>,
 } // TODO: Hints
 
@@ -59,6 +92,7 @@ impl<T: for<'de> Deserialize<'de> + Serialize + Clone + ValidatedResponse> Cargo
         content_parts
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_response(&mut self, response: String) -> bool {
         match serde_json::from_str::<T>(&response) {
             Ok(response) => match response.validate_response() {
@@ -79,6 +113,7 @@ impl<T: for<'de> Deserialize<'de> + Serialize + Clone + ValidatedResponse> Cargo
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn get_response(&self) -> Option<T> {
         self.response.clone()
     }
@@ -155,8 +190,12 @@ fn require_input_value(input: &crate::Input) -> Result<&str, String> {
 
 fn load_image_data_url(path: &str) -> Result<String, String> {
     let image_path = Path::new(path);
-    let image_bytes = fs::read(image_path)
-        .map_err(|error| format!("Failed to read image input '{}': {error}", image_path.display()))?;
+    let image_bytes = fs::read(image_path).map_err(|error| {
+        format!(
+            "Failed to read image input '{}': {error}",
+            image_path.display()
+        )
+    })?;
     let media_type = image_media_type(image_path)?;
     let encoded = BASE64_STANDARD.encode(image_bytes);
     Ok(format!("data:{media_type};base64,{encoded}"))
@@ -306,7 +345,9 @@ fn image_media_type(path: &Path) -> Result<&'static str, String> {
 #[cfg(test)]
 mod tests {
     use super::{Cargo, ContentPart, ValidatedResponse};
+    use base64::Engine as _;
     use serde::{Deserialize, Serialize};
+    use std::path::Path;
 
     #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
     struct SampleOutput {
@@ -380,11 +421,9 @@ mod tests {
     #[test]
     fn detects_when_content_parts_include_images() {
         let text_only = [ContentPart::Text("x".to_string())];
-        assert!(
-            !text_only
-                .iter()
-                .any(|part| matches!(part, ContentPart::Image { .. }))
-        );
+        assert!(!text_only
+            .iter()
+            .any(|part| matches!(part, ContentPart::Image { .. })));
 
         let with_image = [
             ContentPart::Text("x".to_string()),
@@ -392,10 +431,141 @@ mod tests {
                 data_url: "data:image/png;base64,abc".to_string(),
             },
         ];
-        assert!(
-            with_image
-                .iter()
-                .any(|part| matches!(part, ContentPart::Image { .. }))
+        assert!(with_image
+            .iter()
+            .any(|part| matches!(part, ContentPart::Image { .. })));
+    }
+
+    #[test]
+    fn load_supported_file_content_reads_pdf_bytes() {
+        let temp_path =
+            std::env::temp_dir().join(format!("cai2036-runtime-{}.pdf", std::process::id()));
+        std::fs::write(&temp_path, b"%PDF-1.4\n%mock\n").expect("pdf fixture should write");
+
+        let content = super::load_supported_file_content(temp_path.to_str().expect("utf8 path"))
+            .expect("pdf content should load");
+
+        let _ = std::fs::remove_file(&temp_path);
+
+        assert_eq!(
+            content,
+            ContentPart::File {
+                filename: temp_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .expect("filename")
+                    .to_string(),
+                file_data: format!(
+                    "data:application/pdf;base64,{}",
+                    super::BASE64_STANDARD.encode(b"%PDF-1.4\n%mock\n")
+                ),
+            }
         );
+    }
+
+    #[test]
+    fn load_supported_file_content_reads_docx_bytes() {
+        let temp_path =
+            std::env::temp_dir().join(format!("cai2036-runtime-{}.docx", std::process::id()));
+        std::fs::write(&temp_path, b"PK\x03\x04mock-docx").expect("docx fixture should write");
+
+        let content = super::load_supported_file_content(temp_path.to_str().expect("utf8 path"))
+            .expect("docx content should load");
+
+        let _ = std::fs::remove_file(&temp_path);
+
+        assert_eq!(
+            content,
+            ContentPart::File {
+                filename: temp_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .expect("filename")
+                    .to_string(),
+                file_data: format!(
+                    "data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{}",
+                    super::BASE64_STANDARD.encode(b"PK\x03\x04mock-docx")
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn load_supported_file_content_reads_csv_bytes() {
+        let temp_path =
+            std::env::temp_dir().join(format!("cai2036-runtime-{}.csv", std::process::id()));
+        std::fs::write(&temp_path, b"value\n2\n").expect("csv fixture should write");
+
+        let content = super::load_supported_file_content(temp_path.to_str().expect("utf8 path"))
+            .expect("csv content should load");
+
+        let _ = std::fs::remove_file(&temp_path);
+
+        assert_eq!(
+            content,
+            ContentPart::File {
+                filename: temp_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .expect("filename")
+                    .to_string(),
+                file_data: format!(
+                    "data:text/csv;base64,{}",
+                    super::BASE64_STANDARD.encode(b"value\n2\n")
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn supported_file_media_type_maps_phase_three_extensions() {
+        let cases = [
+            ("report.pdf", "application/pdf"),
+            ("report.doc", "application/msword"),
+            ("report.dot", "application/msword"),
+            (
+                "report.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+            ("report.odt", "application/vnd.oasis.opendocument.text"),
+            ("report.rtf", "application/rtf"),
+            ("report.csv", "text/csv"),
+            ("report.tsv", "text/tsv"),
+            ("report.iif", "text/x-iif"),
+            ("report.xla", "application/vnd.ms-excel"),
+            ("report.xlb", "application/vnd.ms-excel"),
+            ("report.xlc", "application/vnd.ms-excel"),
+            ("report.xlm", "application/vnd.ms-excel"),
+            ("report.xls", "application/vnd.ms-excel"),
+            (
+                "report.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+            ("report.xlt", "application/vnd.ms-excel"),
+            ("report.xlw", "application/vnd.ms-excel"),
+            ("report.pot", "application/vnd.ms-powerpoint"),
+            ("report.ppa", "application/vnd.ms-powerpoint"),
+            ("report.pps", "application/vnd.ms-powerpoint"),
+            ("report.ppt", "application/vnd.ms-powerpoint"),
+            (
+                "report.pptx",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ),
+            ("report.pwz", "application/vnd.ms-powerpoint"),
+            ("report.wiz", "application/vnd.ms-powerpoint"),
+        ];
+
+        for (path, expected) in cases {
+            let media_type = super::supported_file_media_type(Path::new(path))
+                .unwrap_or_else(|err| panic!("expected media type for {path}: {err}"));
+            assert_eq!(media_type, expected, "wrong media type for {path}");
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_extension_for_file_inputs() {
+        let err = super::load_supported_file_content("./report.txt").expect_err("txt should fail");
+        assert!(err.contains("Supported: pdf, docx, csv"));
+        assert!(err.contains("pptx"));
     }
 }

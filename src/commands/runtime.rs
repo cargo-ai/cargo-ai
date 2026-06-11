@@ -890,6 +890,17 @@ fn current_agent_runtime_timeout_message(
     )
 }
 
+fn interpreted_usage_agent_info(project_root: Option<&Path>) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "source": "interpreted_runtime",
+        "generated": false,
+    });
+    if let Some(project_root) = project_root {
+        value["project_root"] = serde_json::json!(project_root.display().to_string());
+    }
+    value
+}
+
 pub(crate) async fn run_with_definition(
     sub_m: &ArgMatches,
     definition: &dyn InvocationDefinition,
@@ -901,6 +912,15 @@ pub(crate) async fn run_with_definition_in_context(
     sub_m: &ArgMatches,
     definition: &dyn InvocationDefinition,
     project_root: Option<PathBuf>,
+) -> bool {
+    run_with_definition_in_context_and_usage_agent(sub_m, definition, project_root, None).await
+}
+
+pub(crate) async fn run_with_definition_in_context_and_usage_agent(
+    sub_m: &ArgMatches,
+    definition: &dyn InvocationDefinition,
+    project_root: Option<PathBuf>,
+    usage_agent_info: Option<serde_json::Value>,
 ) -> bool {
     let full_run_started_at = std::time::Instant::now();
 
@@ -1070,10 +1090,28 @@ pub(crate) async fn run_with_definition_in_context(
     let has_output_schema_properties = definition.has_output_schema_properties();
     let actions = definition.actions();
     let ignore_tools = sub_m.get_flag("ignore_tools");
+    let usage_agent_info =
+        usage_agent_info.unwrap_or_else(|| interpreted_usage_agent_info(project_root.as_deref()));
     let tool_resolver = Arc::new(crate::commands::tools::ToolResolver::new(
         project_root,
         crate::cargo_ai_metadata::current_build_target(),
     ));
+    let usage_log_arg = sub_m.get_one::<String>("usage_log").map(String::as_str);
+    let usage_log_setup = match crate::usage_log::UsageLogContext::from_runtime(
+        usage_log_arg,
+        super::runtime_actions::current_agent_action_depth(),
+        Some(usage_agent_info),
+    ) {
+        Ok(setup) => setup,
+        Err(error) => {
+            eprintln!("x {error}");
+            return false;
+        }
+    };
+    let (usage_log_context, mut usage_agent_guard) = match usage_log_setup {
+        Some((context, guard)) => (Some(context), Some(guard)),
+        None => (None, None),
+    };
 
     if !ignore_tools {
         if let Err(error) = crate::commands::tools::audit_actions_for_tools(
@@ -1103,6 +1141,7 @@ pub(crate) async fn run_with_definition_in_context(
         token: token.clone(),
         inference_timeout_in_sec,
         tool_resolver: Some(tool_resolver),
+        usage_log: usage_log_context.clone(),
     };
 
     let named_inputs = match resolved_named_inputs_for_run(sub_m, &named_inputs_template) {
@@ -1179,7 +1218,12 @@ pub(crate) async fn run_with_definition_in_context(
         )
         .await
         {
-            Ok(()) => true,
+            Ok(()) => {
+                if let Some(guard) = usage_agent_guard.as_mut() {
+                    guard.finish_success();
+                }
+                true
+            }
             Err(error) => {
                 print_runtime_failure(
                     "Action execution failed during run.",
@@ -1272,6 +1316,7 @@ pub(crate) async fn run_with_definition_in_context(
                 }
             };
 
+        let provider_started_at = std::time::Instant::now();
         match tokio::time::timeout(
             remaining,
             crate::providers::send_ollama_request(
@@ -1284,8 +1329,51 @@ pub(crate) async fn run_with_definition_in_context(
         )
         .await
         {
-            Ok(Ok(r)) => response.push_str(&r),
+            Ok(Ok(r)) => {
+                if let Some(usage_log) = usage_log_context.as_ref() {
+                    usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                        provider,
+                        profile_name: selected_profile
+                            .as_ref()
+                            .map(|profile| profile.name.as_str()),
+                        auth_mode: action_provider_context.auth_mode.as_str(),
+                        model: model.as_str(),
+                        step: crate::usage_log::UsageStep {
+                            kind: "agent_inference",
+                            action: None,
+                            step_index: None,
+                        },
+                        usage: r.usage.as_ref(),
+                        duration: provider_started_at.elapsed(),
+                        status: crate::usage_log::UsageStatus::Success,
+                        error: None,
+                    });
+                }
+                response.push_str(&r.text)
+            }
             Ok(Err(error)) => {
+                if let Some(usage_log) = usage_log_context.as_ref() {
+                    usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                        provider,
+                        profile_name: selected_profile
+                            .as_ref()
+                            .map(|profile| profile.name.as_str()),
+                        auth_mode: action_provider_context.auth_mode.as_str(),
+                        model: model.as_str(),
+                        step: crate::usage_log::UsageStep {
+                            kind: "agent_inference",
+                            action: None,
+                            step_index: None,
+                        },
+                        usage: None,
+                        duration: provider_started_at.elapsed(),
+                        status: crate::usage_log::UsageStatus::Failed,
+                        error: Some(crate::usage_log::UsageError::redacted(
+                            format!("{:?}", error.kind()).to_ascii_lowercase(),
+                            "Provider request failed.",
+                        )),
+                    });
+                }
                 let details = provider_error_messages(&error);
                 let summary = details
                     .first()
@@ -1305,6 +1393,28 @@ pub(crate) async fn run_with_definition_in_context(
                 return false;
             }
             Err(_) => {
+                if let Some(usage_log) = usage_log_context.as_ref() {
+                    usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                        provider,
+                        profile_name: selected_profile
+                            .as_ref()
+                            .map(|profile| profile.name.as_str()),
+                        auth_mode: action_provider_context.auth_mode.as_str(),
+                        model: model.as_str(),
+                        step: crate::usage_log::UsageStep {
+                            kind: "agent_inference",
+                            action: None,
+                            step_index: None,
+                        },
+                        usage: None,
+                        duration: provider_started_at.elapsed(),
+                        status: crate::usage_log::UsageStatus::Failed,
+                        error: Some(crate::usage_log::UsageError::redacted(
+                            "timeout",
+                            "Provider request timed out.",
+                        )),
+                    });
+                }
                 print_runtime_failure(
                     "The provider did not return a response before the runtime budget expired.",
                     Some(&action_provider_context),
@@ -1346,6 +1456,7 @@ pub(crate) async fn run_with_definition_in_context(
                 }
             };
 
+        let provider_started_at = std::time::Instant::now();
         match tokio::time::timeout(
             remaining,
             crate::providers::send_openai_request(
@@ -1359,8 +1470,51 @@ pub(crate) async fn run_with_definition_in_context(
         )
         .await
         {
-            Ok(Ok(r)) => response.push_str(&r),
+            Ok(Ok(r)) => {
+                if let Some(usage_log) = usage_log_context.as_ref() {
+                    usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                        provider,
+                        profile_name: selected_profile
+                            .as_ref()
+                            .map(|profile| profile.name.as_str()),
+                        auth_mode: action_provider_context.auth_mode.as_str(),
+                        model: model.as_str(),
+                        step: crate::usage_log::UsageStep {
+                            kind: "agent_inference",
+                            action: None,
+                            step_index: None,
+                        },
+                        usage: r.usage.as_ref(),
+                        duration: provider_started_at.elapsed(),
+                        status: crate::usage_log::UsageStatus::Success,
+                        error: None,
+                    });
+                }
+                response.push_str(&r.text)
+            }
             Ok(Err(error)) => {
+                if let Some(usage_log) = usage_log_context.as_ref() {
+                    usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                        provider,
+                        profile_name: selected_profile
+                            .as_ref()
+                            .map(|profile| profile.name.as_str()),
+                        auth_mode: action_provider_context.auth_mode.as_str(),
+                        model: model.as_str(),
+                        step: crate::usage_log::UsageStep {
+                            kind: "agent_inference",
+                            action: None,
+                            step_index: None,
+                        },
+                        usage: None,
+                        duration: provider_started_at.elapsed(),
+                        status: crate::usage_log::UsageStatus::Failed,
+                        error: Some(crate::usage_log::UsageError::redacted(
+                            format!("{:?}", error.kind()).to_ascii_lowercase(),
+                            "Provider request failed.",
+                        )),
+                    });
+                }
                 let details = provider_error_messages(&error);
                 let summary = details
                     .first()
@@ -1380,6 +1534,28 @@ pub(crate) async fn run_with_definition_in_context(
                 return false;
             }
             Err(_) => {
+                if let Some(usage_log) = usage_log_context.as_ref() {
+                    usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                        provider,
+                        profile_name: selected_profile
+                            .as_ref()
+                            .map(|profile| profile.name.as_str()),
+                        auth_mode: action_provider_context.auth_mode.as_str(),
+                        model: model.as_str(),
+                        step: crate::usage_log::UsageStep {
+                            kind: "agent_inference",
+                            action: None,
+                            step_index: None,
+                        },
+                        usage: None,
+                        duration: provider_started_at.elapsed(),
+                        status: crate::usage_log::UsageStatus::Failed,
+                        error: Some(crate::usage_log::UsageError::redacted(
+                            "timeout",
+                            "Provider request timed out.",
+                        )),
+                    });
+                }
                 print_runtime_failure(
                     "The provider did not return a response before the runtime budget expired.",
                     Some(&action_provider_context),
@@ -1437,7 +1613,12 @@ pub(crate) async fn run_with_definition_in_context(
     )
     .await
     {
-        Ok(()) => true,
+        Ok(()) => {
+            if let Some(guard) = usage_agent_guard.as_mut() {
+                guard.finish_success();
+            }
+            true
+        }
         Err(error) => {
             print_runtime_failure(
                 "Action execution failed during run.",
@@ -1578,6 +1759,7 @@ mod tests {
             token: "secret".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            usage_log: None,
         };
 
         let lines = render_runtime_failure_lines(
