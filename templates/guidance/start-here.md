@@ -28,6 +28,11 @@ When action behavior may vary by invocation, also clarify:
 - should the caller choose the image model at runtime?
 - if yes, prefer top-level `runtime_vars` plus `--run-var` over asking the caller to edit JSON for each run
 
+When the user wants token usage, runtime timing, provider timing, or embedding-friendly accounting:
+- use `usage-ledger.md`
+- keep usage logging opt-in with `--usage-log <path>` or `CARGO_AI_USAGE_LOG=<path>`
+- do not design a custom logging backend unless the user explicitly wants business logs or a destination-specific tool
+
 When the user says they need a reusable local tool or native helper:
 - confirm that they really need a project-local `kind: "tool"` capability rather than a plain `exec` step
 - if they need new executable code and Cargo is available, prefer Rust inside a `cargo ai add tool <name>` scaffold instead of ad hoc Python, Node, or shell helper scripts
@@ -53,11 +58,12 @@ When the user says they need a reusable local tool or native helper:
 4. Before presenting a tool as complete, perform the `tool-hardening.md` hardening review.
 5. Copy the closest example from `examples/`.
 6. Decide which inputs are baked into JSON, which are caller-supplied runtime inputs, and whether any action behavior belongs in `runtime_vars`.
-7. Draft the JSON in canonical field order.
-8. If the flow becomes complex, recommend a same-name sidecar Markdown file.
-9. Validate with:
+7. If the caller needs usage or timing accounting, use `usage-ledger.md` for run commands and integration notes.
+8. Draft the JSON in canonical field order.
+9. If the flow becomes complex, recommend a same-name sidecar Markdown file.
+10. Validate with:
    - `cargo ai hatch <agent-name> --config <config.json> --check`
-10. Fix reported errors before building.
+11. Fix reported errors before building.
 
 ## Behavioral Defaults
 

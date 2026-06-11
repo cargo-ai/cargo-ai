@@ -40,6 +40,7 @@ Read these files before inventing structure:
 - `.cargo-ai/guidance/tool-contract.md`
 - `.cargo-ai/guidance/tool-child-agents.md`
 - `.cargo-ai/guidance/tool-hardening.md`
+- `.cargo-ai/guidance/usage-ledger.md`
 - `.cargo-ai/guidance/pattern-selection.md`
 - `.cargo-ai/guidance/agent-definition-contract.md`
 - `.cargo-ai/guidance/action-rules.md`
@@ -130,6 +131,7 @@ For account projects, keep the contract narrow:
 - Keep child `input_overrides` CLI-shaped too: direct string literals, `{ "var": "..." }`, or `{ "input": "<name>" }` when forwarding a named parent input.
 - If another Cargo AI agent should do the work, prefer a native `kind: "agent"` step. Do not create Python or shell wrappers just to launch the child agent.
 - Use wrapper programs only when the task genuinely needs extra non-Cargo-AI behavior around that child invocation.
+- When the user asks for token usage, provider timing, run timing, or embedding-friendly accounting, use `.cargo-ai/guidance/usage-ledger.md`. Prefer Cargo AI's built-in usage ledger over custom parsing of human CLI output.
 - Expect Cargo AI runtime output to print one root `using:` line at run start and another step-level `using:` line only when a child `agent` or `generate_image` step changes the effective `profile`, `auth`, `server`, or `model`.
 - If `agent_schema.properties` is empty, Cargo AI uses the structural action-only shape: named top-level inputs are still allowed there, but anonymous runtime `--input-*` flags remain invalid and invocation-time changes should go through `--input-override NAME=VALUE`.
 - Use top-level `runtime_vars` when the caller should control action behavior or step-local settings at invocation time without editing the JSON.
