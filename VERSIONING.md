@@ -6,14 +6,14 @@ Cargo AI uses semantic versions as a product and CLI contract, not as a Rust lib
 
 While Cargo AI is in the `0.y.z` range, the leftmost non-zero digit is the main compatibility signal.
 
-- `0.y.0` means meaningful product and contract evolution across one or more public surfaces.
-- `0.y.z` means smaller bug fixes, polish, documentation updates, and low-risk compatibility improvements that should not materially change how users author, hatch, run, or share agents.
+- `0.y.z` means a compatible release on the same pre-`1.0.0` line. It may include bug fixes, polish, documentation updates, and additive capabilities that should not require users to rewrite existing agent definitions, CLI usage, generated agents, or project workflows.
+- `0.(y+1).0` means a new pre-`1.0.0` compatibility line. Cargo AI uses this for larger milestones, compatibility-boundary releases, or changes with meaningful migration risk.
 
 ## How To Read Releases
 
-- A release such as `0.1.1` should feel like a smaller follow-up release, not a major expansion of what authored agents or the CLI can do.
-- A release such as `0.2.0` signals that Cargo AI gained meaningful new capability or compatibility surface, even though the product is still pre-`1.0.0`.
-- While Cargo AI remains pre-`1.0.0`, generated-agent provenance/version checks stay intentionally exact. After a meaningful upgrade, existing hatched agents may report `out_of_sync` until they are re-hatched with the newer Cargo AI.
+- A release such as `0.3.1` should be compatible with the `0.3.0` line. It may add new optional behavior, but existing supported definitions and commands should keep working.
+- A release such as `0.4.0` signals a new pre-`1.0.0` compatibility line or a larger product milestone where users should read the release notes before assuming the same compatibility posture as `0.3.x`.
+- While Cargo AI remains pre-`1.0.0`, generated-agent provenance/version checks stay intentionally exact. After installing a newer Cargo AI, existing hatched agents may report `out_of_sync` until they are re-hatched with the newer Cargo AI, even when the release is otherwise compatible.
 
 ## Public Compatibility Surfaces
 
@@ -25,15 +25,15 @@ For Cargo AI, the compatibility surfaces that matter most are:
 - generated-agent behavior and embedded provenance/version expectations
 - documented authoring, account, and release-facing workflows that users are expected to follow
 
-Implementation details may change underneath those surfaces, but changes that materially affect them should be treated as contract changes rather than patch-level noise.
+Implementation details may change underneath those surfaces. Compatible additive changes may ship on the same `0.y.z` line, while breaking changes, migration-risky changes, or larger compatibility-boundary milestones should move to the next `0.(y+1).0` line.
 
 ## What 1.0.0 Means
 
 `1.0.0` should mean Cargo AI is ready to stand behind a stable core public contract across the surfaces above. That does not mean the product stops evolving. It means compatibility changes become rarer, more deliberate, and more tightly managed.
 
-## Why This Release Is 0.3.0
+## Current Release Line
 
-The `0.3.0` release is a pre-`1.0.0` contract release because Cargo AI has evolved meaningfully since `0.2.0` in user-visible ways, including:
+The `0.3.x` line began with the `0.3.0` pre-`1.0.0` contract release. That release introduced meaningful user-visible evolution since `0.2.0`, including:
 
 - direct interpreted execution with `cargo ai run`
 - inline and stdin definition sources for fast scripted authoring flows
@@ -44,7 +44,7 @@ The `0.3.0` release is a pre-`1.0.0` contract release because Cargo AI has evolv
 - structured tool parameter support for validated array and object values
 - install, Cargo AI Home, package, and release-facing documentation updates
 
-That is larger than a patch-level `0.2.1` release, but it is not yet a `1.0.0` stability promise.
+Compatible additive releases on the `0.3.x` line can build on that baseline without signaling a new compatibility boundary. The next `0.4.0` release is reserved for a larger milestone, a compatibility-boundary release, or a change with meaningful migration risk.
 
 ## Upgrade Guidance
 
