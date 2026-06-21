@@ -75,8 +75,14 @@ async fn main() {
             command_succeeded
         } else if let Some(command_succeeded) = try_run_package(&cmd_args) {
             command_succeeded
-        } else if let Some(command_succeeded) = try_run_hatch(&cmd_args) {
+        } else if let Some(command_succeeded) = try_run_hatch(&cmd_args).await {
             command_succeeded
+        } else if let Some(sub_m) = cmd_args.subcommand_matches("packages") {
+            commands::packages::run(sub_m).await
+        } else if let Some(sub_m) = cmd_args.subcommand_matches("agents") {
+            commands::agents::run(sub_m).await
+        } else if let Some(sub_m) = cmd_args.subcommand_matches("mail") {
+            commands::mail::run(sub_m).await
         } else if let Some(sub_m) = cmd_args.subcommand_matches("add") {
             commands::add::run(sub_m)
         } else if let Some(sub_m) = cmd_args.subcommand_matches("tools") {
@@ -129,14 +135,15 @@ fn try_run_package(_cmd_args: &clap::ArgMatches) -> Option<bool> {
 }
 
 #[cfg(feature = "developer-tools")]
-fn try_run_hatch(cmd_args: &clap::ArgMatches) -> Option<bool> {
-    cmd_args
-        .subcommand_matches("hatch")
-        .map(crate::commands::hatch::run)
+async fn try_run_hatch(cmd_args: &clap::ArgMatches) -> Option<bool> {
+    match cmd_args.subcommand_matches("hatch") {
+        Some(sub_m) => Some(crate::commands::hatch::run(sub_m).await),
+        None => None,
+    }
 }
 
 #[cfg(not(feature = "developer-tools"))]
-fn try_run_hatch(_cmd_args: &clap::ArgMatches) -> Option<bool> {
+async fn try_run_hatch(_cmd_args: &clap::ArgMatches) -> Option<bool> {
     None
 }
 

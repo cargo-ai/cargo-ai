@@ -65,6 +65,12 @@ fn resolve_run_definition_source(sub_m: &ArgMatches) -> Result<AgentDefinitionSo
     resolve_definition_source(name_or_path, "run", "run")
 }
 
+fn is_account_run_invocation(sub_m: &ArgMatches) -> bool {
+    sub_m.get_flag("from_account")
+        || sub_m.get_one::<String>("owner_handle").is_some()
+        || sub_m.get_one::<String>("definition_path").is_some()
+}
+
 fn load_run_definition_from_source(
     source: &AgentDefinitionSource,
 ) -> Result<(crate::runtime_definition::RuntimeAgentDefinition, String), String> {
@@ -178,6 +184,10 @@ fn sha256_hex(contents: &str) -> String {
 
 /// Executes the interpreted runtime flow from a local or registry JSON definition.
 pub async fn run(sub_m: &ArgMatches) -> bool {
+    if is_account_run_invocation(sub_m) {
+        return crate::commands::account::run_account_agent(sub_m).await;
+    }
+
     let definition_source = match resolve_run_definition_source(sub_m) {
         Ok(source) => source,
         Err(error) => {

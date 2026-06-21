@@ -1,4 +1,4 @@
-//! Runtime behavior for `cargo ai account agents`.
+//! Runtime behavior for account-backed agent management and execution.
 use clap::ArgMatches;
 use serde_json::{json, Value};
 
@@ -291,17 +291,33 @@ fn account_agent_selector_suffix(source: &AccountAgentSourceDetails) -> String {
     }
 }
 
+fn account_execution_selector_suffix(source: &AccountAgentSourceDetails) -> String {
+    let mut args = Vec::new();
+
+    if source.owner == "self" {
+        args.push("--from-account".to_string());
+    } else {
+        args.push(format!("--owner-handle {}", source.owner));
+    }
+    if source.path != "/" {
+        args.push(format!("--definition-path {}", source.path));
+    }
+
+    format!(" {}", args.join(" "))
+}
+
 fn account_pull_success_ui_response(source: &AccountAgentSourceDetails, file_path: &Path) -> Value {
-    let selector_suffix = account_agent_selector_suffix(source);
+    let management_selector_suffix = account_agent_selector_suffix(source);
+    let execution_selector_suffix = account_execution_selector_suffix(source);
     let file_display = display_path(file_path);
     let mut available_commands = vec![
         json!({
             "label": "Run agent",
-            "value": format!("`cargo ai account run {}{}`", source.agent, selector_suffix)
+            "value": format!("`cargo ai run {}{}`", source.agent, execution_selector_suffix)
         }),
         json!({
         "label": "Print JSON",
-        "value": format!("`cargo ai account agents pull {} --stdout{}`", source.agent, selector_suffix)
+        "value": format!("`cargo ai agents pull {} --stdout{}`", source.agent, management_selector_suffix)
         }),
     ];
 
@@ -310,7 +326,7 @@ fn account_pull_success_ui_response(source: &AccountAgentSourceDetails, file_pat
             1,
             json!({
                 "label": "Hatch agent",
-                "value": format!("`cargo ai account hatch {}{}`", source.agent, selector_suffix)
+                "value": format!("`cargo ai hatch {}{}`", source.agent, execution_selector_suffix)
             }),
         );
     }
@@ -384,7 +400,7 @@ fn restyle_agents_list_ui(response: &mut Value, truncation: Option<(usize, usize
             "title_style": "plain",
             "layout": "aligned",
             "items": [
-                {"label": "Push agent", "value": "`cargo ai account agents push --name <agent> --json-file ./<agent>.json`"}
+                {"label": "Push agent", "value": "`cargo ai agents push --name <agent> --json-file ./<agent>.json`"}
             ]
         }));
     } else {
@@ -446,8 +462,8 @@ fn restyle_agents_list_ui(response: &mut Value, truncation: Option<(usize, usize
             "title_style": "plain",
             "layout": "aligned",
             "items": [
-                {"label": "Pull agent", "value": "`cargo ai account agents pull <agent>`"},
-                {"label": "Push agent", "value": "`cargo ai account agents push --name <agent> --json-file ./<agent>.json`"}
+                {"label": "Pull agent", "value": "`cargo ai agents pull <agent>`"},
+                {"label": "Push agent", "value": "`cargo ai agents push --name <agent> --json-file ./<agent>.json`"}
             ]
         }));
     }
@@ -559,12 +575,8 @@ async fn continue_run_from_response(run_m: &ArgMatches, response: &Value) -> boo
     crate::commands::runtime::run_with_definition(run_m, &definition).await
 }
 
-/// Executes account-agent operations (list/push/pull/hatch/visibility/archive).
+/// Executes account-agent management operations.
 pub async fn run(agents_m: &ArgMatches) -> bool {
-    if let Some(run_m) = agents_m.subcommand_matches("run") {
-        return run_account_agent(run_m).await;
-    }
-
     enum AgentsCommand {
         List {
             owner_handle: Option<String>,
@@ -793,9 +805,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                 is_archived: archive_m.get_flag("archive"),
             }
         } else {
-            println!(
-                "No agents subcommand found. Try 'cargo ai account agents list|push|pull|run|hatch|visibility|archive'."
-            );
+            println!("No agents subcommand found. Try 'cargo ai agents list|push|pull|visibility|archive'.");
             return false;
         }
     } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
@@ -830,7 +840,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         }
     } else {
         println!(
-            "No agents subcommand found. Try 'cargo ai account agents list|push|pull|run|visibility|archive'."
+            "No agents subcommand found. Try 'cargo ai agents list|push|pull|visibility|archive'."
         );
         return false;
     };
@@ -1433,8 +1443,9 @@ pub async fn run_account_agent(run_m: &ArgMatches) -> bool {
 mod tests {
     use super::{
         account_agent_selector_suffix, account_agent_source_details,
-        account_pull_success_ui_response, hatch_mode_from_check_flag, resolve_account_hatch_names,
-        restyle_agents_list_ui, validate_account_run_name, AccountAgentSourceDetails,
+        account_execution_selector_suffix, account_pull_success_ui_response,
+        hatch_mode_from_check_flag, resolve_account_hatch_names, restyle_agents_list_ui,
+        validate_account_run_name, AccountAgentSourceDetails,
     };
     use serde_json::json;
     use std::path::Path;
@@ -1541,19 +1552,19 @@ mod tests {
             assert_eq!(
                 next_step_items[0]["value"].as_str(),
                 Some(
-                    "`cargo ai account run weather_test --owner-handle shared --definition-path /agents/public`"
+                    "`cargo ai run weather_test --owner-handle shared --definition-path /agents/public`"
                 )
             );
             assert_eq!(
                 next_step_items[1]["value"].as_str(),
                 Some(
-                    "`cargo ai account hatch weather_test --owner-handle shared --definition-path /agents/public`"
+                    "`cargo ai hatch weather_test --owner-handle shared --definition-path /agents/public`"
                 )
             );
             assert_eq!(
                 next_step_items[2]["value"].as_str(),
                 Some(
-                    "`cargo ai account agents pull weather_test --stdout --owner-handle shared --definition-path /agents/public`"
+                    "`cargo ai agents pull weather_test --stdout --owner-handle shared --definition-path /agents/public`"
                 )
             );
         } else {
@@ -1561,13 +1572,13 @@ mod tests {
             assert_eq!(
                 next_step_items[0]["value"].as_str(),
                 Some(
-                    "`cargo ai account run weather_test --owner-handle shared --definition-path /agents/public`"
+                    "`cargo ai run weather_test --owner-handle shared --definition-path /agents/public`"
                 )
             );
             assert_eq!(
                 next_step_items[1]["value"].as_str(),
                 Some(
-                    "`cargo ai account agents pull weather_test --stdout --owner-handle shared --definition-path /agents/public`"
+                    "`cargo ai agents pull weather_test --stdout --owner-handle shared --definition-path /agents/public`"
                 )
             );
         }
@@ -1611,7 +1622,7 @@ mod tests {
         );
         assert_eq!(
             response["ui"]["sections"][2]["items"][0]["value"].as_str(),
-            Some("`cargo ai account agents pull <agent>`")
+            Some("`cargo ai agents pull <agent>`")
         );
     }
 
@@ -1624,5 +1635,16 @@ mod tests {
         });
 
         assert!(suffix.is_empty());
+    }
+
+    #[test]
+    fn execution_selector_suffix_marks_authenticated_account_source() {
+        let suffix = account_execution_selector_suffix(&AccountAgentSourceDetails {
+            owner: "self".to_string(),
+            agent: "weather_test".to_string(),
+            path: "/".to_string(),
+        });
+
+        assert_eq!(suffix, " --from-account");
     }
 }
