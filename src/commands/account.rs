@@ -16,8 +16,8 @@ mod status;
 pub(crate) use agents::{run as run_agents, run_account_agent, run_hatch};
 pub(crate) use mail::run as run_mail;
 pub(crate) use projects::{
-    create_package_archive_bytes, directory_size_bytes, format_bytes, run as run_packages,
-    sha256_hex,
+    create_package_archive_bytes, directory_size_bytes, extract_package_archive_bytes,
+    format_bytes, run as run_packages, sha256_hex,
 };
 
 /// Routes `cargo ai account ...` subcommands to their runtime handlers.

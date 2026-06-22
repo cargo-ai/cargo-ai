@@ -85,10 +85,10 @@ const SAFE_PROJECT_PUBLISH_REQUEST_LIMIT_BYTES: u64 = 5_500_000;
 
 pub async fn run(projects_m: &ArgMatches) -> bool {
     let projects_command = if let Some(list_m) = projects_m.subcommand_matches("list") {
+        let owner_handle =
+            crate::commands::local_packages::account_handle_from_list_matches(list_m).flatten();
         ProjectsCommand::List {
-            owner_handle: list_m
-                .get_one::<String>("owner_handle")
-                .map(|s| s.to_string()),
+            owner_handle,
             include_archived: list_m.get_flag("include_archived"),
             display_limit: if list_m.get_flag("all") {
                 None
@@ -872,7 +872,10 @@ fn append_compressed_archive_entries<W: Write>(
     Ok(())
 }
 
-fn extract_package_archive_bytes(archive_bytes: &[u8], output_root: &Path) -> Result<(), String> {
+pub(crate) fn extract_package_archive_bytes(
+    archive_bytes: &[u8],
+    output_root: &Path,
+) -> Result<(), String> {
     match extract_compressed_package_archive_bytes(archive_bytes, output_root) {
         Ok(()) => Ok(()),
         Err(compressed_error) => extract_legacy_package_archive_bytes(archive_bytes, output_root)

@@ -10,6 +10,7 @@ use super::definition_source::{
 struct HatchResolution {
     project_name: String,
     source: AgentDefinitionSource,
+    project_root: Option<PathBuf>,
 }
 
 fn project_root_for_hatch_source(source: &AgentDefinitionSource) -> Option<PathBuf> {
@@ -118,6 +119,19 @@ fn resolve_hatch_input_in_dir(
         return Ok(HatchResolution {
             project_name: name_or_path.to_string(),
             source,
+            project_root: None,
+        });
+    }
+
+    if let Some(resolved) =
+        crate::commands::local_packages::resolve_entrypoint_reference(name_or_path, true)?
+    {
+        return Ok(HatchResolution {
+            project_name: resolved.entrypoint,
+            source: AgentDefinitionSource::LocalPath(
+                resolved.definition_path.display().to_string(),
+            ),
+            project_root: Some(resolved.package_root),
         });
     }
 
@@ -134,6 +148,7 @@ fn resolve_hatch_input_in_dir(
     Ok(HatchResolution {
         project_name,
         source,
+        project_root: None,
     })
 }
 
@@ -240,7 +255,10 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             }
         };
         let resolver = crate::commands::tools::ToolResolver::new(
-            project_root_for_hatch_source(&resolution.source),
+            resolution
+                .project_root
+                .clone()
+                .or_else(|| project_root_for_hatch_source(&resolution.source)),
             build_target.cache_key_target(),
         );
         match crate::commands::tools::audit_actions_for_tools(

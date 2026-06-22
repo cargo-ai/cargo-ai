@@ -1,5 +1,5 @@
 //! CLI parser definitions for `cargo ai packages`.
-use clap::{Arg, ArgGroup, Command};
+use clap::{Arg, ArgAction, ArgGroup, Command};
 
 #[cfg(feature = "developer-tools")]
 fn publish_command() -> Command {
@@ -20,28 +20,29 @@ fn publish_command() -> Command {
 
 pub fn command() -> Command {
     let command = Command::new("packages")
-        .about("Manage published account packages")
+        .about("Manage local and hosted packages")
         .subcommand(
             Command::new("list")
-                .about("List packages")
+                .about("List installed local packages, or hosted packages with --account")
                 .arg(
-                    Arg::new("owner_handle")
-                        .long("owner-handle")
-                        .help("List public packages for this owner handle (omit to list your packages)")
+                    Arg::new("account")
+                        .long("account")
+                        .help("List hosted packages from your account, or from HANDLE when provided")
                         .required(false)
                         .value_name("HANDLE")
-                        .num_args(1),
+                        .num_args(0..=1)
+                        .default_missing_value(""),
                 )
                 .arg(
                     Arg::new("include_archived")
                         .long("include-archived")
-                        .help("Include archived packages (applies to listing your own packages)")
-                        .action(clap::ArgAction::SetTrue),
+                        .help("Include archived hosted packages")
+                        .action(ArgAction::SetTrue),
                 )
                 .arg(
                     Arg::new("limit")
                         .long("limit")
-                        .help("Maximum number of packages to display (default: 20)")
+                        .help("Maximum number of packages to display")
                         .required(false)
                         .value_name("N")
                         .num_args(1)
@@ -52,8 +53,72 @@ pub fn command() -> Command {
                     Arg::new("all")
                         .long("all")
                         .help("Display all returned packages")
-                        .action(clap::ArgAction::SetTrue)
+                        .action(ArgAction::SetTrue)
                         .conflicts_with("limit"),
+                ),
+        )
+        .subcommand(
+            Command::new("install")
+                .about("Install a local package into Cargo AI Home")
+                .arg(
+                    Arg::new("source")
+                        .help("Optional local package root, package archive, or cargo-ai-package.toml path")
+                        .required(false)
+                        .value_name("SOURCE")
+                        .num_args(1)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("alias")
+                        .long("as")
+                        .help("Local package alias (defaults to the package name)")
+                        .required(false)
+                        .value_name("ALIAS")
+                        .num_args(1),
+                )
+                .arg(
+                    Arg::new("profile")
+                        .long("profile")
+                        .help("Current-project package profile to install when SOURCE is omitted")
+                        .required(false)
+                        .value_name("PROFILE")
+                        .num_args(1),
+                )
+                .arg(
+                    Arg::new("replace")
+                        .long("replace")
+                        .help("Replace same-version content or a different package identity at the alias")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("downgrade")
+                        .long("downgrade")
+                        .help("Allow installing an older version over the same package identity")
+                        .action(ArgAction::SetTrue),
+                ),
+        )
+        .subcommand(
+            Command::new("inspect")
+                .about("Inspect an installed local package")
+                .arg(
+                    Arg::new("alias")
+                        .help("Installed package alias")
+                        .required(true)
+                        .value_name("ALIAS")
+                        .num_args(1)
+                        .index(1),
+                ),
+        )
+        .subcommand(
+            Command::new("uninstall")
+                .about("Uninstall a local package alias")
+                .arg(
+                    Arg::new("alias")
+                        .help("Installed package alias")
+                        .required(true)
+                        .value_name("ALIAS")
+                        .num_args(1)
+                        .index(1),
                 ),
         )
         .subcommand(
@@ -138,7 +203,7 @@ pub fn command() -> Command {
                         .help("Set package visibility to public")
                         .required(false)
                         .conflicts_with("private")
-                        .action(clap::ArgAction::SetTrue),
+                        .action(ArgAction::SetTrue),
                 )
                 .arg(
                     Arg::new("private")
@@ -146,7 +211,7 @@ pub fn command() -> Command {
                         .help("Set package visibility to private")
                         .required(false)
                         .conflicts_with("public")
-                        .action(clap::ArgAction::SetTrue),
+                        .action(ArgAction::SetTrue),
                 ),
         )
         .subcommand(
@@ -171,7 +236,7 @@ pub fn command() -> Command {
                         .help("Archive the package")
                         .required(false)
                         .conflicts_with("unarchive")
-                        .action(clap::ArgAction::SetTrue),
+                        .action(ArgAction::SetTrue),
                 )
                 .arg(
                     Arg::new("unarchive")
@@ -179,7 +244,7 @@ pub fn command() -> Command {
                         .help("Unarchive the package")
                         .required(false)
                         .conflicts_with("archive")
-                        .action(clap::ArgAction::SetTrue),
+                        .action(ArgAction::SetTrue),
                 ),
         );
 
@@ -187,4 +252,82 @@ pub fn command() -> Command {
     let command = command.subcommand(publish_command());
 
     command
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn list_defaults_to_local_without_account_selector() {
+        let matches = super::command()
+            .try_get_matches_from(["packages", "list"])
+            .expect("packages list should parse");
+        let list = matches
+            .subcommand_matches("list")
+            .expect("list should be available");
+
+        assert!(list.get_one::<String>("account").is_none());
+    }
+
+    #[test]
+    fn list_account_selector_accepts_optional_handle() {
+        let own_matches = super::command()
+            .try_get_matches_from(["packages", "list", "--account", "--limit", "20"])
+            .expect("packages list --account should parse");
+        let own_list = own_matches
+            .subcommand_matches("list")
+            .expect("list should be available");
+
+        assert_eq!(
+            own_list.get_one::<String>("account").map(String::as_str),
+            Some("")
+        );
+        assert_eq!(own_list.get_one::<u32>("limit").copied(), Some(20));
+
+        let handle_matches = super::command()
+            .try_get_matches_from(["packages", "list", "--account", "alice"])
+            .expect("packages list --account handle should parse");
+        let handle_list = handle_matches
+            .subcommand_matches("list")
+            .expect("list should be available");
+
+        assert_eq!(
+            handle_list.get_one::<String>("account").map(String::as_str),
+            Some("alice")
+        );
+    }
+
+    #[test]
+    fn install_supports_local_source_profile_alias_and_safety_flags() {
+        let matches = super::command()
+            .try_get_matches_from([
+                "packages",
+                "install",
+                "./pkg",
+                "--profile",
+                "release",
+                "--as",
+                "sales_stable",
+                "--replace",
+                "--downgrade",
+            ])
+            .expect("packages install should parse");
+        let install = matches
+            .subcommand_matches("install")
+            .expect("install should be available");
+
+        assert_eq!(
+            install.get_one::<String>("source").map(String::as_str),
+            Some("./pkg")
+        );
+        assert_eq!(
+            install.get_one::<String>("profile").map(String::as_str),
+            Some("release")
+        );
+        assert_eq!(
+            install.get_one::<String>("alias").map(String::as_str),
+            Some("sales_stable")
+        );
+        assert!(install.get_flag("replace"));
+        assert!(install.get_flag("downgrade"));
+    }
 }

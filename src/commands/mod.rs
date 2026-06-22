@@ -13,6 +13,7 @@ pub mod definition_source;
 pub mod hatch;
 pub mod hatch_pipeline;
 pub mod init;
+pub mod local_packages;
 pub mod mail;
 pub mod new;
 #[cfg(feature = "developer-tools")]

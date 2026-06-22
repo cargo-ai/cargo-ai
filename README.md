@@ -1118,10 +1118,10 @@ Published packages use a separate account surface:
 
 ```bash
 # List your published packages
-cargo ai packages list
+cargo ai packages list --account
 
 # List another owner's public packages
-cargo ai packages list --owner-handle alice
+cargo ai packages list --account alice
 
 # Publish the current project package (developer-tools build)
 cargo ai packages publish
@@ -1134,13 +1134,39 @@ Package rules are intentionally different from account agents:
 
 - `publish` packages the current project first, then uploads the resulting package archive
 - published project identity comes from `.cargo-ai/project.toml` `[project].name` and `[project].version`
-- `list` with `--owner-handle <handle>` only returns that owner's public packages
+- `list --account <handle>` only returns that owner's public packages
 - `pull` defaults to the latest published version unless you pass `--version <semver>`
 - pulled packages restore a project-shaped folder locally; they do not expose agent-style definition-path identities in the backend
 - after `pull`, `.cargo-ai/project.toml` remains the working project config and the pulled package receipt is preserved under `.cargo-ai/origin/cargo-ai-package.toml`
 - pulled tools are restored as source-backed project content; materialize a needed tool with `cargo ai tools build <tool-name>` or assemble the runnable build root with `cargo ai build`
 - the current publish path works best when the final package stays at or below about `5.5 MiB`; keep packaged assets minimal and avoid large sample inputs unless they are required in the package itself
 - if you add non-trivial assets to `[build.<profile>].assets`, run `cargo ai package` and inspect the reported package, archive, and request sizes before treating the project as publish-ready
+
+Local machine package installs use the package as the install unit:
+
+```bash
+# List packages installed in Cargo AI Home
+cargo ai packages list
+
+# Install the current project using [build.default]
+cargo ai packages install
+
+# Install the current project with an explicit local alias
+cargo ai packages install --as data_integration
+
+# Install from a local package root, archive, or cargo-ai-package.toml path
+cargo ai packages install ./dist/my_package --as data_integration
+
+# Run or hatch exported package entrypoints
+cargo ai run data_integration::lookup_account
+cargo ai hatch data_integration::daily_digest
+
+# Inspect or remove a local package alias
+cargo ai packages inspect data_integration
+cargo ai packages uninstall data_integration
+```
+
+Local install behavior is version-aware for the same alias: same version and content is a no-op, newer semver upgrades by default, older semver requires `--downgrade`, and same-version content replacement or a different package identity requires `--replace`.
 
 ## Where To Go Next
 
