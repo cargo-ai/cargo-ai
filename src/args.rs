@@ -1205,13 +1205,13 @@ mod tests {
     }
 
     #[test]
-    fn packages_list_parses_owner_handle_and_limit() {
+    fn packages_list_parses_account_handle_and_limit() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
                 "packages",
                 "list",
-                "--owner-handle",
+                "--account",
                 "alice",
                 "--limit",
                 "7",
@@ -1224,9 +1224,7 @@ mod tests {
             .expect("packages list should be available");
 
         assert_eq!(
-            projects
-                .get_one::<String>("owner_handle")
-                .map(String::as_str),
+            projects.get_one::<String>("account").map(String::as_str),
             Some("alice")
         );
         assert_eq!(projects.get_one::<u32>("limit").copied(), Some(7));

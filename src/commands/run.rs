@@ -139,6 +139,32 @@ fn usage_agent_info_for_definition_source(
     value
 }
 
+fn usage_agent_info_for_package_entrypoint(
+    resolved: &crate::commands::local_packages::ResolvedPackageEntrypoint,
+    definition_json: &str,
+) -> Value {
+    let mut value = json!({
+        "source": "installed_package",
+        "generated": false,
+        "package_alias": resolved.alias.as_str(),
+        "entrypoint": resolved.entrypoint.as_str(),
+        "artifact": resolved.definition_path.display().to_string(),
+        "name": resolved.entrypoint.as_str(),
+        "project_root": resolved.package_root.display().to_string(),
+        "package": {
+            "name": resolved.package_name.as_str(),
+            "version": resolved.package_version.as_str(),
+            "content_sha256": resolved.content_sha256.as_str(),
+        }
+    });
+
+    if let Ok(definition_sha256) = definition_sha256_from_json_str(definition_json) {
+        value["definition_sha256"] = json!(definition_sha256);
+    }
+
+    value
+}
+
 fn derived_agent_name_from_path(path: &str) -> Option<String> {
     Path::new(path)
         .file_stem()
@@ -186,6 +212,46 @@ fn sha256_hex(contents: &str) -> String {
 pub async fn run(sub_m: &ArgMatches) -> bool {
     if is_account_run_invocation(sub_m) {
         return crate::commands::account::run_account_agent(sub_m).await;
+    }
+
+    if sub_m.get_one::<String>("config").is_none()
+        && sub_m.get_one::<String>("json").is_none()
+        && !sub_m.get_flag("stdin")
+    {
+        if let Some(name_or_path) = sub_m.get_one::<String>("name").map(String::as_str) {
+            match crate::commands::local_packages::resolve_entrypoint_reference(name_or_path, false)
+            {
+                Ok(Some(resolved)) => {
+                    let source = AgentDefinitionSource::LocalPath(
+                        resolved.definition_path.display().to_string(),
+                    );
+                    let (definition, definition_json) =
+                        match load_run_definition_from_source(&source) {
+                            Ok(loaded) => loaded,
+                            Err(error) => {
+                                eprintln!("x {error}");
+                                return false;
+                            }
+                        };
+                    let usage_agent_info = usage_agent_info_for_package_entrypoint(
+                        &resolved,
+                        definition_json.as_str(),
+                    );
+                    return super::runtime::run_with_definition_in_context_and_usage_agent(
+                        sub_m,
+                        &definition,
+                        Some(resolved.package_root),
+                        Some(usage_agent_info),
+                    )
+                    .await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("x {error}");
+                    return false;
+                }
+            }
+        }
     }
 
     let definition_source = match resolve_run_definition_source(sub_m) {

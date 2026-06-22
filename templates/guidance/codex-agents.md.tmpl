@@ -74,10 +74,17 @@ For account-hosted definitions, remember the current split:
   - `cargo ai hatch <name> --from-account`
   - `cargo ai hatch <name> --owner-handle <handle>`
 - published project packages:
-  - `cargo ai packages list`
-  - `cargo ai packages list --owner-handle <handle>`
+  - `cargo ai packages list --account`
+  - `cargo ai packages list --account <handle>`
   - `cargo ai packages pull <name> --owner-handle <handle>`
   - `cargo ai packages publish`
+
+For local machine package installs:
+- `cargo ai packages list` shows packages installed in Cargo AI Home
+- `cargo ai packages install` installs the current project package
+- `cargo ai packages install <source> --as <alias>` installs a local package root, archive, or manifest path
+- `cargo ai run <alias>::<entrypoint>` runs an exported package entrypoint
+- `cargo ai hatch <alias>::<entrypoint>` hatches an exported hatchable package entrypoint
 
 For published packages, keep the contract narrow:
 - `publish` packages the current project first, then uploads that package
