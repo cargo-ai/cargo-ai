@@ -153,8 +153,19 @@ fn resolve_hatch_input(
     )
 }
 
+fn is_account_hatch_invocation(sub_m: &ArgMatches) -> bool {
+    sub_m.get_flag("from_account")
+        || sub_m.get_one::<String>("owner_handle").is_some()
+        || sub_m.get_one::<String>("definition_path").is_some()
+        || sub_m.get_one::<String>("agent").is_some()
+}
+
 /// Executes the `hatch` command flow from parsed CLI arguments.
-pub fn run(sub_m: &ArgMatches) -> bool {
+pub async fn run(sub_m: &ArgMatches) -> bool {
+    if is_account_hatch_invocation(sub_m) {
+        return crate::commands::account::run_hatch(sub_m).await;
+    }
+
     let Some(name_or_path) = sub_m.get_one::<String>("name") else {
         eprintln!("x Missing project name. Use `cargo ai hatch <name>`.");
         return false;

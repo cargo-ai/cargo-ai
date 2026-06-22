@@ -68,17 +68,18 @@ If these conflict with the local `.cargo-ai/guidance/` bundle, follow the local 
 
 For account-hosted definitions, remember the current split:
 - direct interpreted run:
-  - `cargo ai account run <name>`
-  - `cargo ai account agents run <name> --owner-handle <handle>`
+  - `cargo ai run <name> --from-account`
+  - `cargo ai run <name> --owner-handle <handle>`
 - frozen/export path:
-  - `cargo ai account hatch <name>`
+  - `cargo ai hatch <name> --from-account`
+  - `cargo ai hatch <name> --owner-handle <handle>`
 - published project packages:
-  - `cargo ai account projects list`
-  - `cargo ai account projects list --owner-handle <handle>`
-  - `cargo ai account projects pull <name> --owner-handle <handle>`
-  - `cargo ai account projects publish`
+  - `cargo ai packages list`
+  - `cargo ai packages list --owner-handle <handle>`
+  - `cargo ai packages pull <name> --owner-handle <handle>`
+  - `cargo ai packages publish`
 
-For account projects, keep the contract narrow:
+For published packages, keep the contract narrow:
 - `publish` packages the current project first, then uploads that package
 - publish identity comes from `.cargo-ai/project.toml` `[project].name` and `[project].version`
 - public lookup still uses owner handle plus project name until a later stable-link layer exists
@@ -165,7 +166,7 @@ For account projects, keep the contract narrow:
 - Prefer first-class Cargo AI commands for managed project mutations when they exist, such as `cargo ai new`, `cargo ai init`, `cargo ai add tool`, and `cargo ai add guidance`.
 - Edit `.cargo-ai/project.toml` directly only when no command exists yet, when the user explicitly wants manual control, or when the task is to inspect/repair broken managed state.
 - Avoid casual mutation of machine-global Cargo AI Home content for project-scoped work unless the user explicitly intends a machine-level install or change.
-- After `cargo ai account projects pull`, keep `.cargo-ai/project.toml` as the operative config and treat `.cargo-ai/origin/cargo-ai-package.toml` as provenance metadata rather than a second working manifest.
+- After `cargo ai packages pull`, keep `.cargo-ai/project.toml` as the operative config and treat `.cargo-ai/origin/cargo-ai-package.toml` as provenance metadata rather than a second working manifest.
 - If a pulled project fails at runtime because a source-backed tool has not been materialized yet, first try `cargo ai tools build <tool-name>` for the needed tool or `cargo ai build` for the full runnable project root.
 - Keep published assets minimal. The current project-publish path works best when the final packaged output stays at or below about `5.5 MiB`.
 - When editing `[build.<profile>].assets`, default to the smallest publishable set. Do not add large sample files, raw media, or demo inputs unless the user explicitly wants them shipped in the package.

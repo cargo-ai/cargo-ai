@@ -3,6 +3,7 @@
 //! Each submodule owns one command area and keeps `main.rs` dispatch-only.
 pub mod account;
 pub mod add;
+pub mod agents;
 pub mod auth;
 #[cfg(feature = "developer-tools")]
 pub mod build;
@@ -12,9 +13,11 @@ pub mod definition_source;
 pub mod hatch;
 pub mod hatch_pipeline;
 pub mod init;
+pub mod mail;
 pub mod new;
 #[cfg(feature = "developer-tools")]
 pub mod package;
+pub mod packages;
 pub mod profile;
 pub mod run;
 pub mod runtime;

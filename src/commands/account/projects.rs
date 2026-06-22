@@ -1,4 +1,4 @@
-//! Runtime behavior for `cargo ai account projects`.
+//! Runtime behavior for account-backed package management.
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use clap::ArgMatches;
@@ -112,7 +112,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
             .trim()
             .to_string();
         if name.is_empty() {
-            eprintln!("x Missing project name. Provide NAME or --name <NAME>.");
+            eprintln!("x Missing package name. Provide NAME or --name <NAME>.");
             return false;
         }
 
@@ -134,7 +134,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
         }
     } else if let Some(visibility_m) = projects_m.subcommand_matches("visibility") {
         let Some(name) = visibility_m.get_one::<String>("name") else {
-            eprintln!("x Missing project name. Provide --name <NAME>.");
+            eprintln!("x Missing package name. Provide --name <NAME>.");
             return false;
         };
 
@@ -144,7 +144,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
         }
     } else if let Some(archive_m) = projects_m.subcommand_matches("archive") {
         let Some(name) = archive_m.get_one::<String>("name") else {
-            eprintln!("x Missing project name. Provide --name <NAME>.");
+            eprintln!("x Missing package name. Provide --name <NAME>.");
             return false;
         };
 
@@ -163,7 +163,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
             }
         } else {
             eprintln!(
-                "No projects subcommand found. Try 'cargo ai account projects list|publish|pull|visibility|archive'."
+                "No packages subcommand found. Try 'cargo ai packages list|publish|pull|visibility|archive'."
             );
             return false;
         }
@@ -171,7 +171,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
         #[cfg(not(feature = "developer-tools"))]
         {
             eprintln!(
-                "No projects subcommand found. Try 'cargo ai account projects list|pull|visibility|archive'."
+                "No packages subcommand found. Try 'cargo ai packages list|pull|visibility|archive'."
             );
             return false;
         }
@@ -559,7 +559,7 @@ fn prepare_publish_payload(profile_name: &str) -> Result<PublishPayload, String>
 
     if estimated_request_size_bytes > SAFE_PROJECT_PUBLISH_REQUEST_LIMIT_BYTES {
         return Err(format!(
-            "Estimated publish request size {} exceeds the current safe project-publish ceiling of about {}. Keep packaged assets minimal and remove large sample files before publishing.",
+            "Estimated publish request size {} exceeds the current safe package-publish ceiling of about {}. Keep packaged assets minimal and remove large sample files before publishing.",
             format_bytes(estimated_request_size_bytes),
             format_bytes(SAFE_PROJECT_PUBLISH_REQUEST_LIMIT_BYTES),
         ));
@@ -721,7 +721,7 @@ fn build_local_pull_ui(
     project_version: &str,
     output_path: &Path,
 ) -> Value {
-    let mut source_items = vec![json!({"label": "Project", "value": project_name})];
+    let mut source_items = vec![json!({"label": "Package", "value": project_name})];
     if let Some(owner_handle) = owner_handle {
         source_items.insert(0, json!({"label": "Owner", "value": owner_handle}));
     }
@@ -730,7 +730,7 @@ fn build_local_pull_ui(
         "schema": "1.0",
         "kind": "success",
         "icon": "✓",
-        "title": "Project restored",
+        "title": "Package restored",
         "summary": format!("Restored `{project_name}` to `{}`.", display_path(output_path)),
         "sections": [
             {

@@ -1,120 +1,9 @@
-//! CLI parser definitions for `cargo ai account agents`.
+//! CLI parser definitions for `cargo ai agents`.
 use clap::{Arg, ArgGroup, Command};
 
-pub(crate) fn run_command() -> Command {
-    crate::args::runtime_common::runtime_command(
-        "run",
-        "Run an account agent definition through the interpreted runtime",
-    )
-    .arg(
-        Arg::new("name")
-            .help("Account agent name")
-            .required(true)
-            .value_name("NAME")
-            .num_args(1),
-    )
-    .arg(
-        Arg::new("owner_handle")
-            .long("owner-handle")
-            .help("Owner handle to run from (omit to run your own)")
-            .required(false)
-            .value_name("HANDLE")
-            .num_args(1),
-    )
-    .arg(
-        Arg::new("definition_path")
-            .long("definition-path")
-            .help("Account-side definition namespace path to read from (defaults to '/'; not a local filesystem path).")
-            .required(false)
-            .value_name("PATH")
-            .num_args(1),
-    )
-    .after_help(
-        "Notes:\n  - NAME is the remote/account agent name.\n  - Use --owner-handle to run a public agent from another handle.\n  - --definition-path selects account-side definition namespace path (defaults to '/'; not local filesystem path).\n  - Interpreted account run accepts the same runtime invocation flags as `cargo ai run`.\n  - Hatch/export flags like --check, --target, --output-dir, --keep-project, --force, and --agent are not supported here.",
-    )
-}
-
-#[cfg(feature = "developer-tools")]
-pub(crate) fn hatch_command() -> Command {
-    Command::new("hatch")
-        .about("Build an executable from an account agent definition")
-        .arg(
-            Arg::new("name")
-                .help("Local output/workspace name")
-                .required(true)
-                .value_name("NAME")
-                .num_args(1),
-        )
-        .arg(
-            Arg::new("check")
-                .long("check")
-                .help("Validate scaffold and compile path with `cargo check` (no binary export)")
-                .required(false)
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("owner_handle")
-                .long("owner-handle")
-                .help("Owner handle to hatch from (omit to hatch your own)")
-                .required(false)
-                .value_name("HANDLE")
-                .num_args(1),
-        )
-        .arg(
-            Arg::new("definition_path")
-                .long("definition-path")
-                .help("Account-side definition namespace path to read from (defaults to '/'; not a local filesystem path).")
-                .required(false)
-                .value_name("PATH")
-                .num_args(1),
-        )
-        .arg(
-            Arg::new("agent")
-                .long("agent")
-                .help("Remote/account agent name override (defaults to positional NAME)")
-                .required(false)
-                .value_name("AGENT")
-                .num_args(1),
-        )
-        .arg(
-            Arg::new("target")
-                .long("target")
-                .help("Rust target triple to pass through to cargo build/check")
-                .required(false)
-                .value_name("TRIPLE")
-                .num_args(1),
-        )
-        .arg(
-            Arg::new("output_dir")
-                .long("output-dir")
-                .help("Destination directory for the exported binary (defaults to current directory)")
-                .required(false)
-                .value_name("DIR")
-                .num_args(1),
-        )
-        .arg(
-            Arg::new("force")
-                .long("force")
-                .short('f')
-                .help("Overwrite output binary and replace any kept internal workspace")
-                .required(false)
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("keep_project")
-                .long("keep-project")
-                .help("Preserve the internal hatched project workspace for inspection")
-                .required(false)
-                .action(clap::ArgAction::SetTrue),
-        )
-        .after_help(
-            "Notes:\n  - NAME is the local output/workspace name and defaults the remote account agent name when --agent is omitted.\n  - --agent overrides only the remote/account agent source identifier.\n  - --definition-path selects account-side definition namespace path (defaults to '/'; not local filesystem path).\n  - Owner defaults to your authenticated account when --owner-handle is omitted.\n  - --check validates scaffold and compile behavior without exporting a binary.\n  - --target passes a Rust target triple through to cargo build/check (install targets/toolchains separately when needed).\n  - --output-dir controls where the exported binary is written; NAME still controls the filename.\n  - --keep-project preserves the internal workspace under ~/.cargo/.cargo-ai/agents/<name>.\n  - Existing output binaries or kept workspaces require --force/-f to replace.",
-        )
-}
-
-/// Builds the `agents` account subcommand schema.
+/// Builds the `agents` management command schema.
 pub fn command() -> Command {
-    let command = Command::new("agents")
+    Command::new("agents")
         .about("Manage account agents")
         .subcommand(
             Command::new("list")
@@ -272,7 +161,6 @@ pub fn command() -> Command {
                     "Notes:\n  - Name can be provided as positional NAME or via --name.\n  - Default output: ./<name>.json (when --json-file is omitted and --stdout is not set).\n  - --force applies only when writing to a file.",
                 ),
         )
-        .subcommand(run_command())
         .subcommand(
             Command::new("visibility")
                 .about("Set public visibility for an agent")
@@ -370,10 +258,5 @@ pub fn command() -> Command {
                         .conflicts_with("archive")
                         .action(clap::ArgAction::SetTrue),
                 ),
-        );
-
-    #[cfg(feature = "developer-tools")]
-    let command = command.subcommand(hatch_command());
-
-    command
+        )
 }

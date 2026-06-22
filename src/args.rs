@@ -6,6 +6,7 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 
 mod account;
 mod add;
+mod agents;
 mod auth;
 #[cfg(feature = "developer-tools")]
 mod build;
@@ -13,9 +14,11 @@ mod credentials;
 #[cfg(feature = "developer-tools")]
 mod hatch;
 mod init;
+mod mail;
 mod new;
 #[cfg(feature = "developer-tools")]
 mod package;
+mod packages;
 mod profile;
 mod run;
 pub(crate) mod runtime_common;
@@ -50,6 +53,9 @@ fn cli_command(bin_name: &'static str) -> Command {
         .subcommand(new::command())
         .subcommand(init::command())
         .subcommand(add::command())
+        .subcommand(packages::command())
+        .subcommand(agents::command())
+        .subcommand(mail::command())
         .subcommand(tools::command())
         .subcommand(profile::command())
         .subcommand(auth::command())
@@ -134,7 +140,10 @@ mod tests {
         }
         assert!(index_of("new") < index_of("init"));
         assert!(index_of("init") < index_of("add"));
-        assert!(index_of("add") < index_of("tools"));
+        assert!(index_of("add") < index_of("packages"));
+        assert!(index_of("packages") < index_of("agents"));
+        assert!(index_of("agents") < index_of("mail"));
+        assert!(index_of("mail") < index_of("tools"));
         assert!(index_of("tools") < index_of("profile"));
         assert!(index_of("profile") < index_of("auth"));
         assert!(index_of("auth") < index_of("credentials"));
@@ -162,6 +171,9 @@ mod tests {
         assert!(help.contains("\n  new"));
         assert!(help.contains("\n  init"));
         assert!(help.contains("\n  add"));
+        assert!(help.contains("\n  packages"));
+        assert!(help.contains("\n  agents"));
+        assert!(help.contains("\n  mail"));
         assert!(help.contains("\n  tools"));
         if developer_tools_enabled() {
             assert!(help.contains("\n  hatch"));
@@ -325,14 +337,13 @@ mod tests {
     }
 
     #[test]
-    fn account_mail_prefs_defaults_to_get_intent() {
+    fn mail_prefs_defaults_to_get_intent() {
         let matches = cli_command("cargo-ai")
-            .try_get_matches_from(["cargo-ai", "account", "mail", "prefs"])
+            .try_get_matches_from(["cargo-ai", "mail", "prefs"])
             .expect("prefs command should parse");
 
         let prefs_matches = matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("mail"))
+            .subcommand_matches("mail")
             .and_then(|m| m.subcommand_matches("prefs"))
             .expect("prefs subcommand should be available");
 
@@ -341,14 +352,13 @@ mod tests {
     }
 
     #[test]
-    fn account_mail_prefs_disable_parses() {
+    fn mail_prefs_disable_parses() {
         let matches = cli_command("cargo-ai")
-            .try_get_matches_from(["cargo-ai", "account", "mail", "prefs", "--disable-all"])
+            .try_get_matches_from(["cargo-ai", "mail", "prefs", "--disable-all"])
             .expect("disable-all form should parse");
 
         let prefs_matches = matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("mail"))
+            .subcommand_matches("mail")
             .and_then(|m| m.subcommand_matches("prefs"))
             .expect("prefs subcommand should be available");
 
@@ -357,14 +367,13 @@ mod tests {
     }
 
     #[test]
-    fn account_mail_prefs_enable_parses() {
+    fn mail_prefs_enable_parses() {
         let matches = cli_command("cargo-ai")
-            .try_get_matches_from(["cargo-ai", "account", "mail", "prefs", "--enable-all"])
+            .try_get_matches_from(["cargo-ai", "mail", "prefs", "--enable-all"])
             .expect("enable-all form should parse");
 
         let prefs_matches = matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("mail"))
+            .subcommand_matches("mail")
             .and_then(|m| m.subcommand_matches("prefs"))
             .expect("prefs subcommand should be available");
 
@@ -373,19 +382,21 @@ mod tests {
     }
 
     #[test]
-    fn account_mail_prefs_conflicting_flags_are_rejected() {
+    fn mail_prefs_conflicting_flags_are_rejected() {
         let err = cli_command("cargo-ai")
-            .try_get_matches_from([
-                "cargo-ai",
-                "account",
-                "mail",
-                "prefs",
-                "--disable-all",
-                "--enable-all",
-            ])
+            .try_get_matches_from(["cargo-ai", "mail", "prefs", "--disable-all", "--enable-all"])
             .expect_err("conflicting flags should fail parsing");
 
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn account_mail_old_path_is_removed() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "account", "mail", "prefs"])
+            .expect_err("account mail should be removed");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     }
 
     #[cfg(feature = "developer-tools")]
@@ -629,14 +640,13 @@ mod tests {
 
     #[cfg(feature = "developer-tools")]
     #[test]
-    fn account_agents_hatch_parses_agent_output_dir_check_force_keep_project_and_target_flags() {
+    fn hatch_from_account_parses_agent_output_dir_check_force_keep_project_and_target_flags() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "account",
-                "agents",
                 "hatch",
                 "weather_local",
+                "--from-account",
                 "--check",
                 "--definition-path",
                 "/team/ops",
@@ -649,13 +659,11 @@ mod tests {
                 "--force",
                 "--keep-project",
             ])
-            .expect("account agents hatch flags should parse");
+            .expect("account-backed hatch flags should parse");
 
         let hatch_matches = matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("agents"))
-            .and_then(|m| m.subcommand_matches("hatch"))
-            .expect("account agents hatch should be available");
+            .subcommand_matches("hatch")
+            .expect("hatch subcommand should be available");
 
         assert_eq!(
             hatch_matches.get_one::<String>("name").map(String::as_str),
@@ -690,14 +698,15 @@ mod tests {
 
     #[cfg(feature = "developer-tools")]
     #[test]
-    fn account_hatch_alias_parses_agent_output_dir_check_force_keep_project_and_target_flags() {
+    fn hatch_owner_handle_parses_account_source_selector() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "account",
                 "hatch",
                 "weather_local",
                 "--check",
+                "--owner-handle",
+                "alice",
                 "--definition-path",
                 "/team/ops",
                 "--agent",
@@ -709,12 +718,11 @@ mod tests {
                 "--force",
                 "--keep-project",
             ])
-            .expect("account hatch alias flags should parse");
+            .expect("account-backed hatch owner selector should parse");
 
         let hatch_matches = matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("hatch"))
-            .expect("account hatch alias should be available");
+            .subcommand_matches("hatch")
+            .expect("hatch subcommand should be available");
 
         assert_eq!(
             hatch_matches.get_one::<String>("name").map(String::as_str),
@@ -723,6 +731,12 @@ mod tests {
         assert_eq!(
             hatch_matches.get_one::<String>("agent").map(String::as_str),
             Some("weather_remote")
+        );
+        assert_eq!(
+            hatch_matches
+                .get_one::<String>("owner_handle")
+                .map(String::as_str),
+            Some("alice")
         );
         assert_eq!(
             hatch_matches
@@ -748,12 +762,10 @@ mod tests {
     }
 
     #[test]
-    fn account_agents_run_parses_runtime_flags_and_source_selectors() {
+    fn run_owner_handle_parses_runtime_flags_and_source_selectors() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "account",
-                "agents",
                 "run",
                 "weather_test",
                 "--owner-handle",
@@ -767,13 +779,11 @@ mod tests {
                 "--run-var",
                 "month=04",
             ])
-            .expect("account agents run should parse");
+            .expect("account-backed run should parse");
 
         let run_matches = matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("agents"))
-            .and_then(|m| m.subcommand_matches("run"))
-            .expect("account agents run should be available");
+            .subcommand_matches("run")
+            .expect("run subcommand should be available");
 
         assert_eq!(
             run_matches.get_one::<String>("name").map(String::as_str),
@@ -814,15 +824,26 @@ mod tests {
     }
 
     #[test]
-    fn account_run_alias_parses_runtime_flags_and_source_selectors() {
+    fn run_from_account_parses_runtime_flags_and_source_selectors() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "account",
                 "run",
                 "weather_test",
+                "--from-account",
                 "--owner-handle",
                 "alice",
+            ])
+            .expect_err("--from-account and --owner-handle should conflict");
+
+        assert_eq!(matches.kind(), ErrorKind::ArgumentConflict);
+
+        let matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "run",
+                "weather_test",
+                "--from-account",
                 "--definition-path",
                 "/team/ops",
                 "--server",
@@ -830,23 +851,18 @@ mod tests {
                 "--model",
                 "mistral",
             ])
-            .expect("account run alias should parse");
+            .expect("account-backed run from authenticated account should parse");
 
         let run_matches = matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("run"))
-            .expect("account run alias should be available");
+            .subcommand_matches("run")
+            .expect("run subcommand should be available");
 
         assert_eq!(
             run_matches.get_one::<String>("name").map(String::as_str),
             Some("weather_test")
         );
-        assert_eq!(
-            run_matches
-                .get_one::<String>("owner_handle")
-                .map(String::as_str),
-            Some("alice")
-        );
+        assert!(run_matches.get_flag("from_account"));
+        assert!(run_matches.get_one::<String>("owner_handle").is_none());
         assert_eq!(
             run_matches
                 .get_one::<String>("definition_path")
@@ -864,18 +880,16 @@ mod tests {
     }
 
     #[test]
-    fn account_agents_run_rejects_hatch_only_agent_flag() {
+    fn run_rejects_hatch_only_agent_flag() {
         let err = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "account",
-                "agents",
                 "run",
                 "weather_test",
                 "--agent",
                 "weather_remote",
             ])
-            .expect_err("--agent should be rejected for account agents run");
+            .expect_err("--agent should be rejected for run");
 
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
     }
@@ -926,8 +940,32 @@ mod tests {
 
     #[cfg(feature = "developer-tools")]
     #[test]
-    fn account_agents_hatch_supports_short_force_flag() {
+    fn hatch_from_account_supports_short_force_flag() {
         let matches = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "hatch", "weather_test", "--from-account", "-f"])
+            .expect("account-backed hatch -f should parse");
+
+        let hatch_matches = matches
+            .subcommand_matches("hatch")
+            .expect("hatch should be available");
+
+        assert!(hatch_matches.get_flag("force"));
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn account_hatch_old_path_is_removed() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "account", "hatch", "weather_test", "-f"])
+            .expect_err("account hatch should be removed");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn account_agents_hatch_old_path_is_removed() {
+        let err = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
                 "account",
@@ -936,73 +974,86 @@ mod tests {
                 "weather_test",
                 "-f",
             ])
-            .expect("account agents hatch -f should parse");
+            .expect_err("account agents hatch should be removed");
 
-        let hatch_matches = matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("agents"))
-            .and_then(|m| m.subcommand_matches("hatch"))
-            .expect("account agents hatch should be available");
-
-        assert!(hatch_matches.get_flag("force"));
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     }
 
     #[cfg(feature = "developer-tools")]
     #[test]
-    fn account_hatch_alias_supports_short_force_flag() {
-        let matches = cli_command("cargo-ai")
-            .try_get_matches_from(["cargo-ai", "account", "hatch", "weather_test", "-f"])
-            .expect("account hatch alias -f should parse");
+    fn agents_hatch_is_not_introduced() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "agents", "hatch", "weather_test", "-f"])
+            .expect_err("agents hatch should not exist");
 
-        let hatch_matches = matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("hatch"))
-            .expect("account hatch alias should be available");
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+    }
 
-        assert!(hatch_matches.get_flag("force"));
+    #[test]
+    fn account_run_old_path_is_removed() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "account", "run", "weather_test"])
+            .expect_err("account run should be removed");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn account_agents_run_old_path_is_removed() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "account", "agents", "run", "weather_test"])
+            .expect_err("account agents run should be removed");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn agents_run_is_not_introduced() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "agents", "run", "weather_test"])
+            .expect_err("agents run should not exist");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     }
 
     #[cfg(feature = "developer-tools")]
     #[test]
-    fn account_agents_hatch_rejects_removed_name_flag() {
+    fn hatch_rejects_removed_name_flag_for_account_source() {
         let err = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "account",
-                "agents",
                 "hatch",
+                "--from-account",
                 "--name",
                 "weather_test",
             ])
-            .expect_err("--name should be rejected for account agents hatch");
+            .expect_err("--name should be rejected for account-backed hatch");
 
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
     }
 
     #[cfg(feature = "developer-tools")]
     #[test]
-    fn account_agents_hatch_rejects_local_name_flag() {
+    fn hatch_rejects_local_name_flag_for_account_source() {
         let err = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "account",
-                "agents",
                 "hatch",
                 "weather_test",
+                "--from-account",
                 "--local-name",
                 "weather_test_v2",
             ])
-            .expect_err("--local-name should be rejected for account agents hatch");
+            .expect_err("--local-name should be rejected for account-backed hatch");
 
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
     }
 
     #[test]
-    fn account_agents_definition_path_parses_across_commands() {
+    fn agents_definition_path_parses_across_management_commands() {
         let pull_matches = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "account",
                 "agents",
                 "pull",
                 "weather_test",
@@ -1010,10 +1061,9 @@ mod tests {
                 "/team/ops",
                 "--stdout",
             ])
-            .expect("account agents pull --definition-path should parse");
+            .expect("agents pull --definition-path should parse");
         let pull = pull_matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("agents"))
+            .subcommand_matches("agents")
             .and_then(|m| m.subcommand_matches("pull"))
             .expect("pull subcommand should be available");
         assert_eq!(
@@ -1022,13 +1072,12 @@ mod tests {
             Some("/team/ops")
         );
 
-        let run_matches = cli_command("cargo-ai")
+        let matches = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "account",
-                "agents",
                 "run",
                 "weather_test",
+                "--from-account",
                 "--definition-path",
                 "/team/ops",
                 "--server",
@@ -1036,11 +1085,9 @@ mod tests {
                 "--model",
                 "mistral",
             ])
-            .expect("account agents run --definition-path should parse");
-        let run = run_matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("agents"))
-            .and_then(|m| m.subcommand_matches("run"))
+            .expect("run --definition-path should parse for account-backed execution");
+        let run = matches
+            .subcommand_matches("run")
             .expect("run subcommand should be available");
         assert_eq!(
             run.get_one::<String>("definition_path").map(String::as_str),
@@ -1052,18 +1099,15 @@ mod tests {
             let hatch_matches = cli_command("cargo-ai")
                 .try_get_matches_from([
                     "cargo-ai",
-                    "account",
-                    "agents",
                     "hatch",
                     "weather_test",
+                    "--from-account",
                     "--definition-path",
                     "/team/ops",
                 ])
-                .expect("account agents hatch --definition-path should parse");
+                .expect("hatch --definition-path should parse for account-backed execution");
             let hatch = hatch_matches
-                .subcommand_matches("account")
-                .and_then(|m| m.subcommand_matches("agents"))
-                .and_then(|m| m.subcommand_matches("hatch"))
+                .subcommand_matches("hatch")
                 .expect("hatch subcommand should be available");
             assert_eq!(
                 hatch
@@ -1076,7 +1120,6 @@ mod tests {
         let push_matches = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "account",
                 "agents",
                 "push",
                 "--name",
@@ -1086,10 +1129,9 @@ mod tests {
                 "--definition-path",
                 "/team/ops",
             ])
-            .expect("account agents push --definition-path should parse");
+            .expect("agents push --definition-path should parse");
         let push = push_matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("agents"))
+            .subcommand_matches("agents")
             .and_then(|m| m.subcommand_matches("push"))
             .expect("push subcommand should be available");
         assert_eq!(
@@ -1101,7 +1143,6 @@ mod tests {
         let visibility_matches = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "account",
                 "agents",
                 "visibility",
                 "--name",
@@ -1110,10 +1151,9 @@ mod tests {
                 "--definition-path",
                 "/team/ops",
             ])
-            .expect("account agents visibility --definition-path should parse");
+            .expect("agents visibility --definition-path should parse");
         let visibility = visibility_matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("agents"))
+            .subcommand_matches("agents")
             .and_then(|m| m.subcommand_matches("visibility"))
             .expect("visibility subcommand should be available");
         assert_eq!(
@@ -1126,7 +1166,6 @@ mod tests {
         let archive_matches = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "account",
                 "agents",
                 "archive",
                 "--name",
@@ -1135,10 +1174,9 @@ mod tests {
                 "--definition-path",
                 "/team/ops",
             ])
-            .expect("account agents archive --definition-path should parse");
+            .expect("agents archive --definition-path should parse");
         let archive = archive_matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("agents"))
+            .subcommand_matches("agents")
             .and_then(|m| m.subcommand_matches("archive"))
             .expect("archive subcommand should be available");
         assert_eq!(
@@ -1151,42 +1189,39 @@ mod tests {
 
     #[cfg(feature = "developer-tools")]
     #[test]
-    fn account_agents_hatch_rejects_old_path_flag() {
+    fn hatch_rejects_old_path_flag_for_account_source() {
         let err = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "account",
-                "agents",
                 "hatch",
                 "weather_test",
+                "--from-account",
                 "--path",
                 "/team/ops",
             ])
-            .expect_err("--path should be rejected for account agents hatch");
+            .expect_err("--path should be rejected for account-backed hatch");
 
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
     }
 
     #[test]
-    fn account_projects_list_parses_owner_handle_and_limit() {
+    fn packages_list_parses_owner_handle_and_limit() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "account",
-                "projects",
+                "packages",
                 "list",
                 "--owner-handle",
                 "alice",
                 "--limit",
                 "7",
             ])
-            .expect("account projects list should parse");
+            .expect("packages list should parse");
 
         let projects = matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("projects"))
+            .subcommand_matches("packages")
             .and_then(|m| m.subcommand_matches("list"))
-            .expect("account projects list should be available");
+            .expect("packages list should be available");
 
         assert_eq!(
             projects
@@ -1200,16 +1235,15 @@ mod tests {
 
     #[cfg(feature = "developer-tools")]
     #[test]
-    fn account_projects_publish_parses_profile() {
+    fn packages_publish_parses_profile() {
         let matches = cli_command("cargo-ai")
-            .try_get_matches_from(["cargo-ai", "account", "projects", "publish", "release"])
-            .expect("account projects publish should parse");
+            .try_get_matches_from(["cargo-ai", "packages", "publish", "release"])
+            .expect("packages publish should parse");
 
         let publish = matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("projects"))
+            .subcommand_matches("packages")
             .and_then(|m| m.subcommand_matches("publish"))
-            .expect("account projects publish should be available");
+            .expect("packages publish should be available");
 
         assert_eq!(
             publish.get_one::<String>("profile").map(String::as_str),
@@ -1218,12 +1252,11 @@ mod tests {
     }
 
     #[test]
-    fn account_projects_pull_parses_name_owner_handle_and_output_dir() {
+    fn packages_pull_parses_name_owner_handle_and_output_dir() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "account",
-                "projects",
+                "packages",
                 "pull",
                 "ai_integrations",
                 "--owner-handle",
@@ -1234,13 +1267,12 @@ mod tests {
                 "./restored",
                 "--force",
             ])
-            .expect("account projects pull should parse");
+            .expect("packages pull should parse");
 
         let pull = matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("projects"))
+            .subcommand_matches("packages")
             .and_then(|m| m.subcommand_matches("pull"))
-            .expect("account projects pull should be available");
+            .expect("packages pull should be available");
 
         assert_eq!(
             pull.get_one::<String>("name_positional")
@@ -1260,6 +1292,15 @@ mod tests {
             Some("./restored")
         );
         assert!(pull.get_flag("force"));
+    }
+
+    #[test]
+    fn account_projects_old_path_is_removed() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "account", "projects", "list"])
+            .expect_err("account projects should be removed");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     }
 
     #[test]
@@ -1522,47 +1563,40 @@ mod tests {
 
     #[cfg(not(feature = "developer-tools"))]
     #[test]
-    fn runtime_only_build_accepts_account_run_alias() {
-        let matches = cli_command("cargo-ai")
-            .try_get_matches_from([
-                "cargo-ai",
-                "account",
-                "run",
-                "weather_test",
-                "--server",
-                "ollama",
-                "--model",
-                "mistral",
-            ])
-            .expect("runtime-only build should accept account run alias");
+    fn runtime_only_build_rejects_account_run_alias() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "account", "run", "weather_test"])
+            .expect_err("runtime-only build should reject account run alias");
 
-        assert!(matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("run"))
-            .is_some());
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     }
 
     #[cfg(not(feature = "developer-tools"))]
     #[test]
-    fn runtime_only_build_accepts_account_agents_run() {
+    fn runtime_only_build_rejects_account_agents_run() {
+        let err = cli_command("cargo-ai")
+            .try_get_matches_from(["cargo-ai", "account", "agents", "run", "weather_test"])
+            .expect_err("runtime-only build should reject account agents run");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[cfg(not(feature = "developer-tools"))]
+    #[test]
+    fn runtime_only_build_accepts_top_level_account_run() {
         let matches = cli_command("cargo-ai")
             .try_get_matches_from([
                 "cargo-ai",
-                "account",
-                "agents",
                 "run",
                 "weather_test",
+                "--from-account",
                 "--server",
                 "ollama",
                 "--model",
                 "mistral",
             ])
-            .expect("runtime-only build should accept account agents run");
+            .expect("runtime-only build should accept top-level account-backed run");
 
-        assert!(matches
-            .subcommand_matches("account")
-            .and_then(|m| m.subcommand_matches("agents"))
-            .and_then(|m| m.subcommand_matches("run"))
-            .is_some());
+        assert!(matches.subcommand_matches("run").is_some());
     }
 }

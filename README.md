@@ -147,9 +147,9 @@ cargo ai account handle --set your-handle
 Once registered, you can push an agent definition to your account repository and then either run it directly through Cargo AI or hatch it locally:
 
 ```bash
-cargo ai account agents push adder_test.json --name adder_test
-cargo ai account run adder_test --profile openai-account
-cargo ai account agents hatch adder_test
+cargo ai agents push adder_test.json --name adder_test
+cargo ai run adder_test --from-account --profile openai-account
+cargo ai hatch adder_test --from-account
 ```
 
 ## The Core Mental Model
@@ -1099,42 +1099,42 @@ Examples:
 
 ```bash
 # Run your own hosted definition directly
-cargo ai account run weather_test --profile my_profile
+cargo ai run weather_test --from-account --profile my_profile
 
 # Hatch your own hosted definition
-cargo ai account hatch weather_test
+cargo ai hatch weather_test --from-account
 
 # Run a public definition from another handle
-cargo ai account agents run weather_test --owner-handle alice --profile my_profile
+cargo ai run weather_test --owner-handle alice --profile my_profile
 
 # Validate scaffold and compile path without exporting a binary
-cargo ai account hatch weather_test --check
+cargo ai hatch weather_test --from-account --check
 
 # Hatch a public definition from another handle
-cargo ai account agents hatch weather_test --owner-handle alice
+cargo ai hatch weather_test --owner-handle alice
 ```
 
-Project packages use a separate account surface:
+Published packages use a separate account surface:
 
 ```bash
-# List your published projects
-cargo ai account projects list
+# List your published packages
+cargo ai packages list
 
-# List another owner's public projects
-cargo ai account projects list --owner-handle alice
+# List another owner's public packages
+cargo ai packages list --owner-handle alice
 
 # Publish the current project package (developer-tools build)
-cargo ai account projects publish
+cargo ai packages publish
 
 # Pull the latest published package from another owner
-cargo ai account projects pull ai_integrations --owner-handle alice
+cargo ai packages pull ai_integrations --owner-handle alice
 ```
 
-Account-project rules are intentionally different from account agents:
+Package rules are intentionally different from account agents:
 
 - `publish` packages the current project first, then uploads the resulting package archive
 - published project identity comes from `.cargo-ai/project.toml` `[project].name` and `[project].version`
-- `list` with `--owner-handle <handle>` only returns that owner's public projects
+- `list` with `--owner-handle <handle>` only returns that owner's public packages
 - `pull` defaults to the latest published version unless you pass `--version <semver>`
 - pulled packages restore a project-shaped folder locally; they do not expose agent-style definition-path identities in the backend
 - after `pull`, `.cargo-ai/project.toml` remains the working project config and the pulled package receipt is preserved under `.cargo-ai/origin/cargo-ai-package.toml`

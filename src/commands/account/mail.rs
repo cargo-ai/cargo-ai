@@ -1,4 +1,4 @@
-//! Runtime behavior for `cargo ai account mail`.
+//! Runtime behavior for account mail.
 use clap::ArgMatches;
 
 use crate::infra_api;
@@ -17,7 +17,7 @@ pub async fn run(mail_m: &ArgMatches) -> bool {
         run_prefs(prefs_m).await
     } else {
         eprintln!(
-            "No mail subcommand found. Try 'cargo ai account mail test' or 'cargo ai account mail prefs [--disable-all|--enable-all]'."
+            "No mail subcommand found. Try 'cargo ai mail test' or 'cargo ai mail prefs [--disable-all|--enable-all]'."
         );
         false
     }

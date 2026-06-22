@@ -1,10 +1,10 @@
-//! CLI parser definitions for `cargo ai account projects`.
+//! CLI parser definitions for `cargo ai packages`.
 use clap::{Arg, ArgGroup, Command};
 
 #[cfg(feature = "developer-tools")]
 fn publish_command() -> Command {
     Command::new("publish")
-        .about("Package the current project and publish it to your account")
+        .about("Package the current project and publish it as an account package")
         .arg(
             Arg::new("profile")
                 .help("Build/package profile to publish (defaults to 'default')")
@@ -19,15 +19,15 @@ fn publish_command() -> Command {
 }
 
 pub fn command() -> Command {
-    let command = Command::new("projects")
-        .about("Manage account projects and published packages")
+    let command = Command::new("packages")
+        .about("Manage published account packages")
         .subcommand(
             Command::new("list")
-                .about("List projects")
+                .about("List packages")
                 .arg(
                     Arg::new("owner_handle")
                         .long("owner-handle")
-                        .help("List public projects for this owner handle (omit to list your projects)")
+                        .help("List public packages for this owner handle (omit to list your packages)")
                         .required(false)
                         .value_name("HANDLE")
                         .num_args(1),
@@ -35,13 +35,13 @@ pub fn command() -> Command {
                 .arg(
                     Arg::new("include_archived")
                         .long("include-archived")
-                        .help("Include archived projects (applies to listing your own projects)")
+                        .help("Include archived packages (applies to listing your own packages)")
                         .action(clap::ArgAction::SetTrue),
                 )
                 .arg(
                     Arg::new("limit")
                         .long("limit")
-                        .help("Maximum number of projects to display (default: 20)")
+                        .help("Maximum number of packages to display (default: 20)")
                         .required(false)
                         .value_name("N")
                         .num_args(1)
@@ -51,14 +51,14 @@ pub fn command() -> Command {
                 .arg(
                     Arg::new("all")
                         .long("all")
-                        .help("Display all returned projects")
+                        .help("Display all returned packages")
                         .action(clap::ArgAction::SetTrue)
                         .conflicts_with("limit"),
                 ),
         )
         .subcommand(
             Command::new("pull")
-                .about("Fetch a published project package")
+                .about("Fetch a published package")
                 .group(
                     ArgGroup::new("pull_name")
                         .args(["name", "name_positional"])
@@ -67,14 +67,14 @@ pub fn command() -> Command {
                 .arg(
                     Arg::new("name")
                         .long("name")
-                        .help("Project name (explicit alias for positional NAME)")
+                        .help("Package name (explicit alias for positional NAME)")
                         .required(false)
                         .value_name("NAME")
                         .num_args(1),
                 )
                 .arg(
                     Arg::new("name_positional")
-                        .help("Project name")
+                        .help("Package name")
                         .required(false)
                         .value_name("NAME")
                         .num_args(1)
@@ -118,7 +118,7 @@ pub fn command() -> Command {
         )
         .subcommand(
             Command::new("visibility")
-                .about("Set public visibility for a project")
+                .about("Set public visibility for a package")
                 .group(
                     ArgGroup::new("visibility_state")
                         .args(["public", "private"])
@@ -127,7 +127,7 @@ pub fn command() -> Command {
                 .arg(
                     Arg::new("name")
                         .long("name")
-                        .help("Project name")
+                        .help("Package name")
                         .required(true)
                         .value_name("NAME")
                         .num_args(1),
@@ -135,7 +135,7 @@ pub fn command() -> Command {
                 .arg(
                     Arg::new("public")
                         .long("public")
-                        .help("Set project visibility to public")
+                        .help("Set package visibility to public")
                         .required(false)
                         .conflicts_with("private")
                         .action(clap::ArgAction::SetTrue),
@@ -143,7 +143,7 @@ pub fn command() -> Command {
                 .arg(
                     Arg::new("private")
                         .long("private")
-                        .help("Set project visibility to private")
+                        .help("Set package visibility to private")
                         .required(false)
                         .conflicts_with("public")
                         .action(clap::ArgAction::SetTrue),
@@ -151,7 +151,7 @@ pub fn command() -> Command {
         )
         .subcommand(
             Command::new("archive")
-                .about("Archive or unarchive a project")
+                .about("Archive or unarchive a package")
                 .group(
                     ArgGroup::new("archive_state")
                         .args(["archive", "unarchive"])
@@ -160,7 +160,7 @@ pub fn command() -> Command {
                 .arg(
                     Arg::new("name")
                         .long("name")
-                        .help("Project name")
+                        .help("Package name")
                         .required(true)
                         .value_name("NAME")
                         .num_args(1),
@@ -168,7 +168,7 @@ pub fn command() -> Command {
                 .arg(
                     Arg::new("archive")
                         .long("archive")
-                        .help("Archive the project")
+                        .help("Archive the package")
                         .required(false)
                         .conflicts_with("unarchive")
                         .action(clap::ArgAction::SetTrue),
@@ -176,7 +176,7 @@ pub fn command() -> Command {
                 .arg(
                     Arg::new("unarchive")
                         .long("unarchive")
-                        .help("Unarchive the project")
+                        .help("Unarchive the package")
                         .required(false)
                         .conflicts_with("archive")
                         .action(clap::ArgAction::SetTrue),
