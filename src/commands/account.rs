@@ -7,7 +7,7 @@ use clap::ArgMatches;
 mod agents;
 mod confirm;
 mod handle;
-mod helpers;
+pub(crate) mod helpers;
 mod mail;
 mod projects;
 mod register;

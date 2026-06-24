@@ -1,7 +1,10 @@
 //! Local machine package install and lookup support.
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use clap::ArgMatches;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{btree_map::Entry, BTreeMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,6 +14,8 @@ use uuid::Uuid;
 
 const PACKAGE_MANIFEST_FILE_NAME: &str = "cargo-ai-package.toml";
 const INSTALL_MANIFEST_FILE_NAME: &str = "install.toml";
+const INSTALLED_PACKAGE_DIR_NAME: &str = "package";
+const INSTALLED_PACKAGE_DATA_DIR_NAME: &str = "data";
 
 #[cfg(test)]
 thread_local! {
@@ -33,6 +38,8 @@ struct PackageManifestDocument {
     tools: Vec<String>,
     #[serde(default)]
     assets: Vec<String>,
+    #[serde(default)]
+    permissions: PackagePermissionProfileDocument,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -45,6 +52,8 @@ pub(crate) struct InstalledPackageDocument {
     content_sha256: String,
     source: InstalledPackageSourceDocument,
     installed_at: String,
+    #[serde(default)]
+    permissions: PackagePermissionProfileDocument,
     entrypoints: Vec<InstalledPackageEntrypointDocument>,
 }
 
@@ -53,6 +62,18 @@ struct InstalledPackageSourceDocument {
     kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    requested_owner_handle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hosted_source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hosted_version_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_handle: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -61,6 +82,33 @@ pub(crate) struct InstalledPackageEntrypointDocument {
     path: String,
     runnable: bool,
     hatchable: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct PackagePermissionProfileDocument {
+    pub(crate) package_payload: String,
+    pub(crate) package_data: String,
+    pub(crate) project_workspace: String,
+    pub(crate) subprocess: String,
+}
+
+impl Default for PackagePermissionProfileDocument {
+    fn default() -> Self {
+        Self {
+            package_payload: "read".to_string(),
+            package_data: "read_write".to_string(),
+            project_workspace: "explicit_grant_required".to_string(),
+            subprocess: "blocked_without_explicit_grant".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct InstalledPackageRuntimeContext {
+    pub(crate) alias: String,
+    pub(crate) source_kind: String,
+    pub(crate) package_data_root: PathBuf,
+    pub(crate) permissions: PackagePermissionProfileDocument,
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +147,9 @@ pub(crate) struct ResolvedPackageEntrypoint {
     pub(crate) package_name: String,
     pub(crate) package_version: String,
     pub(crate) content_sha256: String,
+    pub(crate) source_kind: String,
+    pub(crate) package_data_root: PathBuf,
+    pub(crate) permissions: PackagePermissionProfileDocument,
 }
 
 pub async fn run(sub_m: &ArgMatches) -> bool {
@@ -120,6 +171,19 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 
 pub(crate) fn account_handle_from_list_matches(list_m: &ArgMatches) -> Option<Option<String>> {
     list_m.get_one::<String>("account").map(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+pub(crate) fn account_handle_from_install_matches(
+    install_m: &ArgMatches,
+) -> Option<Option<String>> {
+    install_m.get_one::<String>("account").map(|value| {
         let trimmed = value.trim();
         if trimmed.is_empty() {
             None
@@ -156,12 +220,22 @@ fn run_list(list_m: &ArgMatches) -> bool {
 
             println!("Installed packages:");
             for package in packages {
+                let provenance = match package.source.kind.as_str() {
+                    "hosted" => package
+                        .source
+                        .owner_handle
+                        .as_deref()
+                        .map(|handle| format!("hosted {handle}/{}", package.package_name))
+                        .unwrap_or_else(|| "hosted".to_string()),
+                    _ => package.source.kind.clone(),
+                };
                 println!(
-                    "- {}  {} {}  {}",
+                    "- {}  {} {}  {}  {}",
                     package.alias,
                     package.package_name,
                     package.package_version,
-                    entrypoint_summary(&package.entrypoints)
+                    entrypoint_summary(&package.entrypoints),
+                    provenance
                 );
             }
             true
@@ -199,6 +273,100 @@ fn run_install(install_m: &ArgMatches) -> bool {
     }
 }
 
+pub(crate) async fn run_hosted_install(install_m: &ArgMatches) -> bool {
+    let Some(package_name) = install_m.get_one::<String>("source").map(String::as_str) else {
+        eprintln!("x Hosted install requires a package name before --account.");
+        return false;
+    };
+    let package_name = package_name.trim();
+    if package_name.is_empty() {
+        eprintln!("x Hosted install requires a non-empty package name.");
+        return false;
+    }
+    let Some(alias) = install_m.get_one::<String>("alias").map(String::as_str) else {
+        eprintln!(
+            "x Hosted install requires --as <alias> so the local runtime reference is explicit."
+        );
+        return false;
+    };
+    let alias = alias.trim();
+    if let Err(error) = validate_package_alias(alias) {
+        eprintln!("x {error}");
+        return false;
+    }
+
+    let owner_handle = account_handle_from_install_matches(install_m).flatten();
+    let version = install_m
+        .get_one::<String>("version")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(version) = version.as_deref() {
+        if let Err(error) = Version::parse(version) {
+            eprintln!("x Hosted package version '{version}' is not valid semver: {error}");
+            return false;
+        }
+    }
+
+    match install_hosted_package(
+        package_name,
+        owner_handle.as_deref(),
+        version.as_deref(),
+        alias,
+        install_m.get_flag("replace"),
+        install_m.get_flag("downgrade"),
+    )
+    .await
+    {
+        Ok(InstallAction::Noop) => true,
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!("x {error}");
+            false
+        }
+    }
+}
+
+pub(crate) async fn run_hosted_update(update_m: &ArgMatches) -> bool {
+    let Some(alias) = update_m.get_one::<String>("alias").map(String::as_str) else {
+        eprintln!("x Missing package alias.");
+        return false;
+    };
+
+    match update_hosted_package(alias).await {
+        Ok(InstallAction::Noop) => true,
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!("x {error}");
+            false
+        }
+    }
+}
+
+pub(crate) async fn run_hosted_rollback(rollback_m: &ArgMatches) -> bool {
+    let Some(alias) = rollback_m.get_one::<String>("alias").map(String::as_str) else {
+        eprintln!("x Missing package alias.");
+        return false;
+    };
+    let Some(version) = rollback_m.get_one::<String>("to").map(String::as_str) else {
+        eprintln!("x Missing rollback target. Use --to <version>.");
+        return false;
+    };
+    let version = version.trim();
+    if let Err(error) = Version::parse(version) {
+        eprintln!("x Hosted package rollback version '{version}' is not valid semver: {error}");
+        return false;
+    }
+
+    match rollback_hosted_package(alias, version).await {
+        Ok(InstallAction::Noop) => true,
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!("x {error}");
+            false
+        }
+    }
+}
+
 fn run_inspect(inspect_m: &ArgMatches) -> bool {
     let Some(alias) = inspect_m.get_one::<String>("alias").map(String::as_str) else {
         eprintln!("x Missing package alias.");
@@ -217,6 +385,39 @@ fn run_inspect(inspect_m: &ArgMatches) -> bool {
                 Some(path) => println!("Source:    {} ({})", package.source.kind, path),
                 None => println!("Source:    {}", package.source.kind),
             }
+            if package.source.kind == "hosted" {
+                println!("Hosted:");
+                println!(
+                    "  Source ID:  {}",
+                    package
+                        .source
+                        .hosted_source_id
+                        .as_deref()
+                        .unwrap_or("unknown")
+                );
+                println!(
+                    "  Version ID: {}",
+                    package
+                        .source
+                        .hosted_version_id
+                        .as_deref()
+                        .unwrap_or("unknown")
+                );
+                if let Some(owner_handle) = package.source.owner_handle.as_deref() {
+                    println!("  Owner:      {}", owner_handle);
+                }
+                if let Some(owner_account_id) = package.source.owner_account_id.as_deref() {
+                    println!("  Account ID: {}", owner_account_id);
+                }
+            }
+            println!("Permissions:");
+            for line in permission_profile_lines(&package.permissions) {
+                println!("  {line}");
+            }
+            println!(
+                "Data root: {}",
+                installed_package_data_root(package.alias.as_str()).display()
+            );
             println!("Entrypoints:");
             for entrypoint in package.entrypoints {
                 let mut capabilities = Vec::new();
@@ -265,70 +466,436 @@ fn install_local_package(request: &InstallRequest) -> Result<InstallAction, Stri
         Some(source) => prepare_explicit_source(source)?,
         None => prepare_current_project(request.profile.as_str())?,
     };
+    let materialized = match materialize_prepared_package(
+        &prepared,
+        request.alias.as_deref(),
+        request.replace,
+        request.downgrade,
+    ) {
+        Ok(materialized) => materialized,
+        Err(error) => {
+            cleanup_prepared_package(&prepared);
+            return Err(error);
+        }
+    };
+    cleanup_prepared_package(&prepared);
+
+    if matches!(materialized.action, InstallAction::Noop) {
+        println!(
+            "✓ Package `{}` is already installed at version {}.",
+            materialized.alias, materialized.package_version
+        );
+        return Ok(materialized.action);
+    }
+
+    match materialized.action {
+        InstallAction::New => println!(
+            "✓ Package `{}` installed as `{}` at version {}.",
+            materialized.package_name, materialized.alias, materialized.package_version
+        ),
+        InstallAction::Upgrade => println!(
+            "✓ Package `{}` upgraded as `{}` to version {}.",
+            materialized.package_name, materialized.alias, materialized.package_version
+        ),
+        InstallAction::Replace => println!(
+            "✓ Package alias `{}` replaced with `{}` version {}.",
+            materialized.alias, materialized.package_name, materialized.package_version
+        ),
+        InstallAction::Downgrade => println!(
+            "✓ Package `{}` downgraded as `{}` to version {}.",
+            materialized.package_name, materialized.alias, materialized.package_version
+        ),
+        InstallAction::Noop => {}
+    }
+    Ok(materialized.action)
+}
+
+#[derive(Clone, Debug)]
+struct MaterializedPackageInstall {
+    action: InstallAction,
+    alias: String,
+    package_name: String,
+    package_version: String,
+    permissions: PackagePermissionProfileDocument,
+}
+
+fn materialize_prepared_package(
+    prepared: &PreparedPackage,
+    alias_override: Option<&str>,
+    replace: bool,
+    downgrade: bool,
+) -> Result<MaterializedPackageInstall, String> {
     let package_name = required_package_name(&prepared.manifest)?;
     let package_version = required_package_version(&prepared.manifest)?;
-    let alias = request
-        .alias
-        .as_deref()
+    validate_permission_profile(&prepared.manifest.permissions)?;
+    let alias = alias_override
         .unwrap_or(package_name.as_str())
         .trim()
         .to_string();
     validate_package_alias(alias.as_str())?;
     let entrypoints = build_entrypoints(&prepared.manifest, &prepared.package_root)?;
     let existing = load_installed_package(alias.as_str()).ok();
+    ensure_source_identity_replacement_is_explicit(
+        existing.as_ref(),
+        &prepared.source,
+        package_name.as_str(),
+        replace,
+    )?;
+    if prepared.source.kind == "hosted"
+        || existing
+            .as_ref()
+            .map(|package| package.source.kind == "hosted")
+            .unwrap_or(false)
+    {
+        ensure_permission_expansion_is_explicit(
+            existing.as_ref(),
+            &prepared.manifest.permissions,
+            package_name.as_str(),
+            package_version.as_str(),
+        )?;
+    }
     let action = determine_install_action(
         existing.as_ref(),
         package_name.as_str(),
         package_version.as_str(),
         prepared.content_sha256.as_str(),
-        request.replace,
-        request.downgrade,
+        replace,
+        downgrade,
     )?;
 
-    if matches!(action, InstallAction::Noop) {
-        println!(
-            "✓ Package `{}` is already installed at version {}.",
-            alias, package_version
-        );
-        cleanup_prepared_package(&prepared);
-        return Ok(action);
+    if !matches!(action, InstallAction::Noop) {
+        let document = InstalledPackageDocument {
+            format_version: 1,
+            alias: alias.clone(),
+            package_name: package_name.clone(),
+            package_version: package_version.clone(),
+            profile: prepared.manifest.profile.clone(),
+            content_sha256: prepared.content_sha256.clone(),
+            source: prepared.source.clone(),
+            installed_at: now_rfc3339()?,
+            permissions: prepared.manifest.permissions.clone(),
+            entrypoints,
+        };
+
+        write_staged_install(alias.as_str(), &prepared.package_root, &document)?;
     }
 
-    let document = InstalledPackageDocument {
-        format_version: 1,
-        alias: alias.clone(),
-        package_name: package_name.clone(),
-        package_version: package_version.clone(),
-        profile: prepared.manifest.profile.clone(),
-        content_sha256: prepared.content_sha256.clone(),
-        source: prepared.source.clone(),
-        installed_at: now_rfc3339()?,
-        entrypoints,
-    };
+    Ok(MaterializedPackageInstall {
+        action,
+        alias,
+        package_name,
+        package_version,
+        permissions: prepared.manifest.permissions.clone(),
+    })
+}
 
-    write_staged_install(alias.as_str(), &prepared.package_root, &document)?;
+async fn install_hosted_package(
+    package_name: &str,
+    owner_handle: Option<&str>,
+    version: Option<&str>,
+    alias: &str,
+    replace: bool,
+    downgrade: bool,
+) -> Result<InstallAction, String> {
+    let response = pull_hosted_package(package_name, owner_handle, version).await?;
+    let prepared = prepare_hosted_response(&response, owner_handle)?;
+    let materialized =
+        match materialize_prepared_package(&prepared, Some(alias), replace, downgrade) {
+            Ok(materialized) => materialized,
+            Err(error) => {
+                cleanup_prepared_package(&prepared);
+                return Err(error);
+            }
+        };
     cleanup_prepared_package(&prepared);
 
-    match action {
-        InstallAction::New => println!(
-            "✓ Package `{}` installed as `{}` at version {}.",
-            package_name, alias, package_version
-        ),
-        InstallAction::Upgrade => println!(
-            "✓ Package `{}` upgraded as `{}` to version {}.",
-            package_name, alias, package_version
-        ),
-        InstallAction::Replace => println!(
-            "✓ Package alias `{}` replaced with `{}` version {}.",
-            alias, package_name, package_version
-        ),
-        InstallAction::Downgrade => println!(
-            "✓ Package `{}` downgraded as `{}` to version {}.",
-            package_name, alias, package_version
-        ),
-        InstallAction::Noop => {}
+    if matches!(materialized.action, InstallAction::Noop) {
+        println!(
+            "✓ Hosted package `{}` is already installed as `{}` at version {}.",
+            materialized.package_name, materialized.alias, materialized.package_version
+        );
+        return Ok(materialized.action);
     }
-    Ok(action)
+
+    print_permission_summary(&materialized.permissions);
+    println!(
+        "✓ Hosted package `{}` installed as `{}` at version {}.",
+        materialized.package_name, materialized.alias, materialized.package_version
+    );
+    Ok(materialized.action)
+}
+
+async fn update_hosted_package(alias: &str) -> Result<InstallAction, String> {
+    validate_package_alias(alias)?;
+    let existing = load_installed_package(alias)?;
+    ensure_installed_source_is_hosted(&existing)?;
+    let installed_version = Version::parse(existing.package_version.as_str()).map_err(|error| {
+        format!(
+            "Installed package alias `{}` has invalid version '{}': {}",
+            existing.alias, existing.package_version, error
+        )
+    })?;
+
+    let response = pull_hosted_package(
+        existing.package_name.as_str(),
+        hosted_owner_handle_for_refresh(&existing).as_deref(),
+        None,
+    )
+    .await?;
+    let prepared = prepare_hosted_response(
+        &response,
+        hosted_owner_handle_for_refresh(&existing).as_deref(),
+    )?;
+    ensure_hosted_source_matches_existing(&existing, &prepared.source)?;
+    let resolved_version = required_package_version(&prepared.manifest)?;
+    let resolved = Version::parse(resolved_version.as_str()).map_err(|error| {
+        format!(
+            "Hosted package version '{}' is not valid semver: {}",
+            resolved_version, error
+        )
+    })?;
+
+    if resolved <= installed_version {
+        cleanup_prepared_package(&prepared);
+        println!(
+            "✓ Hosted package `{}` is already up to date at version {}.",
+            existing.alias, existing.package_version
+        );
+        return Ok(InstallAction::Noop);
+    }
+
+    let materialized = match materialize_prepared_package(&prepared, Some(alias), false, false) {
+        Ok(materialized) => materialized,
+        Err(error) => {
+            cleanup_prepared_package(&prepared);
+            return Err(error);
+        }
+    };
+    cleanup_prepared_package(&prepared);
+    print_permission_summary(&materialized.permissions);
+    println!(
+        "✓ Hosted package `{}` updated to version {}.",
+        materialized.alias, materialized.package_version
+    );
+    Ok(materialized.action)
+}
+
+async fn rollback_hosted_package(
+    alias: &str,
+    target_version: &str,
+) -> Result<InstallAction, String> {
+    validate_package_alias(alias)?;
+    let existing = load_installed_package(alias)?;
+    ensure_installed_source_is_hosted(&existing)?;
+    let installed_version = Version::parse(existing.package_version.as_str()).map_err(|error| {
+        format!(
+            "Installed package alias `{}` has invalid version '{}': {}",
+            existing.alias, existing.package_version, error
+        )
+    })?;
+    let requested_version = Version::parse(target_version).map_err(|error| {
+        format!("Hosted package rollback version '{target_version}' is not valid semver: {error}")
+    })?;
+    if requested_version == installed_version {
+        println!(
+            "✓ Hosted package `{}` is already installed at version {}.",
+            alias, target_version
+        );
+        return Ok(InstallAction::Noop);
+    }
+    if requested_version > installed_version {
+        return Err(format!(
+            "Rollback target {} is newer than installed version {}. Use `cargo ai packages update {}` to move forward.",
+            requested_version, installed_version, alias
+        ));
+    }
+
+    let response = pull_hosted_package(
+        existing.package_name.as_str(),
+        hosted_owner_handle_for_refresh(&existing).as_deref(),
+        Some(target_version),
+    )
+    .await?;
+    let prepared = prepare_hosted_response(
+        &response,
+        hosted_owner_handle_for_refresh(&existing).as_deref(),
+    )?;
+    ensure_hosted_source_matches_existing(&existing, &prepared.source)?;
+    let materialized = match materialize_prepared_package(&prepared, Some(alias), false, true) {
+        Ok(materialized) => materialized,
+        Err(error) => {
+            cleanup_prepared_package(&prepared);
+            return Err(error);
+        }
+    };
+    cleanup_prepared_package(&prepared);
+    print_permission_summary(&materialized.permissions);
+    println!(
+        "✓ Hosted package `{}` rolled back to version {}.",
+        materialized.alias, materialized.package_version
+    );
+    Ok(materialized.action)
+}
+
+async fn pull_hosted_package(
+    package_name: &str,
+    owner_handle: Option<&str>,
+    version: Option<&str>,
+) -> Result<Value, String> {
+    use crate::commands::account::helpers::{
+        load_account_auth, persist_refreshed_access_token, refresh_access_token_for_retry,
+        RefreshAccessError, INFRA_BASE_URL,
+    };
+
+    let auth = load_account_auth()
+        .map_err(|message| crate::ui::account_status::normalize_leading_glyph(message.as_str()))?;
+    let access_token_owned = auth.access_token;
+    let refresh_token = auth.refresh_token;
+
+    let mut response = crate::infra_api::account::projects::pull_project(
+        INFRA_BASE_URL,
+        access_token_owned.as_str(),
+        package_name,
+        owner_handle,
+        version,
+    )
+    .await
+    .map_err(|error| format!("Request failed: {error:?}"))?;
+
+    if response
+        .get("type")
+        .and_then(Value::as_str)
+        .map(|kind| kind == "access_token_expired")
+        .unwrap_or(false)
+    {
+        match refresh_access_token_for_retry(access_token_owned.as_str(), refresh_token.as_deref())
+            .await
+        {
+            Err(RefreshAccessError::MissingRefreshToken) => {
+                return Err(
+                    "Access token expired, and no refresh token exists in credential store. Run `cargo ai account status` or re-confirm account."
+                        .to_string(),
+                );
+            }
+            Err(RefreshAccessError::RequestFailed(error)) => {
+                return Err(format!("Request failed while refreshing session: {error}"));
+            }
+            Err(RefreshAccessError::MissingRefreshedToken(refresh_response)) => {
+                return Err(backend_response_message(
+                    &refresh_response,
+                    "Session refresh did not return a new access token.",
+                ));
+            }
+            Ok((retry_access_token, refreshed_expires_in)) => {
+                if let Some(rt) = refresh_token.as_deref() {
+                    persist_refreshed_access_token(
+                        retry_access_token.as_str(),
+                        rt,
+                        refreshed_expires_in,
+                    );
+                }
+                response = crate::infra_api::account::projects::pull_project(
+                    INFRA_BASE_URL,
+                    retry_access_token.as_str(),
+                    package_name,
+                    owner_handle,
+                    version,
+                )
+                .await
+                .map_err(|error| format!("Request failed after session refresh: {error:?}"))?;
+            }
+        }
+    }
+
+    if !is_hosted_pull_success(&response) {
+        return Err(backend_response_message(
+            &response,
+            "Hosted package pull did not succeed.",
+        ));
+    }
+
+    Ok(response)
+}
+
+fn prepare_hosted_response(
+    response: &Value,
+    requested_owner_handle: Option<&str>,
+) -> Result<PreparedPackage, String> {
+    let archive_base64 = response
+        .get("package_archive_base64")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "Hosted pull response did not include `package_archive_base64`.".to_string()
+        })?;
+    let package_sha256 = response
+        .get("package_sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Hosted pull response did not include `package_sha256`.".to_string())?;
+    let package_size_bytes = response
+        .get("package_size_bytes")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "Hosted pull response did not include `package_size_bytes`.".to_string())?;
+    let hosted_source_id = required_response_string(response, "hosted_source_id")?;
+    let hosted_version_id = required_response_string(response, "hosted_version_id")?;
+
+    let archive_bytes = BASE64_STANDARD
+        .decode(archive_base64.as_bytes())
+        .map_err(|error| format!("Failed to decode hosted package archive: {error}"))?;
+    let decoded_size_bytes = i64::try_from(archive_bytes.len()).map_err(|_| {
+        "Decoded hosted package archive exceeded supported size limits.".to_string()
+    })?;
+    if decoded_size_bytes != package_size_bytes {
+        return Err(format!(
+            "Hosted package archive size mismatch. Expected {} bytes, got {} bytes after decoding.",
+            package_size_bytes, decoded_size_bytes
+        ));
+    }
+
+    let decoded_sha256 = crate::commands::account::sha256_hex(archive_bytes.as_slice());
+    if decoded_sha256 != package_sha256 {
+        return Err(format!(
+            "Hosted package archive checksum mismatch. Expected {}, got {}.",
+            package_sha256, decoded_sha256
+        ));
+    }
+
+    let staging_root = packages_staging_root().join(format!("hosted-{}", Uuid::new_v4()));
+    fs::create_dir_all(&staging_root).map_err(|error| {
+        format!(
+            "Failed to create hosted package staging directory '{}': {}",
+            staging_root.display(),
+            error
+        )
+    })?;
+    if let Err(error) = crate::commands::account::extract_package_archive_bytes(
+        archive_bytes.as_slice(),
+        &staging_root,
+    ) {
+        let _ = fs::remove_dir_all(&staging_root);
+        return Err(error);
+    }
+
+    let mut prepared = prepare_package_root(
+        staging_root.clone(),
+        InstalledPackageSourceDocument {
+            kind: "hosted".to_string(),
+            path: None,
+            account_selector: Some(if requested_owner_handle.is_some() {
+                "handle".to_string()
+            } else {
+                "self".to_string()
+            }),
+            requested_owner_handle: requested_owner_handle.map(str::to_string),
+            hosted_source_id: Some(hosted_source_id),
+            hosted_version_id: Some(hosted_version_id),
+            owner_account_id: optional_response_string(response, "owner_account_id"),
+            owner_handle: optional_response_string(response, "owner_handle"),
+        },
+        Some(staging_root),
+    )?;
+    prepared.content_sha256 = decoded_sha256;
+    validate_hosted_response_matches_manifest(response, &prepared.manifest)?;
+    Ok(prepared)
 }
 
 pub(crate) fn resolve_entrypoint_reference(
@@ -379,10 +946,13 @@ pub(crate) fn resolve_entrypoint_reference(
         alias: alias.to_string(),
         entrypoint: entrypoint.to_string(),
         definition_path,
-        package_root: installed_root.join("package"),
+        package_root: installed_root.join(INSTALLED_PACKAGE_DIR_NAME),
         package_name: package.package_name,
         package_version: package.package_version,
         content_sha256: package.content_sha256,
+        source_kind: package.source.kind,
+        package_data_root: installed_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME),
+        permissions: package.permissions,
     }))
 }
 
@@ -401,6 +971,12 @@ fn prepare_current_project(profile: &str) -> Result<PreparedPackage, String> {
             path: std::env::current_dir()
                 .ok()
                 .map(|path| path.display().to_string()),
+            account_selector: None,
+            requested_owner_handle: None,
+            hosted_source_id: None,
+            hosted_version_id: None,
+            owner_account_id: None,
+            owner_handle: None,
         },
         temporary_root: None,
     })
@@ -433,6 +1009,12 @@ fn prepare_explicit_source(source: &str) -> Result<PreparedPackage, String> {
             InstalledPackageSourceDocument {
                 kind: "local_root".to_string(),
                 path: Some(trimmed.to_string()),
+                account_selector: None,
+                requested_owner_handle: None,
+                hosted_source_id: None,
+                hosted_version_id: None,
+                owner_account_id: None,
+                owner_handle: None,
             },
             None,
         );
@@ -455,6 +1037,12 @@ fn prepare_explicit_source(source: &str) -> Result<PreparedPackage, String> {
             InstalledPackageSourceDocument {
                 kind: "manifest_path".to_string(),
                 path: Some(trimmed.to_string()),
+                account_selector: None,
+                requested_owner_handle: None,
+                hosted_source_id: None,
+                hosted_version_id: None,
+                owner_account_id: None,
+                owner_handle: None,
             },
             None,
         );
@@ -494,6 +1082,12 @@ fn prepare_archive_source(
         InstalledPackageSourceDocument {
             kind: "local_archive".to_string(),
             path: Some(source_display.to_string()),
+            account_selector: None,
+            requested_owner_handle: None,
+            hosted_source_id: None,
+            hosted_version_id: None,
+            owner_account_id: None,
+            owner_handle: None,
         },
         Some(staging_root),
     )
@@ -702,6 +1296,297 @@ fn determine_install_action(
     ))
 }
 
+fn ensure_source_identity_replacement_is_explicit(
+    existing: Option<&InstalledPackageDocument>,
+    new_source: &InstalledPackageSourceDocument,
+    package_name: &str,
+    replace: bool,
+) -> Result<(), String> {
+    let Some(existing) = existing else {
+        return Ok(());
+    };
+    if existing.source.kind != "hosted" && new_source.kind != "hosted" {
+        return Ok(());
+    }
+    let existing_identity = existing
+        .source
+        .hosted_source_id
+        .as_deref()
+        .or(Some(existing.source.kind.as_str()));
+    let new_identity = new_source
+        .hosted_source_id
+        .as_deref()
+        .or(Some(new_source.kind.as_str()));
+    if existing_identity == new_identity {
+        return Ok(());
+    }
+    if replace {
+        return Ok(());
+    }
+    Err(format!(
+        "Package alias `{}` is already installed for a different source identity. Re-run with --replace to replace it with `{}`.",
+        existing.alias, package_name
+    ))
+}
+
+fn ensure_hosted_source_matches_existing(
+    existing: &InstalledPackageDocument,
+    new_source: &InstalledPackageSourceDocument,
+) -> Result<(), String> {
+    let existing_source_id = existing.source.hosted_source_id.as_deref().ok_or_else(|| {
+        format!(
+            "Installed package alias `{}` is missing hosted_source_id metadata.",
+            existing.alias
+        )
+    })?;
+    let new_source_id = new_source.hosted_source_id.as_deref().ok_or_else(|| {
+        "Hosted pull response did not include hosted_source_id metadata.".to_string()
+    })?;
+    if existing_source_id != new_source_id {
+        return Err(format!(
+            "Hosted package resolution returned source id `{}` but installed alias `{}` is pinned to `{}`.",
+            new_source_id, existing.alias, existing_source_id
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_installed_source_is_hosted(package: &InstalledPackageDocument) -> Result<(), String> {
+    if package.source.kind != "hosted" {
+        return Err(format!(
+            "Package alias `{}` was installed from `{}`. update/rollback only apply to hosted package aliases.",
+            package.alias, package.source.kind
+        ));
+    }
+    if package.source.hosted_source_id.is_none() {
+        return Err(format!(
+            "Package alias `{}` is hosted but missing hosted_source_id metadata.",
+            package.alias
+        ));
+    }
+    Ok(())
+}
+
+fn hosted_owner_handle_for_refresh(package: &InstalledPackageDocument) -> Option<String> {
+    match package.source.account_selector.as_deref() {
+        Some("handle") => package
+            .source
+            .requested_owner_handle
+            .clone()
+            .or_else(|| package.source.owner_handle.clone()),
+        _ => None,
+    }
+}
+
+fn ensure_permission_expansion_is_explicit(
+    existing: Option<&InstalledPackageDocument>,
+    new_permissions: &PackagePermissionProfileDocument,
+    package_name: &str,
+    package_version: &str,
+) -> Result<(), String> {
+    let Some(existing) = existing else {
+        return Ok(());
+    };
+    if !permission_profile_expands(&existing.permissions, new_permissions) {
+        return Ok(());
+    }
+    Err(format!(
+        "Package `{}` version {} requests broader runtime permissions than alias `{}` currently has. Hosted permission expansion is blocked in noninteractive install/update/rollback; review the package and reinstall with an explicit replacement flow when broader grants are supported.",
+        package_name, package_version, existing.alias
+    ))
+}
+
+fn permission_profile_expands(
+    current: &PackagePermissionProfileDocument,
+    candidate: &PackagePermissionProfileDocument,
+) -> bool {
+    permission_level(candidate.package_payload.as_str())
+        > permission_level(current.package_payload.as_str())
+        || permission_level(candidate.package_data.as_str())
+            > permission_level(current.package_data.as_str())
+        || permission_level(candidate.project_workspace.as_str())
+            > permission_level(current.project_workspace.as_str())
+        || permission_level(candidate.subprocess.as_str())
+            > permission_level(current.subprocess.as_str())
+}
+
+fn permission_level(value: &str) -> u8 {
+    match value {
+        "none" => 0,
+        "blocked" | "blocked_without_explicit_grant" => 1,
+        "explicit_grant_required" => 2,
+        "read" => 3,
+        "read_write" => 4,
+        "allowed" => 5,
+        _ => 6,
+    }
+}
+
+fn validate_permission_profile(
+    permissions: &PackagePermissionProfileDocument,
+) -> Result<(), String> {
+    validate_permission_value(
+        permissions.package_payload.as_str(),
+        "permissions.package_payload",
+        &["read"],
+    )?;
+    validate_permission_value(
+        permissions.package_data.as_str(),
+        "permissions.package_data",
+        &["read_write"],
+    )?;
+    validate_permission_value(
+        permissions.project_workspace.as_str(),
+        "permissions.project_workspace",
+        &["none", "explicit_grant_required", "read", "read_write"],
+    )?;
+    validate_permission_value(
+        permissions.subprocess.as_str(),
+        "permissions.subprocess",
+        &["blocked_without_explicit_grant", "allowed"],
+    )
+}
+
+fn validate_permission_value(value: &str, label: &str, allowed: &[&str]) -> Result<(), String> {
+    if allowed.iter().any(|candidate| *candidate == value) {
+        return Ok(());
+    }
+    Err(format!(
+        "Unsupported package permission `{label} = {}`. Expected one of: {}.",
+        value,
+        allowed.join(", ")
+    ))
+}
+
+pub(crate) fn hosted_package_allows_subprocess(context: &InstalledPackageRuntimeContext) -> bool {
+    context.source_kind != "hosted" || context.permissions.subprocess == "allowed"
+}
+
+pub(crate) fn runtime_context_for_package_root(
+    package_root: &Path,
+) -> Option<InstalledPackageRuntimeContext> {
+    if package_root.file_name().and_then(|name| name.to_str()) != Some(INSTALLED_PACKAGE_DIR_NAME) {
+        return None;
+    }
+    let install_root = package_root.parent()?;
+    let alias = install_root.file_name()?.to_string_lossy().to_string();
+    let package = load_installed_package(alias.as_str()).ok()?;
+    Some(InstalledPackageRuntimeContext {
+        alias: package.alias,
+        source_kind: package.source.kind,
+        package_data_root: install_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME),
+        permissions: package.permissions,
+    })
+}
+
+pub(crate) fn resolve_package_data_path(
+    context: &InstalledPackageRuntimeContext,
+    relative_path: &Path,
+) -> Result<PathBuf, String> {
+    if relative_path.as_os_str().is_empty() || relative_path.is_absolute() {
+        return Err(format!(
+            "Package `{}` data path must be a non-empty relative path.",
+            context.alias
+        ));
+    }
+    if relative_path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "Package `{}` data path must not use parent traversal (`..`).",
+            context.alias
+        ));
+    }
+    Ok(context.package_data_root.join(relative_path))
+}
+
+fn permission_profile_lines(permissions: &PackagePermissionProfileDocument) -> Vec<String> {
+    vec![
+        format!("package payload: {}", permissions.package_payload),
+        format!("package data:    {}", permissions.package_data),
+        format!("project writes:  {}", permissions.project_workspace),
+        format!("subprocess:      {}", permissions.subprocess),
+    ]
+}
+
+fn print_permission_summary(permissions: &PackagePermissionProfileDocument) {
+    println!("Permissions:");
+    for line in permission_profile_lines(permissions) {
+        println!("  {line}");
+    }
+}
+
+fn is_hosted_pull_success(response: &Value) -> bool {
+    response
+        .get("type")
+        .and_then(Value::as_str)
+        .map(|kind| kind == "account_projects_pull_succeeded")
+        .unwrap_or(false)
+}
+
+fn backend_response_message(response: &Value, fallback: &str) -> String {
+    response
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            response
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            response
+                .get("type")
+                .and_then(Value::as_str)
+                .map(|kind| format!("{fallback} Backend response type: {kind}."))
+        })
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn required_response_string(response: &Value, field: &str) -> Result<String, String> {
+    response
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("Hosted pull response did not include `{field}`."))
+}
+
+fn optional_response_string(response: &Value, field: &str) -> Option<String> {
+    response
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn validate_hosted_response_matches_manifest(
+    response: &Value,
+    manifest: &PackageManifestDocument,
+) -> Result<(), String> {
+    let response_project = required_response_string(response, "project")?;
+    let response_version = required_response_string(response, "project_version")?;
+    let manifest_project = required_package_name(manifest)?;
+    let manifest_version = required_package_version(manifest)?;
+    if response_project != manifest_project {
+        return Err(format!(
+            "Hosted package response project `{}` did not match package manifest project `{}`.",
+            response_project, manifest_project
+        ));
+    }
+    if response_version != manifest_version {
+        return Err(format!(
+            "Hosted package response version `{}` did not match package manifest version `{}`.",
+            response_version, manifest_version
+        ));
+    }
+    Ok(())
+}
+
 fn write_staged_install(
     alias: &str,
     package_root: &Path,
@@ -709,7 +1594,7 @@ fn write_staged_install(
 ) -> Result<(), String> {
     let packages_root = packages_root();
     let staging_root = packages_staging_root().join(format!("{}-{}", alias, Uuid::new_v4()));
-    let staged_package_root = staging_root.join("package");
+    let staged_package_root = staging_root.join(INSTALLED_PACKAGE_DIR_NAME);
     fs::create_dir_all(&staged_package_root).map_err(|error| {
         format!(
             "Failed to create staged package directory '{}': {}",
@@ -722,18 +1607,59 @@ fn write_staged_install(
         staging_root.join(INSTALL_MANIFEST_FILE_NAME).as_path(),
         document,
     )?;
+    let staged_data_root = staging_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME);
 
     let install_root = packages_root.join(alias);
     if install_root.exists() {
+        let current_data_root = install_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME);
+        if current_data_root.exists() {
+            if !current_data_root.is_dir() {
+                let _ = fs::remove_dir_all(&staging_root);
+                return Err(format!(
+                    "Installed package alias '{}' has a non-directory data root at '{}'.",
+                    alias,
+                    current_data_root.display()
+                ));
+            }
+            fs::rename(&current_data_root, &staged_data_root).map_err(|error| {
+                let _ = fs::remove_dir_all(&staging_root);
+                format!(
+                    "Failed to preserve package data directory '{}' while replacing alias '{}': {}",
+                    current_data_root.display(),
+                    alias,
+                    error
+                )
+            })?;
+        } else {
+            fs::create_dir_all(&staged_data_root).map_err(|error| {
+                let _ = fs::remove_dir_all(&staging_root);
+                format!(
+                    "Failed to create staged package data directory '{}': {}",
+                    staged_data_root.display(),
+                    error
+                )
+            })?;
+        }
         fs::remove_dir_all(&install_root).map_err(|error| {
+            let _ = fs::remove_dir_all(&staging_root);
             format!(
                 "Failed to replace installed package alias '{}': {}",
                 install_root.display(),
                 error
             )
         })?;
+    } else {
+        fs::create_dir_all(&staged_data_root).map_err(|error| {
+            let _ = fs::remove_dir_all(&staging_root);
+            format!(
+                "Failed to create staged package data directory '{}': {}",
+                staged_data_root.display(),
+                error
+            )
+        })?;
     }
     fs::create_dir_all(&packages_root).map_err(|error| {
+        let _ = fs::remove_dir_all(&staging_root);
         format!(
             "Failed to create package store '{}': {}",
             packages_root.display(),
@@ -741,6 +1667,7 @@ fn write_staged_install(
         )
     })?;
     fs::rename(&staging_root, &install_root).map_err(|error| {
+        let _ = fs::remove_dir_all(&staging_root);
         format!(
             "Failed to move staged package install from '{}' to '{}': {}",
             staging_root.display(),
@@ -967,12 +1894,16 @@ fn installed_package_root(alias: &str) -> PathBuf {
     packages_root().join(alias)
 }
 
+fn installed_package_data_root(alias: &str) -> PathBuf {
+    installed_package_root(alias).join(INSTALLED_PACKAGE_DATA_DIR_NAME)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         build_entrypoints, determine_install_action, install_local_package, load_installed_package,
         resolve_entrypoint_reference, uninstall_package, InstallAction, InstallRequest,
-        PackageManifestDocument,
+        PackageManifestDocument, PackagePermissionProfileDocument,
     };
     use std::path::{Path, PathBuf};
 
@@ -989,6 +1920,7 @@ mod tests {
             hatched_agents: hatched_agents.into_iter().map(str::to_string).collect(),
             tools: Vec::new(),
             assets: Vec::new(),
+            permissions: PackagePermissionProfileDocument::default(),
         }
     }
 
@@ -1082,8 +2014,15 @@ assets = ["schemas/customer.sql"]
             source: super::InstalledPackageSourceDocument {
                 kind: "test".to_string(),
                 path: None,
+                account_selector: None,
+                requested_owner_handle: None,
+                hosted_source_id: None,
+                hosted_version_id: None,
+                owner_account_id: None,
+                owner_handle: None,
             },
             installed_at: "2026-06-22T00:00:00Z".to_string(),
+            permissions: PackagePermissionProfileDocument::default(),
             entrypoints: Vec::new(),
         };
 
@@ -1131,6 +2070,48 @@ assets = ["schemas/customer.sql"]
 
         uninstall_package("data_integration").expect("uninstall should succeed");
         assert!(load_installed_package("data_integration").is_err());
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn package_upgrade_preserves_alias_data_directory() {
+        let _store = PackagesRootGuard::new("preserve-data");
+        let package_root = temp_package_root("preserve-data");
+
+        let request = InstallRequest {
+            source: Some(package_root.to_string_lossy().to_string()),
+            alias: Some("data_integration".to_string()),
+            profile: "default".to_string(),
+            replace: false,
+            downgrade: false,
+        };
+        let action = install_local_package(&request).expect("first install should succeed");
+        assert!(matches!(action, InstallAction::New));
+
+        let data_root = super::installed_package_data_root("data_integration");
+        std::fs::create_dir_all(&data_root).expect("data root should exist");
+        std::fs::write(data_root.join("state.json"), r#"{"kept":true}"#)
+            .expect("data file should be writable");
+
+        let manifest_path = package_root.join("cargo-ai-package.toml");
+        let manifest = std::fs::read_to_string(&manifest_path).expect("manifest should read");
+        std::fs::write(
+            &manifest_path,
+            manifest.replace(
+                r#"project_version = "1.0.0""#,
+                r#"project_version = "1.1.0""#,
+            ),
+        )
+        .expect("manifest should update");
+
+        let action = install_local_package(&request).expect("upgrade should succeed");
+        assert!(matches!(action, InstallAction::Upgrade));
+        assert_eq!(
+            std::fs::read_to_string(data_root.join("state.json"))
+                .expect("data file should be preserved"),
+            r#"{"kept":true}"#
+        );
 
         remove_temp_dir_if_present(package_root.as_path());
     }

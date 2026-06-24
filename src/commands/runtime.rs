@@ -1093,9 +1093,12 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     let usage_agent_info =
         usage_agent_info.unwrap_or_else(|| interpreted_usage_agent_info(project_root.as_deref()));
     let tool_resolver = Arc::new(crate::commands::tools::ToolResolver::new(
-        project_root,
+        project_root.clone(),
         crate::cargo_ai_metadata::current_build_target(),
     ));
+    let package_context = project_root
+        .as_deref()
+        .and_then(crate::commands::local_packages::runtime_context_for_package_root);
     let usage_log_arg = sub_m.get_one::<String>("usage_log").map(String::as_str);
     let usage_log_setup = match crate::usage_log::UsageLogContext::from_runtime(
         usage_log_arg,
@@ -1141,6 +1144,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         token: token.clone(),
         inference_timeout_in_sec,
         tool_resolver: Some(tool_resolver),
+        package_context,
         usage_log: usage_log_context.clone(),
     };
 
@@ -1759,6 +1763,7 @@ mod tests {
             token: "secret".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         };
 

@@ -65,6 +65,21 @@ struct PackageArchiveEntry {
     contents_base64: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct PulledPackageHostedReceiptDocument {
+    format_version: u32,
+    source_kind: String,
+    hosted_source_id: String,
+    hosted_version_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_account_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_handle: Option<String>,
+    package_name: String,
+    resolved_version: String,
+    package_sha256: String,
+}
+
 #[cfg(feature = "developer-tools")]
 #[derive(Clone, Debug)]
 struct PublishPayload {
@@ -79,6 +94,8 @@ struct PublishPayload {
 const PULLED_PROJECT_METADATA_RELATIVE_PATH: &str = ".cargo-ai/project.toml";
 const PACKAGE_MANIFEST_FILE_NAME: &str = "cargo-ai-package.toml";
 const PULLED_PACKAGE_RECEIPT_RELATIVE_PATH: &str = ".cargo-ai/origin/cargo-ai-package.toml";
+const PULLED_PACKAGE_HOSTED_RECEIPT_RELATIVE_PATH: &str =
+    ".cargo-ai/origin/cargo-ai-package-receipt.toml";
 const ESTIMATED_PUBLISH_ACCESS_TOKEN: &str = "__publish-size-estimate__";
 #[cfg(feature = "developer-tools")]
 const SAFE_PROJECT_PUBLISH_REQUEST_LIMIT_BYTES: u64 = 5_500_000;
@@ -640,7 +657,8 @@ fn restore_pulled_project(response: &Value, output_path: &Path, force: bool) -> 
 
     prepare_output_directory(output_path, force)?;
     extract_package_archive_bytes(archive_bytes.as_slice(), output_path)?;
-    relocate_pulled_package_receipt(output_path)
+    relocate_pulled_package_receipt(output_path)?;
+    write_pulled_package_hosted_receipt(response, output_path)
 }
 
 fn relocate_pulled_package_receipt(project_root: &Path) -> Result<(), String> {
@@ -673,6 +691,90 @@ fn relocate_pulled_package_receipt(project_root: &Path) -> Result<(), String> {
             "Failed to move pulled package receipt from '{}' to '{}': {}",
             root_receipt_path.display(),
             origin_receipt_path.display(),
+            error
+        )
+    })
+}
+
+fn write_pulled_package_hosted_receipt(
+    response: &Value,
+    project_root: &Path,
+) -> Result<(), String> {
+    let hosted_source_id = response
+        .get("hosted_source_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "Pull succeeded but response did not include `hosted_source_id`.".to_string()
+        })?;
+    let hosted_version_id = response
+        .get("hosted_version_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "Pull succeeded but response did not include `hosted_version_id`.".to_string()
+        })?;
+    let package_name = response
+        .get("project")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Pull succeeded but response did not include `project`.".to_string())?;
+    let resolved_version = response
+        .get("project_version")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "Pull succeeded but response did not include `project_version`.".to_string()
+        })?;
+    let package_sha256 = response
+        .get("package_sha256")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "Pull succeeded but response did not include `package_sha256`.".to_string()
+        })?;
+    let receipt = PulledPackageHostedReceiptDocument {
+        format_version: 1,
+        source_kind: "hosted".to_string(),
+        hosted_source_id: hosted_source_id.to_string(),
+        hosted_version_id: hosted_version_id.to_string(),
+        owner_account_id: response
+            .get("owner_account_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        owner_handle: response
+            .get("owner_handle")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        package_name: package_name.to_string(),
+        resolved_version: resolved_version.to_string(),
+        package_sha256: package_sha256.to_string(),
+    };
+    let receipt_path = project_root.join(PULLED_PACKAGE_HOSTED_RECEIPT_RELATIVE_PATH);
+    if let Some(parent) = receipt_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create pulled package hosted receipt directory '{}': {}",
+                parent.display(),
+                error
+            )
+        })?;
+    }
+    let rendered = toml::to_string_pretty(&receipt)
+        .map_err(|error| format!("Failed to render pulled package hosted receipt: {error}"))?;
+    fs::write(&receipt_path, rendered).map_err(|error| {
+        format!(
+            "Failed to write pulled package hosted receipt '{}': {}",
+            receipt_path.display(),
             error
         )
     })

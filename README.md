@@ -1128,16 +1128,20 @@ cargo ai packages publish
 
 # Pull the latest published package from another owner
 cargo ai packages pull ai_integrations --owner-handle alice
+
+# Pull an exact published package version without installing it
+cargo ai packages pull ai_integrations --owner-handle alice --version 1.2.3
 ```
 
 Package rules are intentionally different from account agents:
 
 - `publish` packages the current project first, then uploads the resulting package archive
 - published project identity comes from `.cargo-ai/project.toml` `[project].name` and `[project].version`
+- published versions for one hosted package identity must increase by semver
 - `list --account <handle>` only returns that owner's public packages
 - `pull` defaults to the latest published version unless you pass `--version <semver>`
 - pulled packages restore a project-shaped folder locally; they do not expose agent-style definition-path identities in the backend
-- after `pull`, `.cargo-ai/project.toml` remains the working project config and the pulled package receipt is preserved under `.cargo-ai/origin/cargo-ai-package.toml`
+- after `pull`, `.cargo-ai/project.toml` remains the working project config, the package manifest is preserved under `.cargo-ai/origin/cargo-ai-package.toml`, and hosted provenance is preserved under `.cargo-ai/origin/cargo-ai-package-receipt.toml`
 - pulled tools are restored as source-backed project content; materialize a needed tool with `cargo ai tools build <tool-name>` or assemble the runnable build root with `cargo ai build`
 - the current publish path works best when the final package stays at or below about `5.5 MiB`; keep packaged assets minimal and avoid large sample inputs unless they are required in the package itself
 - if you add non-trivial assets to `[build.<profile>].assets`, run `cargo ai package` and inspect the reported package, archive, and request sizes before treating the project as publish-ready
@@ -1157,6 +1161,21 @@ cargo ai packages install --as data_integration
 # Install from a local package root, archive, or cargo-ai-package.toml path
 cargo ai packages install ./dist/my_package --as data_integration
 
+# Install the latest hosted package from your account and pin the exact resolved version
+cargo ai packages install data_integration --account --as data_integration
+
+# Install a public hosted package from another owner
+cargo ai packages install data_integration --account alice --as data_integration
+
+# Install an exact hosted package version
+cargo ai packages install data_integration --account alice --version 1.2.3 --as data_integration
+
+# Deliberately move an installed hosted alias forward
+cargo ai packages update data_integration
+
+# Deliberately switch an installed hosted alias back to an exact earlier version
+cargo ai packages rollback data_integration --to 1.1.0
+
 # Run or hatch exported package entrypoints
 cargo ai run data_integration::lookup_account
 cargo ai hatch data_integration::daily_digest
@@ -1167,6 +1186,19 @@ cargo ai packages uninstall data_integration
 ```
 
 Local install behavior is version-aware for the same alias: same version and content is a no-op, newer semver upgrades by default, older semver requires `--downgrade`, and same-version content replacement or a different package identity requires `--replace`.
+
+Hosted install uses the same local alias store, but hosted source identity comes from the server/API rather than a public URL. Omitting `--version` resolves the latest eligible hosted version at install time, then pins that exact version in `install.toml`. `update` checks the same hosted source identity and only moves forward when a newer eligible semver exists. `rollback` never means latest; it switches to the exact `--to <version>` you request.
+
+Installed package layout under Cargo AI Home is:
+
+```text
+$CARGO_AI_HOME/packages/<alias>/
+  install.toml
+  package/
+  data/
+```
+
+`package/` is the verified payload for the active exact version and is rematerialized on hosted update or rollback. `data/` is the package-owned persistent state area and is preserved across normal hosted update/rollback. `cargo ai packages inspect <alias>` shows hosted source IDs, hosted version IDs, package hash, entrypoints, and the accepted permission profile. Hosted package runtime defaults keep Cargo AI-controlled writes under `data/`; project/workspace writes are not implied by install, and unconstrained `exec`/tool subprocess steps are blocked unless the installed package permission profile explicitly allows them.
 
 ## Where To Go Next
 
@@ -1186,6 +1218,7 @@ When you want deeper details, use these files:
 - Actions and authoring patterns:
   - [templates/guidance/action-rules.md](./templates/guidance/action-rules.md)
   - [templates/guidance/authoring-patterns.md](./templates/guidance/authoring-patterns.md)
+  - [templates/guidance/package-workflow.md](./templates/guidance/package-workflow.md)
   - [templates/guidance/examples/README.md](./templates/guidance/examples/README.md)
 - Hatch/check workflow:
   - [templates/shared/docs/hatch-check-loop.md](./templates/shared/docs/hatch-check-loop.md)

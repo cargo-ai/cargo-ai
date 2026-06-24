@@ -754,6 +754,8 @@ pub(crate) struct ActionProviderContext {
     pub(crate) token: String,
     pub(crate) inference_timeout_in_sec: u64,
     pub(crate) tool_resolver: Option<std::sync::Arc<crate::commands::tools::ToolResolver>>,
+    pub(crate) package_context:
+        Option<crate::commands::local_packages::InstalledPackageRuntimeContext>,
     pub(crate) usage_log: Option<crate::usage_log::UsageLogContext>,
 }
 
@@ -1295,6 +1297,7 @@ async fn run_matching_action_steps(
                 &action_data,
                 action_index,
                 &action.name,
+                provider_context.package_context.as_ref(),
                 runtime_budget,
             )
             .await
@@ -1446,8 +1449,17 @@ async fn run_exec_step(
     data: &serde_json::Value,
     action_index: usize,
     action_name: &str,
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<Option<(String, String)>, String> {
+    if let Some(context) = package_context {
+        if !crate::commands::local_packages::hosted_package_allows_subprocess(context) {
+            return Err(format!(
+                "Action '{}' exec step is blocked for hosted package alias '{}'. The installed package permission profile does not allow unconstrained subprocess execution.",
+                action_name, context.alias
+            ));
+        }
+    }
     let program = step.program.as_deref().ok_or_else(|| {
         format!(
             "Action '{}' exec step is missing required `program`.",
@@ -1467,8 +1479,12 @@ async fn run_exec_step(
     })?;
 
     if let Some(output_variable) = step.output_variable.as_deref() {
-        let child = tokio::process::Command::new(program)
-            .args(&resolved_args)
+        let mut command = tokio::process::Command::new(program);
+        command.args(&resolved_args);
+        if let Some(context) = package_context {
+            command.current_dir(context.package_data_root.as_path());
+        }
+        let child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -1517,8 +1533,12 @@ async fn run_exec_step(
             )),
         }
     } else {
-        let child = tokio::process::Command::new(program)
-            .args(&resolved_args)
+        let mut command = tokio::process::Command::new(program);
+        command.args(&resolved_args);
+        if let Some(context) = package_context {
+            command.current_dir(context.package_data_root.as_path());
+        }
+        let child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -1578,6 +1598,14 @@ async fn run_tool_step(
             action_name
         )
     })?;
+    if let Some(context) = provider_context.package_context.as_ref() {
+        if !crate::commands::local_packages::hosted_package_allows_subprocess(context) {
+            return Err(format!(
+                "Action '{}' tool step '{}' is blocked for hosted package alias '{}'. The installed package permission profile does not allow unconstrained tool subprocess execution.",
+                action_name, tool_name, context.alias
+            ));
+        }
+    }
     let mut usage_tool_guard = provider_context.usage_log.as_ref().map(|usage_log| {
         usage_log.start_tool_run(crate::usage_log::UsageTool {
             name: tool_name.to_string(),
@@ -1638,8 +1666,12 @@ async fn run_tool_step(
         action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
     })?;
 
-    let child = tokio::process::Command::new(&contract.resolved.binary_path)
-        .arg("invoke")
+    let mut command = tokio::process::Command::new(&contract.resolved.binary_path);
+    command.arg("invoke");
+    if let Some(context) = provider_context.package_context.as_ref() {
+        command.current_dir(context.package_data_root.as_path());
+    }
+    let child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2149,8 +2181,11 @@ async fn run_generate_image_step(
     };
     let image_bytes = image_response.bytes;
 
-    let output_path_ref = Path::new(output_path.as_str());
-    validate_generated_image_output_path(output_path_ref, action_name)?;
+    let output_path_ref = resolve_generated_image_output_path(
+        output_path.as_str(),
+        action_name,
+        provider_context.package_context.as_ref(),
+    )?;
     if let Some(parent) = output_path_ref.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|error| {
@@ -2164,7 +2199,7 @@ async fn run_generate_image_step(
         }
     }
 
-    std::fs::write(output_path_ref, image_bytes).map_err(|error| {
+    std::fs::write(output_path_ref.as_path(), image_bytes).map_err(|error| {
         format!(
             "Action '{}' failed to write generated image '{}': {}",
             action_name,
@@ -2362,6 +2397,7 @@ async fn resolve_generate_image_step_profile_context(
         token,
         inference_timeout_in_sec: invocation_timeout_in_sec,
         tool_resolver: None,
+        package_context: None,
         usage_log: None,
     }))
 }
@@ -2693,6 +2729,7 @@ async fn run_agent_step(
         token: String::new(),
         inference_timeout_in_sec: 60,
         tool_resolver: None,
+        package_context: None,
         usage_log: None,
     };
     run_agent_step_with_provider_context(
@@ -3832,6 +3869,23 @@ fn validate_generate_image_output_format_for_provider(
     Ok(())
 }
 
+fn resolve_generated_image_output_path(
+    raw_path: &str,
+    action_name: &str,
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
+) -> Result<PathBuf, String> {
+    let output_path_ref = Path::new(raw_path);
+    validate_generated_image_output_path(output_path_ref, action_name)?;
+    if let Some(context) = package_context {
+        return crate::commands::local_packages::resolve_package_data_path(
+            context,
+            output_path_ref,
+        )
+        .map_err(|error| format!("Action '{}': {}", action_name, error));
+    }
+    Ok(output_path_ref.to_path_buf())
+}
+
 fn resolve_generate_image_reference_images(
     references: Option<&[crate::GenerateImageReference]>,
     data: &serde_json::Value,
@@ -4346,6 +4400,7 @@ mod tests {
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         }
     }
@@ -4392,6 +4447,7 @@ auth_mode = "{auth_mode}"
             token: String::new(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         }
     }
@@ -5270,6 +5326,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         };
 
@@ -5290,6 +5347,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         };
 
@@ -5394,9 +5452,10 @@ auth_mode = "{auth_mode}"
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let captured_output = run_exec_step(&step, &json!({}), 0, "capture_exec", runtime_budget)
-            .await
-            .expect("exec capture should succeed");
+        let captured_output =
+            run_exec_step(&step, &json!({}), 0, "capture_exec", None, runtime_budget)
+                .await
+                .expect("exec capture should succeed");
 
         assert_eq!(
             captured_output,
@@ -5446,7 +5505,7 @@ auth_mode = "{auth_mode}"
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
         let result = ACTION_OUTPUT
             .scope(output.clone(), async {
-                run_exec_step(&step, &json!({}), 0, "raw_exec", runtime_budget).await
+                run_exec_step(&step, &json!({}), 0, "raw_exec", None, runtime_budget).await
             })
             .await;
 
@@ -5522,6 +5581,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         };
 
@@ -5625,6 +5685,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         };
 
@@ -5770,6 +5831,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         };
 
@@ -5863,6 +5925,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         };
 
@@ -5931,6 +5994,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         };
 
@@ -6986,6 +7050,7 @@ auth_mode = "{auth_mode}"
             &action_data,
             0,
             "capture_then_agent",
+            None,
             runtime_budget,
         )
         .await

@@ -88,6 +88,27 @@ struct PackageManifestDocument {
     hatched_agents: Vec<String>,
     tools: Vec<String>,
     assets: Vec<String>,
+    #[serde(default)]
+    permissions: PackagePermissionProfileDocument,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct PackagePermissionProfileDocument {
+    package_payload: String,
+    package_data: String,
+    project_workspace: String,
+    subprocess: String,
+}
+
+impl Default for PackagePermissionProfileDocument {
+    fn default() -> Self {
+        Self {
+            package_payload: "read".to_string(),
+            package_data: "read_write".to_string(),
+            project_workspace: "explicit_grant_required".to_string(),
+            subprocess: "blocked_without_explicit_grant".to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -425,6 +446,7 @@ fn assemble_package_root(
         hatched_agents: build_profile.hatched_agents.clone(),
         tools: build_profile.tools.clone(),
         assets: build_profile.assets.clone(),
+        permissions: PackagePermissionProfileDocument::default(),
     };
     write_package_manifest(output_root.path.as_path(), &manifest)?;
 
@@ -941,7 +963,7 @@ fn normalize_path(path: impl AsRef<Path>) -> PathBuf {
 mod tests {
     use super::{
         assemble_package_root, load_project_metadata, resolve_package_output_root,
-        PackageManifestDocument,
+        PackageManifestDocument, PackagePermissionProfileDocument,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -1128,6 +1150,7 @@ assets = ["assets/prompts/"]
                 hatched_agents: vec!["agents/hello_runner.json".to_string()],
                 tools: vec!["hello_tool".to_string()],
                 assets: vec!["assets/prompts/".to_string()],
+                permissions: PackagePermissionProfileDocument::default(),
             }
         );
 

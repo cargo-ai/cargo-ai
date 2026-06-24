@@ -155,6 +155,14 @@ fn usage_agent_info_for_package_entrypoint(
             "name": resolved.package_name.as_str(),
             "version": resolved.package_version.as_str(),
             "content_sha256": resolved.content_sha256.as_str(),
+            "source_kind": resolved.source_kind.as_str(),
+            "data_root": resolved.package_data_root.display().to_string(),
+            "permissions": {
+                "package_payload": resolved.permissions.package_payload.as_str(),
+                "package_data": resolved.permissions.package_data.as_str(),
+                "project_workspace": resolved.permissions.project_workspace.as_str(),
+                "subprocess": resolved.permissions.subprocess.as_str(),
+            },
         }
     });
 

@@ -43,6 +43,12 @@ When the user says they need a reusable local tool or native helper:
   - `tool-hardening.md` for dependency and hardening review
 - keep the tool workflow separate from the agent JSON workflow, then wire them back together with `cargo ai tools check --config <agent.json>`
 
+When the user wants to share, install, update, or roll back reusable agents/tools as a package:
+- use `package-workflow.md`
+- keep the formal term `Cargo AI package`
+- make sure the project has `.cargo-ai/project.toml` `[project]` identity and an explicit `[build.<profile>]`
+- use `cargo ai package` for local package artifacts, `cargo ai packages install` for local machine installs, and `cargo ai packages publish|pull|list --account|update|rollback` for hosted package workflows
+
 ## How To Drive The Conversation
 
 - Keep the questions in plain language.
@@ -59,11 +65,12 @@ When the user says they need a reusable local tool or native helper:
 5. Copy the closest example from `examples/`.
 6. Decide which inputs are baked into JSON, which are caller-supplied runtime inputs, and whether any action behavior belongs in `runtime_vars`.
 7. If the caller needs usage or timing accounting, use `usage-ledger.md` for run commands and integration notes.
-8. Draft the JSON in canonical field order.
-9. If the flow becomes complex, recommend a same-name sidecar Markdown file.
-10. Validate with:
+8. If the user wants reusable package distribution, switch to `package-workflow.md` after the agent/tool shape is valid.
+9. Draft the JSON in canonical field order.
+10. If the flow becomes complex, recommend a same-name sidecar Markdown file.
+11. Validate with:
    - `cargo ai hatch <agent-name> --config <config.json> --check`
-11. Fix reported errors before building.
+12. Fix reported errors before building.
 
 ## Behavioral Defaults
 
