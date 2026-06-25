@@ -169,6 +169,7 @@ struct RunStep {
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
     agent: Option<String>,
+    usage_log: Option<String>,
     tool_name: Option<String>,
     tool_params: BTreeMap<String, ToolParamValue>,
     run_vars: Option<Vec<ActionRunVarSpec>>,
@@ -890,6 +891,12 @@ fn parse_actions(
                             "`input_mode` is only supported for `agent` actions",
                         ));
                     }
+                    if run_obj.contains_key("usage_log") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.usage_log"),
+                            "`usage_log` is only supported for `agent` actions",
+                        ));
+                    }
 
                     let program = get_required_string(run_obj, "program", &run_path)?.to_string();
                     if program.trim().is_empty() {
@@ -923,6 +930,7 @@ fn parse_actions(
                         subject: None,
                         text: None,
                         agent: None,
+                        usage_log: None,
                         tool_name: None,
                         tool_params: BTreeMap::new(),
                         run_vars: None,
@@ -1019,6 +1027,12 @@ fn parse_actions(
                             "`input_mode` is only supported for `agent` actions",
                         ));
                     }
+                    if run_obj.contains_key("usage_log") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.usage_log"),
+                            "`usage_log` is only supported for `agent` actions",
+                        ));
+                    }
 
                     let subject = parse_string_parts_field(
                         run_obj,
@@ -1049,6 +1063,7 @@ fn parse_actions(
                         subject: Some(subject),
                         text: Some(text),
                         agent: None,
+                        usage_log: None,
                         tool_name: None,
                         tool_params: BTreeMap::new(),
                         run_vars: None,
@@ -1144,6 +1159,7 @@ fn parse_actions(
                     let ignore_tools =
                         parse_optional_boolean_field(run_obj, "ignore_tools", &run_path)?
                             .unwrap_or(false);
+                    let usage_log = parse_optional_child_usage_log(run_obj, &run_path)?;
 
                     let inputs = match run_obj.get("inputs") {
                         Some(input_value) => {
@@ -1187,6 +1203,7 @@ fn parse_actions(
                         subject: None,
                         text: None,
                         agent: Some(agent),
+                        usage_log,
                         tool_name: None,
                         tool_params: BTreeMap::new(),
                         run_vars,
@@ -1295,6 +1312,12 @@ fn parse_actions(
                             "`ignore_tools` is only supported for `agent` actions",
                         ));
                     }
+                    if run_obj.contains_key("usage_log") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.usage_log"),
+                            "`usage_log` is only supported for `agent` actions",
+                        ));
+                    }
 
                     let output_variable = parse_optional_capture_variable(
                         run_obj,
@@ -1323,6 +1346,7 @@ fn parse_actions(
                         subject: None,
                         text: None,
                         agent: None,
+                        usage_log: None,
                         tool_name: Some(tool_name),
                         tool_params,
                         run_vars: None,
@@ -1419,6 +1443,12 @@ fn parse_actions(
                             "`ignore_tools` is only supported for `agent` actions",
                         ));
                     }
+                    if run_obj.contains_key("usage_log") {
+                        return Err(BuildError::config(
+                            format!("{run_path}.usage_log"),
+                            "`usage_log` is only supported for `agent` actions",
+                        ));
+                    }
 
                     let model =
                         parse_generate_image_model_field(run_obj, &run_path, action_field_types)?;
@@ -1472,6 +1502,7 @@ fn parse_actions(
                         subject: None,
                         text: None,
                         agent: None,
+                        usage_log: None,
                         tool_name: None,
                         tool_params: BTreeMap::new(),
                         run_vars: None,
@@ -1700,6 +1731,24 @@ fn parse_optional_action_input_mode(
             "unsupported `input_mode` (supported: `replace`, `append`, `prepend`)",
         )),
     }
+}
+
+fn parse_optional_child_usage_log(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+) -> Result<Option<String>, BuildError> {
+    let Some(value) = run_obj.get("usage_log") else {
+        return Ok(None);
+    };
+    let usage_log_path = format!("{run_path}.usage_log");
+    let raw = value.as_str().ok_or_else(|| {
+        BuildError::config(
+            &usage_log_path,
+            "expected `usage_log` to be a non-empty relative path string",
+        )
+    })?;
+    validate_definition_owned_local_path(raw, &usage_log_path, "usage log")?;
+    Ok(Some(raw.trim().to_string()))
 }
 
 fn parse_optional_action_input_overrides(
@@ -4105,6 +4154,11 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     .as_ref()
                     .map(|agent| format!("Some({}.to_string())", rust_string_literal(agent)))
                     .unwrap_or_else(|| "None".to_string());
+                let usage_log = run_step
+                    .usage_log
+                    .as_ref()
+                    .map(|path| format!("Some({}.to_string())", rust_string_literal(path)))
+                    .unwrap_or_else(|| "None".to_string());
                 let tool_name = run_step
                     .tool_name
                     .as_ref()
@@ -4229,6 +4283,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         subject: {},
                         text: {},
                         agent: {},
+                        usage_log: {},
                         tool_name: {},
                         tool_params: {},
                         run_vars: {},
@@ -4260,6 +4315,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     subject,
                     text,
                     agent,
+                    usage_log,
                     tool_name,
                     tool_params,
                     run_vars,
@@ -4511,6 +4567,7 @@ pub struct RunStep {{
     subject: Option<Vec<RunArg>>,
     text: Option<Vec<RunArg>>,
     agent: Option<String>,
+    usage_log: Option<String>,
     tool_name: Option<String>,
     tool_params: std::collections::BTreeMap<String, ToolParamValue>,
     run_vars: Option<Vec<ActionRunVar>>,
@@ -4867,6 +4924,40 @@ mod tests {
                 .expect("explicit same-level child agent target should compile");
 
         assert!(generated.contains("agent: Some(\"./childagent\".to_string())"));
+    }
+
+    #[test]
+    fn accepts_child_agent_usage_log_path() {
+        let generated = generate_agent_model_from_str(
+            r#"{
+    "version": "2026-03-03.r1",
+    "inputs": [
+        { "type": "text", "text": "Test prompt" }
+    ],
+    "agent_schema": {
+        "type": "object",
+        "properties": {
+            "ok": { "type": "boolean" }
+        }
+    },
+    "actions": [
+        {
+            "name": "invoke_child",
+            "logic": { "==": [ { "var": "ok" }, true ] },
+            "run": [
+                {
+                    "kind": "agent",
+                    "artifact": "./childagent",
+                    "usage_log": "usage/childagent.jsonl"
+                }
+            ]
+        }
+    ]
+}"#,
+        )
+        .expect("child usage log path should compile");
+
+        assert!(generated.contains("usage_log: Some(\"usage/childagent.jsonl\".to_string())"));
     }
 
     #[test]

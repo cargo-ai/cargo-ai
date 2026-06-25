@@ -2514,6 +2514,16 @@ async fn run_agent_step_with_provider_context(
     if step.ignore_tools {
         command.arg("--ignore-tools");
     }
+    if let Some(usage_log_path) = step.usage_log.as_deref() {
+        let resolved_usage_log_path = resolve_child_usage_log_path(
+            usage_log_path,
+            action_name,
+            provider_context.package_context.as_ref(),
+        )?;
+        ensure_child_usage_log_parent_exists(resolved_usage_log_path.as_path())?;
+        command.arg("--usage-log");
+        command.arg(resolved_usage_log_path.as_os_str());
+    }
     let inherited_profile_name = if artifact_is_json_definition(artifact) {
         provider_context.profile_name.clone()
     } else {
@@ -2800,6 +2810,62 @@ fn child_artifact_command(
             command
         }
     }
+}
+
+fn resolve_child_usage_log_path(
+    raw_path: &str,
+    action_name: &str,
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
+) -> Result<PathBuf, String> {
+    let path = Path::new(raw_path);
+    validate_child_usage_log_path(path, action_name)?;
+    if let Some(context) = package_context {
+        return crate::commands::local_packages::resolve_package_data_path(context, path)
+            .map_err(|error| format!("Action '{}': {}", action_name, error));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn validate_child_usage_log_path(path: &Path, action_name: &str) -> Result<(), String> {
+    let raw_path = path.to_string_lossy();
+    if raw_path.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' agent `usage_log` must be a non-empty relative path.",
+            action_name
+        ));
+    }
+    if path.is_absolute() {
+        return Err(format!(
+            "Action '{}' agent `usage_log` must be a relative path.",
+            action_name
+        ));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "Action '{}' agent `usage_log` must not use parent traversal (`..`).",
+            action_name
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_child_usage_log_parent_exists(path: &Path) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "Failed to create child usage log directory '{}': {}",
+            parent.display(),
+            error
+        )
+    })
 }
 
 fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'static str> {
@@ -4376,6 +4442,7 @@ mod tests {
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -5443,6 +5510,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -5488,6 +5556,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -5565,6 +5634,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -5659,6 +5729,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -5741,6 +5812,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -5815,6 +5887,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -5909,6 +5982,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -5978,6 +6052,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6069,6 +6144,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6193,6 +6269,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6256,6 +6333,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6305,6 +6383,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6380,6 +6459,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6466,6 +6546,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6523,6 +6604,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6552,6 +6634,36 @@ auth_mode = "{auth_mode}"
         assert!(error.contains("Ollama"));
     }
 
+    #[test]
+    fn child_usage_log_resolves_under_package_data_root() {
+        let data_root =
+            std::env::temp_dir().join(format!("cai2102-package-data-{}", std::process::id()));
+        let context = crate::commands::local_packages::InstalledPackageRuntimeContext {
+            alias: "image_generator".to_string(),
+            source_kind: "hosted".to_string(),
+            package_data_root: data_root.clone(),
+            permissions: crate::commands::local_packages::PackagePermissionProfileDocument::default(
+            ),
+        };
+
+        let resolved = super::resolve_child_usage_log_path(
+            "usage/child.jsonl",
+            "observe_usage",
+            Some(&context),
+        )
+        .expect("package child usage log should resolve");
+
+        assert_eq!(resolved, data_root.join("usage/child.jsonl"));
+    }
+
+    #[test]
+    fn child_usage_log_rejects_parent_traversal() {
+        let error = super::resolve_child_usage_log_path("../usage.jsonl", "observe_usage", None)
+            .expect_err("parent traversal should be rejected");
+
+        assert!(error.contains("parent traversal"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn agent_step_invokes_child_with_forwarded_inputs() {
@@ -6561,6 +6673,9 @@ auth_mode = "{auth_mode}"
         let current_dir = std::env::current_dir().expect("current dir should resolve");
         let script_name = format!(".tmp-cai2032-agent-child-{}.sh", std::process::id());
         let script_path = current_dir.join(&script_name);
+        let usage_log_dir_name = format!(".tmp-cai2032-usage-{}", std::process::id());
+        let usage_log = format!("{usage_log_dir_name}/child.jsonl");
+        let usage_log_dir = current_dir.join(&usage_log_dir_name);
         let output_path = std::env::temp_dir().join(format!(
             "cai2032-agent-child-args-{}.txt",
             std::process::id()
@@ -6597,6 +6712,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: Some(usage_log.clone()),
             run_vars: None,
             input_overrides: None,
             inputs: Some(vec![
@@ -6641,6 +6757,7 @@ auth_mode = "{auth_mode}"
         .await;
 
         let _ = fs::remove_file(&script_path);
+        let _ = fs::remove_dir_all(&usage_log_dir);
 
         assert!(
             result.is_ok(),
@@ -6653,6 +6770,8 @@ auth_mode = "{auth_mode}"
         assert_eq!(
             args.lines().collect::<Vec<_>>(),
             vec![
+                "--usage-log",
+                usage_log.as_str(),
                 "--input-mode",
                 "append",
                 "--input-text",
@@ -6711,6 +6830,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6821,6 +6941,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6910,6 +7031,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7004,6 +7126,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7030,6 +7153,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: Some(vec![crate::ActionInput::Text {
@@ -7130,6 +7254,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7242,6 +7367,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7338,6 +7464,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", artifact_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: Some(vec![crate::ActionInput::Text {
@@ -7423,6 +7550,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", artifact_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: Some(vec![crate::ActionInput::Text {
@@ -7495,6 +7623,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", artifact_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7544,6 +7673,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some("child_agent".to_string()),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7590,6 +7720,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some("./../child_agent".to_string()),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7636,6 +7767,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some("./agents/child_agent".to_string()),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7699,6 +7831,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7769,6 +7902,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7795,6 +7929,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7874,6 +8009,7 @@ auth_mode = "{auth_mode}"
                 subject: None,
                 text: None,
                 agent: None,
+                usage_log: None,
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
@@ -7904,6 +8040,7 @@ auth_mode = "{auth_mode}"
                 subject: None,
                 text: None,
                 agent: Some(format!("./{}", script_name)),
+                usage_log: None,
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
@@ -7980,6 +8117,7 @@ auth_mode = "{auth_mode}"
                 subject: None,
                 text: None,
                 agent: None,
+                usage_log: None,
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
@@ -8016,6 +8154,7 @@ auth_mode = "{auth_mode}"
                 subject: None,
                 text: None,
                 agent: None,
+                usage_log: None,
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
@@ -8102,6 +8241,7 @@ auth_mode = "{auth_mode}"
                 subject: None,
                 text: None,
                 agent: None,
+                usage_log: None,
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
@@ -8135,6 +8275,7 @@ auth_mode = "{auth_mode}"
                 subject: None,
                 text: None,
                 agent: None,
+                usage_log: None,
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
@@ -8220,6 +8361,7 @@ auth_mode = "{auth_mode}"
                     subject: None,
                     text: None,
                     agent: None,
+                    usage_log: None,
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
@@ -8246,6 +8388,7 @@ auth_mode = "{auth_mode}"
                     subject: None,
                     text: None,
                     agent: Some(format!("./{}", script_name)),
+                    usage_log: None,
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
@@ -8277,6 +8420,7 @@ auth_mode = "{auth_mode}"
                 subject: None,
                 text: None,
                 agent: Some(format!("./{}", script_name)),
+                usage_log: None,
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
@@ -8350,6 +8494,7 @@ auth_mode = "{auth_mode}"
                     subject: None,
                     text: None,
                     agent: None,
+                    usage_log: None,
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
@@ -8379,6 +8524,7 @@ auth_mode = "{auth_mode}"
                     subject: None,
                     text: None,
                     agent: None,
+                    usage_log: None,
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
@@ -8414,6 +8560,7 @@ auth_mode = "{auth_mode}"
                     subject: None,
                     text: None,
                     agent: None,
+                    usage_log: None,
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
@@ -8446,6 +8593,7 @@ auth_mode = "{auth_mode}"
                     subject: None,
                     text: None,
                     agent: None,
+                    usage_log: None,
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
@@ -8527,6 +8675,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -8553,6 +8702,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -8629,6 +8779,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -8708,6 +8859,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,

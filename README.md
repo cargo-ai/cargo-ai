@@ -655,6 +655,8 @@ Agent metadata identifies the best-known source for each event. Interpreted loca
 
 Usage logs do not include prompts, model output text, generated image bytes, tool arguments, tool stdout/stderr, profile tokens, access tokens, or raw provider response bodies. If you need custom business logs, decision traces, or writes to a logging backend, implement that explicitly in a tool.
 
+Child `agent` steps may set their own `usage_log` path. That is the JSON equivalent of launching the child with `--usage-log <path>`. Omit it when the child should stay on the parent/root usage log. When running an installed package entrypoint such as `cargo ai run image_generator::generate_with_usage`, relative child usage-log paths resolve under that package alias's persistent `data/` root; for local JSON or standalone hatched binaries, they remain relative to the current run directory.
+
 Use `--render-mode auto|live|append-only` to control that behavior explicitly:
 - `auto` preserves the current terminal-sensitive default
 - `append-only` forces incremental labeled output even in an interactive terminal
@@ -778,6 +780,7 @@ Use child agents when one agent needs to hand work to another agent.
 - A parent can also reuse one declared named top-level input explicitly inside child `inputs` with `{ "input": "<name>" }`.
 - Child `agent` steps may set `run_vars` to pass child runtime vars the same way the CLI uses repeatable `--run-var NAME=VALUE`.
 - Child `agent` steps may set `input_overrides` to target the child's declared named inputs directly.
+- Child `agent` steps may set `usage_log` to send that child run to a child-specific JSONL usage log.
 - Child `agent` steps may still provide anonymous child `inputs`.
 - Child `agent` steps may set `input_mode` to `replace`, `append`, or `prepend` when they also provide child `inputs`.
 - Named child-input reuse is explicit only. Cargo AI does not automatically inherit every named parent input into the child.
@@ -801,6 +804,7 @@ Example:
   "kind": "agent",
   "artifact": "./child_reporter",
   "profile": { "var": "runtime.child_profile" },
+  "usage_log": "usage/child_reporter.jsonl",
   "run_vars": {
     "year": { "var": "runtime.year" },
     "month": "08",
@@ -829,6 +833,7 @@ That child step behaves like a structured CLI invocation:
 - `run_vars.generate_images` is equivalent to `--run-var generate_images=true`
 - `input_overrides.menu_image` is equivalent to `--input-override menu_image=...`
 - `input_overrides.review_reason` is equivalent to `--input-override review_reason=...`
+- `usage_log` is equivalent to child `--usage-log usage/child_reporter.jsonl`
 - child `inputs` stays the anonymous extra-input list
 - child `input_mode` still controls only that anonymous `inputs` list
 
@@ -836,6 +841,7 @@ Use these child-step value shapes:
 
 - `run_vars.<name>`: string, number, boolean, or `{ "var": "..." }`
 - `input_overrides.<name>`: string, `{ "var": "..." }`, or `{ "input": "<name>" }`
+- `usage_log`: non-empty relative path with no `..` traversal
 
 For schema-backed agents, `--input-override` and anonymous runtime inputs operate at different layers. This is valid:
 
@@ -1198,7 +1204,7 @@ $CARGO_AI_HOME/packages/<alias>/
   data/
 ```
 
-`package/` is the verified payload for the active exact version and is rematerialized on hosted update or rollback. `data/` is the package-owned persistent state area and is preserved across normal hosted update/rollback. `cargo ai packages inspect <alias>` shows hosted source IDs, hosted version IDs, package hash, entrypoints, and the accepted permission profile. Hosted package runtime defaults keep Cargo AI-controlled writes under `data/`; project/workspace writes are not implied by install, and unconstrained `exec`/tool subprocess steps are blocked unless the installed package permission profile explicitly allows them.
+`package/` is the verified payload for the active exact version and is rematerialized on hosted update or rollback. `data/` is the package-owned persistent state area and is preserved across normal hosted update/rollback. Installed package entrypoints resolve Cargo AI-controlled child `usage_log` writes under `data/`, which lets a parent/observer agent import metadata-only JSONL into package-owned SQLite or another package-owned store. `cargo ai packages inspect <alias>` shows hosted source IDs, hosted version IDs, package hash, entrypoints, and the accepted permission profile. Hosted package runtime defaults keep Cargo AI-controlled writes under `data/`; project/workspace writes are not implied by install, and unconstrained `exec`/tool subprocess steps are blocked unless the installed package permission profile explicitly allows them.
 
 ## Where To Go Next
 

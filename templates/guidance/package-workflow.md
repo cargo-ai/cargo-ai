@@ -100,6 +100,8 @@ $CARGO_AI_HOME/packages/<alias>/
 
 Hosted update and rollback rematerialize `install.toml` and `package/`, then preserve `data/`. Do not add publisher-authored migrations or total-refresh behavior unless that is part of a separate, explicit story.
 
+Installed package entrypoints resolve Cargo AI-controlled child `usage_log` paths under `data/`. Use this when a parent/observer agent needs a child-specific metadata-only JSONL file before a package tool imports it into SQLite or another package-owned store.
+
 Default hosted package runtime boundaries:
 - `package/` is readable verified payload.
 - `data/` is the default writable package-owned root.

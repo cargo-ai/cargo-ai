@@ -866,58 +866,66 @@ fn parse_run_step(
     let platforms = optional_platforms(run_obj, path)?;
 
     match kind.as_str() {
-        "exec" => Ok(crate::RunStep {
-            kind,
-            program: Some(required_non_empty_string(run_obj, "program", path)?),
-            model: None,
-            profile: None,
-            output_variable: optional_capture_name(run_obj, "output_variable", path)?,
-            status_variable,
-            error_variable,
-            failure_mode,
-            when,
-            args: required_run_args(run_obj, path)?,
-            prompt: None,
-            path: None,
-            subject: None,
-            text: None,
-            agent: None,
-            tool_name: None,
-            tool_params: BTreeMap::new(),
-            run_vars: None,
-            input_overrides: None,
-            inputs: None,
-            reference_images: None,
-            input_mode: None,
-            ignore_tools: false,
-            platforms,
-        }),
-        "email_me" => Ok(crate::RunStep {
-            kind,
-            program: None,
-            model: None,
-            profile: None,
-            output_variable: None,
-            status_variable,
-            error_variable,
-            failure_mode,
-            when,
-            args: Vec::new(),
-            prompt: None,
-            path: None,
-            subject: Some(parse_string_parts_field(run_obj, "subject", path)?),
-            text: Some(parse_string_parts_field(run_obj, "text", path)?),
-            agent: None,
-            tool_name: None,
-            tool_params: BTreeMap::new(),
-            run_vars: None,
-            input_overrides: None,
-            inputs: None,
-            reference_images: None,
-            input_mode: None,
-            ignore_tools: false,
-            platforms,
-        }),
+        "exec" => {
+            reject_agent_only_field(run_obj, "usage_log", path)?;
+            Ok(crate::RunStep {
+                kind,
+                program: Some(required_non_empty_string(run_obj, "program", path)?),
+                model: None,
+                profile: None,
+                output_variable: optional_capture_name(run_obj, "output_variable", path)?,
+                status_variable,
+                error_variable,
+                failure_mode,
+                when,
+                args: required_run_args(run_obj, path)?,
+                prompt: None,
+                path: None,
+                subject: None,
+                text: None,
+                agent: None,
+                usage_log: None,
+                tool_name: None,
+                tool_params: BTreeMap::new(),
+                run_vars: None,
+                input_overrides: None,
+                inputs: None,
+                reference_images: None,
+                input_mode: None,
+                ignore_tools: false,
+                platforms,
+            })
+        }
+        "email_me" => {
+            reject_agent_only_field(run_obj, "usage_log", path)?;
+            Ok(crate::RunStep {
+                kind,
+                program: None,
+                model: None,
+                profile: None,
+                output_variable: None,
+                status_variable,
+                error_variable,
+                failure_mode,
+                when,
+                args: Vec::new(),
+                prompt: None,
+                path: None,
+                subject: Some(parse_string_parts_field(run_obj, "subject", path)?),
+                text: Some(parse_string_parts_field(run_obj, "text", path)?),
+                agent: None,
+                usage_log: None,
+                tool_name: None,
+                tool_params: BTreeMap::new(),
+                run_vars: None,
+                input_overrides: None,
+                inputs: None,
+                reference_images: None,
+                input_mode: None,
+                ignore_tools: false,
+                platforms,
+            })
+        }
         "agent" => {
             let (agent, agent_path) = required_child_artifact(run_obj, path)?;
             validate_child_agent_target(agent.as_str(), agent_path.as_str())?;
@@ -942,6 +950,7 @@ fn parse_run_step(
                 subject: None,
                 text: None,
                 agent: Some(agent),
+                usage_log: optional_child_usage_log(run_obj, path)?,
                 tool_name: None,
                 tool_params: BTreeMap::new(),
                 run_vars: optional_action_run_vars(run_obj, path)?,
@@ -953,33 +962,38 @@ fn parse_run_step(
                 platforms,
             })
         }
-        "tool" => Ok(crate::RunStep {
-            kind,
-            program: None,
-            model: None,
-            profile: None,
-            output_variable: optional_capture_name(run_obj, "output_variable", path)?,
-            status_variable,
-            error_variable,
-            failure_mode,
-            when,
-            args: Vec::new(),
-            prompt: None,
-            path: None,
-            subject: None,
-            text: None,
-            agent: None,
-            tool_name: Some(required_tool_name(run_obj, path)?),
-            tool_params: optional_tool_params(run_obj, path)?,
-            run_vars: None,
-            input_overrides: None,
-            inputs: None,
-            reference_images: None,
-            input_mode: None,
-            ignore_tools: false,
-            platforms,
-        }),
+        "tool" => {
+            reject_agent_only_field(run_obj, "usage_log", path)?;
+            Ok(crate::RunStep {
+                kind,
+                program: None,
+                model: None,
+                profile: None,
+                output_variable: optional_capture_name(run_obj, "output_variable", path)?,
+                status_variable,
+                error_variable,
+                failure_mode,
+                when,
+                args: Vec::new(),
+                prompt: None,
+                path: None,
+                subject: None,
+                text: None,
+                agent: None,
+                usage_log: None,
+                tool_name: Some(required_tool_name(run_obj, path)?),
+                tool_params: optional_tool_params(run_obj, path)?,
+                run_vars: None,
+                input_overrides: None,
+                inputs: None,
+                reference_images: None,
+                input_mode: None,
+                ignore_tools: false,
+                platforms,
+            })
+        }
         "generate_image" => {
+            reject_agent_only_field(run_obj, "usage_log", path)?;
             let path_parts = parse_string_parts_field(run_obj, "path", path)?;
             if let Some(literal_path) = resolve_literal_run_args(&path_parts) {
                 validate_definition_owned_local_path(
@@ -1009,6 +1023,7 @@ fn parse_run_step(
                 subject: None,
                 text: None,
                 agent: None,
+                usage_log: None,
                 tool_name: None,
                 tool_params: BTreeMap::new(),
                 run_vars: None,
@@ -1270,6 +1285,33 @@ fn optional_action_input_mode(
             "{path}.input_mode: unsupported `input_mode` (supported: `replace`, `append`, `prepend`)"
         )),
     }
+}
+
+fn optional_child_usage_log(
+    run_obj: &Map<String, Value>,
+    path: &str,
+) -> Result<Option<String>, String> {
+    let Some(value) = run_obj.get("usage_log") else {
+        return Ok(None);
+    };
+    let raw = value.as_str().ok_or_else(|| {
+        format!("{path}.usage_log: expected `usage_log` to be a non-empty relative path string")
+    })?;
+    validate_definition_owned_local_path(raw, format!("{path}.usage_log").as_str(), "usage log")?;
+    Ok(Some(raw.trim().to_string()))
+}
+
+fn reject_agent_only_field(
+    run_obj: &Map<String, Value>,
+    field_name: &str,
+    path: &str,
+) -> Result<(), String> {
+    if run_obj.contains_key(field_name) {
+        return Err(format!(
+            "{path}.{field_name}: `{field_name}` is only supported for `agent` actions"
+        ));
+    }
+    Ok(())
 }
 
 fn optional_action_input_overrides(
@@ -2590,6 +2632,7 @@ mod tests {
               {
                 "kind": "agent",
                 "artifact": "./summary_agent",
+                "usage_log": "usage/summary-agent.jsonl",
                 "input_mode": "append",
                 "inputs": [
                   { "type": "text", "text": "Summarize this." },
@@ -2619,6 +2662,10 @@ mod tests {
         let child_step = &definition.actions()[0].run[0];
 
         assert_eq!(child_step.agent.as_deref(), Some("./summary_agent"));
+        assert_eq!(
+            child_step.usage_log.as_deref(),
+            Some("usage/summary-agent.jsonl")
+        );
         assert!(child_step
             .inputs
             .as_ref()
