@@ -1466,6 +1466,16 @@ mod tests {
     use std::cell::Cell;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    static TEST_CREDENTIALS_PATH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_credentials_root(timestamp_nanos: u128) -> PathBuf {
+        let sequence = TEST_CREDENTIALS_PATH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "cargo-ai-credentials-file-test-{}-{timestamp_nanos}-{sequence}",
+            std::process::id()
+        ))
+    }
+
     fn with_temp_credentials_path<F>(test: F)
     where
         F: FnOnce(&Path),
@@ -1474,11 +1484,19 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time should be valid")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("cargo-ai-credentials-file-test-{unique}"));
-        fs::create_dir_all(&root).expect("temp root should be created");
+        let root = temp_credentials_root(unique);
+        fs::create_dir(&root).expect("temp root should be created");
         let path = root.join("credentials.toml");
         test(path.as_path());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn temp_credentials_roots_are_unique_for_the_same_timestamp() {
+        let first = temp_credentials_root(1);
+        let second = temp_credentials_root(1);
+
+        assert_ne!(first, second);
     }
 
     fn write_private_test_file(path: &Path, contents: &str) {
