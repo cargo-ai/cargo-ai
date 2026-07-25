@@ -23,6 +23,13 @@ use std::process;
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
 
+fn should_run_automatic_update_check(
+    automatic_persistence_allowed: bool,
+    has_subcommand: bool,
+) -> bool {
+    automatic_persistence_allowed && has_subcommand
+}
+
 // Initialize Tokio runtime macro
 // Executor: Responsible for polling and running to completion
 #[tokio::main]
@@ -31,8 +38,9 @@ async fn main() {
     let cargo_ai_home_preexisting = cargo_ai_home.exists();
     let cmd_args = args::build_cli();
     let skip_update_check_for_invocation = cmd_args.get_flag("no_update_check");
+    let mut automatic_persistence_allowed = true;
 
-    match credentials::migration::run_phase1_migration() {
+    match credentials::migration::run_legacy_credential_migration() {
         Ok(outcome) if outcome.changed() => {
             println!(
                 "✅ Migrated legacy credentials: {} profile token(s), account tokens migrated: {}.",
@@ -46,13 +54,23 @@ async fn main() {
         }
         Ok(_) => {}
         Err(error) => {
-            eprintln!("⚠️ Failed to migrate legacy credentials: {error}");
+            automatic_persistence_allowed = false;
+            eprintln!(
+                "⚠️ Skipping automatic Cargo AI config updates because startup config validation or legacy credential migration failed: {error}. Fix or restore the reported file, then retry."
+            );
         }
     }
 
     // Metadata only powers local drift checks; project-local commands should not
     // look failed when a sandbox blocks best-effort user-home writes.
-    let _ = cargo_ai_metadata::persist_current_metadata();
+    if automatic_persistence_allowed {
+        if let Err(error) = cargo_ai_metadata::persist_current_metadata() {
+            automatic_persistence_allowed = false;
+            eprintln!(
+                "⚠️ Skipping remaining automatic Cargo AI config updates because metadata persistence failed: {error}. Fix or restore the reported file, then retry."
+            );
+        }
+    }
 
     if let Some(notice) = cargo_ai_home_initialization_notice(
         cargo_ai_home_preexisting,
@@ -65,7 +83,10 @@ async fn main() {
     let command_succeeded = if let Some(sub_m) = cmd_args.subcommand_matches("version") {
         commands::version::run(sub_m).await
     } else {
-        if cmd_args.subcommand_name().is_some() {
+        if should_run_automatic_update_check(
+            automatic_persistence_allowed,
+            cmd_args.subcommand_name().is_some(),
+        ) {
             update_check::maybe_run_background_check(skip_update_check_for_invocation).await;
         }
 
@@ -164,7 +185,7 @@ fn cargo_ai_home_initialization_notice(
 
 #[cfg(test)]
 mod tests {
-    use super::cargo_ai_home_initialization_notice;
+    use super::{cargo_ai_home_initialization_notice, should_run_automatic_update_check};
     use std::path::Path;
 
     #[test]
@@ -195,5 +216,12 @@ mod tests {
             cargo_ai_home_initialization_notice(false, false, Path::new("/tmp/cargo-ai-home"));
 
         assert_eq!(notice, None);
+    }
+
+    #[test]
+    fn automatic_update_check_requires_a_healthy_persistence_gate() {
+        assert!(should_run_automatic_update_check(true, true));
+        assert!(!should_run_automatic_update_check(false, true));
+        assert!(!should_run_automatic_update_check(true, false));
     }
 }

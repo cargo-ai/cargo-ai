@@ -52,7 +52,7 @@ cargo ai --help
 
 Full install guidance, PATH details, and current platform posture live under [docs/install](./docs/install/README.md). The step-by-step Cargo workflow is here: [Install with Cargo](./docs/install/cargo.md).
 
-By default, Cargo AI stores config, credentials, and internal workspaces under `~/.cargo/.cargo-ai` (or `$CARGO_HOME/.cargo-ai`). Set `CARGO_AI_HOME` if you want Cargo AI to use a different root directory. See [Cargo AI Home](./docs/cargo-ai-home.md) for the full resolution order, stored state, and first-run behavior.
+By default, Cargo AI stores config, credentials, and internal workspaces under `~/.cargo/.cargo-ai` (or `$CARGO_HOME/.cargo-ai`). Set `CARGO_AI_HOME` if you want Cargo AI to use a different root directory. Locally built binaries and reinstall tests should always use a dedicated development home and isolated install root rather than live state. See [Cargo AI Home](./docs/cargo-ai-home.md) for the full resolution order, development-isolation guidance, and failure-safe automatic-update behavior.
 
 ### 1. Choose your model setup
 

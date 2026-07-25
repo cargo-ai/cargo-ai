@@ -11,7 +11,12 @@ use crate::config::schema::{default_secret_store_mode, SecretStoreMode};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::{ErrorKind, Write};
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const KEYCHAIN_SERVICE: &str = "cargo-ai";
 const PROFILE_TOKEN_PREFIX: &str = "profile/";
@@ -20,6 +25,15 @@ const ACCOUNT_ACCESS_KEY: &str = "account/access_token";
 const ACCOUNT_REFRESH_KEY: &str = "account/refresh_token";
 const OPENAI_OAUTH_ACCESS_KEY: &str = "openai_oauth/access_token";
 const OPENAI_OAUTH_REFRESH_KEY: &str = "openai_oauth/refresh_token";
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+static CREDENTIALS_STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    static TEST_NEW_CREDENTIALS_DESTINATION_CONTENTS: std::cell::RefCell<Option<(PathBuf, String)>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 #[derive(Debug, Clone)]
 pub struct AccountTokens {
@@ -62,6 +76,12 @@ struct CredentialsFile {
 
     #[serde(default)]
     openai_oauth: Option<CredentialsAccount>,
+
+    #[serde(flatten)]
+    other: BTreeMap<String, toml::Value>,
+
+    #[serde(skip)]
+    original_contents: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -71,6 +91,9 @@ struct CredentialsAccount {
 
     #[serde(default)]
     refresh_token: Option<String>,
+
+    #[serde(flatten)]
+    other: BTreeMap<String, toml::Value>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -167,6 +190,7 @@ fn keychain_supported_on_target() -> bool {
 }
 
 fn read_credentials_file(path: &Path) -> Result<CredentialsFile, String> {
+    validate_credentials_path_safety(path)?;
     if !path.exists() {
         return Ok(CredentialsFile::default());
     }
@@ -176,11 +200,29 @@ fn read_credentials_file(path: &Path) -> Result<CredentialsFile, String> {
     let raw = fs::read_to_string(path)
         .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
 
-    toml::from_str::<CredentialsFile>(&raw)
-        .map_err(|error| format!("failed to parse '{}': {error}", path.display()))
+    let mut credentials = toml::from_str::<CredentialsFile>(&raw).map_err(|_| {
+        format!(
+            "failed to parse credentials '{}'; fix or restore this file, which Cargo AI left unchanged",
+            path.display()
+        )
+    })?;
+    credentials.original_contents = Some(raw);
+    Ok(credentials)
 }
 
 fn write_credentials_file(path: &Path, credentials: &CredentialsFile) -> Result<(), String> {
+    write_credentials_file_with_replacer(path, credentials, replace_credentials_file)
+}
+
+fn write_credentials_file_with_replacer<Replace>(
+    path: &Path,
+    credentials: &CredentialsFile,
+    replace: Replace,
+) -> Result<(), String>
+where
+    Replace: FnOnce(&Path, &Path) -> Result<(), String>,
+{
+    validate_credentials_path_safety(path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!(
@@ -189,6 +231,7 @@ fn write_credentials_file(path: &Path, credentials: &CredentialsFile) -> Result<
             )
         })?;
     }
+    validate_credentials_path_safety(path)?;
 
     if path.exists() {
         validate_file_permissions(path)?;
@@ -197,10 +240,280 @@ fn write_credentials_file(path: &Path, credentials: &CredentialsFile) -> Result<
     let serialized = toml::to_string_pretty(credentials)
         .map_err(|error| format!("failed to serialize credentials: {error}"))?;
 
-    fs::write(path, serialized)
-        .map_err(|error| format!("failed to write '{}': {error}", path.display()))?;
+    toml::from_str::<CredentialsFile>(&serialized)
+        .map_err(|_| "failed to validate serialized credentials".to_string())?;
 
-    lock_down_file_permissions(path)?;
+    let staging_path = credentials_staging_path(path)?;
+    let write_result = (|| {
+        let mut staging_file = open_private_staging_file(&staging_path)?;
+        staging_file
+            .write_all(serialized.as_bytes())
+            .map_err(|error| {
+                format!(
+                    "failed to write staged credentials '{}': {error}",
+                    staging_path.display()
+                )
+            })?;
+        staging_file.flush().map_err(|error| {
+            format!(
+                "failed to flush staged credentials '{}': {error}",
+                staging_path.display()
+            )
+        })?;
+        staging_file.sync_all().map_err(|error| {
+            format!(
+                "failed to sync staged credentials '{}': {error}",
+                staging_path.display()
+            )
+        })?;
+        drop(staging_file);
+
+        lock_down_file_permissions(&staging_path)?;
+        validate_credentials_path_safety(path)?;
+        match credentials.original_contents.as_deref() {
+            Some(expected_contents) => {
+                // This comparison narrows, but cannot eliminate, the final
+                // check-to-rename window for non-cooperating existing-file
+                // writers. Missing files use the atomic no-clobber path below.
+                ensure_credentials_source_unchanged(path, expected_contents)?;
+                replace(&staging_path, path)?;
+            }
+            None => install_staged_new_credentials(&staging_path, path)?,
+        }
+        lock_down_file_permissions(path)?;
+        sync_credentials_parent_directory(path)
+    })();
+
+    if staging_path.exists() {
+        let _ = fs::remove_file(&staging_path);
+    }
+
+    write_result?;
+    Ok(())
+}
+
+fn validate_credentials_path_safety(path: &Path) -> Result<(), String> {
+    // The credentials file and its final Cargo AI Home directory are the
+    // managed mutation boundary. Broader ancestors such as `~/.cargo` may be
+    // linked, so they are deliberately not traversed or rejected here.
+    for candidate in [Some(path), path.parent()].into_iter().flatten() {
+        match fs::symlink_metadata(candidate) {
+            Ok(metadata) if credentials_metadata_is_link_like(&metadata) => {
+                return Err(format!(
+                    "refusing credentials path '{}' because managed path '{}' is a symbolic link or reparse point; Cargo AI left it unchanged",
+                    path.display(),
+                    candidate.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect managed credentials path '{}': {error}; Cargo AI left '{}' unchanged",
+                    candidate.display(),
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn credentials_metadata_is_link_like(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn credentials_metadata_is_link_like(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+fn ensure_credentials_source_unchanged(path: &Path, expected_contents: &str) -> Result<(), String> {
+    validate_credentials_path_safety(path)?;
+    match fs::read_to_string(path) {
+        Ok(current) if current == expected_contents => Ok(()),
+        Ok(_) => Err(format!(
+            "credentials '{}' changed while an update was being prepared; retry the command. Cargo AI left the newer file unchanged",
+            path.display()
+        )),
+        Err(error) => Err(format!(
+            "failed to re-read credentials '{}' before replacement: {error}. Cargo AI left the file unchanged",
+            path.display()
+        )),
+    }
+}
+
+fn install_staged_new_credentials(staging_path: &Path, path: &Path) -> Result<(), String> {
+    maybe_create_credentials_destination_for_test(path)?;
+    fs::hard_link(staging_path, path).map_err(|error| {
+        if error.kind() == ErrorKind::AlreadyExists {
+            format!(
+                "credentials '{}' were created concurrently; Cargo AI left the newer file unchanged",
+                path.display()
+            )
+        } else {
+            format!(
+                "failed to install new credentials '{}' without replacing an existing file: {error}",
+                path.display()
+            )
+        }
+    })?;
+    fs::remove_file(staging_path).map_err(|error| {
+        format!(
+            "installed new credentials '{}' but failed to remove staged link '{}': {error}",
+            path.display(),
+            staging_path.display()
+        )
+    })
+}
+
+fn maybe_create_credentials_destination_for_test(path: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        let contents = TEST_NEW_CREDENTIALS_DESTINATION_CONTENTS.with(|fixture| {
+            let mut fixture = fixture.borrow_mut();
+            if fixture
+                .as_ref()
+                .is_some_and(|(fixture_path, _)| fixture_path == path)
+            {
+                fixture.take().map(|(_, contents)| contents)
+            } else {
+                None
+            }
+        });
+        if let Some(contents) = contents {
+            fs::write(path, contents).map_err(|error| {
+                format!(
+                    "failed to create injected concurrent credentials '{}': {error}",
+                    path.display()
+                )
+            })?;
+            lock_down_file_permissions(path)?;
+        }
+    }
+    #[cfg(not(test))]
+    let _ = path;
+    Ok(())
+}
+
+fn credentials_staging_path(path: &Path) -> Result<PathBuf, String> {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("credentials path '{}' has no file name", path.display()))?;
+    let sequence = CREDENTIALS_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    Ok(path.with_file_name(format!(
+        ".{file_name}.tmp-{}-{sequence}",
+        std::process::id()
+    )))
+}
+
+#[cfg(unix)]
+fn open_private_staging_file(path: &Path) -> Result<fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|error| {
+            format!(
+                "failed to create staged credentials '{}': {error}",
+                path.display()
+            )
+        })
+}
+
+#[cfg(not(unix))]
+fn open_private_staging_file(path: &Path) -> Result<fs::File, String> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            format!(
+                "failed to create staged credentials '{}': {error}",
+                path.display()
+            )
+        })
+}
+
+#[cfg(not(windows))]
+fn replace_credentials_file(staging_path: &Path, path: &Path) -> Result<(), String> {
+    fs::rename(staging_path, path).map_err(|error| {
+        format!(
+            "failed to replace credentials '{}' from staged file '{}': {error}",
+            path.display(),
+            staging_path.display()
+        )
+    })
+}
+
+#[cfg(windows)]
+fn replace_credentials_file(staging_path: &Path, path: &Path) -> Result<(), String> {
+    use std::iter;
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+    #[link(name = "Kernel32")]
+    extern "system" {
+        fn MoveFileExW(
+            existing_file_name: *const u16,
+            new_file_name: *const u16,
+            flags: u32,
+        ) -> i32;
+    }
+
+    let staging_wide = staging_path
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let path_wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both paths are owned, NUL-terminated UTF-16 buffers that remain
+    // alive for the duration of the Windows API call.
+    let succeeded = unsafe {
+        MoveFileExW(
+            staging_wide.as_ptr(),
+            path_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if succeeded == 0 {
+        return Err(format!(
+            "failed to replace credentials '{}' from staged file '{}': {}",
+            path.display(),
+            staging_path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_credentials_parent_directory(path: &Path) -> Result<(), String> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            format!(
+                "failed to sync credentials directory '{}': {error}",
+                parent.display()
+            )
+        })
+}
+
+#[cfg(not(unix))]
+fn sync_credentials_parent_directory(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
@@ -431,13 +744,14 @@ fn store_account_tokens_in_file_with_path(
     refresh_token: Option<&str>,
 ) -> Result<(), String> {
     let mut credentials = read_credentials_file(path)?;
-    credentials.account = Some(CredentialsAccount {
-        access_token: Some(access_token.to_string()),
-        refresh_token: refresh_token
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
-    });
+    let account = credentials
+        .account
+        .get_or_insert_with(CredentialsAccount::default);
+    account.access_token = Some(access_token.to_string());
+    account.refresh_token = refresh_token
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     write_credentials_file(path, &credentials)
 }
 
@@ -484,13 +798,14 @@ fn store_openai_oauth_tokens_in_file_with_path(
     refresh_token: Option<&str>,
 ) -> Result<(), String> {
     let mut credentials = read_credentials_file(path)?;
-    credentials.openai_oauth = Some(CredentialsAccount {
-        access_token: Some(access_token.to_string()),
-        refresh_token: refresh_token
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
-    });
+    let openai_oauth = credentials
+        .openai_oauth
+        .get_or_insert_with(CredentialsAccount::default);
+    openai_oauth.access_token = Some(access_token.to_string());
+    openai_oauth.refresh_token = refresh_token
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     write_credentials_file(path, &credentials)
 }
 
@@ -607,29 +922,38 @@ fn load_snapshot_from_keychain(profile_names: &[String]) -> Result<SecretSnapsho
 }
 
 fn write_snapshot_to_file(path: &Path, snapshot: &SecretSnapshot) -> Result<(), String> {
-    let mut credentials = CredentialsFile::default();
+    let mut credentials = read_credentials_file(path)?;
     credentials.profile_tokens = snapshot.profile_tokens.clone();
-    credentials.account = snapshot
-        .account_tokens
-        .as_ref()
-        .map(|tokens| CredentialsAccount {
-            access_token: Some(tokens.access_token.clone()),
-            refresh_token: tokens.refresh_token.clone(),
-        });
-    credentials.openai_oauth =
-        snapshot
-            .openai_oauth_tokens
-            .as_ref()
-            .map(|tokens| CredentialsAccount {
-                access_token: Some(tokens.access_token.clone()),
-                refresh_token: tokens.refresh_token.clone(),
-            });
+    match &snapshot.account_tokens {
+        Some(tokens) => {
+            let account = credentials
+                .account
+                .get_or_insert_with(CredentialsAccount::default);
+            account.access_token = Some(tokens.access_token.clone());
+            account.refresh_token = tokens.refresh_token.clone();
+        }
+        None => credentials.account = None,
+    }
+    match &snapshot.openai_oauth_tokens {
+        Some(tokens) => {
+            let openai_oauth = credentials
+                .openai_oauth
+                .get_or_insert_with(CredentialsAccount::default);
+            openai_oauth.access_token = Some(tokens.access_token.clone());
+            openai_oauth.refresh_token = tokens.refresh_token.clone();
+        }
+        None => credentials.openai_oauth = None,
+    }
 
     write_credentials_file(path, &credentials)
 }
 
 fn clear_file_snapshot(path: &Path) -> Result<(), String> {
-    write_credentials_file(path, &CredentialsFile::default())
+    let mut credentials = read_credentials_file(path)?;
+    credentials.profile_tokens.clear();
+    credentials.account = None;
+    credentials.openai_oauth = None;
+    write_credentials_file(path, &credentials)
 }
 
 fn write_snapshot_to_keychain(snapshot: &SecretSnapshot) -> Result<(), String> {
@@ -729,6 +1053,129 @@ fn clear_source_after_migration(
             SecretStoreMode::Keychain => clear_file_snapshot(&path),
         },
         _ => Ok(()),
+    }
+}
+
+fn legacy_config_target_mode(configured_mode: Option<SecretStoreMode>) -> SecretStoreMode {
+    match configured_mode {
+        Some(mode) => mode,
+        None if keychain_supported_on_target() && keychain_enabled() => {
+            if keychain_get(ACCOUNT_ACCESS_KEY).is_ok() {
+                SecretStoreMode::Keychain
+            } else {
+                SecretStoreMode::File
+            }
+        }
+        None => SecretStoreMode::File,
+    }
+}
+
+fn commit_legacy_tokens_to_file_with_path(
+    path: &Path,
+    profile_tokens: &[(String, String)],
+    account_tokens: Option<(&str, Option<&str>)>,
+) -> Result<(), String> {
+    if profile_tokens.is_empty() && account_tokens.is_none() {
+        return Ok(());
+    }
+
+    let mut credentials = read_credentials_file(path)?;
+    let mut changed = false;
+    for (profile_name, token) in profile_tokens {
+        if credentials.profile_tokens.get(profile_name) != Some(token) {
+            credentials
+                .profile_tokens
+                .insert(profile_name.clone(), token.clone());
+            changed = true;
+        }
+    }
+
+    if let Some((access_token, refresh_token)) = account_tokens {
+        let account = credentials
+            .account
+            .get_or_insert_with(CredentialsAccount::default);
+        if account.access_token.as_deref() != Some(access_token) {
+            account.access_token = Some(access_token.to_string());
+            changed = true;
+        }
+        if let Some(refresh_token) = refresh_token
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if account.refresh_token.as_deref() != Some(refresh_token) {
+                account.refresh_token = Some(refresh_token.to_string());
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
+        write_credentials_file(path, &credentials)
+    } else {
+        Ok(())
+    }
+}
+
+fn commit_legacy_tokens_to_keychain_with<GetSecret, SetSecret>(
+    profile_tokens: &[(String, String)],
+    account_tokens: Option<(&str, Option<&str>)>,
+    mut get_secret: GetSecret,
+    mut set_secret: SetSecret,
+) -> Result<(), String>
+where
+    GetSecret: FnMut(&str) -> Result<Option<String>, String>,
+    SetSecret: FnMut(&str, &str) -> Result<(), String>,
+{
+    let mut planned_writes = Vec::new();
+    for (profile_name, token) in profile_tokens {
+        let account = keychain_account_for_profile(profile_name);
+        if get_secret(&account)?.as_deref() != Some(token) {
+            planned_writes.push((account, token.clone()));
+        }
+    }
+
+    if let Some((access_token, refresh_token)) = account_tokens {
+        if let Some(refresh_token) = refresh_token
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if get_secret(ACCOUNT_REFRESH_KEY)?.as_deref() != Some(refresh_token) {
+                planned_writes.push((ACCOUNT_REFRESH_KEY.to_string(), refresh_token.to_string()));
+            }
+        }
+        if get_secret(ACCOUNT_ACCESS_KEY)?.as_deref() != Some(access_token) {
+            planned_writes.push((ACCOUNT_ACCESS_KEY.to_string(), access_token.to_string()));
+        }
+    }
+
+    for (account, secret) in planned_writes {
+        set_secret(&account, &secret)?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn commit_legacy_config_tokens(
+    configured_mode: Option<SecretStoreMode>,
+    profile_tokens: &[(String, String)],
+    account_tokens: Option<(&str, Option<&str>)>,
+) -> Result<(), String> {
+    if profile_tokens.is_empty() && account_tokens.is_none() {
+        return Ok(());
+    }
+
+    match legacy_config_target_mode(configured_mode) {
+        SecretStoreMode::File => commit_legacy_tokens_to_file_with_path(
+            &credentials_path(),
+            profile_tokens,
+            account_tokens,
+        ),
+        SecretStoreMode::Keychain => commit_legacy_tokens_to_keychain_with(
+            profile_tokens,
+            account_tokens,
+            keychain_get,
+            keychain_set,
+        ),
     }
 }
 
@@ -1016,6 +1463,7 @@ pub fn clear_openai_oauth_tokens() -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::config::schema::SecretStoreMode;
+    use std::cell::Cell;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn with_temp_credentials_path<F>(test: F)
@@ -1031,6 +1479,25 @@ mod tests {
         let path = root.join("credentials.toml");
         test(path.as_path());
         let _ = fs::remove_dir_all(root);
+    }
+
+    fn write_private_test_file(path: &Path, contents: &str) {
+        fs::write(path, contents).expect("test credentials should be written");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .expect("test credentials should be private");
+        }
+    }
+
+    fn staged_credentials_count(path: &Path) -> usize {
+        fs::read_dir(path)
+            .expect("credentials directory should be readable")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .count()
     }
 
     #[test]
@@ -1067,6 +1534,435 @@ mod tests {
                 load_account_tokens_from_file_with_path(path).expect("account tokens should load");
             assert!(loaded.is_none());
         });
+    }
+
+    #[test]
+    fn bulk_legacy_file_commit_preserves_unrelated_entries() {
+        with_temp_credentials_path(|path| {
+            write_private_test_file(
+                path,
+                r#"
+profile_tokens = { existing = "existing-secret" }
+future_scalar = "keep-me"
+
+[account]
+access_token = "old-access"
+refresh_token = "old-refresh"
+tenant = "keep-tenant"
+
+[openai_oauth]
+access_token = "oauth-access"
+refresh_token = "oauth-refresh"
+audience = "keep-audience"
+
+[future_section]
+enabled = true
+"#,
+            );
+
+            let profile_tokens = vec![("legacy-profile".to_string(), "legacy-secret".to_string())];
+            commit_legacy_tokens_to_file_with_path(
+                path,
+                &profile_tokens,
+                Some(("new-access", Some("new-refresh"))),
+            )
+            .expect("legacy credentials should commit");
+
+            let raw = fs::read_to_string(path).expect("credentials should remain readable");
+            let value = toml::from_str::<toml::Value>(&raw)
+                .expect("committed credentials should remain valid TOML");
+
+            assert_eq!(
+                value["profile_tokens"]["existing"].as_str(),
+                Some("existing-secret")
+            );
+            assert_eq!(
+                value["profile_tokens"]["legacy-profile"].as_str(),
+                Some("legacy-secret")
+            );
+            assert_eq!(
+                value["account"]["access_token"].as_str(),
+                Some("new-access")
+            );
+            assert_eq!(
+                value["account"]["refresh_token"].as_str(),
+                Some("new-refresh")
+            );
+            assert_eq!(value["account"]["tenant"].as_str(), Some("keep-tenant"));
+            assert_eq!(
+                value["openai_oauth"]["access_token"].as_str(),
+                Some("oauth-access")
+            );
+            assert_eq!(
+                value["openai_oauth"]["audience"].as_str(),
+                Some("keep-audience")
+            );
+            assert_eq!(value["future_scalar"].as_str(), Some("keep-me"));
+            assert_eq!(value["future_section"]["enabled"].as_bool(), Some(true));
+
+            let parent = path.parent().expect("credentials should have a parent");
+            let staged_files = fs::read_dir(parent)
+                .expect("credentials directory should be readable")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+                .count();
+            assert_eq!(staged_files, 0, "staged credentials should be cleaned up");
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(path)
+                    .expect("credentials metadata should be readable")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o077, 0, "credentials must remain owner-only");
+            }
+        });
+    }
+
+    #[test]
+    fn bulk_legacy_file_commit_keeps_existing_refresh_when_legacy_config_omits_it() {
+        with_temp_credentials_path(|path| {
+            write_private_test_file(
+                path,
+                r#"[account]
+access_token = "existing-access"
+refresh_token = "existing-refresh"
+"#,
+            );
+
+            commit_legacy_tokens_to_file_with_path(path, &[], Some(("legacy-access", None)))
+                .expect("legacy account access should commit");
+
+            let account = load_account_tokens_from_file_with_path(path)
+                .expect("account credentials should load")
+                .expect("account credentials should exist");
+            assert_eq!(account.access_token, "legacy-access");
+            assert_eq!(account.refresh_token.as_deref(), Some("existing-refresh"));
+        });
+    }
+
+    #[test]
+    fn repeated_bulk_legacy_file_commit_is_byte_identical() {
+        with_temp_credentials_path(|path| {
+            let original = r#"profile_tokens={ legacy="legacy-secret",existing="keep" }
+[account]
+access_token="legacy-access"
+refresh_token="legacy-refresh"
+"#;
+            write_private_test_file(path, original);
+            let profile_tokens = vec![("legacy".to_string(), "legacy-secret".to_string())];
+
+            commit_legacy_tokens_to_file_with_path(
+                path,
+                &profile_tokens,
+                Some(("legacy-access", Some("legacy-refresh"))),
+            )
+            .expect("repeated credential commit should succeed");
+
+            assert_eq!(
+                fs::read_to_string(path).expect("credentials should remain readable"),
+                original,
+                "an already committed credential set must not be reformatted or rewritten"
+            );
+        });
+    }
+
+    #[test]
+    fn bulk_legacy_file_commit_failure_preserves_original_bytes() {
+        with_temp_credentials_path(|path| {
+            let malformed = b"profile_tokens = [not-valid\n";
+            fs::write(path, malformed).expect("malformed credentials should be written");
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                    .expect("test credentials should be private");
+            }
+
+            let profile_tokens = vec![("legacy-profile".to_string(), "legacy-secret".to_string())];
+            let result = commit_legacy_tokens_to_file_with_path(path, &profile_tokens, None);
+
+            assert!(result.is_err());
+            assert_eq!(
+                fs::read(path).expect("original credentials should remain readable"),
+                malformed
+            );
+        });
+    }
+
+    #[test]
+    fn malformed_credentials_error_does_not_echo_secret_contents() {
+        with_temp_credentials_path(|path| {
+            let sentinel = "sentinel-secret-must-not-appear";
+            write_private_test_file(
+                path,
+                &format!("[account]\naccess_token = \"{sentinel}\"\nrefresh_token = [not-valid\n"),
+            );
+
+            let error = read_credentials_file(path)
+                .expect_err("malformed credentials should fail without disclosing contents");
+
+            assert!(error.contains("failed to parse credentials"));
+            assert!(!error.contains(sentinel));
+        });
+    }
+
+    #[test]
+    fn staged_replacement_failure_preserves_original_and_removes_staging_file() {
+        with_temp_credentials_path(|path| {
+            let original = "profile_tokens = { existing = \"existing-secret\" }\n";
+            write_private_test_file(path, original);
+            let mut updated =
+                read_credentials_file(path).expect("original credentials should parse");
+            updated
+                .profile_tokens
+                .insert("legacy-profile".to_string(), "legacy-secret".to_string());
+
+            let result = write_credentials_file_with_replacer(
+                path,
+                &updated,
+                |staging_path, destination| {
+                    assert!(
+                        staging_path.exists(),
+                        "staged file should exist before replace"
+                    );
+                    assert_eq!(destination, path);
+                    Err("injected active replacement failure".to_string())
+                },
+            );
+
+            assert!(result
+                .expect_err("replacement failure should be returned")
+                .contains("injected active replacement failure"));
+            assert_eq!(
+                fs::read_to_string(path).expect("original credentials should remain readable"),
+                original
+            );
+            let parent = path.parent().expect("credentials should have a parent");
+            let staged_files = fs::read_dir(parent)
+                .expect("credentials directory should be readable")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+                .count();
+            assert_eq!(staged_files, 0, "failed staging file should be removed");
+        });
+    }
+
+    #[test]
+    fn missing_credentials_do_not_replace_concurrently_created_file() {
+        with_temp_credentials_path(|path| {
+            let concurrent = "profile_tokens = { concurrent = \"newer-unrelated-secret\" }\n";
+            TEST_NEW_CREDENTIALS_DESTINATION_CONTENTS.with(|fixture| {
+                *fixture.borrow_mut() = Some((path.to_path_buf(), concurrent.to_string()));
+            });
+            let profile_tokens = vec![("legacy".to_string(), "legacy-secret".to_string())];
+
+            let error = commit_legacy_tokens_to_file_with_path(path, &profile_tokens, None)
+                .expect_err("concurrently created credentials must win");
+
+            assert!(error.contains("created concurrently"));
+            assert_eq!(
+                fs::read_to_string(path).expect("concurrent credentials should remain readable"),
+                concurrent
+            );
+            assert_eq!(
+                staged_credentials_count(
+                    path.parent()
+                        .expect("test credentials should have a parent")
+                ),
+                0,
+                "failed no-clobber install must clean staging"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_credentials_parent_is_refused_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        with_temp_credentials_path(|ordinary_path| {
+            let root = ordinary_path
+                .parent()
+                .expect("test credentials should have a parent");
+            let maintained_backup = root.join("maintained-backup");
+            let linked_home = root.join("linked-home");
+            fs::create_dir_all(&maintained_backup).expect("backup directory should exist");
+            let target = maintained_backup.join("credentials.toml");
+            let sentinel = "profile_tokens = { protected = \"backup-sentinel\" }\n";
+            write_private_test_file(&target, sentinel);
+            symlink(&maintained_backup, &linked_home).expect("home symlink should be created");
+            let linked_credentials = linked_home.join("credentials.toml");
+
+            let read_error = read_credentials_file(&linked_credentials)
+                .expect_err("linked credentials parent must be refused for reads");
+            let profile_tokens = vec![("legacy".to_string(), "legacy-secret".to_string())];
+            let write_error =
+                commit_legacy_tokens_to_file_with_path(&linked_credentials, &profile_tokens, None)
+                    .expect_err("linked credentials parent must be refused for writes");
+
+            assert!(read_error.contains("symbolic link or reparse point"));
+            assert!(write_error.contains("symbolic link or reparse point"));
+            assert_eq!(
+                fs::read_to_string(&target).expect("backup sentinel should remain readable"),
+                sentinel
+            );
+            assert_eq!(staged_credentials_count(&maintained_backup), 0);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_credentials_file_is_refused_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        with_temp_credentials_path(|linked_credentials| {
+            let root = linked_credentials
+                .parent()
+                .expect("test credentials should have a parent");
+            let maintained_backup = root.join("maintained-backup");
+            fs::create_dir_all(&maintained_backup).expect("backup directory should exist");
+            let target = maintained_backup.join("credentials-backup.toml");
+            let sentinel = "profile_tokens = { protected = \"backup-sentinel\" }\n";
+            write_private_test_file(&target, sentinel);
+            symlink(&target, linked_credentials).expect("credentials symlink should be created");
+
+            let read_error = read_credentials_file(linked_credentials)
+                .expect_err("linked credentials file must be refused for reads");
+            let profile_tokens = vec![("legacy".to_string(), "legacy-secret".to_string())];
+            let write_error =
+                commit_legacy_tokens_to_file_with_path(linked_credentials, &profile_tokens, None)
+                    .expect_err("linked credentials file must be refused for writes");
+
+            assert!(read_error.contains("symbolic link or reparse point"));
+            assert!(write_error.contains("symbolic link or reparse point"));
+            assert_eq!(
+                fs::read_to_string(&target).expect("backup sentinel should remain readable"),
+                sentinel
+            );
+            assert_eq!(staged_credentials_count(root), 0);
+            assert_eq!(staged_credentials_count(&maintained_backup), 0);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_ancestor_is_allowed_when_credentials_parent_is_real() {
+        use std::os::unix::fs::symlink;
+
+        with_temp_credentials_path(|ordinary_path| {
+            let root = ordinary_path
+                .parent()
+                .expect("test credentials should have a parent");
+            let actual_cargo_parent = root.join("actual-cargo-parent");
+            let linked_cargo_parent = root.join("linked-cargo-parent");
+            let actual_home = actual_cargo_parent.join(".cargo-ai");
+            fs::create_dir_all(&actual_home).expect("actual Cargo AI Home should exist");
+            symlink(&actual_cargo_parent, &linked_cargo_parent)
+                .expect("Cargo ancestor symlink should be created");
+            let credentials = linked_cargo_parent.join(".cargo-ai/credentials.toml");
+            let profile_tokens = vec![("legacy".to_string(), "legacy-secret".to_string())];
+
+            commit_legacy_tokens_to_file_with_path(&credentials, &profile_tokens, None)
+                .expect("a linked ancestor outside the final home should be allowed");
+
+            let loaded = load_profile_token_from_file_with_path(&credentials, "legacy")
+                .expect("credentials under linked ancestor should load");
+            assert_eq!(loaded.as_deref(), Some("legacy-secret"));
+            assert!(actual_home.join("credentials.toml").is_file());
+            assert_eq!(staged_credentials_count(&actual_home), 0);
+        });
+    }
+
+    #[test]
+    fn empty_bulk_legacy_commit_does_not_create_credentials_file() {
+        with_temp_credentials_path(|path| {
+            commit_legacy_tokens_to_file_with_path(path, &[], None)
+                .expect("empty commit should be a no-op");
+            assert!(!path.exists());
+        });
+    }
+
+    #[test]
+    fn keychain_bulk_commit_stops_on_error_without_destructive_cleanup() {
+        let profile_tokens = vec![
+            ("first".to_string(), "first-secret".to_string()),
+            ("second".to_string(), "second-secret".to_string()),
+        ];
+        let mut writes = Vec::new();
+
+        let result = commit_legacy_tokens_to_keychain_with(
+            &profile_tokens,
+            Some(("account-access", Some("account-refresh"))),
+            |_| Ok(None),
+            |account, secret| {
+                writes.push((account.to_string(), secret.to_string()));
+                if account == keychain_account_for_profile("second") {
+                    Err("injected keychain failure".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].0, keychain_account_for_profile("first"));
+        assert_eq!(writes[1].0, keychain_account_for_profile("second"));
+    }
+
+    #[test]
+    fn keychain_bulk_commit_writes_refresh_before_access_commit_marker() {
+        let mut writes = Vec::new();
+        commit_legacy_tokens_to_keychain_with(
+            &[],
+            Some(("account-access", Some("account-refresh"))),
+            |_| Ok(None),
+            |account, secret| {
+                writes.push((account.to_string(), secret.to_string()));
+                Ok(())
+            },
+        )
+        .expect("keychain writes should succeed");
+
+        assert_eq!(
+            writes,
+            vec![
+                (
+                    ACCOUNT_REFRESH_KEY.to_string(),
+                    "account-refresh".to_string()
+                ),
+                (ACCOUNT_ACCESS_KEY.to_string(), "account-access".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn repeated_keychain_bulk_commit_skips_unchanged_values() {
+        let profile_tokens = vec![("existing".to_string(), "existing-secret".to_string())];
+        let writes = Cell::new(0);
+
+        commit_legacy_tokens_to_keychain_with(
+            &profile_tokens,
+            Some(("account-access", Some("account-refresh"))),
+            |account| match account {
+                value if value == keychain_account_for_profile("existing") => {
+                    Ok(Some("existing-secret".to_string()))
+                }
+                ACCOUNT_ACCESS_KEY => Ok(Some("account-access".to_string())),
+                ACCOUNT_REFRESH_KEY => Ok(Some("account-refresh".to_string())),
+                _ => Ok(None),
+            },
+            |_, _| {
+                writes.set(writes.get() + 1);
+                Ok(())
+            },
+        )
+        .expect("unchanged keychain credential commit should succeed");
+
+        assert_eq!(writes.get(), 0);
     }
 
     #[test]
