@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{btree_map::Entry, BTreeMap};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -17,9 +18,20 @@ const INSTALL_MANIFEST_FILE_NAME: &str = "install.toml";
 const INSTALLED_PACKAGE_DIR_NAME: &str = "package";
 const INSTALLED_PACKAGE_DATA_DIR_NAME: &str = "data";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StagedInstallFailurePoint {
+    AfterBackup,
+    AfterDataTransfer,
+    FinalAliasReplacement,
+    RestoreData,
+    RestoreAlias,
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_PACKAGES_ROOT: std::cell::RefCell<Option<PathBuf>> = std::cell::RefCell::new(None);
+    static TEST_STAGED_INSTALL_FAILURES: std::cell::RefCell<Vec<StagedInstallFailurePoint>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1498,7 +1510,68 @@ pub(crate) fn resolve_package_data_path(
             context.alias
         ));
     }
-    Ok(context.package_data_root.join(relative_path))
+
+    let data_root_exists = match fs::symlink_metadata(&context.package_data_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(format!(
+                "Package `{}` data root '{}' must be a real directory and not a symbolic link.",
+                context.alias,
+                context.package_data_root.display()
+            ));
+        }
+        Ok(_) => true,
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect package `{}` data root '{}': {}",
+                context.alias,
+                context.package_data_root.display(),
+                error
+            ));
+        }
+    };
+
+    let mut resolved = context.package_data_root.clone();
+    let mut inspect_existing_components = data_root_exists;
+    for component in relative_path.components() {
+        match component {
+            std::path::Component::CurDir => continue,
+            std::path::Component::Normal(segment) => resolved.push(segment),
+            std::path::Component::ParentDir => unreachable!("parent traversal rejected above"),
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(format!(
+                    "Package `{}` data path must be a non-empty relative path.",
+                    context.alias
+                ));
+            }
+        }
+        if !inspect_existing_components {
+            continue;
+        }
+        match fs::symlink_metadata(&resolved) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "Package `{}` data path '{}' must not traverse symbolic link '{}'.",
+                    context.alias,
+                    relative_path.display(),
+                    resolved.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                inspect_existing_components = false;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect package `{}` data path component '{}': {}",
+                    context.alias,
+                    resolved.display(),
+                    error
+                ));
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 fn permission_profile_lines(permissions: &PackagePermissionProfileDocument) -> Vec<String> {
@@ -1593,62 +1666,46 @@ fn write_staged_install(
     document: &InstalledPackageDocument,
 ) -> Result<(), String> {
     let packages_root = packages_root();
-    let staging_root = packages_staging_root().join(format!("{}-{}", alias, Uuid::new_v4()));
+    let transaction_id = Uuid::new_v4();
+    let staging_root =
+        packages_staging_root().join(format!("{alias}-{transaction_id}-replacement"));
+    let backup_root = packages_staging_root().join(format!("{alias}-{transaction_id}-backup"));
     let staged_package_root = staging_root.join(INSTALLED_PACKAGE_DIR_NAME);
-    fs::create_dir_all(&staged_package_root).map_err(|error| {
-        format!(
-            "Failed to create staged package directory '{}': {}",
-            staged_package_root.display(),
-            error
-        )
-    })?;
-    copy_directory_recursive(package_root, staged_package_root.as_path())?;
-    write_install_manifest(
-        staging_root.join(INSTALL_MANIFEST_FILE_NAME).as_path(),
-        document,
-    )?;
-    let staged_data_root = staging_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME);
-
-    let install_root = packages_root.join(alias);
-    if install_root.exists() {
-        let current_data_root = install_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME);
-        if current_data_root.exists() {
-            if !current_data_root.is_dir() {
-                let _ = fs::remove_dir_all(&staging_root);
-                return Err(format!(
-                    "Installed package alias '{}' has a non-directory data root at '{}'.",
-                    alias,
-                    current_data_root.display()
-                ));
-            }
-            fs::rename(&current_data_root, &staged_data_root).map_err(|error| {
-                let _ = fs::remove_dir_all(&staging_root);
-                format!(
-                    "Failed to preserve package data directory '{}' while replacing alias '{}': {}",
-                    current_data_root.display(),
-                    alias,
-                    error
-                )
-            })?;
-        } else {
-            fs::create_dir_all(&staged_data_root).map_err(|error| {
-                let _ = fs::remove_dir_all(&staging_root);
-                format!(
-                    "Failed to create staged package data directory '{}': {}",
-                    staged_data_root.display(),
-                    error
-                )
-            })?;
-        }
-        fs::remove_dir_all(&install_root).map_err(|error| {
-            let _ = fs::remove_dir_all(&staging_root);
+    let prepare_result = (|| {
+        fs::create_dir_all(&staged_package_root).map_err(|error| {
             format!(
-                "Failed to replace installed package alias '{}': {}",
-                install_root.display(),
+                "Failed to create staged package directory '{}': {}",
+                staged_package_root.display(),
                 error
             )
         })?;
-    } else {
+        copy_directory_recursive(package_root, staged_package_root.as_path())?;
+        write_install_manifest(
+            staging_root.join(INSTALL_MANIFEST_FILE_NAME).as_path(),
+            document,
+        )
+    })();
+    if let Err(error) = prepare_result {
+        let _ = fs::remove_dir_all(&staging_root);
+        return Err(error);
+    }
+
+    let staged_data_root = staging_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME);
+    let install_root = packages_root.join(alias);
+    let install_metadata = match fs::symlink_metadata(&install_root) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err(format!(
+                "Failed to inspect installed package alias '{}': {}",
+                install_root.display(),
+                error
+            ));
+        }
+    };
+
+    let Some(install_metadata) = install_metadata else {
         fs::create_dir_all(&staged_data_root).map_err(|error| {
             let _ = fs::remove_dir_all(&staging_root);
             format!(
@@ -1657,24 +1714,240 @@ fn write_staged_install(
                 error
             )
         })?;
+        if let Err(error) =
+            maybe_fail_staged_install(StagedInstallFailurePoint::FinalAliasReplacement)
+        {
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err(error);
+        }
+        return fs::rename(&staging_root, &install_root).map_err(|error| {
+            let _ = fs::remove_dir_all(&staging_root);
+            format!(
+                "Failed to move staged package install from '{}' to '{}': {}",
+                staging_root.display(),
+                install_root.display(),
+                error
+            )
+        });
+    };
+
+    if install_metadata.file_type().is_symlink() || !install_metadata.is_dir() {
+        let _ = fs::remove_dir_all(&staging_root);
+        return Err(format!(
+            "Installed package alias '{}' at '{}' must be a real directory and not a symbolic link.",
+            alias,
+            install_root.display()
+        ));
     }
-    fs::create_dir_all(&packages_root).map_err(|error| {
+
+    let current_data_root = install_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME);
+    let preserve_existing_data = match fs::symlink_metadata(&current_data_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err(format!(
+                "Installed package alias '{}' has an unsafe data root at '{}'; expected a real directory and not a symbolic link.",
+                alias,
+                current_data_root.display()
+            ));
+        }
+        Ok(_) => true,
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err(format!(
+                "Failed to inspect package data directory '{}' while replacing alias '{}': {}",
+                current_data_root.display(),
+                alias,
+                error
+            ));
+        }
+    };
+
+    fs::rename(&install_root, &backup_root).map_err(|error| {
         let _ = fs::remove_dir_all(&staging_root);
         format!(
-            "Failed to create package store '{}': {}",
-            packages_root.display(),
+            "Failed to create recoverable backup '{}' for package alias '{}': {}",
+            backup_root.display(),
+            alias,
             error
         )
     })?;
-    fs::rename(&staging_root, &install_root).map_err(|error| {
-        let _ = fs::remove_dir_all(&staging_root);
+
+    if let Err(error) = maybe_fail_staged_install(StagedInstallFailurePoint::AfterBackup) {
+        return Err(staged_install_failure_with_recovery(
+            alias,
+            error,
+            &install_root,
+            &backup_root,
+            &staging_root,
+            false,
+        ));
+    }
+
+    let preserved_data_moved = if preserve_existing_data {
+        let backup_data_root = backup_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME);
+        if let Err(error) = fs::rename(&backup_data_root, &staged_data_root) {
+            return Err(staged_install_failure_with_recovery(
+                alias,
+                format!(
+                    "Failed to preserve package data directory '{}' while replacing alias '{}': {}",
+                    backup_data_root.display(),
+                    alias,
+                    error
+                ),
+                &install_root,
+                &backup_root,
+                &staging_root,
+                false,
+            ));
+        }
+        true
+    } else {
+        if let Err(error) = fs::create_dir_all(&staged_data_root) {
+            return Err(staged_install_failure_with_recovery(
+                alias,
+                format!(
+                    "Failed to create staged package data directory '{}': {}",
+                    staged_data_root.display(),
+                    error
+                ),
+                &install_root,
+                &backup_root,
+                &staging_root,
+                false,
+            ));
+        }
+        false
+    };
+
+    if let Err(error) = maybe_fail_staged_install(StagedInstallFailurePoint::AfterDataTransfer) {
+        return Err(staged_install_failure_with_recovery(
+            alias,
+            error,
+            &install_root,
+            &backup_root,
+            &staging_root,
+            preserved_data_moved,
+        ));
+    }
+
+    let replacement_result = maybe_fail_staged_install(
+        StagedInstallFailurePoint::FinalAliasReplacement,
+    )
+    .and_then(|_| {
+        fs::rename(&staging_root, &install_root).map_err(|error| {
+            format!(
+                "Failed to move staged package install from '{}' to '{}': {}",
+                staging_root.display(),
+                install_root.display(),
+                error
+            )
+        })
+    });
+    if let Err(error) = replacement_result {
+        return Err(staged_install_failure_with_recovery(
+            alias,
+            error,
+            &install_root,
+            &backup_root,
+            &staging_root,
+            preserved_data_moved,
+        ));
+    }
+
+    if let Err(error) = fs::remove_dir_all(&backup_root) {
+        eprintln!(
+            "Warning: package alias `{alias}` was replaced, but the prior package backup '{}' could not be removed: {error}",
+            backup_root.display()
+        );
+    }
+    Ok(())
+}
+
+fn staged_install_failure_with_recovery(
+    alias: &str,
+    failure: String,
+    install_root: &Path,
+    backup_root: &Path,
+    staging_root: &Path,
+    preserved_data_moved: bool,
+) -> String {
+    match restore_previous_install(
+        install_root,
+        backup_root,
+        staging_root,
+        preserved_data_moved,
+    ) {
+        Ok(()) => format!("{failure} Previous package alias `{alias}` was restored."),
+        Err(recovery_error) => format!(
+            "{failure} Automatic recovery for package alias `{alias}` failed: {recovery_error} Backup retained at '{}'; staged replacement retained at '{}'.",
+            backup_root.display(),
+            staging_root.display()
+        ),
+    }
+}
+
+fn restore_previous_install(
+    install_root: &Path,
+    backup_root: &Path,
+    staging_root: &Path,
+    preserved_data_moved: bool,
+) -> Result<(), String> {
+    if preserved_data_moved {
+        maybe_fail_staged_install(StagedInstallFailurePoint::RestoreData)?;
+        let staged_data_root = staging_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME);
+        let backup_data_root = backup_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME);
+        fs::rename(&staged_data_root, &backup_data_root).map_err(|error| {
+            format!(
+                "failed to restore package data from '{}' to '{}': {}",
+                staged_data_root.display(),
+                backup_data_root.display(),
+                error
+            )
+        })?;
+    }
+
+    maybe_fail_staged_install(StagedInstallFailurePoint::RestoreAlias)?;
+    fs::rename(backup_root, install_root).map_err(|error| {
         format!(
-            "Failed to move staged package install from '{}' to '{}': {}",
-            staging_root.display(),
+            "failed to restore package alias from '{}' to '{}': {}",
+            backup_root.display(),
             install_root.display(),
             error
         )
-    })
+    })?;
+    let _ = fs::remove_dir_all(staging_root);
+    Ok(())
+}
+
+fn maybe_fail_staged_install(point: StagedInstallFailurePoint) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        let should_fail = TEST_STAGED_INSTALL_FAILURES.with(|failures| {
+            let mut failures = failures.borrow_mut();
+            if failures.first().copied() == Some(point) {
+                failures.remove(0);
+                true
+            } else {
+                false
+            }
+        });
+        if should_fail {
+            return Err(format!(
+                "Injected staged install failure at `{point:?}` for testing."
+            ));
+        }
+    }
+    #[cfg(not(test))]
+    let _ = point;
+    Ok(())
+}
+
+#[cfg(test)]
+fn set_test_staged_install_failures(points: &[StagedInstallFailurePoint]) {
+    TEST_STAGED_INSTALL_FAILURES.with(|failures| {
+        failures.replace(points.to_vec());
+    });
 }
 
 fn write_install_manifest(path: &Path, document: &InstalledPackageDocument) -> Result<(), String> {
@@ -1902,8 +2175,9 @@ fn installed_package_data_root(alias: &str) -> PathBuf {
 mod tests {
     use super::{
         build_entrypoints, determine_install_action, install_local_package, load_installed_package,
-        resolve_entrypoint_reference, uninstall_package, InstallAction, InstallRequest,
-        PackageManifestDocument, PackagePermissionProfileDocument,
+        resolve_entrypoint_reference, resolve_package_data_path, uninstall_package, InstallAction,
+        InstallRequest, InstalledPackageRuntimeContext, PackageManifestDocument,
+        PackagePermissionProfileDocument, StagedInstallFailurePoint,
     };
     use std::path::{Path, PathBuf};
 
@@ -1946,6 +2220,9 @@ mod tests {
             super::TEST_PACKAGES_ROOT.with(|value| {
                 value.replace(None);
             });
+            super::TEST_STAGED_INSTALL_FAILURES.with(|failures| {
+                failures.replace(Vec::new());
+            });
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }
@@ -1978,6 +2255,94 @@ assets = ["schemas/customer.sql"]
 
     fn remove_temp_dir_if_present(path: &Path) {
         let _ = std::fs::remove_dir_all(path);
+    }
+
+    fn local_install_request(package_root: &Path) -> InstallRequest {
+        InstallRequest {
+            source: Some(package_root.to_string_lossy().to_string()),
+            alias: Some("data_integration".to_string()),
+            profile: "default".to_string(),
+            replace: false,
+            downgrade: false,
+        }
+    }
+
+    fn prepare_package_upgrade(stem: &str) -> (PackagesRootGuard, PathBuf, InstallRequest) {
+        let store = PackagesRootGuard::new(stem);
+        let package_root = temp_package_root(stem);
+        let request = local_install_request(&package_root);
+        let action = install_local_package(&request).expect("first install should succeed");
+        assert!(matches!(action, InstallAction::New));
+
+        let data_root = super::installed_package_data_root("data_integration");
+        std::fs::write(data_root.join("state.json"), r#"{"kept":true}"#)
+            .expect("data file should be writable");
+
+        let manifest_path = package_root.join("cargo-ai-package.toml");
+        let manifest = std::fs::read_to_string(&manifest_path).expect("manifest should read");
+        std::fs::write(
+            &manifest_path,
+            manifest.replace(
+                r#"project_version = "1.0.0""#,
+                r#"project_version = "1.1.0""#,
+            ),
+        )
+        .expect("manifest should update");
+        std::fs::write(
+            package_root.join("agents/lookup_account.json"),
+            r#"{"version":2}"#,
+        )
+        .expect("updated definition should be writable");
+
+        (store, package_root, request)
+    }
+
+    fn assert_failed_upgrade_restores_previous_install(
+        point: StagedInstallFailurePoint,
+        stem: &str,
+    ) {
+        let (_store, package_root, request) = prepare_package_upgrade(stem);
+        super::set_test_staged_install_failures(&[point]);
+
+        let error = install_local_package(&request).expect_err("upgrade should fail");
+
+        assert!(error.contains("Previous package alias `data_integration` was restored"));
+        let installed =
+            load_installed_package("data_integration").expect("previous metadata should load");
+        assert_eq!(installed.package_version, "1.0.0");
+        assert_eq!(
+            std::fs::read_to_string(
+                super::installed_package_data_root("data_integration").join("state.json")
+            )
+            .expect("previous data should be restored"),
+            r#"{"kept":true}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                super::installed_package_root("data_integration")
+                    .join("package/agents/lookup_account.json")
+            )
+            .expect("previous package payload should be restored"),
+            "{}"
+        );
+        assert_eq!(
+            std::fs::read_dir(super::packages_staging_root())
+                .expect("staging root should remain readable")
+                .count(),
+            0,
+            "recoverable failure should clean transaction artifacts"
+        );
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    fn runtime_context(package_data_root: PathBuf) -> InstalledPackageRuntimeContext {
+        InstalledPackageRuntimeContext {
+            alias: "data_integration".to_string(),
+            source_kind: "hosted".to_string(),
+            package_data_root,
+            permissions: PackagePermissionProfileDocument::default(),
+        }
     }
 
     #[test]
@@ -2078,14 +2443,7 @@ assets = ["schemas/customer.sql"]
     fn package_upgrade_preserves_alias_data_directory() {
         let _store = PackagesRootGuard::new("preserve-data");
         let package_root = temp_package_root("preserve-data");
-
-        let request = InstallRequest {
-            source: Some(package_root.to_string_lossy().to_string()),
-            alias: Some("data_integration".to_string()),
-            profile: "default".to_string(),
-            replace: false,
-            downgrade: false,
-        };
+        let request = local_install_request(&package_root);
         let action = install_local_package(&request).expect("first install should succeed");
         assert!(matches!(action, InstallAction::New));
 
@@ -2114,5 +2472,194 @@ assets = ["schemas/customer.sql"]
         );
 
         remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn package_upgrade_restores_alias_after_failure_following_backup() {
+        assert_failed_upgrade_restores_previous_install(
+            StagedInstallFailurePoint::AfterBackup,
+            "failure-after-backup",
+        );
+    }
+
+    #[test]
+    fn package_upgrade_restores_alias_after_failure_following_data_transfer() {
+        assert_failed_upgrade_restores_previous_install(
+            StagedInstallFailurePoint::AfterDataTransfer,
+            "failure-after-data-transfer",
+        );
+    }
+
+    #[test]
+    fn package_upgrade_restores_alias_after_final_replacement_failure() {
+        assert_failed_upgrade_restores_previous_install(
+            StagedInstallFailurePoint::FinalAliasReplacement,
+            "failure-final-replacement",
+        );
+    }
+
+    #[test]
+    fn package_upgrade_retains_recovery_paths_when_alias_restore_fails() {
+        let (_store, package_root, request) = prepare_package_upgrade("failure-restore-alias");
+        super::set_test_staged_install_failures(&[
+            StagedInstallFailurePoint::FinalAliasReplacement,
+            StagedInstallFailurePoint::RestoreAlias,
+        ]);
+
+        let error = install_local_package(&request).expect_err("upgrade should fail");
+        assert!(error.contains("Automatic recovery for package alias `data_integration` failed"));
+
+        let mut transaction_paths = std::fs::read_dir(super::packages_staging_root())
+            .expect("staging root should remain readable")
+            .map(|entry| entry.expect("staging entry should be readable").path())
+            .collect::<Vec<_>>();
+        transaction_paths.sort();
+        assert_eq!(transaction_paths.len(), 2);
+        let backup_root = transaction_paths
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.ends_with("-backup"))
+                    .unwrap_or(false)
+            })
+            .expect("backup should be retained");
+        let replacement_root = transaction_paths
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.ends_with("-replacement"))
+                    .unwrap_or(false)
+            })
+            .expect("replacement should be retained");
+        assert!(error.contains(backup_root.to_string_lossy().as_ref()));
+        assert!(error.contains(replacement_root.to_string_lossy().as_ref()));
+        assert_eq!(
+            std::fs::read_to_string(backup_root.join("data/state.json"))
+                .expect("backup should retain package data"),
+            r#"{"kept":true}"#
+        );
+        assert!(backup_root.join("install.toml").is_file());
+        assert!(replacement_root.join("install.toml").is_file());
+        assert!(!super::installed_package_root("data_integration").exists());
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_upgrade_rejects_symlinked_installed_data_root() {
+        use std::os::unix::fs::symlink;
+
+        let (store, package_root, request) = prepare_package_upgrade("upgrade-data-root-symlink");
+        let data_root = super::installed_package_data_root("data_integration");
+        let external_data_root = store.path.join("external-data");
+        std::fs::remove_dir_all(&data_root).expect("installed data root should be removable");
+        std::fs::create_dir_all(&external_data_root)
+            .expect("external data root should be writable");
+        std::fs::write(external_data_root.join("state.json"), "outside")
+            .expect("external data should be writable");
+        symlink(&external_data_root, &data_root).expect("data root symlink should be created");
+
+        let error = install_local_package(&request).expect_err("upgrade should reject symlink");
+
+        assert!(error.contains("has an unsafe data root"));
+        assert_eq!(
+            load_installed_package("data_integration")
+                .expect("previous install should remain")
+                .package_version,
+            "1.0.0"
+        );
+        assert_eq!(
+            std::fs::read_to_string(external_data_root.join("state.json"))
+                .expect("external data should remain untouched"),
+            "outside"
+        );
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn package_data_path_allows_missing_trailing_components() {
+        let store = PackagesRootGuard::new("data-path-missing");
+        let data_root = store.path.join("data");
+        std::fs::create_dir_all(&data_root).expect("data root should be writable");
+        let context = runtime_context(data_root.clone());
+
+        let resolved = resolve_package_data_path(&context, Path::new("usage/2026/07/events.jsonl"))
+            .expect("missing trailing components should be allowed");
+
+        assert_eq!(resolved, data_root.join("usage/2026/07/events.jsonl"));
+    }
+
+    #[test]
+    fn package_data_path_allows_missing_data_root() {
+        let store = PackagesRootGuard::new("data-root-missing");
+        let data_root = store.path.join("data");
+        let context = runtime_context(data_root.clone());
+
+        let resolved = resolve_package_data_path(&context, Path::new("usage/events.jsonl"))
+            .expect("missing data root should be creatable by the caller");
+
+        assert_eq!(resolved, data_root.join("usage/events.jsonl"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_data_path_rejects_symlinked_data_root() {
+        use std::os::unix::fs::symlink;
+
+        let store = PackagesRootGuard::new("data-path-root-symlink");
+        let target_root = store.path.join("target");
+        let data_root = store.path.join("data");
+        std::fs::create_dir_all(&target_root).expect("target should be writable");
+        symlink(&target_root, &data_root).expect("data root symlink should be created");
+        let context = runtime_context(data_root);
+
+        let error = resolve_package_data_path(&context, Path::new("events.jsonl"))
+            .expect_err("symlinked data root should be rejected");
+
+        assert!(error.contains("must be a real directory and not a symbolic link"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_data_path_rejects_nested_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let store = PackagesRootGuard::new("data-path-nested-symlink");
+        let data_root = store.path.join("data");
+        let target_root = store.path.join("target");
+        std::fs::create_dir_all(&data_root).expect("data root should be writable");
+        std::fs::create_dir_all(&target_root).expect("target should be writable");
+        symlink(&target_root, data_root.join("external"))
+            .expect("nested symlink should be created");
+        let context = runtime_context(data_root);
+
+        let error = resolve_package_data_path(&context, Path::new("external/events.jsonl"))
+            .expect_err("nested symlink should be rejected");
+
+        assert!(error.contains("must not traverse symbolic link"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_data_path_rejects_symlink_target_leaf() {
+        use std::os::unix::fs::symlink;
+
+        let store = PackagesRootGuard::new("data-path-leaf-symlink");
+        let data_root = store.path.join("data");
+        let target_file = store.path.join("outside.jsonl");
+        std::fs::create_dir_all(&data_root).expect("data root should be writable");
+        std::fs::write(&target_file, "outside").expect("target should be writable");
+        symlink(&target_file, data_root.join("events.jsonl"))
+            .expect("leaf symlink should be created");
+        let context = runtime_context(data_root);
+
+        let error = resolve_package_data_path(&context, Path::new("events.jsonl"))
+            .expect_err("symlink target leaf should be rejected");
+
+        assert!(error.contains("must not traverse symbolic link"));
     }
 }
