@@ -655,6 +655,8 @@ Agent metadata identifies the best-known source for each event. Interpreted loca
 
 Usage logs do not include prompts, model output text, generated image bytes, tool arguments, tool stdout/stderr, profile tokens, access tokens, or raw provider response bodies. If you need custom business logs, decision traces, or writes to a logging backend, implement that explicitly in a tool.
 
+Child `agent` steps may set their own `usage_log` path. That is the JSON equivalent of launching the child with `--usage-log <path>`. Omit it when the child should stay on the parent/root usage log. When running an installed package entrypoint such as `cargo ai run image_generator::generate_with_usage`, relative child usage-log paths resolve under that package alias's persistent `data/` root; for local JSON or standalone hatched binaries, they remain relative to the current run directory.
+
 Use `--render-mode auto|live|append-only` to control that behavior explicitly:
 - `auto` preserves the current terminal-sensitive default
 - `append-only` forces incremental labeled output even in an interactive terminal
@@ -778,6 +780,7 @@ Use child agents when one agent needs to hand work to another agent.
 - A parent can also reuse one declared named top-level input explicitly inside child `inputs` with `{ "input": "<name>" }`.
 - Child `agent` steps may set `run_vars` to pass child runtime vars the same way the CLI uses repeatable `--run-var NAME=VALUE`.
 - Child `agent` steps may set `input_overrides` to target the child's declared named inputs directly.
+- Child `agent` steps may set `usage_log` to send that child run to a child-specific JSONL usage log.
 - Child `agent` steps may still provide anonymous child `inputs`.
 - Child `agent` steps may set `input_mode` to `replace`, `append`, or `prepend` when they also provide child `inputs`.
 - Named child-input reuse is explicit only. Cargo AI does not automatically inherit every named parent input into the child.
@@ -801,6 +804,7 @@ Example:
   "kind": "agent",
   "artifact": "./child_reporter",
   "profile": { "var": "runtime.child_profile" },
+  "usage_log": "usage/child_reporter.jsonl",
   "run_vars": {
     "year": { "var": "runtime.year" },
     "month": "08",
@@ -829,6 +833,7 @@ That child step behaves like a structured CLI invocation:
 - `run_vars.generate_images` is equivalent to `--run-var generate_images=true`
 - `input_overrides.menu_image` is equivalent to `--input-override menu_image=...`
 - `input_overrides.review_reason` is equivalent to `--input-override review_reason=...`
+- `usage_log` is equivalent to child `--usage-log usage/child_reporter.jsonl`
 - child `inputs` stays the anonymous extra-input list
 - child `input_mode` still controls only that anonymous `inputs` list
 
@@ -836,6 +841,7 @@ Use these child-step value shapes:
 
 - `run_vars.<name>`: string, number, boolean, or `{ "var": "..." }`
 - `input_overrides.<name>`: string, `{ "var": "..." }`, or `{ "input": "<name>" }`
+- `usage_log`: non-empty relative path with no `..` traversal
 
 For schema-backed agents, `--input-override` and anonymous runtime inputs operate at different layers. This is valid:
 
@@ -1128,16 +1134,20 @@ cargo ai packages publish
 
 # Pull the latest published package from another owner
 cargo ai packages pull ai_integrations --owner-handle alice
+
+# Pull an exact published package version without installing it
+cargo ai packages pull ai_integrations --owner-handle alice --version 1.2.3
 ```
 
 Package rules are intentionally different from account agents:
 
 - `publish` packages the current project first, then uploads the resulting package archive
 - published project identity comes from `.cargo-ai/project.toml` `[project].name` and `[project].version`
+- published versions for one hosted package identity must increase by semver
 - `list --account <handle>` only returns that owner's public packages
 - `pull` defaults to the latest published version unless you pass `--version <semver>`
 - pulled packages restore a project-shaped folder locally; they do not expose agent-style definition-path identities in the backend
-- after `pull`, `.cargo-ai/project.toml` remains the working project config and the pulled package receipt is preserved under `.cargo-ai/origin/cargo-ai-package.toml`
+- after `pull`, `.cargo-ai/project.toml` remains the working project config, the package manifest is preserved under `.cargo-ai/origin/cargo-ai-package.toml`, and hosted provenance is preserved under `.cargo-ai/origin/cargo-ai-package-receipt.toml`
 - pulled tools are restored as source-backed project content; materialize a needed tool with `cargo ai tools build <tool-name>` or assemble the runnable build root with `cargo ai build`
 - the current publish path works best when the final package stays at or below about `5.5 MiB`; keep packaged assets minimal and avoid large sample inputs unless they are required in the package itself
 - if you add non-trivial assets to `[build.<profile>].assets`, run `cargo ai package` and inspect the reported package, archive, and request sizes before treating the project as publish-ready
@@ -1157,9 +1167,27 @@ cargo ai packages install --as data_integration
 # Install from a local package root, archive, or cargo-ai-package.toml path
 cargo ai packages install ./dist/my_package --as data_integration
 
+# Install the latest hosted package from your account and pin the exact resolved version
+cargo ai packages install data_integration --account --as data_integration
+
+# Install a public hosted package from another owner
+cargo ai packages install data_integration --account alice --as data_integration
+
+# Install an exact hosted package version
+cargo ai packages install data_integration --account alice --version 1.2.3 --as data_integration
+
+# Accept a reviewed hosted subprocess permission when requested
+cargo ai packages install data_integration --account alice --as data_integration --accept-permissions
+
+# Deliberately move an installed hosted alias forward
+cargo ai packages update data_integration
+
+# Deliberately switch an installed hosted alias back to an exact earlier version
+cargo ai packages rollback data_integration --to 1.1.0
+
 # Run or hatch exported package entrypoints
 cargo ai run data_integration::lookup_account
-cargo ai hatch data_integration::daily_digest
+cargo ai hatch data_integration::daily_digest --allow-hosted-code
 
 # Inspect or remove a local package alias
 cargo ai packages inspect data_integration
@@ -1167,6 +1195,21 @@ cargo ai packages uninstall data_integration
 ```
 
 Local install behavior is version-aware for the same alias: same version and content is a no-op, newer semver upgrades by default, older semver requires `--downgrade`, and same-version content replacement or a different package identity requires `--replace`.
+
+Hosted install uses the same local alias store, but hosted source identity comes from the server/API rather than a public URL. Omitting `--version` resolves the latest eligible hosted version at install time, then pins that exact version in `install.toml`. `update` checks the same hosted source identity and only moves forward when a newer eligible semver exists. `rollback` never means latest; it switches to the exact `--to <version>` you request. Install, update, and rollback print the requested permission profile before materialization. A first install or transition that newly enables subprocess execution requires `--accept-permissions`; project/workspace `read` and `read_write` requests remain unsupported.
+
+Installed package layout under Cargo AI Home is:
+
+```text
+$CARGO_AI_HOME/packages/<alias>/
+  install.toml
+  package/
+  data/
+```
+
+`package/` is the verified payload for the active exact version and is rematerialized on hosted update or rollback. `data/` is the package-owned persistent state area and is preserved across normal hosted update/rollback. Installed package entrypoints resolve Cargo AI-controlled child `usage_log` writes under `data/`, which lets a parent/observer agent import metadata-only JSONL into package-owned SQLite or another package-owned store. Definition-owned image/file inputs resolve from verified `package/`; only an explicit runtime input override can grant access to a caller-selected path. `cargo ai packages inspect <alias>` shows opaque hosted source/version IDs, optional owner handle, package hash, entrypoints, and the accepted permission profile. Hosted JSON child agents resolve through declared `alias::entrypoint` exports. Direct child executables are blocked unless subprocess permission was explicitly accepted, and then resolve only inside verified `package/` while running from `data/`. Hatching a hosted alias requires `--allow-hosted-code` because the exported executable is trusted code outside the installed permission boundary.
+
+Hosted package archives are rejected before extraction when they exceed 10 MiB compressed, 100 MiB expanded, 10,000 entries, or 1,024 bytes in a normalized relative entry path. Absolute, parent-traversing, drive-relative, UNC, device-root, symbolic-link, and Windows reparse-point paths are rejected.
 
 ## Where To Go Next
 
@@ -1186,6 +1229,7 @@ When you want deeper details, use these files:
 - Actions and authoring patterns:
   - [templates/guidance/action-rules.md](./templates/guidance/action-rules.md)
   - [templates/guidance/authoring-patterns.md](./templates/guidance/authoring-patterns.md)
+  - [templates/guidance/package-workflow.md](./templates/guidance/package-workflow.md)
   - [templates/guidance/examples/README.md](./templates/guidance/examples/README.md)
 - Hatch/check workflow:
   - [templates/shared/docs/hatch-check-loop.md](./templates/shared/docs/hatch-check-loop.md)

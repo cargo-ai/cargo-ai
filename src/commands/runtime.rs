@@ -1,6 +1,7 @@
 //! Shared interpreted runtime behavior for Cargo AI commands.
 use clap::ArgMatches;
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -543,6 +544,73 @@ fn resolved_named_inputs_for_run(
     Ok(named_inputs)
 }
 
+fn resolve_hosted_named_input_paths(
+    sub_m: &ArgMatches,
+    named_inputs: &mut [crate::Input],
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
+) -> Result<(), String> {
+    let Some(context) = package_context.filter(|context| context.source_kind == "hosted") else {
+        return Ok(());
+    };
+
+    let overridden_names = sub_m
+        .get_many::<String>("input_override")
+        .into_iter()
+        .flatten()
+        .map(|assignment| parse_input_override_assignment(assignment).map(|(name, _)| name))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+
+    for input in named_inputs
+        .iter_mut()
+        .filter(|input| matches!(input.kind, crate::InputKind::Image | crate::InputKind::File))
+    {
+        let Some(raw_path) = input.value.as_deref() else {
+            continue;
+        };
+        if raw_path.trim().is_empty() {
+            return Err(format!(
+                "Named {} input '{}' must resolve to a non-empty path.",
+                input.kind_label(),
+                input.name.as_deref().unwrap_or("(unnamed)")
+            ));
+        }
+
+        let path = Path::new(raw_path);
+        let is_explicit_override = input
+            .name
+            .as_ref()
+            .is_some_and(|name| overridden_names.contains(name));
+        let resolved = if is_explicit_override {
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map_err(|error| {
+                        format!(
+                            "Could not resolve explicit named input '{}' against the caller directory: {}",
+                            input.name.as_deref().unwrap_or("(unnamed)"),
+                            error
+                        )
+                    })?
+                    .join(path)
+            }
+        } else {
+            crate::commands::local_packages::resolve_package_payload_path(context, path).map_err(
+                |error| {
+                    format!(
+                        "Named package input '{}' is invalid: {}",
+                        input.name.as_deref().unwrap_or("(unnamed)"),
+                        error
+                    )
+                },
+            )?
+        };
+        input.value = Some(resolved.to_string_lossy().to_string());
+    }
+
+    Ok(())
+}
+
 fn resolved_inputs_for_run(
     sub_m: &ArgMatches,
     named_inputs: &[crate::Input],
@@ -913,7 +981,8 @@ pub(crate) async fn run_with_definition_in_context(
     definition: &dyn InvocationDefinition,
     project_root: Option<PathBuf>,
 ) -> bool {
-    run_with_definition_in_context_and_usage_agent(sub_m, definition, project_root, None).await
+    run_with_definition_in_context_and_usage_agent(sub_m, definition, project_root, None, None)
+        .await
 }
 
 pub(crate) async fn run_with_definition_in_context_and_usage_agent(
@@ -921,6 +990,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     definition: &dyn InvocationDefinition,
     project_root: Option<PathBuf>,
     usage_agent_info: Option<serde_json::Value>,
+    package_context: Option<crate::commands::local_packages::InstalledPackageRuntimeContext>,
 ) -> bool {
     let full_run_started_at = std::time::Instant::now();
 
@@ -1093,9 +1163,14 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     let usage_agent_info =
         usage_agent_info.unwrap_or_else(|| interpreted_usage_agent_info(project_root.as_deref()));
     let tool_resolver = Arc::new(crate::commands::tools::ToolResolver::new(
-        project_root,
+        project_root.clone(),
         crate::cargo_ai_metadata::current_build_target(),
     ));
+    let package_context = package_context.or_else(|| {
+        project_root
+            .as_deref()
+            .and_then(crate::commands::local_packages::runtime_context_for_package_root)
+    });
     let usage_log_arg = sub_m.get_one::<String>("usage_log").map(String::as_str);
     let usage_log_setup = match crate::usage_log::UsageLogContext::from_runtime(
         usage_log_arg,
@@ -1124,6 +1199,26 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         }
     }
 
+    let mut named_inputs = match resolved_named_inputs_for_run(sub_m, &named_inputs_template) {
+        Ok(named_inputs) => named_inputs,
+        Err(error) => {
+            eprintln!("x {error}");
+            return false;
+        }
+    };
+    if let Err(error) =
+        resolve_hosted_named_input_paths(sub_m, &mut named_inputs, package_context.as_ref())
+    {
+        eprintln!("x {error}");
+        return false;
+    }
+    let selected_inputs = match resolved_inputs_for_run(sub_m, &named_inputs) {
+        Ok(selected_inputs) => selected_inputs,
+        Err(error) => {
+            eprintln!("x {error}");
+            return false;
+        }
+    };
     let action_provider_context = super::runtime_actions::ActionProviderContext {
         provider,
         profile_name: selected_profile
@@ -1141,22 +1236,8 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         token: token.clone(),
         inference_timeout_in_sec,
         tool_resolver: Some(tool_resolver),
+        package_context,
         usage_log: usage_log_context.clone(),
-    };
-
-    let named_inputs = match resolved_named_inputs_for_run(sub_m, &named_inputs_template) {
-        Ok(named_inputs) => named_inputs,
-        Err(error) => {
-            eprintln!("x {error}");
-            return false;
-        }
-    };
-    let selected_inputs = match resolved_inputs_for_run(sub_m, &named_inputs) {
-        Ok(selected_inputs) => selected_inputs,
-        Err(error) => {
-            eprintln!("x {error}");
-            return false;
-        }
     };
     let runtime_vars = match resolved_runtime_vars_for_run(sub_m, &runtime_var_specs) {
         Ok(runtime_vars) => runtime_vars,
@@ -1759,6 +1840,7 @@ mod tests {
             token: "secret".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         };
 
@@ -2115,6 +2197,74 @@ mod tests {
         .expect_err("unsupported file extensions should fail");
 
         assert!(error.contains("supported file extension"));
+    }
+
+    #[test]
+    fn hosted_named_path_inputs_separate_package_assets_from_caller_grants() {
+        let install_root = std::env::temp_dir().join(format!(
+            "cai2102-hosted-named-inputs-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let package_root = install_root.join("package");
+        let data_root = install_root.join("data");
+        std::fs::create_dir_all(package_root.join("assets")).expect("package assets should exist");
+        std::fs::create_dir_all(&data_root).expect("package data should exist");
+        std::fs::write(package_root.join("assets/default.png"), "image")
+            .expect("package image should exist");
+        let context = crate::commands::local_packages::InstalledPackageRuntimeContext {
+            alias: "image_generator".to_string(),
+            source_kind: "hosted".to_string(),
+            package_payload_root: package_root.clone(),
+            package_data_root: data_root,
+            current_entrypoint_path: Some("agents/observer.json".to_string()),
+            entrypoints: Vec::new(),
+            permissions: crate::commands::local_packages::PackagePermissionProfileDocument::default(
+            ),
+        };
+
+        let baked_matches = matches(&["cargo-ai", "run"]);
+        let baked_runtime_m = baked_matches
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
+        let mut baked = vec![crate::Input {
+            name: Some("front_photo".to_string()),
+            kind: crate::InputKind::Image,
+            value: Some("assets/default.png".to_string()),
+        }];
+        super::resolve_hosted_named_input_paths(baked_runtime_m, &mut baked, Some(&context))
+            .expect("package-owned image should resolve inside the verified payload");
+        assert_eq!(
+            baked[0].value.as_deref(),
+            package_root.join("assets").join("default.png").to_str()
+        );
+
+        let caller_path = format!("caller-selected-{}.png", uuid::Uuid::new_v4());
+        let override_assignment = format!("front_photo={caller_path}");
+        let explicit_matches = matches(&[
+            "cargo-ai",
+            "run",
+            "--input-override",
+            override_assignment.as_str(),
+        ]);
+        let explicit_runtime_m = explicit_matches
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
+        let mut explicit = vec![crate::Input {
+            name: Some("front_photo".to_string()),
+            kind: crate::InputKind::Image,
+            value: Some(caller_path.clone()),
+        }];
+        super::resolve_hosted_named_input_paths(explicit_runtime_m, &mut explicit, Some(&context))
+            .expect("caller-provided image should remain an explicit caller path");
+        assert_eq!(
+            explicit[0].value.as_deref(),
+            std::env::current_dir()
+                .expect("caller directory should resolve")
+                .join(caller_path)
+                .to_str()
+        );
+
+        let _ = std::fs::remove_dir_all(install_root);
     }
 
     #[test]

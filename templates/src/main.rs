@@ -4981,6 +4981,12 @@ async fn run_agent_step(
     if step.ignore_tools {
         command.arg("--ignore-tools");
     }
+    if let Some(usage_log_path) = step.usage_log.as_deref() {
+        let resolved_usage_log_path = resolve_child_usage_log_path(usage_log_path, action_name)?;
+        ensure_child_usage_log_parent_exists(resolved_usage_log_path.as_path())?;
+        command.arg("--usage-log");
+        command.arg(resolved_usage_log_path.as_os_str());
+    }
     let inherited_profile_name = if artifact_is_json_definition(artifact) {
         provider_context.profile_name.clone()
     } else {
@@ -5226,6 +5232,54 @@ fn child_artifact_command(
             command
         }
     }
+}
+
+fn resolve_child_usage_log_path(raw_path: &str, action_name: &str) -> Result<PathBuf, String> {
+    let path = Path::new(raw_path);
+    validate_child_usage_log_path(path, action_name)?;
+    Ok(path.to_path_buf())
+}
+
+fn validate_child_usage_log_path(path: &Path, action_name: &str) -> Result<(), String> {
+    let raw_path = path.to_string_lossy();
+    if raw_path.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' agent `usage_log` must be a non-empty relative path.",
+            action_name
+        ));
+    }
+    if path.is_absolute() {
+        return Err(format!(
+            "Action '{}' agent `usage_log` must be a relative path.",
+            action_name
+        ));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "Action '{}' agent `usage_log` must not use parent traversal (`..`).",
+            action_name
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_child_usage_log_parent_exists(path: &Path) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "Failed to create child usage log directory '{}': {}",
+            parent.display(),
+            error
+        )
+    })
 }
 
 fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'static str> {

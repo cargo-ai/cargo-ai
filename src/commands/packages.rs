@@ -8,6 +8,20 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             return crate::commands::account::run_packages(sub_m).await;
         }
     }
+    if let Some(install_m) = sub_m.subcommand_matches("install") {
+        if crate::commands::local_packages::account_handle_from_install_matches(install_m).is_some()
+        {
+            return crate::commands::local_packages::run_hosted_install(install_m).await;
+        }
+    }
+
+    if let Some(update_m) = sub_m.subcommand_matches("update") {
+        return crate::commands::local_packages::run_hosted_update(update_m).await;
+    }
+
+    if let Some(rollback_m) = sub_m.subcommand_matches("rollback") {
+        return crate::commands::local_packages::run_hosted_rollback(rollback_m).await;
+    }
 
     if sub_m.subcommand_matches("install").is_some()
         || sub_m.subcommand_matches("inspect").is_some()

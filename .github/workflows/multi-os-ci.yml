@@ -36,6 +36,15 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Check project
+        run: cargo check --all-targets
+
+      - name: Run test suite
+        run: cargo test --all-targets
+
       - name: Build project
         run: cargo build --verbose
 

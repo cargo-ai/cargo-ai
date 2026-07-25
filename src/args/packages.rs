@@ -59,14 +59,31 @@ pub fn command() -> Command {
         )
         .subcommand(
             Command::new("install")
-                .about("Install a local package into Cargo AI Home")
+                .about("Install a local or hosted package into Cargo AI Home")
                 .arg(
                     Arg::new("source")
-                        .help("Optional local package root, package archive, or cargo-ai-package.toml path")
+                        .help("Local package root/archive/manifest path, or hosted package name when --account is present")
                         .required(false)
                         .value_name("SOURCE")
                         .num_args(1)
                         .index(1),
+                )
+                .arg(
+                    Arg::new("account")
+                        .long("account")
+                        .help("Install a hosted package from your account, or from HANDLE when provided")
+                        .required(false)
+                        .value_name("HANDLE")
+                        .num_args(0..=1)
+                        .default_missing_value(""),
+                )
+                .arg(
+                    Arg::new("version")
+                        .long("version")
+                        .help("Exact hosted package version to install (defaults to latest)")
+                        .required(false)
+                        .value_name("SEMVER")
+                        .num_args(1),
                 )
                 .arg(
                     Arg::new("alias")
@@ -94,6 +111,57 @@ pub fn command() -> Command {
                     Arg::new("downgrade")
                         .long("downgrade")
                         .help("Allow installing an older version over the same package identity")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("accept_permissions")
+                        .long("accept-permissions")
+                        .help("Accept reviewed hosted package permissions for this install")
+                        .requires("account")
+                        .action(ArgAction::SetTrue),
+                ),
+        )
+        .subcommand(
+            Command::new("update")
+                .about("Update an installed hosted package alias to the latest eligible version")
+                .arg(
+                    Arg::new("alias")
+                        .help("Installed hosted package alias")
+                        .required(true)
+                        .value_name("ALIAS")
+                        .num_args(1)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("accept_permissions")
+                        .long("accept-permissions")
+                        .help("Accept reviewed permission expansion for this hosted update")
+                        .action(ArgAction::SetTrue),
+                ),
+        )
+        .subcommand(
+            Command::new("rollback")
+                .about("Switch an installed hosted package alias to an exact earlier version")
+                .arg(
+                    Arg::new("alias")
+                        .help("Installed hosted package alias")
+                        .required(true)
+                        .value_name("ALIAS")
+                        .num_args(1)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("to")
+                        .long("to")
+                        .help("Exact hosted package version to switch to")
+                        .required(true)
+                        .value_name("SEMVER")
+                        .num_args(1),
+                )
+                .arg(
+                    Arg::new("accept_permissions")
+                        .long("accept-permissions")
+                        .help("Accept reviewed permission expansion for this hosted rollback")
                         .action(ArgAction::SetTrue),
                 ),
         )
@@ -329,5 +397,106 @@ mod tests {
         );
         assert!(install.get_flag("replace"));
         assert!(install.get_flag("downgrade"));
+    }
+
+    #[test]
+    fn install_supports_hosted_account_version_and_alias() {
+        let own_matches = super::command()
+            .try_get_matches_from([
+                "packages",
+                "install",
+                "data_integration",
+                "--account",
+                "--as",
+                "data",
+            ])
+            .expect("hosted self install should parse");
+        let own_install = own_matches
+            .subcommand_matches("install")
+            .expect("install should be available");
+        assert_eq!(
+            own_install.get_one::<String>("account").map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            own_install.get_one::<String>("alias").map(String::as_str),
+            Some("data")
+        );
+
+        let version_matches = super::command()
+            .try_get_matches_from([
+                "packages",
+                "install",
+                "data_integration",
+                "--account",
+                "alice",
+                "--version",
+                "1.2.3",
+                "--as",
+                "data",
+            ])
+            .expect("hosted handle install should parse");
+        let version_install = version_matches
+            .subcommand_matches("install")
+            .expect("install should be available");
+        assert_eq!(
+            version_install
+                .get_one::<String>("account")
+                .map(String::as_str),
+            Some("alice")
+        );
+        assert_eq!(
+            version_install
+                .get_one::<String>("version")
+                .map(String::as_str),
+            Some("1.2.3")
+        );
+    }
+
+    #[test]
+    fn update_and_rollback_parse_hosted_alias_commands() {
+        let update_matches = super::command()
+            .try_get_matches_from(["packages", "update", "data", "--accept-permissions"])
+            .expect("packages update should parse");
+        let update = update_matches
+            .subcommand_matches("update")
+            .expect("update should be available");
+        assert_eq!(
+            update.get_one::<String>("alias").map(String::as_str),
+            Some("data")
+        );
+        assert!(update.get_flag("accept_permissions"));
+
+        let rollback_matches = super::command()
+            .try_get_matches_from([
+                "packages",
+                "rollback",
+                "data",
+                "--to",
+                "1.0.0",
+                "--accept-permissions",
+            ])
+            .expect("packages rollback should parse");
+        let rollback = rollback_matches
+            .subcommand_matches("rollback")
+            .expect("rollback should be available");
+        assert_eq!(
+            rollback.get_one::<String>("alias").map(String::as_str),
+            Some("data")
+        );
+        assert_eq!(
+            rollback.get_one::<String>("to").map(String::as_str),
+            Some("1.0.0")
+        );
+        assert!(rollback.get_flag("accept_permissions"));
+    }
+
+    #[test]
+    fn permission_acceptance_is_hosted_only_for_install() {
+        let error = super::command()
+            .try_get_matches_from(["packages", "install", "./pkg", "--accept-permissions"])
+            .expect_err("local install must not accept hosted permissions");
+
+        assert!(error.to_string().contains("--account"));
     }
 }

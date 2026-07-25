@@ -47,7 +47,7 @@ These documented step kinds and helper fields are exhaustive for the current MVP
   - Required: `kind`, `program`, `args`
 - `agent`
   - Required: `kind`, `agent`
-  - Optional: `profile`
+  - Optional: `profile`, `usage_log`
 - `tool`
   - Required: `kind`, `name`
   - Optional: `params`, `output_variable`
@@ -172,6 +172,7 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - Parent actions may pass child-agent `inputs`, including dynamic string parts resolved from current action-local data.
 - Parent actions may also pass child-agent `run_vars` keyed by the intended child runtime var.
 - Parent actions may also pass child-agent `input_overrides` keyed by the intended named child input.
+- Parent actions may set child-agent `usage_log` to the same relative path they would pass with child `--usage-log <path>`.
 - If the target is another Cargo AI agent, prefer a native `kind: "agent"` step instead of an `exec` wrapper that launches Python, shell, or another helper just to call the child.
 - Use wrapper programs only when the task truly needs extra non-Cargo-AI behavior around that child call.
 - Child `inputs` may also reference declared named top-level inputs with the exact shape `{ "input": "<name>" }`.
@@ -182,6 +183,8 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - Child `inputs` may still resolve declared `runtime.*` values alongside top-level model output fields and prior captured step variables.
 - Parent `agent` steps should prefer `input_overrides` when targeting declared named child inputs and use child `inputs` for extra anonymous context.
 - Parent `agent` steps should use child `run_vars` for invocation-scoped operational settings that the child already declares in top-level `runtime_vars`.
+- Parent `agent` step `usage_log` values must be non-empty relative paths with no `..` traversal.
+- Omitted child `usage_log` preserves current parent/root usage-log inheritance.
 - Parent `agent` steps may set child `input_mode` to `replace`, `append`, or `prepend` when they also provide child `inputs`.
 - Parent `agent` steps may also set a step-level `profile` as a literal string or single variable reference; Cargo AI resolves it at step runtime and forwards `--profile <name>` to the child.
 - Child `input_mode` applies only to child `inputs`; it does not suppress or merge child `input_overrides`.
@@ -192,6 +195,21 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - Cargo AI prints one root `using:` line at run start. In append-only output, it also emits another action-prefixed `using:` line when a child `agent` or `generate_image` step changes the effective `profile`, `auth`, `server`, or `model`.
 - Interactive live mode keeps the parent dashboard at the orchestration level and does not surface child or step-level `using:` lines there.
 - Native child-agent steps preserve child input forwarding, failure handling, depth limits, and runtime observability without inventing an extra scripting layer.
+
+Example child usage log:
+
+```json
+{
+  "kind": "agent",
+  "agent": "./image_generator.json",
+  "usage_log": "usage/image-generator-run.jsonl",
+  "input_overrides": {
+    "prompt": { "var": "image_prompt" }
+  }
+}
+```
+
+For installed package entrypoints, that relative `usage_log` path resolves under the alias `data/` root. For local JSON and standalone hatched binaries, it remains relative to the current run directory.
 
 ## Named Input Notes
 

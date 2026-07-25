@@ -11,6 +11,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{Cursor, Write};
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use tar::{Archive, Builder, EntryType, HeaderMode};
 use uuid::Uuid;
@@ -65,6 +67,19 @@ struct PackageArchiveEntry {
     contents_base64: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PulledPackageHostedReceiptDocument {
+    format_version: u32,
+    source_kind: String,
+    hosted_source_id: String,
+    hosted_version_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_handle: Option<String>,
+    package_name: String,
+    resolved_version: String,
+    package_sha256: String,
+}
+
 #[cfg(feature = "developer-tools")]
 #[derive(Clone, Debug)]
 struct PublishPayload {
@@ -79,9 +94,32 @@ struct PublishPayload {
 const PULLED_PROJECT_METADATA_RELATIVE_PATH: &str = ".cargo-ai/project.toml";
 const PACKAGE_MANIFEST_FILE_NAME: &str = "cargo-ai-package.toml";
 const PULLED_PACKAGE_RECEIPT_RELATIVE_PATH: &str = ".cargo-ai/origin/cargo-ai-package.toml";
+const PULLED_PACKAGE_HOSTED_RECEIPT_RELATIVE_PATH: &str =
+    ".cargo-ai/origin/cargo-ai-package-receipt.toml";
 const ESTIMATED_PUBLISH_ACCESS_TOKEN: &str = "__publish-size-estimate__";
 #[cfg(feature = "developer-tools")]
 const SAFE_PROJECT_PUBLISH_REQUEST_LIMIT_BYTES: u64 = 5_500_000;
+const HOSTED_ARCHIVE_MAX_COMPRESSED_BYTES: usize = 10 * 1024 * 1024;
+const HOSTED_ARCHIVE_MAX_EXPANDED_BYTES: u64 = 100 * 1024 * 1024;
+const HOSTED_ARCHIVE_MAX_ENTRIES: usize = 10_000;
+const HOSTED_ARCHIVE_MAX_PATH_BYTES: usize = 1_024;
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+#[derive(Clone, Copy)]
+struct ArchiveLimits {
+    compressed_bytes: usize,
+    expanded_bytes: u64,
+    entries: usize,
+    path_bytes: usize,
+}
+
+const HOSTED_ARCHIVE_LIMITS: ArchiveLimits = ArchiveLimits {
+    compressed_bytes: HOSTED_ARCHIVE_MAX_COMPRESSED_BYTES,
+    expanded_bytes: HOSTED_ARCHIVE_MAX_EXPANDED_BYTES,
+    entries: HOSTED_ARCHIVE_MAX_ENTRIES,
+    path_bytes: HOSTED_ARCHIVE_MAX_PATH_BYTES,
+};
 
 pub async fn run(projects_m: &ArgMatches) -> bool {
     let projects_command = if let Some(list_m) = projects_m.subcommand_matches("list") {
@@ -446,6 +484,12 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
     } = &projects_command
     {
         if is_project_pull_success(&response) {
+            if let Err(error) =
+                validate_project_pull_response_matches_request(&response, name, version.as_deref())
+            {
+                eprintln!("x {error}");
+                return false;
+            }
             let output_path = output_dir
                 .clone()
                 .unwrap_or_else(|| PathBuf::from(name.clone()));
@@ -598,6 +642,49 @@ fn is_project_pull_success(response: &Value) -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn validate_project_pull_response_matches_request(
+    response: &Value,
+    requested_name: &str,
+    requested_version: Option<&str>,
+) -> Result<(), String> {
+    let resolved_name = response
+        .get("project")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Hosted pull response did not include `project`.".to_string())?;
+    if resolved_name != requested_name {
+        return Err(format!(
+            "Hosted pull response returned package `{resolved_name}` for requested package `{requested_name}`."
+        ));
+    }
+
+    let resolved_version_raw = response
+        .get("project_version")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Hosted pull response did not include `project_version`.".to_string())?;
+    let resolved_version = Version::parse(resolved_version_raw).map_err(|error| {
+        format!(
+            "Hosted pull response returned invalid package version `{resolved_version_raw}`: {error}"
+        )
+    })?;
+    if let Some(requested_version_raw) = requested_version {
+        let requested_version = Version::parse(requested_version_raw).map_err(|error| {
+            format!(
+                "Requested hosted package version `{requested_version_raw}` is invalid: {error}"
+            )
+        })?;
+        if resolved_version != requested_version {
+            return Err(format!(
+                "Hosted pull response returned version {resolved_version} for exact requested version {requested_version}."
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn restore_pulled_project(response: &Value, output_path: &Path, force: bool) -> Result<(), String> {
     let archive_base64 = response
         .get("package_archive_base64")
@@ -617,10 +704,13 @@ fn restore_pulled_project(response: &Value, output_path: &Path, force: bool) -> 
         .ok_or_else(|| {
             "Pull succeeded but response did not include `package_size_bytes`.".to_string()
         })?;
+    let declared_size_bytes = usize::try_from(package_size_bytes).map_err(|_| {
+        "Pull response declared an invalid negative or unsupported package archive size."
+            .to_string()
+    })?;
+    validate_package_archive_size(declared_size_bytes)?;
 
-    let archive_bytes = BASE64_STANDARD
-        .decode(archive_base64.as_bytes())
-        .map_err(|error| format!("Failed to decode package archive: {error}"))?;
+    let archive_bytes = decode_package_archive_base64(archive_base64)?;
     let decoded_size_bytes = i64::try_from(archive_bytes.len())
         .map_err(|_| "Decoded package archive exceeded supported size limits.".to_string())?;
     if decoded_size_bytes != package_size_bytes {
@@ -640,7 +730,70 @@ fn restore_pulled_project(response: &Value, output_path: &Path, force: bool) -> 
 
     prepare_output_directory(output_path, force)?;
     extract_package_archive_bytes(archive_bytes.as_slice(), output_path)?;
-    relocate_pulled_package_receipt(output_path)
+    validate_restored_package_manifest(response, output_path)?;
+    relocate_pulled_package_receipt(output_path)?;
+    write_pulled_package_hosted_receipt(response, output_path)
+}
+
+fn validate_restored_package_manifest(response: &Value, project_root: &Path) -> Result<(), String> {
+    let manifest_path = project_root.join(PACKAGE_MANIFEST_FILE_NAME);
+    let contents = fs::read_to_string(&manifest_path).map_err(|error| {
+        format!(
+            "Failed to read restored package manifest '{}': {}",
+            manifest_path.display(),
+            error
+        )
+    })?;
+    let manifest: toml::Value = toml::from_str(contents.as_str()).map_err(|error| {
+        format!(
+            "Failed to parse restored package manifest '{}': {}",
+            manifest_path.display(),
+            error
+        )
+    })?;
+    let manifest_name = manifest
+        .get("project_name")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Restored package manifest '{}' is missing `project_name`.",
+                manifest_path.display()
+            )
+        })?;
+    let manifest_version_raw = manifest
+        .get("project_version")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Restored package manifest '{}' is missing `project_version`.",
+                manifest_path.display()
+            )
+        })?;
+    let response_name = response
+        .get("project")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Hosted pull response did not include `project`.".to_string())?;
+    let response_version_raw = response
+        .get("project_version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Hosted pull response did not include `project_version`.".to_string())?;
+    let manifest_version = Version::parse(manifest_version_raw).map_err(|error| {
+        format!("Restored package manifest version `{manifest_version_raw}` is invalid: {error}")
+    })?;
+    let response_version = Version::parse(response_version_raw).map_err(|error| {
+        format!("Hosted pull response version `{response_version_raw}` is invalid: {error}")
+    })?;
+
+    if manifest_name != response_name || manifest_version != response_version {
+        return Err(format!(
+            "Restored package manifest identity `{manifest_name}` {manifest_version} did not match hosted response identity `{response_name}` {response_version}."
+        ));
+    }
+    Ok(())
 }
 
 fn relocate_pulled_package_receipt(project_root: &Path) -> Result<(), String> {
@@ -678,31 +831,125 @@ fn relocate_pulled_package_receipt(project_root: &Path) -> Result<(), String> {
     })
 }
 
-fn prepare_output_directory(path: &Path, force: bool) -> Result<(), String> {
-    if path.exists() {
-        if !force {
-            return Err(format!(
-                "Output directory '{}' already exists. Re-run with --force to replace it, or choose --output-dir <DIR>.",
-                path.display()
-            ));
-        }
+fn write_pulled_package_hosted_receipt(
+    response: &Value,
+    project_root: &Path,
+) -> Result<(), String> {
+    let hosted_source_id = response
+        .get("hosted_source_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "Pull succeeded but response did not include `hosted_source_id`.".to_string()
+        })?;
+    let hosted_version_id = response
+        .get("hosted_version_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "Pull succeeded but response did not include `hosted_version_id`.".to_string()
+        })?;
+    let package_name = response
+        .get("project")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Pull succeeded but response did not include `project`.".to_string())?;
+    let resolved_version = response
+        .get("project_version")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "Pull succeeded but response did not include `project_version`.".to_string()
+        })?;
+    let package_sha256 = response
+        .get("package_sha256")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "Pull succeeded but response did not include `package_sha256`.".to_string()
+        })?;
+    let receipt = PulledPackageHostedReceiptDocument {
+        format_version: 1,
+        source_kind: "hosted".to_string(),
+        hosted_source_id: hosted_source_id.to_string(),
+        hosted_version_id: hosted_version_id.to_string(),
+        owner_handle: response
+            .get("owner_handle")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        package_name: package_name.to_string(),
+        resolved_version: resolved_version.to_string(),
+        package_sha256: package_sha256.to_string(),
+    };
+    let receipt_path = project_root.join(PULLED_PACKAGE_HOSTED_RECEIPT_RELATIVE_PATH);
+    if let Some(parent) = receipt_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create pulled package hosted receipt directory '{}': {}",
+                parent.display(),
+                error
+            )
+        })?;
+    }
+    let rendered = toml::to_string_pretty(&receipt)
+        .map_err(|error| format!("Failed to render pulled package hosted receipt: {error}"))?;
+    fs::write(&receipt_path, rendered).map_err(|error| {
+        format!(
+            "Failed to write pulled package hosted receipt '{}': {}",
+            receipt_path.display(),
+            error
+        )
+    })
+}
 
-        if path.is_dir() {
-            fs::remove_dir_all(path).map_err(|error| {
-                format!(
-                    "Failed to replace existing output directory '{}': {}",
-                    path.display(),
-                    error
-                )
-            })?;
-        } else {
-            fs::remove_file(path).map_err(|error| {
-                format!(
-                    "Failed to replace existing output path '{}': {}",
-                    path.display(),
-                    error
-                )
-            })?;
+fn prepare_output_directory(path: &Path, force: bool) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if archive_metadata_is_link_like(&metadata) {
+                return Err(format!(
+                    "Output path '{}' must not be a symbolic link or reparse point.",
+                    path.display()
+                ));
+            }
+            if !force {
+                return Err(format!(
+                    "Output directory '{}' already exists. Re-run with --force to replace it, or choose --output-dir <DIR>.",
+                    path.display()
+                ));
+            }
+
+            if metadata.is_dir() {
+                fs::remove_dir_all(path).map_err(|error| {
+                    format!(
+                        "Failed to replace existing output directory '{}': {}",
+                        path.display(),
+                        error
+                    )
+                })?;
+            } else {
+                fs::remove_file(path).map_err(|error| {
+                    format!(
+                        "Failed to replace existing output path '{}': {}",
+                        path.display(),
+                        error
+                    )
+                })?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect output path '{}': {}",
+                path.display(),
+                error
+            ));
         }
     }
 
@@ -712,7 +959,8 @@ fn prepare_output_directory(path: &Path, force: bool) -> Result<(), String> {
             path.display(),
             error
         )
-    })
+    })?;
+    ensure_archive_path_is_safe(path, Path::new(""))
 }
 
 fn build_local_pull_ui(
@@ -876,26 +1124,47 @@ pub(crate) fn extract_package_archive_bytes(
     archive_bytes: &[u8],
     output_root: &Path,
 ) -> Result<(), String> {
-    match extract_compressed_package_archive_bytes(archive_bytes, output_root) {
-        Ok(()) => Ok(()),
-        Err(compressed_error) => extract_legacy_package_archive_bytes(archive_bytes, output_root)
-            .map_err(|legacy_error| {
-                format!(
-                    "Failed to parse project package archive as a compressed tarball ({compressed_error}) or legacy JSON archive ({legacy_error})."
-                )
-            }),
+    extract_package_archive_bytes_with_limits(archive_bytes, output_root, HOSTED_ARCHIVE_LIMITS)
+}
+
+pub(crate) fn validate_package_archive_size(compressed_bytes: usize) -> Result<(), String> {
+    validate_archive_compressed_size(compressed_bytes, HOSTED_ARCHIVE_LIMITS)
+}
+
+pub(crate) fn decode_package_archive_base64(archive_base64: &str) -> Result<Vec<u8>, String> {
+    validate_archive_base64_size(archive_base64.len(), HOSTED_ARCHIVE_LIMITS)?;
+    let archive_bytes = BASE64_STANDARD
+        .decode(archive_base64.as_bytes())
+        .map_err(|error| format!("Failed to decode package archive: {error}"))?;
+    validate_package_archive_size(archive_bytes.len())?;
+    Ok(archive_bytes)
+}
+
+fn extract_package_archive_bytes_with_limits(
+    archive_bytes: &[u8],
+    output_root: &Path,
+    limits: ArchiveLimits,
+) -> Result<(), String> {
+    validate_archive_compressed_size(archive_bytes.len(), limits)?;
+    if archive_bytes.starts_with(&[0x1f, 0x8b]) {
+        extract_compressed_package_archive_bytes(archive_bytes, output_root, limits)
+    } else {
+        extract_legacy_package_archive_bytes(archive_bytes, output_root, limits)
     }
 }
 
 fn extract_compressed_package_archive_bytes(
     archive_bytes: &[u8],
     output_root: &Path,
+    limits: ArchiveLimits,
 ) -> Result<(), String> {
     let decoder = GzDecoder::new(Cursor::new(archive_bytes));
     let mut archive = Archive::new(decoder);
     let entries = archive
         .entries()
         .map_err(|error| format!("Failed to read compressed project archive entries: {error}"))?;
+    let mut entry_count = 0_usize;
+    let mut expanded_bytes = 0_u64;
 
     for entry in entries {
         let mut entry = entry
@@ -904,8 +1173,26 @@ fn extract_compressed_package_archive_bytes(
             format!("Failed to read compressed project archive entry path: {error}")
         })?;
         let relative_path = entry_path.to_string_lossy().replace('\\', "/");
-        validate_relative_archive_path(relative_path.as_str())?;
-        let target_path = output_root.join(relative_path.as_str());
+        let relative_path = validate_relative_archive_path(relative_path.as_str())?;
+        let relative_path_text = relative_path.to_string_lossy().replace('\\', "/");
+        let entry_size = match entry.header().entry_type() {
+            EntryType::Directory => 0,
+            EntryType::Regular => entry.size(),
+            other => {
+                return Err(format!(
+                    "Compressed archive entry '{}' has unsupported kind '{:?}'.",
+                    relative_path_text, other
+                ));
+            }
+        };
+        update_archive_budget(
+            &mut entry_count,
+            &mut expanded_bytes,
+            relative_path_text.as_str(),
+            entry_size,
+            limits,
+        )?;
+        let target_path = resolve_archive_target_path(output_root, relative_path.as_path())?;
         match entry.header().entry_type() {
             EntryType::Directory => {
                 fs::create_dir_all(&target_path).map_err(|error| {
@@ -915,6 +1202,7 @@ fn extract_compressed_package_archive_bytes(
                         error
                     )
                 })?;
+                ensure_archive_target_is_safe(output_root, relative_path.as_path())?;
             }
             EntryType::Regular => {
                 if let Some(parent) = target_path.parent() {
@@ -926,6 +1214,7 @@ fn extract_compressed_package_archive_bytes(
                         )
                     })?;
                 }
+                ensure_archive_target_parent_is_safe(output_root, relative_path.as_path())?;
                 entry.unpack(&target_path).map_err(|error| {
                     format!(
                         "Failed to write restored file '{}': {}",
@@ -933,13 +1222,9 @@ fn extract_compressed_package_archive_bytes(
                         error
                     )
                 })?;
+                ensure_archive_target_is_safe(output_root, relative_path.as_path())?;
             }
-            other => {
-                return Err(format!(
-                    "Compressed archive entry '{}' has unsupported kind '{:?}'.",
-                    relative_path, other
-                ));
-            }
+            _ => unreachable!("unsupported archive entry kinds rejected before extraction"),
         }
     }
 
@@ -949,6 +1234,7 @@ fn extract_compressed_package_archive_bytes(
 fn extract_legacy_package_archive_bytes(
     archive_bytes: &[u8],
     output_root: &Path,
+    limits: ArchiveLimits,
 ) -> Result<(), String> {
     let archive: PackageArchiveDocument = serde_json::from_slice(archive_bytes)
         .map_err(|error| format!("Failed to parse project package archive: {error}"))?;
@@ -959,11 +1245,22 @@ fn extract_legacy_package_archive_bytes(
         ));
     }
 
+    let mut entry_count = 0_usize;
+    let mut expanded_bytes = 0_u64;
     for entry in archive.entries {
-        validate_relative_archive_path(entry.path.as_str())?;
-        let target_path = output_root.join(entry.path.as_str());
+        let relative_path = validate_relative_archive_path(entry.path.as_str())?;
+        let relative_path_text = relative_path.to_string_lossy().replace('\\', "/");
         match entry.kind.as_str() {
             "dir" => {
+                update_archive_budget(
+                    &mut entry_count,
+                    &mut expanded_bytes,
+                    relative_path_text.as_str(),
+                    0,
+                    limits,
+                )?;
+                let target_path =
+                    resolve_archive_target_path(output_root, relative_path.as_path())?;
                 fs::create_dir_all(&target_path).map_err(|error| {
                     format!(
                         "Failed to create restored directory '{}': {}",
@@ -971,6 +1268,7 @@ fn extract_legacy_package_archive_bytes(
                         error
                     )
                 })?;
+                ensure_archive_target_is_safe(output_root, relative_path.as_path())?;
             }
             "file" => {
                 let encoded = entry.contents_base64.ok_or_else(|| {
@@ -984,6 +1282,17 @@ fn extract_legacy_package_archive_bytes(
                             entry.path, error
                         )
                     })?;
+                update_archive_budget(
+                    &mut entry_count,
+                    &mut expanded_bytes,
+                    relative_path_text.as_str(),
+                    u64::try_from(decoded.len()).map_err(|_| {
+                        "Legacy archive entry exceeded supported size limits.".to_string()
+                    })?,
+                    limits,
+                )?;
+                let target_path =
+                    resolve_archive_target_path(output_root, relative_path.as_path())?;
                 if let Some(parent) = target_path.parent() {
                     fs::create_dir_all(parent).map_err(|error| {
                         format!(
@@ -993,6 +1302,7 @@ fn extract_legacy_package_archive_bytes(
                         )
                     })?;
                 }
+                ensure_archive_target_parent_is_safe(output_root, relative_path.as_path())?;
                 fs::write(&target_path, decoded).map_err(|error| {
                     format!(
                         "Failed to write restored file '{}': {}",
@@ -1000,6 +1310,7 @@ fn extract_legacy_package_archive_bytes(
                         error
                     )
                 })?;
+                ensure_archive_target_is_safe(output_root, relative_path.as_path())?;
             }
             other => {
                 return Err(format!(
@@ -1065,27 +1376,154 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn validate_relative_archive_path(raw_path: &str) -> Result<(), String> {
-    if raw_path.trim().is_empty() {
-        return Err("Archive entry path cannot be empty.".to_string());
-    }
-    let candidate = Path::new(raw_path);
-    if candidate.is_absolute() {
+fn validate_archive_compressed_size(
+    compressed_bytes: usize,
+    limits: ArchiveLimits,
+) -> Result<(), String> {
+    if compressed_bytes > limits.compressed_bytes {
         return Err(format!(
-            "Archive entry path '{}' must be relative.",
-            raw_path
-        ));
-    }
-    if candidate
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(format!(
-            "Archive entry path '{}' cannot use parent traversal (`..`).",
-            raw_path
+            "Package archive is {} bytes after decoding; the client limit is {} bytes.",
+            compressed_bytes, limits.compressed_bytes
         ));
     }
     Ok(())
+}
+
+fn validate_archive_base64_size(encoded_bytes: usize, limits: ArchiveLimits) -> Result<(), String> {
+    let max_encoded_bytes = limits
+        .compressed_bytes
+        .checked_add(2)
+        .and_then(|value| value.checked_div(3))
+        .and_then(|value| value.checked_mul(4))
+        .ok_or_else(|| "Package archive size limit overflowed supported bounds.".to_string())?;
+    if encoded_bytes > max_encoded_bytes {
+        return Err(format!(
+            "Package archive base64 payload exceeds the {}-byte client limit.",
+            max_encoded_bytes
+        ));
+    }
+    Ok(())
+}
+
+fn update_archive_budget(
+    entry_count: &mut usize,
+    expanded_bytes: &mut u64,
+    relative_path: &str,
+    entry_size: u64,
+    limits: ArchiveLimits,
+) -> Result<(), String> {
+    if relative_path.len() > limits.path_bytes {
+        return Err(format!(
+            "Archive entry path exceeds the {}-byte client limit.",
+            limits.path_bytes
+        ));
+    }
+    *entry_count = entry_count
+        .checked_add(1)
+        .ok_or_else(|| "Archive entry count exceeded supported limits.".to_string())?;
+    if *entry_count > limits.entries {
+        return Err(format!(
+            "Package archive contains more than {} entries.",
+            limits.entries
+        ));
+    }
+    *expanded_bytes = expanded_bytes
+        .checked_add(entry_size)
+        .ok_or_else(|| "Expanded package archive size exceeded supported limits.".to_string())?;
+    if *expanded_bytes > limits.expanded_bytes {
+        return Err(format!(
+            "Expanded package archive exceeds the {}-byte client limit.",
+            limits.expanded_bytes
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn archive_metadata_is_link_like(metadata: &fs::Metadata) -> bool {
+    archive_windows_attributes_are_link_like(metadata.file_attributes())
+}
+
+#[cfg(windows)]
+fn archive_windows_attributes_are_link_like(attributes: u32) -> bool {
+    attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn archive_metadata_is_link_like(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+fn resolve_archive_target_path(
+    output_root: &Path,
+    relative_path: &Path,
+) -> Result<PathBuf, String> {
+    ensure_archive_target_parent_is_safe(output_root, relative_path)?;
+    Ok(output_root.join(relative_path))
+}
+
+fn ensure_archive_target_parent_is_safe(
+    output_root: &Path,
+    relative_path: &Path,
+) -> Result<(), String> {
+    let parent = relative_path.parent().unwrap_or_else(|| Path::new(""));
+    ensure_archive_path_is_safe(output_root, parent)
+}
+
+fn ensure_archive_target_is_safe(output_root: &Path, relative_path: &Path) -> Result<(), String> {
+    ensure_archive_path_is_safe(output_root, relative_path)
+}
+
+fn ensure_archive_path_is_safe(output_root: &Path, relative_path: &Path) -> Result<(), String> {
+    let root_metadata = fs::symlink_metadata(output_root).map_err(|error| {
+        format!(
+            "Failed to inspect archive output root '{}': {}",
+            output_root.display(),
+            error
+        )
+    })?;
+    if archive_metadata_is_link_like(&root_metadata) || !root_metadata.is_dir() {
+        return Err(format!(
+            "Archive output root '{}' must be a real directory and not a symbolic link or reparse point.",
+            output_root.display()
+        ));
+    }
+
+    let mut current = output_root.to_path_buf();
+    for component in relative_path.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::Normal(segment) => current.push(segment),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err("Archive target path escaped the output root.".to_string());
+            }
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if archive_metadata_is_link_like(&metadata) => {
+                return Err(format!(
+                    "Archive target path must not traverse symbolic link or reparse point '{}'.",
+                    current.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect archive target component '{}': {}",
+                    current.display(),
+                    error
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_relative_archive_path(raw_path: &str) -> Result<PathBuf, String> {
+    crate::commands::local_packages::normalize_portable_relative_path(
+        raw_path,
+        "Archive entry path",
+    )
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
@@ -1103,8 +1541,12 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_package_archive_bytes, extract_package_archive_bytes,
-        relocate_pulled_package_receipt, sha256_hex, PackageArchiveDocument,
+        create_package_archive_bytes, extract_compressed_package_archive_bytes,
+        extract_legacy_package_archive_bytes, extract_package_archive_bytes,
+        extract_package_archive_bytes_with_limits, relocate_pulled_package_receipt, sha256_hex,
+        validate_archive_base64_size, validate_project_pull_response_matches_request,
+        validate_relative_archive_path, validate_restored_package_manifest, ArchiveLimits,
+        PackageArchiveDocument, PackageArchiveEntry, PulledPackageHostedReceiptDocument,
     };
     use base64::Engine as _;
     use std::fs;
@@ -1240,5 +1682,265 @@ mod tests {
 
         let _ = fs::remove_dir_all(source_root);
         let _ = fs::remove_dir_all(dest_root);
+    }
+
+    #[test]
+    fn compressed_archive_limits_entry_count_and_expanded_bytes() {
+        let source_root = temp_dir("compressed-limits-source");
+        let dest_root = temp_dir("compressed-limits-dest");
+        fs::create_dir_all(&source_root).expect("source root should be created");
+        fs::create_dir_all(&dest_root).expect("dest root should be created");
+        fs::write(source_root.join("one.txt"), "1234").expect("first file should be written");
+        fs::write(source_root.join("two.txt"), "5678").expect("second file should be written");
+        let archive =
+            create_package_archive_bytes(source_root.as_path()).expect("archive should serialize");
+
+        let entry_error = extract_compressed_package_archive_bytes(
+            archive.as_slice(),
+            dest_root.as_path(),
+            ArchiveLimits {
+                compressed_bytes: archive.len(),
+                expanded_bytes: 100,
+                entries: 1,
+                path_bytes: 1_024,
+            },
+        )
+        .expect_err("compressed entry count should be limited");
+        assert!(entry_error.contains("more than 1 entries"));
+
+        let expanded_dest = temp_dir("compressed-expanded-dest");
+        fs::create_dir_all(&expanded_dest).expect("expanded dest should be created");
+        let expanded_error = extract_compressed_package_archive_bytes(
+            archive.as_slice(),
+            expanded_dest.as_path(),
+            ArchiveLimits {
+                compressed_bytes: archive.len(),
+                expanded_bytes: 3,
+                entries: 10,
+                path_bytes: 1_024,
+            },
+        )
+        .expect_err("compressed expanded bytes should be limited");
+        assert!(expanded_error.contains("Expanded package archive exceeds"));
+
+        let _ = fs::remove_dir_all(source_root);
+        let _ = fs::remove_dir_all(dest_root);
+        let _ = fs::remove_dir_all(expanded_dest);
+    }
+
+    #[test]
+    fn legacy_archive_limits_entry_count_and_expanded_bytes() {
+        let archive = PackageArchiveDocument {
+            format_version: 1,
+            entries: vec![
+                PackageArchiveEntry {
+                    path: "one.txt".to_string(),
+                    kind: "file".to_string(),
+                    contents_base64: Some(
+                        base64::engine::general_purpose::STANDARD.encode(b"1234"),
+                    ),
+                },
+                PackageArchiveEntry {
+                    path: "two.txt".to_string(),
+                    kind: "file".to_string(),
+                    contents_base64: Some(
+                        base64::engine::general_purpose::STANDARD.encode(b"5678"),
+                    ),
+                },
+            ],
+        };
+        let archive = serde_json::to_vec(&archive).expect("legacy archive should serialize");
+        let entry_dest = temp_dir("legacy-entry-limit");
+        fs::create_dir_all(&entry_dest).expect("entry dest should be created");
+        let entry_error = extract_legacy_package_archive_bytes(
+            archive.as_slice(),
+            entry_dest.as_path(),
+            ArchiveLimits {
+                compressed_bytes: archive.len(),
+                expanded_bytes: 100,
+                entries: 1,
+                path_bytes: 1_024,
+            },
+        )
+        .expect_err("legacy entry count should be limited");
+        assert!(entry_error.contains("more than 1 entries"));
+
+        let expanded_dest = temp_dir("legacy-expanded-limit");
+        fs::create_dir_all(&expanded_dest).expect("expanded dest should be created");
+        let expanded_error = extract_legacy_package_archive_bytes(
+            archive.as_slice(),
+            expanded_dest.as_path(),
+            ArchiveLimits {
+                compressed_bytes: archive.len(),
+                expanded_bytes: 3,
+                entries: 10,
+                path_bytes: 1_024,
+            },
+        )
+        .expect_err("legacy expanded bytes should be limited");
+        assert!(expanded_error.contains("Expanded package archive exceeds"));
+
+        let _ = fs::remove_dir_all(entry_dest);
+        let _ = fs::remove_dir_all(expanded_dest);
+    }
+
+    #[test]
+    fn archive_paths_reject_windows_prefixes_on_every_platform() {
+        for candidate in [
+            "C:relative.txt",
+            "C:\\absolute.txt",
+            "\\\\server\\share\\file.txt",
+            "\\\\?\\C:\\file.txt",
+        ] {
+            let error = validate_relative_archive_path(candidate)
+                .expect_err("Windows-prefixed path should be rejected");
+            assert!(
+                error.contains("drive-relative")
+                    || error.contains("device-root")
+                    || error.contains("prefix"),
+                "unexpected error for {candidate}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn archive_limits_decoded_size_and_normalized_path_length() {
+        let error = extract_package_archive_bytes_with_limits(
+            b"12345",
+            PathBuf::from("unused").as_path(),
+            ArchiveLimits {
+                compressed_bytes: 4,
+                expanded_bytes: 100,
+                entries: 10,
+                path_bytes: 1_024,
+            },
+        )
+        .expect_err("decoded archive size should be checked before extraction");
+        assert!(error.contains("after decoding"));
+
+        let long_path = format!("{}.txt", "a".repeat(1_025));
+        let error = validate_relative_archive_path(long_path.as_str())
+            .expect_err("overlong normalized path should be rejected");
+        assert!(error.contains("1024-byte path limit"));
+    }
+
+    #[test]
+    fn archive_base64_size_is_bounded_before_decode() {
+        let limits = ArchiveLimits {
+            compressed_bytes: 4,
+            expanded_bytes: 100,
+            entries: 10,
+            path_bytes: 1_024,
+        };
+        validate_archive_base64_size(8, limits).expect("base64 for four decoded bytes should fit");
+        let error = validate_archive_base64_size(9, limits)
+            .expect_err("oversized base64 should be rejected before decode");
+        assert!(error.contains("base64 payload exceeds"));
+    }
+
+    #[test]
+    fn hosted_pull_response_must_match_requested_identity_and_version() {
+        let response = serde_json::json!({
+            "project": "demo",
+            "project_version": "1.2.3"
+        });
+        validate_project_pull_response_matches_request(&response, "demo", Some("1.2.3"))
+            .expect("matching hosted response should pass");
+
+        let package_error =
+            validate_project_pull_response_matches_request(&response, "other", None)
+                .expect_err("wrong package identity should fail");
+        assert!(package_error.contains("requested package `other`"));
+        let version_error =
+            validate_project_pull_response_matches_request(&response, "demo", Some("1.2.2"))
+                .expect_err("wrong exact version should fail");
+        assert!(version_error.contains("exact requested version 1.2.2"));
+    }
+
+    #[test]
+    fn restored_manifest_must_match_hosted_response_identity() {
+        let root = temp_dir("restored-manifest-identity");
+        fs::create_dir_all(&root).expect("restored root should be writable");
+        fs::write(
+            root.join("cargo-ai-package.toml"),
+            r#"format_version = 1
+project_name = "demo"
+project_version = "1.2.3"
+"#,
+        )
+        .expect("restored manifest should be writable");
+        let matching = serde_json::json!({
+            "project": "demo",
+            "project_version": "1.2.3"
+        });
+        validate_restored_package_manifest(&matching, &root)
+            .expect("matching restored manifest should pass");
+
+        let mismatched = serde_json::json!({
+            "project": "other",
+            "project_version": "1.2.3"
+        });
+        let error = validate_restored_package_manifest(&mismatched, &root)
+            .expect_err("mismatched restored manifest should fail");
+        assert!(error.contains("did not match hosted response identity"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pull_output_rejects_symlink_root_without_touching_target() {
+        use super::prepare_output_directory;
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("pull-output-symlink");
+        let external = root.join("external");
+        let output = root.join("output");
+        fs::create_dir_all(&external).expect("external output should be writable");
+        fs::write(external.join("sentinel.txt"), "outside")
+            .expect("external sentinel should be writable");
+        symlink(&external, &output).expect("output symlink should be created");
+
+        let error = prepare_output_directory(&output, true)
+            .expect_err("symlinked output root should be rejected");
+        assert!(error.contains("symbolic link"));
+        assert_eq!(
+            fs::read_to_string(external.join("sentinel.txt"))
+                .expect("external sentinel should remain"),
+            "outside"
+        );
+
+        let _ = fs::remove_file(output);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hosted_pull_receipt_reads_legacy_owner_id_but_omits_new_emission() {
+        let legacy = r#"
+format_version = 1
+source_kind = "hosted"
+hosted_source_id = "source-id"
+hosted_version_id = "version-id"
+owner_account_id = "private-account-id"
+owner_handle = "alice"
+package_name = "demo"
+resolved_version = "1.0.0"
+package_sha256 = "abc"
+"#;
+        let receipt: PulledPackageHostedReceiptDocument =
+            toml::from_str(legacy).expect("legacy hosted receipt should remain readable");
+        assert_eq!(receipt.hosted_source_id, "source-id");
+
+        let rendered = toml::to_string_pretty(&receipt).expect("receipt should serialize");
+        assert!(!rendered.contains("owner_account_id"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn archive_output_rejects_windows_reparse_attributes() {
+        assert!(super::archive_windows_attributes_are_link_like(
+            super::FILE_ATTRIBUTE_REPARSE_POINT
+        ));
+        assert!(!super::archive_windows_attributes_are_link_like(0));
     }
 }

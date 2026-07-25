@@ -115,6 +115,14 @@ pub fn command() -> Command {
                 .required(false)
                 .action(clap::ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("allow_hosted_code")
+                .long("allow-hosted-code")
+                .help("Acknowledge that exported hosted package code will run outside package confinement")
+                .required(false)
+                .conflicts_with_all(["from_account", "owner_handle"])
+                .action(ArgAction::SetTrue),
+        )
         .after_help(
             "Definition sources:\n  - NAME by itself: agent name, registry name, or local .json shorthand\n  - --from-account: account agent NAME from your authenticated account\n  - --owner-handle <HANDLE>: public account agent NAME from another owner\n  - --agent <AGENT>: remote account source name when the local output name differs\n  - --config <FILE>: agent definition JSON file\n  - --json <JSON>: raw agent definition JSON string\n  - --stdin: read agent definition JSON from stdin\n\nWhen --config, --json, or --stdin is used, positional NAME is always the local output/project name.",
         )
@@ -134,6 +142,7 @@ mod tests {
         assert!(help.contains("--config <FILE>"));
         assert!(help.contains("--json <JSON>"));
         assert!(help.contains("--stdin"));
+        assert!(help.contains("--allow-hosted-code"));
         assert!(help.contains("Definition sources:"));
         assert!(help.contains("When --config, --json, or --stdin is used"));
     }

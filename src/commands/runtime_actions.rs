@@ -87,10 +87,11 @@ enum ActionLaneStatus {
     Skipped,
 }
 
+#[derive(Debug)]
 enum ChildArtifactInvocation {
     DirectExecutable(PathBuf),
-    CargoSubcommand,
-    StandaloneCargoAi,
+    CargoSubcommand(String),
+    StandaloneCargoAi(String),
 }
 
 impl ActionOutput {
@@ -754,6 +755,8 @@ pub(crate) struct ActionProviderContext {
     pub(crate) token: String,
     pub(crate) inference_timeout_in_sec: u64,
     pub(crate) tool_resolver: Option<std::sync::Arc<crate::commands::tools::ToolResolver>>,
+    pub(crate) package_context:
+        Option<crate::commands::local_packages::InstalledPackageRuntimeContext>,
     pub(crate) usage_log: Option<crate::usage_log::UsageLogContext>,
 }
 
@@ -1295,6 +1298,7 @@ async fn run_matching_action_steps(
                 &action_data,
                 action_index,
                 &action.name,
+                provider_context.package_context.as_ref(),
                 runtime_budget,
             )
             .await
@@ -1446,8 +1450,17 @@ async fn run_exec_step(
     data: &serde_json::Value,
     action_index: usize,
     action_name: &str,
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<Option<(String, String)>, String> {
+    if let Some(context) = package_context {
+        if !crate::commands::local_packages::hosted_package_allows_subprocess(context) {
+            return Err(format!(
+                "Action '{}' exec step is blocked for hosted package alias '{}'. The installed package permission profile does not allow unconstrained subprocess execution.",
+                action_name, context.alias
+            ));
+        }
+    }
     let program = step.program.as_deref().ok_or_else(|| {
         format!(
             "Action '{}' exec step is missing required `program`.",
@@ -1467,8 +1480,12 @@ async fn run_exec_step(
     })?;
 
     if let Some(output_variable) = step.output_variable.as_deref() {
-        let child = tokio::process::Command::new(program)
-            .args(&resolved_args)
+        let mut command = tokio::process::Command::new(program);
+        command.args(&resolved_args);
+        if let Some(context) = package_context {
+            command.current_dir(context.package_data_root.as_path());
+        }
+        let child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -1517,8 +1534,12 @@ async fn run_exec_step(
             )),
         }
     } else {
-        let child = tokio::process::Command::new(program)
-            .args(&resolved_args)
+        let mut command = tokio::process::Command::new(program);
+        command.args(&resolved_args);
+        if let Some(context) = package_context {
+            command.current_dir(context.package_data_root.as_path());
+        }
+        let child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -1578,6 +1599,14 @@ async fn run_tool_step(
             action_name
         )
     })?;
+    if let Some(context) = provider_context.package_context.as_ref() {
+        if !crate::commands::local_packages::hosted_package_allows_subprocess(context) {
+            return Err(format!(
+                "Action '{}' tool step '{}' is blocked for hosted package alias '{}'. The installed package permission profile does not allow unconstrained tool subprocess execution.",
+                action_name, tool_name, context.alias
+            ));
+        }
+    }
     let mut usage_tool_guard = provider_context.usage_log.as_ref().map(|usage_log| {
         usage_log.start_tool_run(crate::usage_log::UsageTool {
             name: tool_name.to_string(),
@@ -1638,8 +1667,12 @@ async fn run_tool_step(
         action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
     })?;
 
-    let child = tokio::process::Command::new(&contract.resolved.binary_path)
-        .arg("invoke")
+    let mut command = tokio::process::Command::new(&contract.resolved.binary_path);
+    command.arg("invoke");
+    if let Some(context) = provider_context.package_context.as_ref() {
+        command.current_dir(context.package_data_root.as_path());
+    }
+    let child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2038,6 +2071,7 @@ async fn run_generate_image_step(
         data,
         action_name,
         named_inputs,
+        provider_context.package_context.as_ref(),
     )?;
 
     let remaining = remaining_runtime_duration(
@@ -2149,8 +2183,11 @@ async fn run_generate_image_step(
     };
     let image_bytes = image_response.bytes;
 
-    let output_path_ref = Path::new(output_path.as_str());
-    validate_generated_image_output_path(output_path_ref, action_name)?;
+    let output_path_ref = resolve_generated_image_output_path(
+        output_path.as_str(),
+        action_name,
+        provider_context.package_context.as_ref(),
+    )?;
     if let Some(parent) = output_path_ref.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|error| {
@@ -2164,7 +2201,7 @@ async fn run_generate_image_step(
         }
     }
 
-    std::fs::write(output_path_ref, image_bytes).map_err(|error| {
+    std::fs::write(output_path_ref.as_path(), image_bytes).map_err(|error| {
         format!(
             "Action '{}' failed to write generated image '{}': {}",
             action_name,
@@ -2362,6 +2399,7 @@ async fn resolve_generate_image_step_profile_context(
         token,
         inference_timeout_in_sec: invocation_timeout_in_sec,
         tool_resolver: None,
+        package_context: None,
         usage_log: None,
     }))
 }
@@ -2466,8 +2504,19 @@ async fn run_agent_step_with_provider_context(
 
     let current_depth = current_agent_action_depth();
     validate_agent_action_depth(current_depth, max_agent_depth, action_name)?;
-    let invocation = resolve_child_artifact_invocation(artifact, action_name)?;
-    let mut command = child_artifact_command(&invocation, artifact);
+    let invocation = resolve_child_artifact_invocation(
+        artifact,
+        action_name,
+        provider_context.package_context.as_ref(),
+    )?;
+    let mut command = child_artifact_command(&invocation);
+    if let Some(context) = provider_context
+        .package_context
+        .as_ref()
+        .filter(|context| context.source_kind == "hosted")
+    {
+        command.current_dir(context.package_data_root.as_path());
+    }
     if let Some(action_execution_override) = action_execution_override {
         command.arg("--action-execution");
         command.arg(match action_execution_override {
@@ -2477,6 +2526,16 @@ async fn run_agent_step_with_provider_context(
     }
     if step.ignore_tools {
         command.arg("--ignore-tools");
+    }
+    if let Some(usage_log_path) = step.usage_log.as_deref() {
+        let resolved_usage_log_path = resolve_child_usage_log_path(
+            usage_log_path,
+            action_name,
+            provider_context.package_context.as_ref(),
+        )?;
+        ensure_child_usage_log_parent_exists(resolved_usage_log_path.as_path())?;
+        command.arg("--usage-log");
+        command.arg(resolved_usage_log_path.as_os_str());
     }
     let inherited_profile_name = if artifact_is_json_definition(artifact) {
         provider_context.profile_name.clone()
@@ -2505,7 +2564,7 @@ async fn run_agent_step_with_provider_context(
         command.arg("--profile");
         command.arg(profile_name);
     }
-    let (child_args, resolution_notes) = child_input_args(
+    let (child_args, resolution_notes) = child_input_args_with_package_context(
         step.run_vars.as_deref(),
         step.input_overrides.as_deref(),
         step.input_mode,
@@ -2513,6 +2572,7 @@ async fn run_agent_step_with_provider_context(
         data,
         action_name,
         named_inputs,
+        provider_context.package_context.as_ref(),
     )?;
     for note in resolution_notes {
         print_action_line(action_index, action_name, note.as_str());
@@ -2693,6 +2753,7 @@ async fn run_agent_step(
         token: String::new(),
         inference_timeout_in_sec: 60,
         tool_resolver: None,
+        package_context: None,
         usage_log: None,
     };
     run_agent_step_with_provider_context(
@@ -2713,8 +2774,57 @@ async fn run_agent_step(
 fn resolve_child_artifact_invocation(
     artifact: &str,
     action_name: &str,
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
 ) -> Result<ChildArtifactInvocation, String> {
     validate_agent_step_target(artifact, action_name)?;
+    if let Some(context) = package_context.filter(|context| context.source_kind == "hosted") {
+        let (package_relative_path, artifact_path) =
+            crate::commands::local_packages::resolve_package_payload_path_from_current_entrypoint(
+                context, artifact,
+            )
+            .map_err(|error| format!("Action '{}': {}", action_name, error))?;
+        if !artifact_is_json_definition(artifact) {
+            if !crate::commands::local_packages::hosted_package_allows_subprocess(context) {
+                return Err(format!(
+                    "Action '{}' child executable '{}' is blocked for hosted package alias '{}'. Reinstall or transition the package with an explicitly accepted subprocess permission before direct child execution.",
+                    action_name, artifact, context.alias
+                ));
+            }
+            if !artifact_path.is_file() {
+                return Err(format!(
+                    "Action '{}' child executable '{}' was not found in the verified package payload.",
+                    action_name, artifact
+                ));
+            }
+            return Ok(ChildArtifactInvocation::DirectExecutable(artifact_path));
+        }
+
+        let exported = context
+            .entrypoints
+            .iter()
+            .find(|entrypoint| {
+                entrypoint.runnable && entrypoint.path == package_relative_path
+            })
+            .ok_or_else(|| {
+                format!(
+                    "Action '{}' hosted child agent '{}' must resolve to a declared runnable export in package alias '{}'.",
+                    action_name, artifact, context.alias
+                )
+            })?;
+        let reference = format!("{}::{}", context.alias, exported.name);
+        let cargo_ai_exists = command_exists_on_path("cargo-ai");
+        if command_exists_on_path("cargo") && cargo_ai_exists {
+            return Ok(ChildArtifactInvocation::CargoSubcommand(reference));
+        }
+        if cargo_ai_exists {
+            return Ok(ChildArtifactInvocation::StandaloneCargoAi(reference));
+        }
+        return Err(format!(
+            "Action '{}' hosted child agent '{}' requires Cargo AI to be available as `cargo ai` or `cargo-ai` on PATH.",
+            action_name, artifact
+        ));
+    }
+
     let artifact_path = Path::new(artifact);
     if !artifact_path.exists() {
         return Err(format!(
@@ -2731,10 +2841,14 @@ fn resolve_child_artifact_invocation(
 
     let cargo_ai_exists = command_exists_on_path("cargo-ai");
     if command_exists_on_path("cargo") && cargo_ai_exists {
-        return Ok(ChildArtifactInvocation::CargoSubcommand);
+        return Ok(ChildArtifactInvocation::CargoSubcommand(
+            artifact.to_string(),
+        ));
     }
     if cargo_ai_exists {
-        return Ok(ChildArtifactInvocation::StandaloneCargoAi);
+        return Ok(ChildArtifactInvocation::StandaloneCargoAi(
+            artifact.to_string(),
+        ));
     }
 
     Err(format!(
@@ -2743,26 +2857,83 @@ fn resolve_child_artifact_invocation(
     ))
 }
 
-fn child_artifact_command(
-    invocation: &ChildArtifactInvocation,
-    artifact: &str,
-) -> tokio::process::Command {
+fn child_artifact_command(invocation: &ChildArtifactInvocation) -> tokio::process::Command {
     match invocation {
         ChildArtifactInvocation::DirectExecutable(path) => tokio::process::Command::new(path),
-        ChildArtifactInvocation::CargoSubcommand => {
+        ChildArtifactInvocation::CargoSubcommand(reference) => {
             let mut command = tokio::process::Command::new("cargo");
             command.arg("ai");
             command.arg("run");
-            command.arg(artifact);
+            command.arg(reference);
             command
         }
-        ChildArtifactInvocation::StandaloneCargoAi => {
+        ChildArtifactInvocation::StandaloneCargoAi(reference) => {
             let mut command = tokio::process::Command::new("cargo-ai");
             command.arg("run");
-            command.arg(artifact);
+            command.arg(reference);
             command
         }
     }
+}
+
+fn resolve_child_usage_log_path(
+    raw_path: &str,
+    action_name: &str,
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
+) -> Result<PathBuf, String> {
+    let path = Path::new(raw_path);
+    validate_child_usage_log_path(path, action_name)?;
+    if let Some(context) = package_context {
+        return crate::commands::local_packages::resolve_package_data_path(context, path)
+            .map_err(|error| format!("Action '{}': {}", action_name, error));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn validate_child_usage_log_path(path: &Path, action_name: &str) -> Result<(), String> {
+    let raw_path = path.to_string_lossy();
+    crate::commands::local_packages::normalize_portable_relative_path(
+        raw_path.as_ref(),
+        format!("Action '{}' agent `usage_log`", action_name).as_str(),
+    )?;
+    if raw_path.trim().is_empty() {
+        return Err(format!(
+            "Action '{}' agent `usage_log` must be a non-empty relative path.",
+            action_name
+        ));
+    }
+    if path.is_absolute() {
+        return Err(format!(
+            "Action '{}' agent `usage_log` must be a relative path.",
+            action_name
+        ));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "Action '{}' agent `usage_log` must not use parent traversal (`..`).",
+            action_name
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_child_usage_log_parent_exists(path: &Path) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "Failed to create child usage log directory '{}': {}",
+            parent.display(),
+            error
+        )
+    })
 }
 
 fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'static str> {
@@ -3321,6 +3492,10 @@ fn action_runtime_timeout_message(
 }
 
 fn validate_agent_step_target(agent: &str, action_name: &str) -> Result<(), String> {
+    crate::commands::local_packages::normalize_portable_relative_path(
+        agent,
+        format!("Action '{}' agent step target", action_name).as_str(),
+    )?;
     let agent_path = Path::new(agent);
     if agent.trim().is_empty() {
         return Err(format!(
@@ -3462,6 +3637,7 @@ fn matching_run_steps<'a>(
         .collect()
 }
 
+#[cfg(test)]
 fn child_input_args(
     run_vars: Option<&[crate::ActionRunVar]>,
     input_overrides: Option<&[crate::ActionInputOverride]>,
@@ -3470,6 +3646,29 @@ fn child_input_args(
     data: &serde_json::Value,
     action_name: &str,
     named_inputs: &BTreeMap<String, crate::Input>,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    child_input_args_with_package_context(
+        run_vars,
+        input_overrides,
+        input_mode,
+        inputs,
+        data,
+        action_name,
+        named_inputs,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn child_input_args_with_package_context(
+    run_vars: Option<&[crate::ActionRunVar]>,
+    input_overrides: Option<&[crate::ActionInputOverride]>,
+    input_mode: Option<crate::ActionInputMode>,
+    inputs: Option<&[crate::ActionInput]>,
+    data: &serde_json::Value,
+    action_name: &str,
+    named_inputs: &BTreeMap<String, crate::Input>,
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut args = Vec::new();
     let mut notes = Vec::new();
@@ -3494,6 +3693,14 @@ fn child_input_args(
                 action_name,
                 &input_override.name,
                 named_inputs,
+            )?;
+            validate_hosted_child_input_override(
+                &input_override.value,
+                resolved_value.as_str(),
+                action_name,
+                &input_override.name,
+                named_inputs,
+                package_context,
             )?;
             args.push("--input-override".to_string());
             args.push(format!("{}={}", input_override.name, resolved_value));
@@ -3562,13 +3769,20 @@ fn child_input_args(
                     }
                 }
                 crate::ActionInput::Image { path } => {
-                    let resolved = resolve_string_parts(
+                    let resolved_path = resolve_string_parts(
                         path,
                         data,
                         action_name,
                         &format!("child-agent image path input {}", index + 1),
                     )?;
-                    validate_child_input_path(&resolved, action_name, index + 1, "image")?;
+                    let resolved = resolve_hosted_child_input_path(
+                        resolved_path.as_str(),
+                        child_input_uses_dynamic_parts(path),
+                        action_name,
+                        index + 1,
+                        "image",
+                        package_context,
+                    )?;
                     args.push("--input-image".to_string());
                     args.push(resolved.clone());
                     if child_input_uses_dynamic_parts(path) {
@@ -3581,13 +3795,20 @@ fn child_input_args(
                     }
                 }
                 crate::ActionInput::File { path } => {
-                    let resolved = resolve_string_parts(
+                    let resolved_path = resolve_string_parts(
                         path,
                         data,
                         action_name,
                         &format!("child-agent file path input {}", index + 1),
                     )?;
-                    validate_child_input_path(&resolved, action_name, index + 1, "file")?;
+                    let resolved = resolve_hosted_child_input_path(
+                        resolved_path.as_str(),
+                        child_input_uses_dynamic_parts(path),
+                        action_name,
+                        index + 1,
+                        "file",
+                        package_context,
+                    )?;
                     validate_child_file_extension(&resolved, action_name, index + 1)?;
                     args.push("--input-file".to_string());
                     args.push(resolved.clone());
@@ -3613,24 +3834,95 @@ fn child_input_args(
                             action_name, input
                         )
                     })?;
-                    let payload = crate::Input {
-                        name: Some(input.clone()),
-                        kind: forwarded.kind,
-                        value: Some(value.to_string()),
-                    };
-                    args.push("--forwarded-input".to_string());
-                    args.push(serde_json::to_string(&payload).map_err(|error| {
-                        format!(
-                            "Action '{}' failed to serialize forwarded named input '{}': {}",
-                            action_name, input, error
+                    if package_context.is_some_and(|context| context.source_kind == "hosted")
+                        && !matches!(
+                            forwarded.kind,
+                            crate::InputKind::Image | crate::InputKind::File
                         )
-                    })?);
+                        && child_override_looks_like_external_path(value)
+                    {
+                        return Err(format!(
+                            "Action '{}' child-agent named input '{}' is blocked because hosted package code cannot reinterpret text or URL input as an external filesystem path.",
+                            action_name, input
+                        ));
+                    }
+                    args.push("--input-override".to_string());
+                    args.push(format!("{}={}", input, value));
                 }
             }
         }
     }
 
     Ok((args, notes))
+}
+
+fn validate_hosted_child_input_override(
+    source: &crate::ActionInputOverrideValue,
+    resolved_value: &str,
+    action_name: &str,
+    override_name: &str,
+    named_inputs: &BTreeMap<String, crate::Input>,
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
+) -> Result<(), String> {
+    if package_context.is_none_or(|context| context.source_kind != "hosted") {
+        return Ok(());
+    }
+
+    let inherits_constrained_path = match source {
+        crate::ActionInputOverrideValue::NamedInput { input } => {
+            named_inputs.get(input).is_some_and(|value| {
+                matches!(value.kind, crate::InputKind::Image | crate::InputKind::File)
+            })
+        }
+        crate::ActionInputOverrideValue::Literal(_)
+        | crate::ActionInputOverrideValue::Variable(_) => false,
+    };
+    if inherits_constrained_path || !child_override_looks_like_external_path(resolved_value) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Action '{}' child-agent named input override '{}' is blocked because hosted package code cannot introduce an absolute, prefixed, or parent-traversing path. Forward a declared image/file input supplied by the caller, or use a relative path under the package data directory.",
+        action_name, override_name
+    ))
+}
+
+fn child_override_looks_like_external_path(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() || value.starts_with("http://") || value.starts_with("https://") {
+        return false;
+    }
+
+    let portable = value.replace('\\', "/");
+    let bytes = portable.as_bytes();
+    Path::new(value).is_absolute()
+        || portable.starts_with('/')
+        || portable.starts_with("file:")
+        || portable.split('/').any(|component| component == "..")
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+}
+
+fn resolve_hosted_child_input_path(
+    raw_path: &str,
+    dynamic: bool,
+    action_name: &str,
+    input_index: usize,
+    input_kind: &str,
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
+) -> Result<String, String> {
+    validate_child_input_path(raw_path, action_name, input_index, input_kind)?;
+    let Some(context) = package_context.filter(|context| context.source_kind == "hosted") else {
+        return Ok(raw_path.to_string());
+    };
+
+    let resolved = if dynamic {
+        crate::commands::local_packages::resolve_package_data_path(context, Path::new(raw_path))
+            .map_err(|error| format!("Action '{}': {}", action_name, error))?
+    } else {
+        crate::commands::local_packages::resolve_package_payload_path(context, Path::new(raw_path))
+            .map_err(|error| format!("Action '{}': {}", action_name, error))?
+    };
+    Ok(resolved.to_string_lossy().to_string())
 }
 
 fn resolve_child_input_override_value(
@@ -3772,6 +4064,10 @@ fn child_input_uses_dynamic_parts(parts: &[crate::RunArg]) -> bool {
 
 fn validate_generated_image_output_path(path: &Path, action_name: &str) -> Result<(), String> {
     let raw_path = path.to_string_lossy();
+    crate::commands::local_packages::normalize_portable_relative_path(
+        raw_path.as_ref(),
+        format!("Action '{}' generate_image `path`", action_name).as_str(),
+    )?;
     if raw_path.trim().is_empty() {
         return Err(format!(
             "Action '{}' generate_image `path` must resolve to a non-empty relative path.",
@@ -3832,11 +4128,29 @@ fn validate_generate_image_output_format_for_provider(
     Ok(())
 }
 
+fn resolve_generated_image_output_path(
+    raw_path: &str,
+    action_name: &str,
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
+) -> Result<PathBuf, String> {
+    let output_path_ref = Path::new(raw_path);
+    validate_generated_image_output_path(output_path_ref, action_name)?;
+    if let Some(context) = package_context {
+        return crate::commands::local_packages::resolve_package_data_path(
+            context,
+            output_path_ref,
+        )
+        .map_err(|error| format!("Action '{}': {}", action_name, error));
+    }
+    Ok(output_path_ref.to_path_buf())
+}
+
 fn resolve_generate_image_reference_images(
     references: Option<&[crate::GenerateImageReference]>,
     data: &serde_json::Value,
     action_name: &str,
     named_inputs: &BTreeMap<String, crate::Input>,
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
 ) -> Result<Vec<crate::providers::ImageReference>, String> {
     let Some(references) = references else {
         return Ok(Vec::new());
@@ -3845,13 +4159,36 @@ fn resolve_generate_image_reference_images(
     let mut resolved = Vec::with_capacity(references.len());
     for (index, reference) in references.iter().enumerate() {
         let path = match reference {
-            crate::GenerateImageReference::Path { path } => resolve_string_parts(
-                path,
-                data,
-                action_name,
-                &format!("reference_images[{}].path", index),
-            )
-            .map_err(|error| format!("Action '{}': {error}", action_name))?,
+            crate::GenerateImageReference::Path { path } => {
+                let resolved = resolve_string_parts(
+                    path,
+                    data,
+                    action_name,
+                    &format!("reference_images[{}].path", index),
+                )
+                .map_err(|error| format!("Action '{}': {error}", action_name))?;
+                validate_generate_image_reference_path(resolved.as_str(), action_name, index + 1)?;
+                if let Some(context) =
+                    package_context.filter(|context| context.source_kind == "hosted")
+                {
+                    let resolved = if child_input_uses_dynamic_parts(path) {
+                        crate::commands::local_packages::resolve_package_data_path(
+                            context,
+                            Path::new(resolved.as_str()),
+                        )
+                        .map_err(|error| format!("Action '{}': {}", action_name, error))?
+                    } else {
+                        crate::commands::local_packages::resolve_package_payload_path(
+                            context,
+                            Path::new(resolved.as_str()),
+                        )
+                        .map_err(|error| format!("Action '{}': {}", action_name, error))?
+                    };
+                    resolved.to_string_lossy().to_string()
+                } else {
+                    resolved
+                }
+            }
             crate::GenerateImageReference::Named { input } => {
                 let named_input = named_inputs.get(input).ok_or_else(|| {
                     format!(
@@ -3880,7 +4217,6 @@ fn resolve_generate_image_reference_images(
             }
         };
 
-        validate_generate_image_reference_path(path.as_str(), action_name, index + 1)?;
         resolved.push(
             crate::providers::load_image_reference(path.as_str()).map_err(|error| {
                 format!(
@@ -3918,6 +4254,14 @@ fn validate_generate_image_reference_path(
     action_name: &str,
     input_index: usize,
 ) -> Result<(), String> {
+    crate::commands::local_packages::normalize_portable_relative_path(
+        path,
+        format!(
+            "Action '{}' generate_image reference image {}",
+            action_name, input_index
+        )
+        .as_str(),
+    )?;
     if path.trim().is_empty() {
         return Err(format!(
             "Action '{}' generate_image reference image {} must resolve to a non-empty relative path.",
@@ -3967,6 +4311,14 @@ fn validate_child_input_path(
     input_index: usize,
     input_kind: &str,
 ) -> Result<(), String> {
+    crate::commands::local_packages::normalize_portable_relative_path(
+        path,
+        format!(
+            "Action '{}' child-agent {} input {}",
+            action_name, input_kind, input_index
+        )
+        .as_str(),
+    )?;
     if path.trim().is_empty() {
         return Err(format!(
             "Action '{}' child-agent {} input {} must resolve to a non-empty relative path.",
@@ -4129,12 +4481,13 @@ mod tests {
         format_backend_ui_message, format_elapsed_duration, insert_action_output_variable,
         matching_run_steps,
         resolve_action_render_mode_for_capability as resolve_action_output_mode_for_capability,
-        resolve_generate_image_step_profile_context, resolve_run_args, resolve_string_parts,
-        run_agent_step, run_completion_message_for_depth, run_exec_step, run_generate_image_step,
-        run_header_line, run_tool_step, step_matches_platform, validate_agent_action_depth,
-        ActionOutput, ActionOutputMode, ActionProviderContext,
-        RequestedActionRenderMode as RequestedActionOutputMode, StepExecutionOutcome,
-        ACTION_OUTPUT,
+        resolve_child_artifact_invocation, resolve_generate_image_step_profile_context,
+        resolve_hosted_child_input_path, resolve_run_args, resolve_string_parts, run_agent_step,
+        run_agent_step_with_provider_context, run_completion_message_for_depth, run_exec_step,
+        run_generate_image_step, run_header_line, run_tool_step, step_matches_platform,
+        validate_agent_action_depth, ActionOutput, ActionOutputMode, ActionProviderContext,
+        ChildArtifactInvocation, RequestedActionRenderMode as RequestedActionOutputMode,
+        StepExecutionOutcome, ACTION_OUTPUT,
     };
     use crate::credentials::openai_oauth;
     use crate::providers::ProviderKind;
@@ -4322,6 +4675,7 @@ mod tests {
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -4346,7 +4700,44 @@ mod tests {
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
+        }
+    }
+
+    fn hosted_package_context(
+        install_root: &Path,
+        subprocess: &str,
+    ) -> crate::commands::local_packages::InstalledPackageRuntimeContext {
+        let package_payload_root = install_root.join("package");
+        let package_data_root = install_root.join("data");
+        fs::create_dir_all(package_payload_root.join("agents"))
+            .expect("package agents directory should exist");
+        fs::create_dir_all(&package_data_root).expect("package data directory should exist");
+        crate::commands::local_packages::InstalledPackageRuntimeContext {
+            alias: "image_generator".to_string(),
+            source_kind: "hosted".to_string(),
+            package_payload_root,
+            package_data_root,
+            current_entrypoint_path: Some("agents/observer.json".to_string()),
+            entrypoints: vec![
+                crate::commands::local_packages::InstalledPackageEntrypointDocument {
+                    name: "observer".to_string(),
+                    path: "agents/observer.json".to_string(),
+                    runnable: true,
+                    hatchable: false,
+                },
+                crate::commands::local_packages::InstalledPackageEntrypointDocument {
+                    name: "child".to_string(),
+                    path: "agents/child.json".to_string(),
+                    runnable: true,
+                    hatchable: false,
+                },
+            ],
+            permissions: crate::commands::local_packages::PackagePermissionProfileDocument {
+                subprocess: subprocess.to_string(),
+                ..crate::commands::local_packages::PackagePermissionProfileDocument::default()
+            },
         }
     }
 
@@ -4392,6 +4783,7 @@ auth_mode = "{auth_mode}"
             token: String::new(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         }
     }
@@ -4763,7 +5155,7 @@ auth_mode = "{auth_mode}"
     }
 
     #[test]
-    fn child_input_args_forward_named_inputs_as_hidden_runtime_payloads() {
+    fn child_input_args_forward_named_inputs_as_standard_overrides() {
         let (args, notes) = child_input_args(
             None,
             None,
@@ -4784,13 +5176,10 @@ auth_mode = "{auth_mode}"
         )
         .expect("named child input args should resolve");
 
-        assert_eq!(args.len(), 2);
-        assert_eq!(args[0], "--forwarded-input");
-        let payload: crate::Input =
-            serde_json::from_str(&args[1]).expect("forwarded input payload should deserialize");
-        assert_eq!(payload.name.as_deref(), Some("menu_image"));
-        assert_eq!(payload.kind, crate::InputKind::Image);
-        assert_eq!(payload.value.as_deref(), Some("./artifacts/menu.png"));
+        assert_eq!(
+            args,
+            vec!["--input-override", "menu_image=./artifacts/menu.png"]
+        );
         assert!(notes.is_empty());
     }
 
@@ -4887,6 +5276,107 @@ auth_mode = "{auth_mode}"
             vec!["--input-override", "menu_image=./artifacts/menu.png"]
         );
         assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn hosted_child_override_rejects_external_variable_path() {
+        let install_root = std::env::temp_dir().join(format!(
+            "cai2102-hosted-child-override-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let context =
+            hosted_package_context(install_root.as_path(), "blocked_without_explicit_grant");
+        let error = super::child_input_args_with_package_context(
+            None,
+            Some(&[crate::ActionInputOverride {
+                name: "source_doc".to_string(),
+                value: crate::ActionInputOverrideValue::Variable("source_doc".to_string()),
+            }]),
+            None,
+            None,
+            &json!({ "source_doc": "../../private/report.pdf" }),
+            "demo",
+            &no_named_inputs(),
+            Some(&context),
+        )
+        .expect_err("hosted package variables must not introduce external paths");
+
+        assert!(error.contains("hosted package code cannot introduce"));
+        let _ = fs::remove_dir_all(install_root);
+    }
+
+    #[test]
+    fn hosted_child_override_allows_constrained_parent_path_input() {
+        let install_root = std::env::temp_dir().join(format!(
+            "cai2102-hosted-child-parent-input-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let context =
+            hosted_package_context(install_root.as_path(), "blocked_without_explicit_grant");
+        let explicit_path = std::env::temp_dir().join("caller-selected-report.pdf");
+        let named_inputs = std::collections::BTreeMap::from([(
+            "source_doc".to_string(),
+            named_input("source_doc", crate::InputKind::File, explicit_path.to_str()),
+        )]);
+        let (args, notes) = super::child_input_args_with_package_context(
+            None,
+            Some(&[crate::ActionInputOverride {
+                name: "source_doc".to_string(),
+                value: crate::ActionInputOverrideValue::NamedInput {
+                    input: "source_doc".to_string(),
+                },
+            }]),
+            None,
+            None,
+            &json!({}),
+            "demo",
+            &named_inputs,
+            Some(&context),
+        )
+        .expect("a declared parent path input should preserve the caller grant");
+
+        assert_eq!(
+            args,
+            vec![
+                "--input-override".to_string(),
+                format!("source_doc={}", explicit_path.display()),
+            ]
+        );
+        assert!(notes.is_empty());
+        let _ = fs::remove_dir_all(install_root);
+    }
+
+    #[test]
+    fn hosted_child_named_text_cannot_be_reinterpreted_as_external_path() {
+        let install_root = std::env::temp_dir().join(format!(
+            "cai2102-hosted-child-text-input-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let context =
+            hosted_package_context(install_root.as_path(), "blocked_without_explicit_grant");
+        let error = super::child_input_args_with_package_context(
+            None,
+            None,
+            None,
+            Some(&[crate::ActionInput::Named {
+                input: "menu_note".to_string(),
+            }]),
+            &json!({}),
+            "demo",
+            &std::collections::BTreeMap::from([(
+                "menu_note".to_string(),
+                named_input(
+                    "menu_note",
+                    crate::InputKind::Text,
+                    Some("/private/report.pdf"),
+                ),
+            )]),
+            Some(&context),
+        )
+        .expect_err("hosted text input must not become an implicit filesystem grant");
+
+        assert!(error.contains("cannot reinterpret text or URL input"));
+        let _ = fs::remove_dir_all(install_root);
     }
 
     #[test]
@@ -5270,6 +5760,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         };
 
@@ -5290,6 +5781,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         };
 
@@ -5385,6 +5877,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -5394,9 +5887,10 @@ auth_mode = "{auth_mode}"
         };
 
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
-        let captured_output = run_exec_step(&step, &json!({}), 0, "capture_exec", runtime_budget)
-            .await
-            .expect("exec capture should succeed");
+        let captured_output =
+            run_exec_step(&step, &json!({}), 0, "capture_exec", None, runtime_budget)
+                .await
+                .expect("exec capture should succeed");
 
         assert_eq!(
             captured_output,
@@ -5429,6 +5923,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -5446,7 +5941,7 @@ auth_mode = "{auth_mode}"
         let runtime_budget = configured_agent_action_runtime_budget(Some(600));
         let result = ACTION_OUTPUT
             .scope(output.clone(), async {
-                run_exec_step(&step, &json!({}), 0, "raw_exec", runtime_budget).await
+                run_exec_step(&step, &json!({}), 0, "raw_exec", None, runtime_budget).await
             })
             .await;
 
@@ -5506,6 +6001,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -5522,6 +6018,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         };
 
@@ -5599,6 +6096,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -5625,6 +6123,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         };
 
@@ -5680,6 +6179,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -5754,6 +6254,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -5770,6 +6271,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         };
 
@@ -5847,6 +6349,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -5863,6 +6366,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         };
 
@@ -5915,6 +6419,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -5931,6 +6436,7 @@ auth_mode = "{auth_mode}"
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
+            package_context: None,
             usage_log: None,
         };
 
@@ -6005,6 +6511,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6129,6 +6636,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6192,6 +6700,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6241,6 +6750,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6316,6 +6826,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6402,6 +6913,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6459,6 +6971,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6488,6 +7001,261 @@ auth_mode = "{auth_mode}"
         assert!(error.contains("Ollama"));
     }
 
+    #[test]
+    fn child_usage_log_resolves_under_package_data_root() {
+        let data_root =
+            std::env::temp_dir().join(format!("cai2102-package-data-{}", std::process::id()));
+        let context = crate::commands::local_packages::InstalledPackageRuntimeContext {
+            alias: "image_generator".to_string(),
+            source_kind: "hosted".to_string(),
+            package_payload_root: data_root
+                .parent()
+                .expect("data root should have a parent")
+                .join("package"),
+            package_data_root: data_root.clone(),
+            current_entrypoint_path: Some("agents/observer.json".to_string()),
+            entrypoints: Vec::new(),
+            permissions: crate::commands::local_packages::PackagePermissionProfileDocument::default(
+            ),
+        };
+
+        let resolved = super::resolve_child_usage_log_path(
+            "usage/child.jsonl",
+            "observe_usage",
+            Some(&context),
+        )
+        .expect("package child usage log should resolve");
+
+        assert_eq!(resolved, data_root.join("usage/child.jsonl"));
+    }
+
+    #[test]
+    fn child_usage_log_rejects_parent_traversal() {
+        let error = super::resolve_child_usage_log_path("../usage.jsonl", "observe_usage", None)
+            .expect_err("parent traversal should be rejected");
+
+        assert!(error.contains("parent traversal"));
+    }
+
+    #[test]
+    fn child_usage_log_rejects_windows_drive_relative_path() {
+        let error = super::resolve_child_usage_log_path("C:usage.jsonl", "observe_usage", None)
+            .expect_err("Windows drive-relative path should be rejected on every platform");
+
+        assert!(error.contains("drive-relative") || error.contains("prefix"));
+    }
+
+    #[test]
+    fn hosted_child_static_and_dynamic_paths_use_payload_and_data_roots() {
+        let install_root = std::env::temp_dir().join(format!(
+            "cai2102-hosted-child-inputs-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let context =
+            hosted_package_context(install_root.as_path(), "blocked_without_explicit_grant");
+        fs::create_dir_all(context.package_payload_root.join("assets"))
+            .expect("payload assets should exist");
+        fs::write(
+            context.package_payload_root.join("assets/reference.png"),
+            "image",
+        )
+        .expect("payload reference should exist");
+
+        let static_path = resolve_hosted_child_input_path(
+            "assets/reference.png",
+            false,
+            "invoke_child",
+            1,
+            "image",
+            Some(&context),
+        )
+        .expect("static package path should resolve from payload");
+        assert_eq!(
+            PathBuf::from(static_path),
+            context.package_payload_root.join("assets/reference.png")
+        );
+
+        let dynamic_path = resolve_hosted_child_input_path(
+            "images/generated.png",
+            true,
+            "invoke_child",
+            1,
+            "image",
+            Some(&context),
+        )
+        .expect("dynamic package path should resolve from data");
+        assert_eq!(
+            PathBuf::from(dynamic_path),
+            context.package_data_root.join("images/generated.png")
+        );
+
+        let _ = fs::remove_dir_all(install_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hosted_json_child_resolves_through_declared_alias_export() {
+        let test_path = TestPathCommands::new();
+        test_path.write_command("cargo", "#!/bin/sh\nexit 0\n");
+        test_path.write_command("cargo-ai", "#!/bin/sh\nexit 0\n");
+        let install_root = std::env::temp_dir().join(format!(
+            "cai2102-hosted-child-export-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let context =
+            hosted_package_context(install_root.as_path(), "blocked_without_explicit_grant");
+        fs::write(
+            context.package_payload_root.join("agents/observer.json"),
+            "{}",
+        )
+        .expect("observer should exist");
+        fs::write(context.package_payload_root.join("agents/child.json"), "{}")
+            .expect("child should exist");
+
+        let invocation =
+            resolve_child_artifact_invocation("./child.json", "invoke_child", Some(&context))
+                .expect("declared hosted child should resolve");
+        match invocation {
+            ChildArtifactInvocation::CargoSubcommand(reference) => {
+                assert_eq!(reference, "image_generator::child");
+            }
+            _ => panic!("hosted JSON child should use the cargo subcommand"),
+        }
+
+        let _ = fs::remove_dir_all(install_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hosted_json_child_rejects_undeclared_payload_file() {
+        let test_path = TestPathCommands::new();
+        test_path.write_command("cargo", "#!/bin/sh\nexit 0\n");
+        test_path.write_command("cargo-ai", "#!/bin/sh\nexit 0\n");
+        let install_root = std::env::temp_dir().join(format!(
+            "cai2102-hosted-child-private-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let context =
+            hosted_package_context(install_root.as_path(), "blocked_without_explicit_grant");
+        fs::write(
+            context.package_payload_root.join("agents/private.json"),
+            "{}",
+        )
+        .expect("private child should exist");
+
+        let error =
+            resolve_child_artifact_invocation("./private.json", "invoke_child", Some(&context))
+                .expect_err("undeclared hosted child should be rejected");
+        assert!(error.contains("declared runnable export"));
+
+        let _ = fs::remove_dir_all(install_root);
+    }
+
+    #[test]
+    fn hosted_direct_child_requires_accepted_subprocess_permission() {
+        let install_root = std::env::temp_dir().join(format!(
+            "cai2102-hosted-child-exec-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let blocked =
+            hosted_package_context(install_root.as_path(), "blocked_without_explicit_grant");
+        fs::write(
+            blocked.package_payload_root.join("agents/child_exec"),
+            "binary",
+        )
+        .expect("child executable fixture should exist");
+
+        let error =
+            resolve_child_artifact_invocation("./child_exec", "invoke_child", Some(&blocked))
+                .expect_err("direct hosted child should be blocked");
+        assert!(error.contains("explicitly accepted subprocess permission"));
+
+        let allowed = hosted_package_context(install_root.as_path(), "allowed");
+        let invocation =
+            resolve_child_artifact_invocation("./child_exec", "invoke_child", Some(&allowed))
+                .expect("accepted direct hosted child should resolve");
+        match invocation {
+            ChildArtifactInvocation::DirectExecutable(path) => {
+                assert_eq!(path, allowed.package_payload_root.join("agents/child_exec"));
+            }
+            _ => panic!("direct hosted child should resolve to its verified payload path"),
+        }
+
+        let _ = fs::remove_dir_all(install_root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn accepted_hosted_direct_child_runs_from_package_data_root() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let install_root =
+            std::env::temp_dir().join(format!("cai2102-hosted-child-cwd-{}", uuid::Uuid::new_v4()));
+        let context = hosted_package_context(install_root.as_path(), "allowed");
+        let child_path = context.package_payload_root.join("agents/child_exec");
+        fs::write(&child_path, "#!/bin/sh\npwd > child-cwd.txt\n")
+            .expect("child script should exist");
+        let mut permissions = fs::metadata(&child_path)
+            .expect("child script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&child_path, permissions).expect("child script should be executable");
+
+        let mut provider = provider_context();
+        provider.package_context = Some(context.clone());
+        let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
+            kind: "agent".to_string(),
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: Some("./child_exec".to_string()),
+            usage_log: None,
+            run_vars: None,
+            input_overrides: None,
+            inputs: None,
+            reference_images: None,
+            input_mode: None,
+            platforms: None,
+        };
+
+        let result = run_agent_step_with_provider_context(
+            &step,
+            &json!({}),
+            &no_named_inputs(),
+            0,
+            "invoke_child",
+            1,
+            &provider,
+            None,
+            5,
+            configured_agent_action_runtime_budget(Some(600)),
+        )
+        .await;
+        assert!(result.is_ok(), "accepted child should run: {result:?}");
+        let recorded = fs::read_to_string(context.package_data_root.join("child-cwd.txt"))
+            .expect("child should record its working directory");
+        assert_eq!(
+            PathBuf::from(recorded.trim()),
+            fs::canonicalize(&context.package_data_root)
+                .expect("package data root should canonicalize")
+        );
+
+        let _ = fs::remove_dir_all(install_root);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn agent_step_invokes_child_with_forwarded_inputs() {
@@ -6497,6 +7265,9 @@ auth_mode = "{auth_mode}"
         let current_dir = std::env::current_dir().expect("current dir should resolve");
         let script_name = format!(".tmp-cai2032-agent-child-{}.sh", std::process::id());
         let script_path = current_dir.join(&script_name);
+        let usage_log_dir_name = format!(".tmp-cai2032-usage-{}", std::process::id());
+        let usage_log = format!("{usage_log_dir_name}/child.jsonl");
+        let usage_log_dir = current_dir.join(&usage_log_dir_name);
         let output_path = std::env::temp_dir().join(format!(
             "cai2032-agent-child-args-{}.txt",
             std::process::id()
@@ -6533,6 +7304,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: Some(usage_log.clone()),
             run_vars: None,
             input_overrides: None,
             inputs: Some(vec![
@@ -6577,6 +7349,7 @@ auth_mode = "{auth_mode}"
         .await;
 
         let _ = fs::remove_file(&script_path);
+        let _ = fs::remove_dir_all(&usage_log_dir);
 
         assert!(
             result.is_ok(),
@@ -6589,6 +7362,8 @@ auth_mode = "{auth_mode}"
         assert_eq!(
             args.lines().collect::<Vec<_>>(),
             vec![
+                "--usage-log",
+                usage_log.as_str(),
                 "--input-mode",
                 "append",
                 "--input-text",
@@ -6610,12 +7385,11 @@ auth_mode = "{auth_mode}"
         use std::os::unix::fs::PermissionsExt;
 
         let current_dir = std::env::current_dir().expect("current dir should resolve");
-        let script_name = format!(".tmp-cai2067-child-summary-{}.sh", std::process::id());
+        let unique = uuid::Uuid::new_v4();
+        let script_name = format!(".tmp-cai2067-child-summary-{unique}.sh");
         let script_path = current_dir.join(&script_name);
-        let marker_path = std::env::temp_dir().join(format!(
-            "cai2067-child-summary-marker-{}.txt",
-            std::process::id()
-        ));
+        let marker_path =
+            std::env::temp_dir().join(format!("cai2067-child-summary-marker-{unique}.txt"));
 
         let script_body = format!(
             "#!/bin/sh\nprintf 'using: profile=child_profile auth=api_key server=openai model=gpt-5.2\\n'\nprintf 'child detail\\n'\nprintf 'ran' > \"{}\"\n",
@@ -6647,6 +7421,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6679,16 +7454,18 @@ auth_mode = "{auth_mode}"
             })
             .await;
 
+        if let Err(error) = result {
+            let _ = fs::remove_file(&script_path);
+            let _ = fs::remove_file(&marker_path);
+            panic!("child summary step should succeed without passthrough: {error}");
+        }
+
         let _ = fs::remove_file(&script_path);
         let marker =
             fs::read_to_string(&marker_path).expect("child script should still execute normally");
         let _ = fs::remove_file(&marker_path);
         assert_eq!(marker, "ran");
 
-        assert!(
-            result.is_ok(),
-            "child summary step should succeed without passthrough: {result:?}"
-        );
         output.action_success(0, "child_summary", "completed");
 
         let snapshot = output.snapshot_lines_for_test();
@@ -6757,6 +7534,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6846,6 +7624,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6940,6 +7719,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -6966,6 +7746,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: Some(vec![crate::ActionInput::Text {
@@ -6986,6 +7767,7 @@ auth_mode = "{auth_mode}"
             &action_data,
             0,
             "capture_then_agent",
+            None,
             runtime_budget,
         )
         .await
@@ -7065,6 +7847,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7177,6 +7960,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7273,6 +8057,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", artifact_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: Some(vec![crate::ActionInput::Text {
@@ -7358,6 +8143,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", artifact_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: Some(vec![crate::ActionInput::Text {
@@ -7430,6 +8216,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", artifact_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7479,6 +8266,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some("child_agent".to_string()),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7525,6 +8313,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some("./../child_agent".to_string()),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7571,6 +8360,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some("./agents/child_agent".to_string()),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7634,6 +8424,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7704,6 +8495,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7730,6 +8522,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -7809,6 +8602,7 @@ auth_mode = "{auth_mode}"
                 subject: None,
                 text: None,
                 agent: None,
+                usage_log: None,
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
@@ -7839,6 +8633,7 @@ auth_mode = "{auth_mode}"
                 subject: None,
                 text: None,
                 agent: Some(format!("./{}", script_name)),
+                usage_log: None,
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
@@ -7915,6 +8710,7 @@ auth_mode = "{auth_mode}"
                 subject: None,
                 text: None,
                 agent: None,
+                usage_log: None,
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
@@ -7951,6 +8747,7 @@ auth_mode = "{auth_mode}"
                 subject: None,
                 text: None,
                 agent: None,
+                usage_log: None,
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
@@ -8037,6 +8834,7 @@ auth_mode = "{auth_mode}"
                 subject: None,
                 text: None,
                 agent: None,
+                usage_log: None,
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
@@ -8070,6 +8868,7 @@ auth_mode = "{auth_mode}"
                 subject: None,
                 text: None,
                 agent: None,
+                usage_log: None,
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
@@ -8155,6 +8954,7 @@ auth_mode = "{auth_mode}"
                     subject: None,
                     text: None,
                     agent: None,
+                    usage_log: None,
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
@@ -8181,6 +8981,7 @@ auth_mode = "{auth_mode}"
                     subject: None,
                     text: None,
                     agent: Some(format!("./{}", script_name)),
+                    usage_log: None,
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
@@ -8212,6 +9013,7 @@ auth_mode = "{auth_mode}"
                 subject: None,
                 text: None,
                 agent: Some(format!("./{}", script_name)),
+                usage_log: None,
                 run_vars: None,
                 input_overrides: None,
                 inputs: None,
@@ -8285,6 +9087,7 @@ auth_mode = "{auth_mode}"
                     subject: None,
                     text: None,
                     agent: None,
+                    usage_log: None,
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
@@ -8314,6 +9117,7 @@ auth_mode = "{auth_mode}"
                     subject: None,
                     text: None,
                     agent: None,
+                    usage_log: None,
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
@@ -8349,6 +9153,7 @@ auth_mode = "{auth_mode}"
                     subject: None,
                     text: None,
                     agent: None,
+                    usage_log: None,
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
@@ -8381,6 +9186,7 @@ auth_mode = "{auth_mode}"
                     subject: None,
                     text: None,
                     agent: None,
+                    usage_log: None,
                     run_vars: None,
                     input_overrides: None,
                     inputs: None,
@@ -8462,6 +9268,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: None,
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -8488,6 +9295,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -8564,6 +9372,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
@@ -8643,6 +9452,7 @@ auth_mode = "{auth_mode}"
             subject: None,
             text: None,
             agent: Some(format!("./{}", script_name)),
+            usage_log: None,
             run_vars: None,
             input_overrides: None,
             inputs: None,
