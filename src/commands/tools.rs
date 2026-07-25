@@ -1996,12 +1996,13 @@ mod tests {
 
         let report =
             lint_project_source_tool(&root, "hello_tool").expect("lint should produce a report");
+        let expected_relative_path = PathBuf::from("src").join("agent_bridge.rs");
 
         assert!(
             report
                 .errors
                 .iter()
-                .any(|error| error.contains("src/agent_bridge.rs")),
+                .any(|error| error.contains(expected_relative_path.to_string_lossy().as_ref())),
             "expected missing scaffold file error, got {report:?}"
         );
 

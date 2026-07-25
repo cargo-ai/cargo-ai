@@ -2235,7 +2235,7 @@ mod tests {
             .expect("package-owned image should resolve inside the verified payload");
         assert_eq!(
             baked[0].value.as_deref(),
-            package_root.join("assets/default.png").to_str()
+            package_root.join("assets").join("default.png").to_str()
         );
 
         let caller_path = format!("caller-selected-{}.png", uuid::Uuid::new_v4());

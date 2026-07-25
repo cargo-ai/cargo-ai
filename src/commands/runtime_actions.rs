@@ -7385,12 +7385,11 @@ auth_mode = "{auth_mode}"
         use std::os::unix::fs::PermissionsExt;
 
         let current_dir = std::env::current_dir().expect("current dir should resolve");
-        let script_name = format!(".tmp-cai2067-child-summary-{}.sh", std::process::id());
+        let unique = uuid::Uuid::new_v4();
+        let script_name = format!(".tmp-cai2067-child-summary-{unique}.sh");
         let script_path = current_dir.join(&script_name);
-        let marker_path = std::env::temp_dir().join(format!(
-            "cai2067-child-summary-marker-{}.txt",
-            std::process::id()
-        ));
+        let marker_path =
+            std::env::temp_dir().join(format!("cai2067-child-summary-marker-{unique}.txt"));
 
         let script_body = format!(
             "#!/bin/sh\nprintf 'using: profile=child_profile auth=api_key server=openai model=gpt-5.2\\n'\nprintf 'child detail\\n'\nprintf 'ran' > \"{}\"\n",
@@ -7455,16 +7454,18 @@ auth_mode = "{auth_mode}"
             })
             .await;
 
+        if let Err(error) = result {
+            let _ = fs::remove_file(&script_path);
+            let _ = fs::remove_file(&marker_path);
+            panic!("child summary step should succeed without passthrough: {error}");
+        }
+
         let _ = fs::remove_file(&script_path);
         let marker =
             fs::read_to_string(&marker_path).expect("child script should still execute normally");
         let _ = fs::remove_file(&marker_path);
         assert_eq!(marker, "ran");
 
-        assert!(
-            result.is_ok(),
-            "child summary step should succeed without passthrough: {result:?}"
-        );
         output.action_success(0, "child_summary", "completed");
 
         let snapshot = output.snapshot_lines_for_test();

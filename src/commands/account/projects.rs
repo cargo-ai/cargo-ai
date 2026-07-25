@@ -1543,11 +1543,10 @@ mod tests {
     use super::{
         create_package_archive_bytes, extract_compressed_package_archive_bytes,
         extract_legacy_package_archive_bytes, extract_package_archive_bytes,
-        extract_package_archive_bytes_with_limits, prepare_output_directory,
-        relocate_pulled_package_receipt, sha256_hex, validate_archive_base64_size,
-        validate_project_pull_response_matches_request, validate_relative_archive_path,
-        validate_restored_package_manifest, ArchiveLimits, PackageArchiveDocument,
-        PackageArchiveEntry, PulledPackageHostedReceiptDocument,
+        extract_package_archive_bytes_with_limits, relocate_pulled_package_receipt, sha256_hex,
+        validate_archive_base64_size, validate_project_pull_response_matches_request,
+        validate_relative_archive_path, validate_restored_package_manifest, ArchiveLimits,
+        PackageArchiveDocument, PackageArchiveEntry, PulledPackageHostedReceiptDocument,
     };
     use base64::Engine as _;
     use std::fs;
@@ -1891,6 +1890,7 @@ project_version = "1.2.3"
     #[cfg(unix)]
     #[test]
     fn pull_output_rejects_symlink_root_without_touching_target() {
+        use super::prepare_output_directory;
         use std::os::unix::fs::symlink;
 
         let root = temp_dir("pull-output-symlink");
