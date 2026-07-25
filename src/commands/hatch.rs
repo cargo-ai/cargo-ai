@@ -11,6 +11,7 @@ struct HatchResolution {
     project_name: String,
     source: AgentDefinitionSource,
     project_root: Option<PathBuf>,
+    installed_source_kind: Option<String>,
 }
 
 fn project_root_for_hatch_source(source: &AgentDefinitionSource) -> Option<PathBuf> {
@@ -120,6 +121,7 @@ fn resolve_hatch_input_in_dir(
             project_name: name_or_path.to_string(),
             source,
             project_root: None,
+            installed_source_kind: None,
         });
     }
 
@@ -132,6 +134,7 @@ fn resolve_hatch_input_in_dir(
                 resolved.definition_path.display().to_string(),
             ),
             project_root: Some(resolved.package_root),
+            installed_source_kind: Some(resolved.source_kind),
         });
     }
 
@@ -149,7 +152,22 @@ fn resolve_hatch_input_in_dir(
         project_name,
         source,
         project_root: None,
+        installed_source_kind: None,
     })
+}
+
+fn ensure_hosted_hatch_acknowledged(
+    installed_source_kind: Option<&str>,
+    allow_hosted_code: bool,
+) -> Result<(), String> {
+    if installed_source_kind != Some("hosted") || allow_hosted_code {
+        return Ok(());
+    }
+
+    Err(
+        "Hatching an installed hosted package exports trusted executable code outside the package permission boundary. Review the package and re-run with `--allow-hosted-code` to acknowledge that trust elevation."
+            .to_string(),
+    )
 }
 
 fn resolve_hatch_input(
@@ -227,6 +245,19 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             return false;
         }
     };
+    let allow_hosted_code = sub_m.get_flag("allow_hosted_code");
+    if let Err(error) = ensure_hosted_hatch_acknowledged(
+        resolution.installed_source_kind.as_deref(),
+        allow_hosted_code,
+    ) {
+        eprintln!("x {error}");
+        return false;
+    }
+    if resolution.installed_source_kind.as_deref() == Some("hosted") {
+        eprintln!(
+            "Warning: the exported executable is trusted hosted package code and is not confined by the installed alias permission profile."
+        );
+    }
 
     let presentation = presentation_from_resolution(&resolution);
     let new_project_name = resolution.project_name;
@@ -291,8 +322,8 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        mode_from_check_flag, resolve_hatch_input, resolve_hatch_input_in_dir,
-        resolve_local_output_dir,
+        ensure_hosted_hatch_acknowledged, mode_from_check_flag, resolve_hatch_input,
+        resolve_hatch_input_in_dir, resolve_local_output_dir,
     };
     use crate::commands::definition_source::AgentDefinitionSource;
     use crate::commands::hatch_pipeline::HatchMode;
@@ -507,5 +538,18 @@ mod tests {
         let output_dir = resolve_local_output_dir(&output_dir_matches(Some("./dist")))
             .expect("provided output dir should resolve");
         assert_eq!(output_dir, Some(PathBuf::from("./dist")));
+    }
+
+    #[test]
+    fn hosted_hatch_requires_explicit_trust_acknowledgement() {
+        let error = ensure_hosted_hatch_acknowledged(Some("hosted"), false)
+            .expect_err("hosted hatch should fail without acknowledgement");
+        assert!(error.contains("--allow-hosted-code"));
+        assert!(error.contains("outside the package permission boundary"));
+
+        ensure_hosted_hatch_acknowledged(Some("hosted"), true)
+            .expect("explicit acknowledgement should allow hosted hatch");
+        ensure_hosted_hatch_acknowledged(Some("local"), false)
+            .expect("local package hatch should remain unchanged");
     }
 }

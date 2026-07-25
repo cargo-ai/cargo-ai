@@ -245,11 +245,22 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                         &resolved,
                         definition_json.as_str(),
                     );
+                    let package_context =
+                        match crate::commands::local_packages::runtime_context_for_resolved_entrypoint(
+                            &resolved,
+                        ) {
+                            Ok(context) => context,
+                            Err(error) => {
+                                eprintln!("x {error}");
+                                return false;
+                            }
+                        };
                     return super::runtime::run_with_definition_in_context_and_usage_agent(
                         sub_m,
                         &definition,
                         Some(resolved.package_root),
                         Some(usage_agent_info),
+                        Some(package_context),
                     )
                     .await;
                 }
@@ -289,6 +300,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         &definition,
         project_root,
         Some(usage_agent_info),
+        None,
     )
     .await
 }

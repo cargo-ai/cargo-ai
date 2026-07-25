@@ -1176,6 +1176,9 @@ cargo ai packages install data_integration --account alice --as data_integration
 # Install an exact hosted package version
 cargo ai packages install data_integration --account alice --version 1.2.3 --as data_integration
 
+# Accept a reviewed hosted subprocess permission when requested
+cargo ai packages install data_integration --account alice --as data_integration --accept-permissions
+
 # Deliberately move an installed hosted alias forward
 cargo ai packages update data_integration
 
@@ -1184,7 +1187,7 @@ cargo ai packages rollback data_integration --to 1.1.0
 
 # Run or hatch exported package entrypoints
 cargo ai run data_integration::lookup_account
-cargo ai hatch data_integration::daily_digest
+cargo ai hatch data_integration::daily_digest --allow-hosted-code
 
 # Inspect or remove a local package alias
 cargo ai packages inspect data_integration
@@ -1193,7 +1196,7 @@ cargo ai packages uninstall data_integration
 
 Local install behavior is version-aware for the same alias: same version and content is a no-op, newer semver upgrades by default, older semver requires `--downgrade`, and same-version content replacement or a different package identity requires `--replace`.
 
-Hosted install uses the same local alias store, but hosted source identity comes from the server/API rather than a public URL. Omitting `--version` resolves the latest eligible hosted version at install time, then pins that exact version in `install.toml`. `update` checks the same hosted source identity and only moves forward when a newer eligible semver exists. `rollback` never means latest; it switches to the exact `--to <version>` you request.
+Hosted install uses the same local alias store, but hosted source identity comes from the server/API rather than a public URL. Omitting `--version` resolves the latest eligible hosted version at install time, then pins that exact version in `install.toml`. `update` checks the same hosted source identity and only moves forward when a newer eligible semver exists. `rollback` never means latest; it switches to the exact `--to <version>` you request. Install, update, and rollback print the requested permission profile before materialization. A first install or transition that newly enables subprocess execution requires `--accept-permissions`; project/workspace `read` and `read_write` requests remain unsupported.
 
 Installed package layout under Cargo AI Home is:
 
@@ -1204,7 +1207,9 @@ $CARGO_AI_HOME/packages/<alias>/
   data/
 ```
 
-`package/` is the verified payload for the active exact version and is rematerialized on hosted update or rollback. `data/` is the package-owned persistent state area and is preserved across normal hosted update/rollback. Installed package entrypoints resolve Cargo AI-controlled child `usage_log` writes under `data/`, which lets a parent/observer agent import metadata-only JSONL into package-owned SQLite or another package-owned store. `cargo ai packages inspect <alias>` shows hosted source IDs, hosted version IDs, package hash, entrypoints, and the accepted permission profile. Hosted package runtime defaults keep Cargo AI-controlled writes under `data/`; project/workspace writes are not implied by install, and unconstrained `exec`/tool subprocess steps are blocked unless the installed package permission profile explicitly allows them.
+`package/` is the verified payload for the active exact version and is rematerialized on hosted update or rollback. `data/` is the package-owned persistent state area and is preserved across normal hosted update/rollback. Installed package entrypoints resolve Cargo AI-controlled child `usage_log` writes under `data/`, which lets a parent/observer agent import metadata-only JSONL into package-owned SQLite or another package-owned store. Definition-owned image/file inputs resolve from verified `package/`; only an explicit runtime input override can grant access to a caller-selected path. `cargo ai packages inspect <alias>` shows opaque hosted source/version IDs, optional owner handle, package hash, entrypoints, and the accepted permission profile. Hosted JSON child agents resolve through declared `alias::entrypoint` exports. Direct child executables are blocked unless subprocess permission was explicitly accepted, and then resolve only inside verified `package/` while running from `data/`. Hatching a hosted alias requires `--allow-hosted-code` because the exported executable is trusted code outside the installed permission boundary.
+
+Hosted package archives are rejected before extraction when they exceed 10 MiB compressed, 100 MiB expanded, 10,000 entries, or 1,024 bytes in a normalized relative entry path. Absolute, parent-traversing, drive-relative, UNC, device-root, symbolic-link, and Windows reparse-point paths are rejected.
 
 ## Where To Go Next
 

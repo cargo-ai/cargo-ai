@@ -112,6 +112,13 @@ pub fn command() -> Command {
                         .long("downgrade")
                         .help("Allow installing an older version over the same package identity")
                         .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("accept_permissions")
+                        .long("accept-permissions")
+                        .help("Accept reviewed hosted package permissions for this install")
+                        .requires("account")
+                        .action(ArgAction::SetTrue),
                 ),
         )
         .subcommand(
@@ -124,6 +131,12 @@ pub fn command() -> Command {
                         .value_name("ALIAS")
                         .num_args(1)
                         .index(1),
+                )
+                .arg(
+                    Arg::new("accept_permissions")
+                        .long("accept-permissions")
+                        .help("Accept reviewed permission expansion for this hosted update")
+                        .action(ArgAction::SetTrue),
                 ),
         )
         .subcommand(
@@ -144,6 +157,12 @@ pub fn command() -> Command {
                         .required(true)
                         .value_name("SEMVER")
                         .num_args(1),
+                )
+                .arg(
+                    Arg::new("accept_permissions")
+                        .long("accept-permissions")
+                        .help("Accept reviewed permission expansion for this hosted rollback")
+                        .action(ArgAction::SetTrue),
                 ),
         )
         .subcommand(
@@ -437,7 +456,7 @@ mod tests {
     #[test]
     fn update_and_rollback_parse_hosted_alias_commands() {
         let update_matches = super::command()
-            .try_get_matches_from(["packages", "update", "data"])
+            .try_get_matches_from(["packages", "update", "data", "--accept-permissions"])
             .expect("packages update should parse");
         let update = update_matches
             .subcommand_matches("update")
@@ -446,9 +465,17 @@ mod tests {
             update.get_one::<String>("alias").map(String::as_str),
             Some("data")
         );
+        assert!(update.get_flag("accept_permissions"));
 
         let rollback_matches = super::command()
-            .try_get_matches_from(["packages", "rollback", "data", "--to", "1.0.0"])
+            .try_get_matches_from([
+                "packages",
+                "rollback",
+                "data",
+                "--to",
+                "1.0.0",
+                "--accept-permissions",
+            ])
             .expect("packages rollback should parse");
         let rollback = rollback_matches
             .subcommand_matches("rollback")
@@ -461,5 +488,15 @@ mod tests {
             rollback.get_one::<String>("to").map(String::as_str),
             Some("1.0.0")
         );
+        assert!(rollback.get_flag("accept_permissions"));
+    }
+
+    #[test]
+    fn permission_acceptance_is_hosted_only_for_install() {
+        let error = super::command()
+            .try_get_matches_from(["packages", "install", "./pkg", "--accept-permissions"])
+            .expect_err("local install must not accept hosted permissions");
+
+        assert!(error.to_string().contains("--account"));
     }
 }
