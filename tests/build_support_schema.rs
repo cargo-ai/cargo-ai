@@ -6,6 +6,12 @@ mod build_support;
 
 use sha2::{Digest, Sha256};
 
+fn absolute_test_path(file_name: &str) -> String {
+    let path = std::env::temp_dir().join(file_name);
+    assert!(path.is_absolute());
+    path.to_string_lossy().into_owned()
+}
+
 /// Constructs a minimal `.agentcfg` JSON document with caller-provided schema
 /// properties and actions sections.
 fn config_with(properties: &str, actions: &str) -> String {
@@ -1689,21 +1695,20 @@ fn rejects_unsupported_file_inputs() {
 
 #[test]
 fn rejects_agent_absolute_path() {
-    let cfg = config_with(
-        r#""value": { "type": "integer" }"#,
-        r#"[
-          {
+    let actions = serde_json::json!([
+        {
             "name": "bad_agent",
-            "logic": { "==": [ { "var": "value" }, 1 ] },
+            "logic": { "==": [{ "var": "value" }, 1] },
             "run": [
-              {
-                "kind": "agent",
-                "agent": "/tmp/summary_agent"
-              }
+                {
+                    "kind": "agent",
+                    "agent": absolute_test_path("summary_agent")
+                }
             ]
-          }
-        ]"#,
-    );
+        }
+    ])
+    .to_string();
+    let cfg = config_with(r#""value": { "type": "integer" }"#, &actions);
 
     let err = build_support::generate_agent_model_from_str(&cfg)
         .unwrap_err()
@@ -1791,21 +1796,22 @@ fn rejects_image_input_parent_traversal_path() {
 
 #[test]
 fn rejects_image_input_absolute_path() {
-    let cfg = r#"{
-    "version": "2026-03-03.r1",
-    "inputs": [
-        { "type": "image", "path": "/tmp/4.png" }
-    ],
-    "agent_schema": {
-        "type": "object",
-        "properties": {
-            "value": { "type": "integer" }
-        }
-    },
-    "actions": []
-}"#;
+    let cfg = serde_json::json!({
+        "version": "2026-03-03.r1",
+        "inputs": [
+            { "type": "image", "path": absolute_test_path("4.png") }
+        ],
+        "agent_schema": {
+            "type": "object",
+            "properties": {
+                "value": { "type": "integer" }
+            }
+        },
+        "actions": []
+    })
+    .to_string();
 
-    let err = build_support::generate_agent_model_from_str(cfg)
+    let err = build_support::generate_agent_model_from_str(&cfg)
         .unwrap_err()
         .to_string();
 
