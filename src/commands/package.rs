@@ -4,11 +4,17 @@ use clap::ArgMatches;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
+
+use super::package_dependencies::{validate_dependency_declarations, PackageDependencies};
 
 const PROJECT_METADATA_RELATIVE_PATH: &str = ".cargo-ai/project.toml";
 const PROJECT_TOOLS_RELATIVE_PATH: &str = ".cargo-ai/tools";
 const PACKAGE_MANIFEST_FILE_NAME: &str = "cargo-ai-package.toml";
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct ProjectMetadataDocument {
@@ -18,6 +24,8 @@ struct ProjectMetadataDocument {
     runtime: Option<ProjectRuntimeDocument>,
     #[serde(default)]
     build: BTreeMap<String, BuildProfileDocument>,
+    #[serde(default)]
+    package_dependencies: PackageDependencies,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -120,6 +128,8 @@ struct GeneratedProjectMetadataDocument {
     runtime: Option<ProjectRuntimeDocument>,
     tools: GeneratedProjectToolsPolicyDocument,
     build: BTreeMap<String, BuildProfileDocument>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    package_dependencies: PackageDependencies,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -159,6 +169,7 @@ struct LoadedProjectMetadata {
     project_identity: Option<ProjectIdentityDocument>,
     runtime_defaults: Option<ProjectRuntimeDefaultsDocument>,
     build_profile: BuildProfileDocument,
+    package_dependencies: PackageDependencies,
 }
 
 pub fn run(sub_m: &ArgMatches) -> bool {
@@ -205,10 +216,10 @@ pub fn run(sub_m: &ArgMatches) -> bool {
     }
 }
 
-fn current_project_root() -> Option<PathBuf> {
-    std::env::current_dir()
-        .ok()
-        .and_then(|dir| crate::commands::tools::maybe_find_project_root(dir.as_path()))
+fn current_project_root() -> Result<Option<PathBuf>, String> {
+    let current_dir = std::env::current_dir()
+        .map_err(|error| format!("Failed to inspect the current project directory: {error}"))?;
+    crate::commands::package_dependencies::find_project_root(current_dir.as_path())
 }
 
 pub(crate) fn assemble_current_project_package(
@@ -217,7 +228,7 @@ pub(crate) fn assemble_current_project_package(
     force: bool,
     print_banner: bool,
 ) -> Result<AssembledPackage, String> {
-    let project_root = current_project_root().ok_or_else(|| {
+    let project_root = current_project_root()?.ok_or_else(|| {
         "No Cargo AI project metadata was found from the current directory upward.".to_string()
     })?;
     let loaded_metadata = load_project_metadata(&project_root, profile_name)?;
@@ -236,6 +247,7 @@ pub(crate) fn assemble_current_project_package(
         loaded_metadata.project_identity.as_ref(),
         loaded_metadata.runtime_defaults.as_ref(),
         &loaded_metadata.build_profile,
+        &loaded_metadata.package_dependencies,
         &output_root,
         force,
     )?;
@@ -283,6 +295,7 @@ fn load_project_metadata(
     profile_name: &str,
 ) -> Result<LoadedProjectMetadata, String> {
     let metadata_path = project_root.join(PROJECT_METADATA_RELATIVE_PATH);
+    validate_project_source_path(project_root, &metadata_path, "Project metadata")?;
     let contents = fs::read_to_string(&metadata_path).map_err(|error| {
         format!(
             "Failed to read project metadata '{}': {}",
@@ -324,11 +337,13 @@ fn load_project_metadata(
             metadata_path.display()
         ));
     }
+    validate_dependency_declarations(&metadata.package_dependencies)?;
 
     Ok(LoadedProjectMetadata {
         project_identity: normalize_project_identity(metadata.project.take()),
         runtime_defaults: metadata.runtime.and_then(|runtime| runtime.defaults),
         build_profile: profile,
+        package_dependencies: metadata.package_dependencies,
     })
 }
 
@@ -362,6 +377,12 @@ fn resolve_package_output_root(
             output_path.display()
         ));
     }
+    if normalized_project_root.starts_with(&normalized_output_root) {
+        return Err(format!(
+            "Output directory '{}' resolves to an ancestor of the current Cargo AI project. Choose a project-contained package folder or omit --output-dir to use the default target path.",
+            output_path.display()
+        ));
+    }
 
     Ok(PackageOutputRoot {
         path: output_path,
@@ -375,6 +396,7 @@ fn assemble_package_root(
     project_identity: Option<&ProjectIdentityDocument>,
     runtime_defaults: Option<&ProjectRuntimeDefaultsDocument>,
     build_profile: &BuildProfileDocument,
+    package_dependencies: &PackageDependencies,
     output_root: &PackageOutputRoot,
     force: bool,
 ) -> Result<PackageManifestDocument, String> {
@@ -385,7 +407,8 @@ fn assemble_package_root(
         assets: dedupe_preserve_order(&build_profile.assets),
     };
 
-    prepare_output_root(output_root, force)?;
+    validate_output_source_boundaries(project_root, &build_profile, output_root)?;
+    prepare_output_root(project_root, output_root, force)?;
 
     for relative_path in dedupe_preserve_order(
         &build_profile
@@ -435,6 +458,7 @@ fn assemble_package_root(
         runtime_defaults,
         profile_name,
         &build_profile,
+        package_dependencies,
     )?;
 
     let manifest = PackageManifestDocument {
@@ -453,16 +477,144 @@ fn assemble_package_root(
     Ok(manifest)
 }
 
-fn prepare_output_root(output_root: &PackageOutputRoot, force: bool) -> Result<(), String> {
-    if output_root.path.exists() {
-        if output_root.explicit && !force {
+fn validate_output_source_boundaries(
+    project_root: &Path,
+    build_profile: &BuildProfileDocument,
+    output_root: &PackageOutputRoot,
+) -> Result<(), String> {
+    let mut sources = vec![(
+        "Project metadata".to_string(),
+        project_root.join(PROJECT_METADATA_RELATIVE_PATH),
+    )];
+
+    for relative_path in dedupe_preserve_order(
+        &build_profile
+            .agent_definitions
+            .iter()
+            .cloned()
+            .chain(build_profile.hatched_agents.iter().cloned())
+            .collect::<Vec<_>>(),
+    ) {
+        let relative_path = validate_project_relative_path(relative_path.as_str(), "Agent")?;
+        let source_path = project_root.join(relative_path);
+        validate_project_source_path(project_root, &source_path, "Agent")?;
+        sources.push(("Agent".to_string(), source_path));
+    }
+
+    for relative_path in &build_profile.assets {
+        let relative_path = validate_project_relative_path(relative_path, "Asset")?;
+        let source_path = project_root.join(relative_path);
+        validate_project_source_path(project_root, &source_path, "Asset")?;
+        sources.push(("Asset".to_string(), source_path));
+    }
+
+    for tool_name in &build_profile.tools {
+        let tool_manifest_path = crate::commands::tools::project_tools_root(project_root)
+            .join(tool_name)
+            .join("tool.json");
+        let context = load_project_source_tool_context(project_root, tool_name)?;
+        sources.push((format!("Tool '{tool_name}' metadata"), tool_manifest_path));
+        sources.push((
+            format!("Tool '{tool_name}' source"),
+            project_root.join(context.source_root_relative_path),
+        ));
+    }
+
+    let comparable_output = comparable_filesystem_path(output_root.path.as_path())?;
+    for (label, source_path) in sources {
+        let comparable_source = comparable_filesystem_path(source_path.as_path())?;
+        if paths_overlap(&comparable_output, &comparable_source) {
             return Err(format!(
-                "Output directory '{}' already exists. Re-run with --force to replace it, or omit --output-dir to use the default target package path.",
-                output_root.path.display()
+                "Package output path '{}' overlaps {label} source '{}'. Choose an output directory that is separate from every packaged source path.",
+                output_root.path.display(),
+                source_path.display()
             ));
         }
+    }
 
-        remove_existing_output_root(output_root.path.as_path())?;
+    Ok(())
+}
+
+fn comparable_filesystem_path(path: &Path) -> Result<PathBuf, String> {
+    let absolute_path = normalize_against_current_dir(path)?;
+    let mut existing_ancestor = absolute_path.clone();
+    let mut missing_components = Vec::new();
+
+    loop {
+        match fs::symlink_metadata(&existing_ancestor) {
+            Ok(_) => {
+                let mut comparable = fs::canonicalize(&existing_ancestor).map_err(|error| {
+                    format!(
+                        "Failed to resolve package path '{}': {}",
+                        existing_ancestor.display(),
+                        error
+                    )
+                })?;
+                for component in missing_components.iter().rev() {
+                    comparable.push(component);
+                }
+                return Ok(normalize_path(comparable.as_path()));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let component = existing_ancestor.file_name().ok_or_else(|| {
+                    format!(
+                        "Package path '{}' has no existing filesystem ancestor.",
+                        path.display()
+                    )
+                })?;
+                missing_components.push(component.to_os_string());
+                if !existing_ancestor.pop() {
+                    return Err(format!(
+                        "Package path '{}' has no existing filesystem ancestor.",
+                        path.display()
+                    ));
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect package path '{}': {}",
+                    existing_ancestor.display(),
+                    error
+                ));
+            }
+        }
+    }
+}
+
+fn paths_overlap(first: &Path, second: &Path) -> bool {
+    first == second || first.starts_with(second) || second.starts_with(first)
+}
+
+fn prepare_output_root(
+    project_root: &Path,
+    output_root: &PackageOutputRoot,
+    force: bool,
+) -> Result<(), String> {
+    ensure_output_path_ancestors_are_safe(&output_root.path, project_root)?;
+    match fs::symlink_metadata(&output_root.path) {
+        Ok(metadata) => {
+            if metadata_is_link_like(&metadata) {
+                return Err(format!(
+                    "Package output path '{}' must not be a symbolic link or reparse point.",
+                    output_root.path.display()
+                ));
+            }
+            if output_root.explicit && !force {
+                return Err(format!(
+                    "Output directory '{}' already exists. Re-run with --force to replace it, or omit --output-dir to use the default target package path.",
+                    output_root.path.display()
+                ));
+            }
+            remove_existing_output_root(output_root.path.as_path(), &metadata)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect package output path '{}': {}",
+                output_root.path.display(),
+                error
+            ));
+        }
     }
 
     fs::create_dir_all(&output_root.path).map_err(|error| {
@@ -472,11 +624,25 @@ fn prepare_output_root(output_root: &PackageOutputRoot, force: bool) -> Result<(
             error
         )
     })?;
+    ensure_output_path_ancestors_are_safe(&output_root.path, project_root)?;
+    let metadata = fs::symlink_metadata(&output_root.path).map_err(|error| {
+        format!(
+            "Failed to inspect created package output directory '{}': {}",
+            output_root.path.display(),
+            error
+        )
+    })?;
+    if metadata_is_link_like(&metadata) || !metadata.is_dir() {
+        return Err(format!(
+            "Package output path '{}' must be a real directory and not a symbolic link or reparse point.",
+            output_root.path.display()
+        ));
+    }
     Ok(())
 }
 
-fn remove_existing_output_root(path: &Path) -> Result<(), String> {
-    if path.is_dir() {
+fn remove_existing_output_root(path: &Path, metadata: &fs::Metadata) -> Result<(), String> {
+    if metadata.is_dir() {
         fs::remove_dir_all(path).map_err(|error| {
             format!(
                 "Failed to replace existing package output directory '{}': {}",
@@ -484,7 +650,7 @@ fn remove_existing_output_root(path: &Path) -> Result<(), String> {
                 error
             )
         })?;
-    } else {
+    } else if metadata.is_file() {
         fs::remove_file(path).map_err(|error| {
             format!(
                 "Failed to replace existing package output file '{}': {}",
@@ -492,6 +658,11 @@ fn remove_existing_output_root(path: &Path) -> Result<(), String> {
                 error
             )
         })?;
+    } else {
+        return Err(format!(
+            "Package output path '{}' must be a regular file or directory before replacement.",
+            path.display()
+        ));
     }
 
     Ok(())
@@ -504,7 +675,18 @@ fn load_project_source_tool_context(
     let tool_manifest_path = crate::commands::tools::project_tools_root(project_root)
         .join(tool_name)
         .join("tool.json");
-    if !tool_manifest_path.exists() {
+    let tool_manifest_metadata = match fs::symlink_metadata(&tool_manifest_path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect tool manifest '{}': {}",
+                tool_manifest_path.display(),
+                error
+            ));
+        }
+    };
+    if tool_manifest_metadata.is_none() {
         let machine_manifest_path = crate::commands::tools::machine_tools_root()
             .join(tool_name)
             .join("tool.json");
@@ -519,6 +701,7 @@ fn load_project_source_tool_context(
             tool_name
         ));
     }
+    validate_project_source_path(project_root, &tool_manifest_path, "Tool manifest")?;
 
     let manifest_contents = fs::read_to_string(&tool_manifest_path).map_err(|error| {
         format!(
@@ -550,8 +733,9 @@ fn load_project_source_tool_context(
             tool_name
         )
     })?;
-    validate_project_relative_path(source.manifest_path.as_str(), "Tool source manifest")?;
-    if Path::new(source.manifest_path.as_str())
+    let source_manifest_relative_path =
+        validate_project_relative_path(source.manifest_path.as_str(), "Tool source manifest")?;
+    if source_manifest_relative_path
         .file_name()
         .and_then(|value| value.to_str())
         != Some("Cargo.toml")
@@ -562,14 +746,8 @@ fn load_project_source_tool_context(
         ));
     }
 
-    let source_manifest_path = project_root.join(source.manifest_path.as_str());
-    if !source_manifest_path.exists() {
-        return Err(format!(
-            "Tool '{}' source manifest '{}' was not found.",
-            tool_name,
-            source_manifest_path.display()
-        ));
-    }
+    let source_manifest_path = project_root.join(&source_manifest_relative_path);
+    validate_project_source_path(project_root, &source_manifest_path, "Tool source manifest")?;
 
     let source_root = source_manifest_path.parent().ok_or_else(|| {
         format!(
@@ -599,7 +777,9 @@ fn load_project_source_tool_context(
         .to_string();
 
     Ok(ProjectSourceToolContext {
-        source_manifest_relative_path: source.manifest_path,
+        source_manifest_relative_path: source_manifest_relative_path
+            .to_string_lossy()
+            .replace('\\', "/"),
         source_root_relative_path,
         binary_name: manifest
             .binary
@@ -653,6 +833,7 @@ fn write_generated_project_metadata(
     runtime_defaults: Option<&ProjectRuntimeDefaultsDocument>,
     profile_name: &str,
     build_profile: &BuildProfileDocument,
+    package_dependencies: &PackageDependencies,
 ) -> Result<(), String> {
     let metadata_path = package_root.join(PROJECT_METADATA_RELATIVE_PATH);
     if let Some(parent) = metadata_path.parent() {
@@ -679,6 +860,7 @@ fn write_generated_project_metadata(
             allow_global_fallback: false,
         },
         build,
+        package_dependencies: package_dependencies.clone(),
     };
     let rendered = toml::to_string_pretty(&document)
         .map_err(|error| format!("Failed to render package project metadata TOML: {error}"))?;
@@ -736,20 +918,18 @@ fn copy_declared_path(
     package_root: &Path,
     require_json_file: bool,
 ) -> Result<(), String> {
-    validate_project_relative_path(
+    let relative_path = validate_project_relative_path(
         relative_path,
         if require_json_file { "Agent" } else { "Asset" },
     )?;
-    let source_path = project_root.join(relative_path);
-    if !source_path.exists() {
-        return Err(format!(
-            "{} path '{}' was not found in the current project.",
-            if require_json_file { "Agent" } else { "Asset" },
-            source_path.display()
-        ));
-    }
+    let source_path = project_root.join(&relative_path);
+    let source_metadata = validate_project_source_path(
+        project_root,
+        &source_path,
+        if require_json_file { "Agent" } else { "Asset" },
+    )?;
     if require_json_file {
-        if !source_path.is_file() {
+        if !source_metadata.is_file() {
             return Err(format!(
                 "Agent path '{}' must point to a JSON file.",
                 source_path.display()
@@ -768,15 +948,22 @@ fn copy_declared_path(
         }
     }
 
-    let dest_path = package_root.join(relative_path);
-    if source_path.is_dir() {
-        copy_directory_recursive(source_path.as_path(), dest_path.as_path())
+    let dest_path = package_root.join(&relative_path);
+    if source_metadata.is_dir() {
+        copy_directory_recursive(project_root, source_path.as_path(), dest_path.as_path())
     } else {
-        copy_file(source_path.as_path(), dest_path.as_path())
+        copy_file(project_root, source_path.as_path(), dest_path.as_path())
     }
 }
 
-fn copy_file(source: &Path, dest: &Path) -> Result<(), String> {
+fn copy_file(project_root: &Path, source: &Path, dest: &Path) -> Result<(), String> {
+    let metadata = validate_project_source_path(project_root, source, "Packaged file")?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "Packaged path '{}' must be a regular file.",
+            source.display()
+        ));
+    }
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!(
@@ -802,15 +989,11 @@ fn copy_tool_source_root(
     relative_path: &str,
     package_root: &Path,
 ) -> Result<(), String> {
-    validate_project_relative_path(relative_path, "Tool source root")?;
-    let source_path = project_root.join(relative_path);
-    if !source_path.exists() {
-        return Err(format!(
-            "Tool source root '{}' was not found in the current project.",
-            source_path.display()
-        ));
-    }
-    if !source_path.is_dir() {
+    let relative_path = validate_project_relative_path(relative_path, "Tool source root")?;
+    let source_path = project_root.join(&relative_path);
+    let source_metadata =
+        validate_project_source_path(project_root, &source_path, "Tool source root")?;
+    if !source_metadata.is_dir() {
         return Err(format!(
             "Tool source root '{}' must point to a directory.",
             source_path.display()
@@ -818,10 +1001,21 @@ fn copy_tool_source_root(
     }
 
     let dest_path = package_root.join(relative_path);
-    copy_directory_recursive_skipping_target(source_path.as_path(), dest_path.as_path())
+    copy_directory_recursive_skipping_target(
+        project_root,
+        source_path.as_path(),
+        dest_path.as_path(),
+    )
 }
 
-fn copy_directory_recursive(source: &Path, dest: &Path) -> Result<(), String> {
+fn copy_directory_recursive(project_root: &Path, source: &Path, dest: &Path) -> Result<(), String> {
+    let metadata = validate_project_source_path(project_root, source, "Packaged directory")?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "Packaged path '{}' must be a real directory.",
+            source.display()
+        ));
+    }
     fs::create_dir_all(dest).map_err(|error| {
         format!(
             "Failed to create destination directory '{}': {}",
@@ -846,17 +1040,34 @@ fn copy_directory_recursive(source: &Path, dest: &Path) -> Result<(), String> {
         })?;
         let source_path = entry.path();
         let dest_path = dest.join(entry.file_name());
-        if source_path.is_dir() {
-            copy_directory_recursive(source_path.as_path(), dest_path.as_path())?;
+        let metadata = validate_project_source_path(project_root, &source_path, "Packaged entry")?;
+        if metadata.is_dir() {
+            copy_directory_recursive(project_root, source_path.as_path(), dest_path.as_path())?;
+        } else if metadata.is_file() {
+            copy_file(project_root, source_path.as_path(), dest_path.as_path())?;
         } else {
-            copy_file(source_path.as_path(), dest_path.as_path())?;
+            return Err(format!(
+                "Packaged path '{}' must be a regular file or directory.",
+                source_path.display()
+            ));
         }
     }
 
     Ok(())
 }
 
-fn copy_directory_recursive_skipping_target(source: &Path, dest: &Path) -> Result<(), String> {
+fn copy_directory_recursive_skipping_target(
+    project_root: &Path,
+    source: &Path,
+    dest: &Path,
+) -> Result<(), String> {
+    let metadata = validate_project_source_path(project_root, source, "Tool source directory")?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "Tool source path '{}' must be a real directory.",
+            source.display()
+        ));
+    }
     fs::create_dir_all(dest).map_err(|error| {
         format!(
             "Failed to create destination directory '{}': {}",
@@ -881,7 +1092,9 @@ fn copy_directory_recursive_skipping_target(source: &Path, dest: &Path) -> Resul
         })?;
         let source_path = entry.path();
         let dest_path = dest.join(entry.file_name());
-        if source_path.is_dir()
+        let metadata =
+            validate_project_source_path(project_root, &source_path, "Tool source entry")?;
+        if metadata.is_dir()
             && entry
                 .file_name()
                 .to_str()
@@ -890,10 +1103,19 @@ fn copy_directory_recursive_skipping_target(source: &Path, dest: &Path) -> Resul
         {
             continue;
         }
-        if source_path.is_dir() {
-            copy_directory_recursive_skipping_target(source_path.as_path(), dest_path.as_path())?;
+        if metadata.is_dir() {
+            copy_directory_recursive_skipping_target(
+                project_root,
+                source_path.as_path(),
+                dest_path.as_path(),
+            )?;
+        } else if metadata.is_file() {
+            copy_file(project_root, source_path.as_path(), dest_path.as_path())?;
         } else {
-            copy_file(source_path.as_path(), dest_path.as_path())?;
+            return Err(format!(
+                "Tool source path '{}' must be a regular file or directory.",
+                source_path.display()
+            ));
         }
     }
 
@@ -913,25 +1135,192 @@ fn dedupe_preserve_order(values: &[String]) -> Vec<String> {
     deduped
 }
 
-fn validate_project_relative_path(raw_path: &str, label: &str) -> Result<(), String> {
-    if raw_path.trim().is_empty() {
-        return Err(format!("{label} path must be a non-empty relative path."));
-    }
-    let candidate = Path::new(raw_path);
-    if candidate.is_absolute() {
+fn validate_project_relative_path(raw_path: &str, label: &str) -> Result<PathBuf, String> {
+    crate::commands::local_packages::normalize_portable_relative_path(
+        raw_path,
+        format!("{label} path").as_str(),
+    )
+}
+
+fn validate_project_source_path(
+    project_root: &Path,
+    source_path: &Path,
+    label: &str,
+) -> Result<fs::Metadata, String> {
+    let project_metadata = fs::symlink_metadata(project_root).map_err(|error| {
+        format!(
+            "Failed to inspect project root '{}' while validating {label}: {}",
+            project_root.display(),
+            error
+        )
+    })?;
+    if metadata_is_link_like(&project_metadata) || !project_metadata.is_dir() {
         return Err(format!(
-            "{label} path must be relative and stay at the current level or below."
+            "Project root '{}' must be a real directory and not a symbolic link or reparse point.",
+            project_root.display()
         ));
     }
-    if candidate
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
+    let relative_path = source_path.strip_prefix(project_root).map_err(|_| {
+        format!(
+            "{label} '{}' is not inside project root '{}'.",
+            source_path.display(),
+            project_root.display()
+        )
+    })?;
+
+    let mut current_path = project_root.to_path_buf();
+    let mut source_metadata = project_metadata;
+    for component in relative_path.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::Normal(segment) => current_path.push(segment),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "{label} '{}' must stay inside project root '{}'.",
+                    source_path.display(),
+                    project_root.display()
+                ));
+            }
+        }
+        source_metadata = fs::symlink_metadata(&current_path).map_err(|error| {
+            format!(
+                "Failed to inspect {label} component '{}': {}",
+                current_path.display(),
+                error
+            )
+        })?;
+        if metadata_is_link_like(&source_metadata) {
+            return Err(format!(
+                "{label} must not traverse symbolic link or reparse point '{}'.",
+                current_path.display()
+            ));
+        }
+    }
+
+    let canonical_project_root = fs::canonicalize(project_root).map_err(|error| {
+        format!(
+            "Failed to resolve project root '{}': {}",
+            project_root.display(),
+            error
+        )
+    })?;
+    let canonical_source_path = fs::canonicalize(source_path).map_err(|error| {
+        format!(
+            "Failed to resolve {label} '{}': {}",
+            source_path.display(),
+            error
+        )
+    })?;
+    if !canonical_source_path.starts_with(&canonical_project_root) {
         return Err(format!(
-            "{label} path must stay at the current level or below; parent traversal (`..`) is not allowed."
+            "{label} '{}' resolves outside project root '{}'.",
+            source_path.display(),
+            project_root.display()
         ));
+    }
+    Ok(source_metadata)
+}
+
+fn ensure_output_path_ancestors_are_safe(path: &Path, project_root: &Path) -> Result<(), String> {
+    let absolute_path = normalize_against_current_dir(path)?;
+    let parent = absolute_path.parent().ok_or_else(|| {
+        format!(
+            "Package output path '{}' must have a writable parent directory.",
+            path.display()
+        )
+    })?;
+    let trusted_boundaries = trusted_output_boundaries(project_root);
+    inspect_existing_output_components(parent, &trusted_boundaries)?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "Failed to create package output parent directory '{}': {}",
+            parent.display(),
+            error
+        )
+    })?;
+    inspect_existing_output_components(parent, &trusted_boundaries)
+}
+
+fn inspect_existing_output_components(
+    path: &Path,
+    trusted_boundaries: &[PathBuf],
+) -> Result<(), String> {
+    let trusted_boundary = trusted_boundaries
+        .iter()
+        .filter(|boundary| path.starts_with(boundary))
+        .max_by_key(|boundary| boundary.components().count());
+    let (mut current_path, remaining_path) = match trusted_boundary {
+        Some(boundary) => {
+            let canonical_boundary = fs::canonicalize(boundary).map_err(|error| {
+                format!(
+                    "Failed to resolve trusted package output boundary '{}': {}",
+                    boundary.display(),
+                    error
+                )
+            })?;
+            let remaining = path
+                .strip_prefix(boundary)
+                .map_err(|_| "Package output path escaped its trusted boundary.".to_string())?;
+            (canonical_boundary, remaining)
+        }
+        None => (PathBuf::new(), path),
+    };
+    for component in remaining_path.components() {
+        current_path.push(component.as_os_str());
+        match fs::symlink_metadata(&current_path) {
+            Ok(metadata) if metadata_is_link_like(&metadata) => {
+                return Err(format!(
+                    "Package output path must not traverse symbolic link or reparse point '{}'.",
+                    current_path.display()
+                ));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(format!(
+                    "Package output ancestor '{}' must be a real directory.",
+                    current_path.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect package output ancestor '{}': {}",
+                    current_path.display(),
+                    error
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+fn trusted_output_boundaries(project_root: &Path) -> Vec<PathBuf> {
+    let mut boundaries = vec![
+        normalize_path(project_root),
+        normalize_path(std::env::temp_dir()),
+    ];
+    if let Ok(current_dir) = std::env::current_dir() {
+        boundaries.push(normalize_path(current_dir));
+    }
+    boundaries
+        .into_iter()
+        .filter(|boundary| boundary.is_absolute() && boundary.exists())
+        .collect()
+}
+
+#[cfg(windows)]
+fn metadata_is_link_like(metadata: &fs::Metadata) -> bool {
+    windows_attributes_are_link_like(metadata.file_attributes())
+}
+
+#[cfg(windows)]
+fn windows_attributes_are_link_like(attributes: u32) -> bool {
+    attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_link_like(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 fn normalize_against_current_dir(path: &Path) -> Result<PathBuf, String> {
@@ -1100,6 +1489,10 @@ version = "0.1.0"
 [tools]
 allow_global_fallback = true
 
+[package_dependencies.reports]
+hosted_source_id = "source-reports"
+version = ">=1.2, <2.0"
+
 [build.default]
 agent_definitions = ["agents/definition_only.json"]
 hatched_agents = ["agents/hello_runner.json"]
@@ -1134,6 +1527,7 @@ assets = ["assets/prompts/"]
             loaded_metadata.project_identity.as_ref(),
             loaded_metadata.runtime_defaults.as_ref(),
             &loaded_metadata.build_profile,
+            &loaded_metadata.package_dependencies,
             &output_root,
             false,
         )
@@ -1186,6 +1580,9 @@ assets = ["assets/prompts/"]
         assert!(generated_project.contains("allow_global_fallback = false"));
         assert!(generated_project.contains("[build.default]"));
         assert!(generated_project.contains("hatched_agents = [\"agents/hello_runner.json\"]"));
+        assert!(generated_project.contains("[package_dependencies.reports]"));
+        assert!(generated_project.contains("hosted_source_id = \"source-reports\""));
+        assert!(generated_project.contains("version = \">=1.2, <2.0\""));
 
         let package_manifest: PackageManifestDocument = toml::from_str(
             &fs::read_to_string(output_root.path.join("cargo-ai-package.toml"))
@@ -1253,6 +1650,7 @@ tools = ["machine_only"]
             loaded_metadata.project_identity.as_ref(),
             loaded_metadata.runtime_defaults.as_ref(),
             &loaded_metadata.build_profile,
+            &loaded_metadata.package_dependencies,
             &output_root,
             false,
         )
@@ -1266,5 +1664,183 @@ tools = ["machine_only"]
         }
         let _ = fs::remove_dir_all(&project_root);
         let _ = fs::remove_dir_all(&cargo_ai_home);
+    }
+
+    #[test]
+    fn package_rejects_default_output_nested_in_declared_source() {
+        let project_root = temp_dir("default-output-source-overlap");
+        fs::create_dir_all(project_root.join("target"))
+            .expect("declared target asset should exist");
+        fs::write(project_root.join("target/sentinel.txt"), "source")
+            .expect("source sentinel should be writable");
+        write_project_metadata(
+            &project_root,
+            r#"
+format_version = 1
+
+[build.default]
+assets = ["target"]
+"#,
+        );
+
+        let loaded_metadata =
+            load_project_metadata(&project_root, "default").expect("profile should load");
+        let output_root = resolve_package_output_root(&project_root, "default", None)
+            .expect("default output should resolve");
+        let error = assemble_package_root(
+            &project_root,
+            "default",
+            loaded_metadata.project_identity.as_ref(),
+            loaded_metadata.runtime_defaults.as_ref(),
+            &loaded_metadata.build_profile,
+            &loaded_metadata.package_dependencies,
+            &output_root,
+            false,
+        )
+        .expect_err("output nested in a copied directory must fail before assembly");
+
+        assert!(error.contains("overlaps Asset source"));
+        assert_eq!(
+            fs::read_to_string(project_root.join("target/sentinel.txt"))
+                .expect("declared source must remain intact"),
+            "source"
+        );
+        assert!(!output_root.path.exists());
+        let _ = fs::remove_dir_all(project_root);
+    }
+
+    #[test]
+    fn package_rejects_explicit_output_that_would_delete_declared_source() {
+        let project_root = temp_dir("explicit-output-source-overlap");
+        fs::create_dir_all(project_root.join("assets"))
+            .expect("declared asset directory should exist");
+        fs::write(project_root.join("assets/sentinel.txt"), "source")
+            .expect("source sentinel should be writable");
+        write_project_metadata(
+            &project_root,
+            r#"
+format_version = 1
+
+[build.default]
+assets = ["assets"]
+"#,
+        );
+
+        let loaded_metadata =
+            load_project_metadata(&project_root, "default").expect("profile should load");
+        let explicit_output = project_root.join("assets");
+        let output_root = resolve_package_output_root(
+            &project_root,
+            "default",
+            Some(explicit_output.to_string_lossy().as_ref()),
+        )
+        .expect("explicit output should resolve before source preflight");
+        let error = assemble_package_root(
+            &project_root,
+            "default",
+            loaded_metadata.project_identity.as_ref(),
+            loaded_metadata.runtime_defaults.as_ref(),
+            &loaded_metadata.build_profile,
+            &loaded_metadata.package_dependencies,
+            &output_root,
+            true,
+        )
+        .expect_err("output equal to a copied directory must not delete the source");
+
+        assert!(error.contains("overlaps Asset source"));
+        assert_eq!(
+            fs::read_to_string(project_root.join("assets/sentinel.txt"))
+                .expect("declared source must remain intact"),
+            "source"
+        );
+        let _ = fs::remove_dir_all(project_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_rejects_linked_sources_and_output_ancestors() {
+        use std::os::unix::fs::symlink;
+
+        let project_root = temp_dir("linked-boundaries");
+        let external_root = temp_dir("linked-boundaries-external");
+        fs::create_dir_all(project_root.join("assets")).expect("assets root should exist");
+        fs::create_dir_all(&external_root).expect("external root should exist");
+        fs::write(external_root.join("secret.txt"), "outside")
+            .expect("external fixture should be writable");
+        write_project_metadata(
+            &project_root,
+            r#"
+format_version = 1
+
+[build.default]
+assets = ["assets/linked.txt"]
+"#,
+        );
+        symlink(
+            external_root.join("secret.txt"),
+            project_root.join("assets/linked.txt"),
+        )
+        .expect("linked asset should be created");
+        let loaded_metadata =
+            load_project_metadata(&project_root, "default").expect("profile should load");
+        let output_root = resolve_package_output_root(&project_root, "default", None)
+            .expect("default output should resolve");
+        let source_error = assemble_package_root(
+            &project_root,
+            "default",
+            loaded_metadata.project_identity.as_ref(),
+            loaded_metadata.runtime_defaults.as_ref(),
+            &loaded_metadata.build_profile,
+            &loaded_metadata.package_dependencies,
+            &output_root,
+            false,
+        )
+        .expect_err("linked project source should be rejected");
+        assert!(source_error.contains("symbolic link"));
+        assert_eq!(
+            fs::read_to_string(external_root.join("secret.txt"))
+                .expect("external source should remain readable"),
+            "outside"
+        );
+
+        fs::remove_file(project_root.join("assets/linked.txt"))
+            .expect("linked asset should be removable");
+        fs::write(project_root.join("assets/linked.txt"), "inside")
+            .expect("real asset should be writable");
+        symlink(&external_root, project_root.join("linked-output"))
+            .expect("linked output ancestor should be created");
+        let explicit_output = project_root.join("linked-output/package");
+        let output_root = resolve_package_output_root(
+            &project_root,
+            "default",
+            Some(explicit_output.to_string_lossy().as_ref()),
+        )
+        .expect("explicit output should resolve lexically");
+        let output_error = assemble_package_root(
+            &project_root,
+            "default",
+            loaded_metadata.project_identity.as_ref(),
+            loaded_metadata.runtime_defaults.as_ref(),
+            &loaded_metadata.build_profile,
+            &loaded_metadata.package_dependencies,
+            &output_root,
+            true,
+        )
+        .expect_err("linked output ancestor should be rejected");
+        assert!(output_error.contains("symbolic link"));
+        assert!(!external_root.join("package").exists());
+
+        let _ = fs::remove_file(project_root.join("linked-output"));
+        let _ = fs::remove_dir_all(project_root);
+        let _ = fs::remove_dir_all(external_root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_rejects_windows_reparse_attributes() {
+        assert!(super::windows_attributes_are_link_like(
+            super::FILE_ATTRIBUTE_REPARSE_POINT
+        ));
+        assert!(!super::windows_attributes_are_link_like(0));
     }
 }

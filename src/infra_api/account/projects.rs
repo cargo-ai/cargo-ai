@@ -1,6 +1,61 @@
 #[cfg(test)]
 use crate::config::schema::CargoAiMetadata;
 use serde_json::{json, Value};
+use std::time::Duration;
+
+const PROJECTS_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const PROJECTS_RESPONSE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+async fn post_projects_request(url: String, body: &Value) -> Result<Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(PROJECTS_REQUEST_TIMEOUT)
+        .build()
+        .map_err(|error| format!("Failed to configure projects request: {error}"))?;
+    let mut response = client
+        .post(url)
+        .json(body)
+        .send()
+        .await
+        .map_err(|error| format!("Projects request failed: {error}"))?;
+
+    if response
+        .content_length()
+        .map(|length| length > PROJECTS_RESPONSE_MAX_BYTES as u64)
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "Projects response exceeded the {}-byte client limit.",
+            PROJECTS_RESPONSE_MAX_BYTES
+        ));
+    }
+
+    let mut response_bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("Failed to read projects response: {error}"))?
+    {
+        let next_size = checked_response_size(response_bytes.len(), chunk.len())?;
+        response_bytes.reserve(next_size - response_bytes.len());
+        response_bytes.extend_from_slice(&chunk);
+    }
+
+    serde_json::from_slice(&response_bytes)
+        .map_err(|error| format!("Failed to parse projects response JSON: {error}"))
+}
+
+fn checked_response_size(current_size: usize, chunk_size: usize) -> Result<usize, String> {
+    let next_size = current_size
+        .checked_add(chunk_size)
+        .ok_or_else(|| "Projects response size exceeded supported bounds.".to_string())?;
+    if next_size > PROJECTS_RESPONSE_MAX_BYTES {
+        return Err(format!(
+            "Projects response exceeded the {}-byte client limit.",
+            PROJECTS_RESPONSE_MAX_BYTES
+        ));
+    }
+    Ok(next_size)
+}
 
 /// List projects for the authenticated account or for a specific owner handle.
 pub async fn list_projects(
@@ -8,17 +63,11 @@ pub async fn list_projects(
     access_token: &str,
     owner_handle: Option<&str>,
     include_archived: bool,
-) -> Result<Value, reqwest::Error> {
+) -> Result<Value, String> {
     let url = format!("{}/account", base_url.trim_end_matches('/'));
     let body = build_list_projects_body(access_token, owner_handle, include_archived);
 
-    let client = reqwest::Client::new();
-    let resp = client.post(url).json(&body).send().await?;
-
-    match resp.json::<Value>().await {
-        Ok(v) => Ok(v),
-        Err(e) => Err(e),
-    }
+    post_projects_request(url, &body).await
 }
 
 /// Publish a packaged project archive.
@@ -31,7 +80,7 @@ pub async fn publish_project(
     package_sha256: &str,
     package_size_bytes: i64,
     package_archive_base64: &str,
-) -> Result<Value, reqwest::Error> {
+) -> Result<Value, String> {
     let url = format!("{}/account", base_url.trim_end_matches('/'));
     let body = build_publish_project_body(
         access_token,
@@ -43,13 +92,7 @@ pub async fn publish_project(
         package_archive_base64,
     );
 
-    let client = reqwest::Client::new();
-    let resp = client.post(url).json(&body).send().await?;
-
-    match resp.json::<Value>().await {
-        Ok(v) => Ok(v),
-        Err(e) => Err(e),
-    }
+    post_projects_request(url, &body).await
 }
 
 /// Pull a published project package.
@@ -58,18 +101,13 @@ pub async fn pull_project(
     access_token: &str,
     name: &str,
     owner_handle: Option<&str>,
+    hosted_source_id: Option<&str>,
     version: Option<&str>,
-) -> Result<Value, reqwest::Error> {
+) -> Result<Value, String> {
     let url = format!("{}/account", base_url.trim_end_matches('/'));
-    let body = build_pull_project_body(access_token, name, owner_handle, version);
+    let body = build_pull_project_body(access_token, name, owner_handle, hosted_source_id, version);
 
-    let client = reqwest::Client::new();
-    let resp = client.post(url).json(&body).send().await?;
-
-    match resp.json::<Value>().await {
-        Ok(v) => Ok(v),
-        Err(e) => Err(e),
-    }
+    post_projects_request(url, &body).await
 }
 
 pub async fn set_project_visibility(
@@ -77,17 +115,11 @@ pub async fn set_project_visibility(
     access_token: &str,
     name: &str,
     is_public: bool,
-) -> Result<Value, reqwest::Error> {
+) -> Result<Value, String> {
     let url = format!("{}/account", base_url.trim_end_matches('/'));
     let body = build_set_project_visibility_body(access_token, name, is_public);
 
-    let client = reqwest::Client::new();
-    let resp = client.post(url).json(&body).send().await?;
-
-    match resp.json::<Value>().await {
-        Ok(v) => Ok(v),
-        Err(e) => Err(e),
-    }
+    post_projects_request(url, &body).await
 }
 
 pub async fn set_project_archive(
@@ -95,17 +127,11 @@ pub async fn set_project_archive(
     access_token: &str,
     name: &str,
     is_archived: bool,
-) -> Result<Value, reqwest::Error> {
+) -> Result<Value, String> {
     let url = format!("{}/account", base_url.trim_end_matches('/'));
     let body = build_set_project_archive_body(access_token, name, is_archived);
 
-    let client = reqwest::Client::new();
-    let resp = client.post(url).json(&body).send().await?;
-
-    match resp.json::<Value>().await {
-        Ok(v) => Ok(v),
-        Err(e) => Err(e),
-    }
+    post_projects_request(url, &body).await
 }
 
 fn build_list_projects_body(
@@ -188,6 +214,7 @@ fn build_pull_project_body(
     access_token: &str,
     name: &str,
     owner_handle: Option<&str>,
+    hosted_source_id: Option<&str>,
     version: Option<&str>,
 ) -> Value {
     let mut pull_payload = json!({
@@ -196,6 +223,9 @@ fn build_pull_project_body(
 
     if let Some(handle) = owner_handle {
         pull_payload["owner_handle"] = json!(handle);
+    }
+    if let Some(source_id) = hosted_source_id {
+        pull_payload["hosted_source_id"] = json!(source_id);
     }
     if let Some(version) = version {
         pull_payload["version"] = json!(version);
@@ -276,7 +306,10 @@ fn build_publish_project_body_with_metadata(
 
 #[cfg(test)]
 mod tests {
-    use super::build_publish_project_body_with_metadata;
+    use super::{
+        build_publish_project_body_with_metadata, build_pull_project_body, checked_response_size,
+        PROJECTS_RESPONSE_MAX_BYTES,
+    };
     use crate::config::schema::CargoAiMetadata;
     use serde_json::json;
 
@@ -315,5 +348,30 @@ mod tests {
             body["cargo_ai_metadata"]["cargo_ai_binary_sha256"],
             "hash-456"
         );
+    }
+
+    #[test]
+    fn projects_response_size_is_bounded_before_json_parsing() {
+        assert_eq!(
+            checked_response_size(PROJECTS_RESPONSE_MAX_BYTES - 1, 1)
+                .expect("response at the limit should be accepted"),
+            PROJECTS_RESPONSE_MAX_BYTES
+        );
+        let error = checked_response_size(PROJECTS_RESPONSE_MAX_BYTES, 1)
+            .expect_err("response beyond the limit should be rejected");
+        assert!(error.contains("client limit"));
+    }
+
+    #[test]
+    fn pull_body_supports_stable_hosted_source_identity() {
+        let body = build_pull_project_body(
+            "access-token",
+            "demo",
+            None,
+            Some("source-id"),
+            Some("1.2.3"),
+        );
+        assert_eq!(body["projects"]["pull"]["hosted_source_id"], "source-id");
+        assert!(body["projects"]["pull"].get("owner_handle").is_none());
     }
 }

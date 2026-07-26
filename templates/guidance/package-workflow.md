@@ -18,6 +18,11 @@ version = "0.1.0"
 [tools]
 allow_global_fallback = true
 
+# Bind every project-level alias reference to one hosted identity and version range.
+[package_dependencies.data_integration]
+hosted_source_id = "<opaque source id from cargo ai packages inspect>"
+version = ">=1.2, <2.0"
+
 [build.default]
 agent_definitions = ["agents/lookup_account.json"]
 hatched_agents = ["agents/daily_digest.json"]
@@ -60,6 +65,7 @@ Bare package names without `--account` are local-only. They must not trigger net
 # Hosted listings
 cargo ai packages list --account
 cargo ai packages list --account alice
+cargo ai packages list --account --include-archived
 
 # Publish the current project package
 cargo ai packages publish
@@ -84,7 +90,9 @@ cargo ai packages rollback data_integration --to 1.1.0
 
 Hosted source identity is server/API-owned. Do not derive it from a public URL. `inspect` and hosted pull receipts expose the opaque hosted source id, hosted version id, optional owner handle, resolved version, and package hash.
 
-Omitting `--version` resolves the latest eligible semver version at that moment and pins the exact resolved version locally. `update` moves forward only when a newer eligible version exists. `rollback` targets the exact `--to <version>`; it never means latest.
+Omitting `--version` resolves the latest eligible semver version at that moment and pins the exact resolved version locally. `update` moves forward only when a newer eligible version exists. `rollback` targets the exact `--to <version>`; it never means latest. Update and rollback resolve by the stored opaque source id, so an owner-handle change does not break an installed alias. Explicit handle installs and pulls verify the normalized owner returned by the service. `--include-archived` adds archived packages to the normal active listing.
+
+Replacing an alias with a different source identity resets permission acceptance and requires both `--replace` and an explicit data choice: use `--keep-data` only after reviewing that the new publisher may read the old state, or `--delete-data` to start with an empty data directory.
 
 Published versions for one hosted package identity must increase by semver. If a user needs to change same-version content, they should publish a higher version.
 
@@ -101,7 +109,13 @@ $CARGO_AI_HOME/packages/<alias>/
 
 `install.toml` is Cargo AI-owned provenance. `package/` is the verified payload for the active exact version. `data/` is package-owned persistent local state.
 
-Hosted update and rollback rematerialize `install.toml` and `package/`, then preserve `data/`. Do not add publisher-authored migrations or total-refresh behavior unless that is part of a separate, explicit story.
+Hosted update and rollback rematerialize `install.toml` and `package/`, then preserve `data/`. Install, update, rollback, and uninstall serialize each alias with an operating-system lock that is released automatically if the process exits. Do not add publisher-authored migrations or total-refresh behavior unless that is part of a separate, explicit story.
+
+Uninstall removes `install.toml`, `package/`, and `data/`. When `data/` is nonempty, first back up or export it and then confirm permanent deletion explicitly:
+
+```bash
+cargo ai packages uninstall data_integration --delete-data
+```
 
 Installed package entrypoints resolve Cargo AI-controlled child `usage_log` paths under `data/`. Use this when a parent/observer agent needs a child-specific metadata-only JSONL file before a package tool imports it into SQLite or another package-owned store.
 
@@ -127,10 +141,18 @@ Hosted archives are checked before extraction. The client accepts at most 10 MiB
 
 ## Cross-Package References
 
-Use installed aliases and exported entrypoints:
+Declare the alias binding in the calling project's `.cargo-ai/project.toml`, then use the installed alias and exported entrypoint:
+
+```toml
+[package_dependencies.data_integration]
+hosted_source_id = "<opaque hosted source id>"
+version = "^1.2"
+```
 
 ```json
 { "kind": "agent", "agent": "data_integration::lookup_account" }
 ```
+
+Cargo AI verifies that a declared installed alias is hosted, has the declared source id, and matches the semver requirement before top-level run/hatch and child resolution. An undeclared local-source alias remains available for development, while a hosted declaration never binds a local alias. Package assembly preserves hosted declarations. A hosted package needs an accepted subprocess permission before it can invoke a cross-package child. A hatched binary resolves package children only while it is executed inside a Cargo AI project; it fails closed after being moved or launched without project context. It also requires `cargo ai` or `cargo-ai` on `PATH`, and that spawned Cargo AI process applies the full local/hosted identity and version policy.
 
 Do not introduce unqualified global lookup by bare agent or tool name. Package internals remain private unless they are exported as entrypoints.

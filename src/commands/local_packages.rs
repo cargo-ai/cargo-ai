@@ -11,6 +11,7 @@ use std::io::ErrorKind;
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -28,6 +29,7 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StagedInstallFailurePoint {
+    BackupInspection,
     AfterBackup,
     AfterDataTransfer,
     FinalAliasReplacement,
@@ -132,6 +134,18 @@ pub(crate) struct InstalledPackageRuntimeContext {
     pub(crate) permissions: PackagePermissionProfileDocument,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InstalledEntrypointCapability {
+    Run,
+    Hatch,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CheckedInstalledPackageRuntime {
+    pub(crate) context: InstalledPackageRuntimeContext,
+    pub(crate) lease: Arc<crate::commands::package_lock::PackageAliasLockGuard>,
+}
+
 #[derive(Clone, Debug)]
 struct PreparedPackage {
     package_root: PathBuf,
@@ -141,6 +155,34 @@ struct PreparedPackage {
     temporary_root: Option<PathBuf>,
 }
 
+struct TemporaryPackageRootGuard {
+    path: Option<PathBuf>,
+}
+
+impl TemporaryPackageRootGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn path(&self) -> &Path {
+        self.path
+            .as_deref()
+            .expect("temporary package root guard should remain armed")
+    }
+
+    fn release(mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TemporaryPackageRootGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.as_deref() {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct InstallRequest {
     source: Option<String>,
@@ -148,6 +190,8 @@ struct InstallRequest {
     profile: String,
     replace: bool,
     downgrade: bool,
+    keep_data: bool,
+    delete_data: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -171,6 +215,7 @@ pub(crate) struct ResolvedPackageEntrypoint {
     pub(crate) source_kind: String,
     pub(crate) package_data_root: PathBuf,
     pub(crate) permissions: PackagePermissionProfileDocument,
+    pub(crate) lease: Arc<crate::commands::package_lock::PackageAliasLockGuard>,
 }
 
 pub async fn run(sub_m: &ArgMatches) -> bool {
@@ -282,6 +327,8 @@ fn run_install(install_m: &ArgMatches) -> bool {
             .unwrap_or_else(|| "default".to_string()),
         replace: install_m.get_flag("replace"),
         downgrade: install_m.get_flag("downgrade"),
+        keep_data: install_m.get_flag("keep_data"),
+        delete_data: install_m.get_flag("delete_data"),
     };
 
     match install_local_package(&request) {
@@ -336,6 +383,8 @@ pub(crate) async fn run_hosted_install(install_m: &ArgMatches) -> bool {
         install_m.get_flag("replace"),
         install_m.get_flag("downgrade"),
         install_m.get_flag("accept_permissions"),
+        install_m.get_flag("keep_data"),
+        install_m.get_flag("delete_data"),
     )
     .await
     {
@@ -468,7 +517,7 @@ fn run_uninstall(uninstall_m: &ArgMatches) -> bool {
         return false;
     };
 
-    match uninstall_package(alias) {
+    match uninstall_package(alias, uninstall_m.get_flag("delete_data")) {
         Ok(()) => {
             println!("✓ Package `{alias}` uninstalled");
             true
@@ -491,6 +540,8 @@ fn install_local_package(request: &InstallRequest) -> Result<InstallAction, Stri
         request.replace,
         request.downgrade,
         false,
+        request.keep_data,
+        request.delete_data,
     ) {
         Ok(materialized) => materialized,
         Err(error) => {
@@ -544,17 +595,41 @@ fn materialize_prepared_package(
     replace: bool,
     downgrade: bool,
     accept_permissions: bool,
+    keep_data: bool,
+    delete_data: bool,
 ) -> Result<MaterializedPackageInstall, String> {
     let package_name = required_package_name(&prepared.manifest)?;
-    let package_version = required_package_version(&prepared.manifest)?;
-    validate_permission_profile(&prepared.manifest.permissions)?;
     let alias = alias_override
         .unwrap_or(package_name.as_str())
         .trim()
         .to_string();
     validate_package_alias(alias.as_str())?;
+    let _lock = acquire_package_alias_lock(alias.as_str())?;
+    materialize_prepared_package_under_lock(
+        prepared,
+        alias.as_str(),
+        replace,
+        downgrade,
+        accept_permissions,
+        keep_data,
+        delete_data,
+    )
+}
+
+fn materialize_prepared_package_under_lock(
+    prepared: &PreparedPackage,
+    alias: &str,
+    replace: bool,
+    downgrade: bool,
+    accept_permissions: bool,
+    keep_data: bool,
+    delete_data: bool,
+) -> Result<MaterializedPackageInstall, String> {
+    let package_name = required_package_name(&prepared.manifest)?;
+    let package_version = required_package_version(&prepared.manifest)?;
+    validate_permission_profile(&prepared.manifest.permissions)?;
     let entrypoints = build_entrypoints(&prepared.manifest, &prepared.package_root)?;
-    let existing = load_installed_package(alias.as_str()).ok();
+    let existing = load_installed_package_if_present(alias)?;
     ensure_source_identity_replacement_is_explicit(
         existing.as_ref(),
         &prepared.source,
@@ -564,25 +639,43 @@ fn materialize_prepared_package(
     if prepared.source.kind == "hosted" {
         ensure_hosted_permissions_are_accepted(
             existing.as_ref(),
+            &prepared.source,
             &prepared.manifest.permissions,
             package_name.as_str(),
             package_version.as_str(),
             accept_permissions,
         )?;
     }
-    let action = determine_install_action(
+    let identity_changed = existing.as_ref().is_some_and(|installed| {
+        installed_identity_changes(installed, &prepared.source, package_name.as_str())
+    });
+    let mut action = if identity_changed {
+        InstallAction::Replace
+    } else {
+        determine_install_action(
+            existing.as_ref(),
+            package_name.as_str(),
+            package_version.as_str(),
+            prepared.content_sha256.as_str(),
+            replace,
+            downgrade,
+        )?
+    };
+    if matches!(action, InstallAction::Noop) && existing.is_some() && delete_data {
+        action = InstallAction::Replace;
+    }
+    let preserve_existing_data = preserve_existing_data_for_install(
         existing.as_ref(),
+        &prepared.source,
         package_name.as_str(),
-        package_version.as_str(),
-        prepared.content_sha256.as_str(),
-        replace,
-        downgrade,
+        keep_data,
+        delete_data,
     )?;
 
     if !matches!(action, InstallAction::Noop) {
         let document = InstalledPackageDocument {
             format_version: 1,
-            alias: alias.clone(),
+            alias: alias.to_string(),
             package_name: package_name.clone(),
             package_version: package_version.clone(),
             profile: prepared.manifest.profile.clone(),
@@ -593,12 +686,17 @@ fn materialize_prepared_package(
             entrypoints,
         };
 
-        write_staged_install(alias.as_str(), &prepared.package_root, &document)?;
+        write_staged_install(
+            alias,
+            &prepared.package_root,
+            &document,
+            preserve_existing_data,
+        )?;
     }
 
     Ok(MaterializedPackageInstall {
         action,
-        alias,
+        alias: alias.to_string(),
         package_name,
         package_version,
     })
@@ -612,9 +710,11 @@ async fn install_hosted_package(
     replace: bool,
     downgrade: bool,
     accept_permissions: bool,
+    keep_data: bool,
+    delete_data: bool,
 ) -> Result<InstallAction, String> {
-    let response = pull_hosted_package(package_name, owner_handle, version).await?;
-    let prepared = prepare_hosted_response(&response, owner_handle)?;
+    let response = pull_hosted_package(package_name, owner_handle, None, version).await?;
+    let prepared = prepare_hosted_response(&response, owner_handle, None)?;
     print_permission_summary(&prepared.manifest.permissions);
     let materialized = match materialize_prepared_package(
         &prepared,
@@ -622,6 +722,8 @@ async fn install_hosted_package(
         replace,
         downgrade,
         accept_permissions,
+        keep_data,
+        delete_data,
     ) {
         Ok(materialized) => materialized,
         Err(error) => {
@@ -651,6 +753,7 @@ async fn update_hosted_package(
     accept_permissions: bool,
 ) -> Result<InstallAction, String> {
     validate_package_alias(alias)?;
+    let _lock = acquire_package_alias_lock(alias)?;
     let existing = load_installed_package(alias)?;
     ensure_installed_source_is_hosted(&existing)?;
     let installed_version = Version::parse(existing.package_version.as_str()).map_err(|error| {
@@ -660,16 +763,19 @@ async fn update_hosted_package(
         )
     })?;
 
+    let hosted_source_id = existing
+        .source
+        .hosted_source_id
+        .as_deref()
+        .expect("hosted source validation should require an id");
     let response = pull_hosted_package(
         existing.package_name.as_str(),
-        hosted_owner_handle_for_refresh(&existing).as_deref(),
+        None,
+        Some(hosted_source_id),
         None,
     )
     .await?;
-    let prepared = prepare_hosted_response(
-        &response,
-        hosted_owner_handle_for_refresh(&existing).as_deref(),
-    )?;
+    let prepared = prepare_hosted_response(&response, None, Some(hosted_source_id))?;
     ensure_hosted_source_matches_existing(&existing, &prepared.source)?;
     let resolved_version = required_package_version(&prepared.manifest)?;
     let resolved = Version::parse(resolved_version.as_str()).map_err(|error| {
@@ -689,12 +795,14 @@ async fn update_hosted_package(
     }
 
     print_permission_summary(&prepared.manifest.permissions);
-    let materialized = match materialize_prepared_package(
+    let materialized = match materialize_prepared_package_under_lock(
         &prepared,
-        Some(alias),
+        alias,
         false,
         false,
         accept_permissions,
+        false,
+        false,
     ) {
         Ok(materialized) => materialized,
         Err(error) => {
@@ -716,6 +824,7 @@ async fn rollback_hosted_package(
     accept_permissions: bool,
 ) -> Result<InstallAction, String> {
     validate_package_alias(alias)?;
+    let _lock = acquire_package_alias_lock(alias)?;
     let existing = load_installed_package(alias)?;
     ensure_installed_source_is_hosted(&existing)?;
     let installed_version = Version::parse(existing.package_version.as_str()).map_err(|error| {
@@ -741,27 +850,36 @@ async fn rollback_hosted_package(
         ));
     }
 
+    let hosted_source_id = existing
+        .source
+        .hosted_source_id
+        .as_deref()
+        .expect("hosted source validation should require an id");
     let response = pull_hosted_package(
         existing.package_name.as_str(),
-        hosted_owner_handle_for_refresh(&existing).as_deref(),
+        None,
+        Some(hosted_source_id),
         Some(target_version),
     )
     .await?;
-    let prepared = prepare_hosted_response(
-        &response,
-        hosted_owner_handle_for_refresh(&existing).as_deref(),
-    )?;
+    let prepared = prepare_hosted_response(&response, None, Some(hosted_source_id))?;
     ensure_hosted_source_matches_existing(&existing, &prepared.source)?;
     print_permission_summary(&prepared.manifest.permissions);
-    let materialized =
-        match materialize_prepared_package(&prepared, Some(alias), false, true, accept_permissions)
-        {
-            Ok(materialized) => materialized,
-            Err(error) => {
-                cleanup_prepared_package(&prepared);
-                return Err(error);
-            }
-        };
+    let materialized = match materialize_prepared_package_under_lock(
+        &prepared,
+        alias,
+        false,
+        true,
+        accept_permissions,
+        false,
+        false,
+    ) {
+        Ok(materialized) => materialized,
+        Err(error) => {
+            cleanup_prepared_package(&prepared);
+            return Err(error);
+        }
+    };
     cleanup_prepared_package(&prepared);
     println!(
         "✓ Hosted package `{}` rolled back to version {}.",
@@ -773,6 +891,7 @@ async fn rollback_hosted_package(
 async fn pull_hosted_package(
     package_name: &str,
     owner_handle: Option<&str>,
+    hosted_source_id: Option<&str>,
     version: Option<&str>,
 ) -> Result<Value, String> {
     use crate::commands::account::helpers::{
@@ -790,10 +909,11 @@ async fn pull_hosted_package(
         access_token_owned.as_str(),
         package_name,
         owner_handle,
+        hosted_source_id,
         version,
     )
     .await
-    .map_err(|error| format!("Request failed: {error:?}"))?;
+    .map_err(|error| format!("Request failed: {error}"))?;
 
     if response
         .get("type")
@@ -832,10 +952,11 @@ async fn pull_hosted_package(
                     retry_access_token.as_str(),
                     package_name,
                     owner_handle,
+                    hosted_source_id,
                     version,
                 )
                 .await
-                .map_err(|error| format!("Request failed after session refresh: {error:?}"))?;
+                .map_err(|error| format!("Request failed after session refresh: {error}"))?;
             }
         }
     }
@@ -847,6 +968,7 @@ async fn pull_hosted_package(
         ));
     }
     validate_hosted_response_matches_request(&response, package_name, version)?;
+    validate_hosted_response_provenance(&response, owner_handle, hosted_source_id)?;
 
     Ok(response)
 }
@@ -854,6 +976,7 @@ async fn pull_hosted_package(
 fn prepare_hosted_response(
     response: &Value,
     requested_owner_handle: Option<&str>,
+    requested_hosted_source_id: Option<&str>,
 ) -> Result<PreparedPackage, String> {
     let archive_base64 = response
         .get("package_archive_base64")
@@ -904,33 +1027,37 @@ fn prepare_hosted_response(
             error
         )
     })?;
-    if let Err(error) = crate::commands::account::extract_package_archive_bytes(
+    let staging_guard = TemporaryPackageRootGuard::new(staging_root);
+    crate::commands::account::extract_package_archive_bytes(
         archive_bytes.as_slice(),
-        &staging_root,
-    ) {
-        let _ = fs::remove_dir_all(&staging_root);
-        return Err(error);
-    }
+        staging_guard.path(),
+    )?;
 
     let mut prepared = prepare_package_root(
-        staging_root.clone(),
+        staging_guard.path().to_path_buf(),
         InstalledPackageSourceDocument {
             kind: "hosted".to_string(),
             path: None,
-            account_selector: Some(if requested_owner_handle.is_some() {
-                "handle".to_string()
-            } else {
-                "self".to_string()
-            }),
+            account_selector: Some(
+                if requested_hosted_source_id.is_some() {
+                    "source_id"
+                } else if requested_owner_handle.is_some() {
+                    "handle"
+                } else {
+                    "self"
+                }
+                .to_string(),
+            ),
             requested_owner_handle: requested_owner_handle.map(str::to_string),
             hosted_source_id: Some(hosted_source_id),
             hosted_version_id: Some(hosted_version_id),
             owner_handle: optional_response_string(response, "owner_handle"),
         },
-        Some(staging_root),
+        Some(staging_guard.path().to_path_buf()),
     )?;
     prepared.content_sha256 = decoded_sha256;
     validate_hosted_response_matches_manifest(response, &prepared.manifest)?;
+    staging_guard.release();
     Ok(prepared)
 }
 
@@ -938,13 +1065,36 @@ pub(crate) fn resolve_entrypoint_reference(
     reference: &str,
     require_hatchable: bool,
 ) -> Result<Option<ResolvedPackageEntrypoint>, String> {
+    let current_dir = std::env::current_dir()
+        .map_err(|error| format!("Failed to inspect the current project directory: {error}"))?;
+    let project_root = crate::commands::package_dependencies::find_project_root(&current_dir)?;
+    resolve_entrypoint_reference_for_project(reference, require_hatchable, project_root.as_deref())
+}
+
+pub(crate) fn resolve_entrypoint_reference_for_project(
+    reference: &str,
+    require_hatchable: bool,
+    dependency_project_root: Option<&Path>,
+) -> Result<Option<ResolvedPackageEntrypoint>, String> {
     let Some((alias, entrypoint)) = reference.split_once("::") else {
         return Ok(None);
     };
     validate_package_alias(alias)?;
     validate_entrypoint_name(entrypoint)?;
 
+    let lease = Arc::new(acquire_package_alias_read_lock(alias)?);
     let package = load_installed_package(alias)?;
+    if let Some(project_root) = dependency_project_root {
+        crate::commands::package_dependencies::validate_installed_dependency(
+            project_root,
+            crate::commands::package_dependencies::InstalledPackageDependencyIdentity {
+                alias,
+                source_kind: package.source.kind.as_str(),
+                hosted_source_id: package.source.hosted_source_id.as_deref(),
+                package_version: package.package_version.as_str(),
+            },
+        )?;
+    }
     let installed_root = installed_package_root(alias);
     let entry = package
         .entrypoints
@@ -996,7 +1146,25 @@ pub(crate) fn resolve_entrypoint_reference(
         source_kind: package.source.kind,
         package_data_root: installed_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME),
         permissions: package.permissions,
+        lease,
     }))
+}
+
+pub(crate) fn validate_installed_alias_dependency_for_project(
+    alias: &str,
+    project_root: &Path,
+) -> Result<(), String> {
+    let _lease = acquire_package_alias_read_lock(alias)?;
+    let package = load_installed_package(alias)?;
+    crate::commands::package_dependencies::validate_installed_dependency(
+        project_root,
+        crate::commands::package_dependencies::InstalledPackageDependencyIdentity {
+            alias,
+            source_kind: package.source.kind.as_str(),
+            hosted_source_id: package.source.hosted_source_id.as_deref(),
+            package_version: package.package_version.as_str(),
+        },
+    )
 }
 
 #[cfg(feature = "developer-tools")]
@@ -1113,6 +1281,7 @@ fn prepare_archive_source(
             error
         )
     })?;
+    let staging_guard = TemporaryPackageRootGuard::new(staging_root);
     let bytes = fs::read(source_path).map_err(|error| {
         format!(
             "Failed to read package archive '{}': {}",
@@ -1120,15 +1289,13 @@ fn prepare_archive_source(
             error
         )
     })?;
-    if let Err(error) =
-        crate::commands::account::extract_package_archive_bytes(bytes.as_slice(), &staging_root)
-    {
-        let _ = fs::remove_dir_all(&staging_root);
-        return Err(error);
-    }
+    crate::commands::account::extract_package_archive_bytes(
+        bytes.as_slice(),
+        staging_guard.path(),
+    )?;
 
-    prepare_package_root(
-        staging_root.clone(),
+    let prepared = prepare_package_root(
+        staging_guard.path().to_path_buf(),
         InstalledPackageSourceDocument {
             kind: "local_archive".to_string(),
             path: Some(source_display.to_string()),
@@ -1138,8 +1305,10 @@ fn prepare_archive_source(
             hosted_version_id: None,
             owner_handle: None,
         },
-        Some(staging_root),
-    )
+        Some(staging_guard.path().to_path_buf()),
+    )?;
+    staging_guard.release();
+    Ok(prepared)
 }
 
 fn prepare_package_root(
@@ -1421,19 +1590,9 @@ fn ensure_installed_source_is_hosted(package: &InstalledPackageDocument) -> Resu
     Ok(())
 }
 
-fn hosted_owner_handle_for_refresh(package: &InstalledPackageDocument) -> Option<String> {
-    match package.source.account_selector.as_deref() {
-        Some("handle") => package
-            .source
-            .requested_owner_handle
-            .clone()
-            .or_else(|| package.source.owner_handle.clone()),
-        _ => None,
-    }
-}
-
 fn ensure_hosted_permissions_are_accepted(
     existing: Option<&InstalledPackageDocument>,
+    new_source: &InstalledPackageSourceDocument,
     new_permissions: &PackagePermissionProfileDocument,
     package_name: &str,
     package_version: &str,
@@ -1450,15 +1609,16 @@ fn ensure_hosted_permissions_are_accepted(
     }
 
     let baseline = PackagePermissionProfileDocument::default();
-    let current_permissions = existing
-        .filter(|package| package.source.kind == "hosted")
+    let same_hosted_source = existing.filter(|package| {
+        package.source.kind == "hosted"
+            && package.source.hosted_source_id.is_some()
+            && package.source.hosted_source_id == new_source.hosted_source_id
+    });
+    let current_permissions = same_hosted_source
         .map(|package| &package.permissions)
         .unwrap_or(&baseline);
     let requires_acceptance = new_permissions.subprocess == "allowed"
-        && (existing
-            .filter(|package| package.source.kind == "hosted")
-            .is_none()
-            || current_permissions.subprocess != "allowed")
+        && (same_hosted_source.is_none() || current_permissions.subprocess != "allowed")
         || permission_profile_expands(current_permissions, new_permissions);
     if !requires_acceptance || accept_permissions {
         return Ok(());
@@ -1468,6 +1628,48 @@ fn ensure_hosted_permissions_are_accepted(
         "Hosted package `{}` version {} requests permissions beyond the currently accepted profile. Review the permission summary and re-run with `--accept-permissions` to accept this exact transition.",
         package_name, package_version
     ))
+}
+
+fn preserve_existing_data_for_install(
+    existing: Option<&InstalledPackageDocument>,
+    new_source: &InstalledPackageSourceDocument,
+    new_package_name: &str,
+    keep_data: bool,
+    delete_data: bool,
+) -> Result<bool, String> {
+    let Some(existing) = existing else {
+        return Ok(false);
+    };
+    if keep_data && delete_data {
+        return Err("Choose only one of --keep-data or --delete-data.".to_string());
+    }
+
+    let identity_changed = installed_identity_changes(existing, new_source, new_package_name);
+
+    if identity_changed && !keep_data && !delete_data {
+        return Err(format!(
+            "Replacing package alias `{}` with a different source identity requires an explicit data disposition. Re-run with --keep-data to transfer the existing data after review, or --delete-data to start the new source with empty data.",
+            existing.alias
+        ));
+    }
+    if identity_changed {
+        return Ok(keep_data);
+    }
+    if delete_data {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn installed_identity_changes(
+    existing: &InstalledPackageDocument,
+    new_source: &InstalledPackageSourceDocument,
+    new_package_name: &str,
+) -> bool {
+    existing.package_name != new_package_name
+        || ((existing.source.kind == "hosted" || new_source.kind == "hosted")
+            && (existing.source.kind != new_source.kind
+                || existing.source.hosted_source_id != new_source.hosted_source_id))
 }
 
 fn permission_profile_expands(
@@ -1654,36 +1856,178 @@ fn resolve_existing_path_under_root(
     Ok(resolved)
 }
 
-pub(crate) fn runtime_context_for_package_root(
-    package_root: &Path,
-) -> Option<InstalledPackageRuntimeContext> {
-    if package_root.file_name().and_then(|name| name.to_str()) != Some(INSTALLED_PACKAGE_DIR_NAME) {
-        return None;
+fn absolute_lexical_path(path: &Path) -> Result<PathBuf, String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("Failed to resolve current directory: {error}"))?
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::Normal(segment) => normalized.push(segment),
+        }
     }
-    let install_root = package_root.parent()?;
-    let alias = install_root.file_name()?.to_string_lossy().to_string();
-    let package = load_installed_package(alias.as_str()).ok()?;
+    Ok(normalized)
+}
+
+fn installed_package_alias_for_path(
+    path: &Path,
+    package_store_root: &Path,
+) -> Result<Option<String>, String> {
+    let Ok(relative_path) = path.strip_prefix(package_store_root) else {
+        return Ok(None);
+    };
+    let mut components = relative_path.components();
+    let Some(Component::Normal(alias)) = components.next() else {
+        return Ok(None);
+    };
+    let Some(Component::Normal(payload_directory)) = components.next() else {
+        return Ok(None);
+    };
+    if payload_directory != INSTALLED_PACKAGE_DIR_NAME {
+        return Ok(None);
+    }
+    alias
+        .to_str()
+        .map(|alias| Some(alias.to_string()))
+        .ok_or_else(|| {
+            format!(
+                "Installed package path '{}' contains a non-Unicode alias.",
+                path.display()
+            )
+        })
+}
+
+fn validate_installed_package_project_metadata(
+    package_root: &Path,
+    alias: &str,
+) -> Result<(), String> {
+    let metadata_path = resolve_existing_path_under_root(
+        package_root,
+        Path::new(".cargo-ai/project.toml"),
+        "Installed package project metadata",
+    )?;
+    if !metadata_path.is_file() {
+        return Err(format!(
+            "Installed package alias `{alias}` project metadata '{}' must be a regular file.",
+            metadata_path.display()
+        ));
+    }
+    let contents = fs::read_to_string(&metadata_path).map_err(|error| {
+        format!(
+            "Failed to read installed package alias `{alias}` project metadata '{}': {error}",
+            metadata_path.display()
+        )
+    })?;
+    toml::from_str::<toml::Value>(&contents).map_err(|error| {
+        format!(
+            "Failed to parse installed package alias `{alias}` project metadata '{}': {error}",
+            metadata_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+pub(crate) fn checked_runtime_lease_for_path(
+    candidate_path: &Path,
+    required_capability: Option<InstalledEntrypointCapability>,
+) -> Result<Option<CheckedInstalledPackageRuntime>, String> {
+    let absolute_candidate_path = absolute_lexical_path(candidate_path)?;
+    let absolute_packages_root = absolute_lexical_path(packages_root().as_path())?;
+    let lexical_alias = installed_package_alias_for_path(
+        absolute_candidate_path.as_path(),
+        absolute_packages_root.as_path(),
+    )?;
+    let canonical_candidate_path = fs::canonicalize(candidate_path).map_err(|error| {
+        format!(
+            "Failed to resolve runtime definition context '{}': {error}",
+            candidate_path.display()
+        )
+    })?;
+    let canonical_packages_root = match fs::canonicalize(packages_root()) {
+        Ok(root) => root,
+        Err(error) if error.kind() == ErrorKind::NotFound && lexical_alias.is_none() => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(format!(
+                "Failed to resolve package store '{}' while checking runtime definition context '{}': {error}",
+                packages_root().display(),
+                candidate_path.display()
+            ));
+        }
+    };
+    let canonical_alias = installed_package_alias_for_path(
+        canonical_candidate_path.as_path(),
+        canonical_packages_root.as_path(),
+    )?;
+    let alias = match (lexical_alias, canonical_alias) {
+        (None, None) => return Ok(None),
+        (Some(alias), None) | (None, Some(alias)) => alias,
+        (Some(lexical), Some(canonical)) if lexical == canonical => lexical,
+        (Some(lexical), Some(canonical)) => {
+            return Err(format!(
+                "Runtime definition context '{}' redirects between installed package aliases `{lexical}` and `{canonical}`.",
+                candidate_path.display()
+            ));
+        }
+    };
+    let lease = Arc::new(acquire_package_alias_read_lock(alias.as_str())?);
+    let package = load_installed_package(alias.as_str())?;
     if package.alias != alias {
-        return None;
+        return Err(format!(
+            "Installed package metadata for alias `{alias}` declares mismatched alias `{}`.",
+            package.alias
+        ));
     }
     let expected_install_root = installed_package_root(alias.as_str());
     let expected_package_root = expected_install_root.join(INSTALLED_PACKAGE_DIR_NAME);
-    let provided_canonical = fs::canonicalize(package_root).ok()?;
-    let expected_canonical = fs::canonicalize(&expected_package_root).ok()?;
-    if provided_canonical != expected_canonical {
-        return None;
+    let expected_canonical = fs::canonicalize(&expected_package_root).map_err(|error| {
+        format!(
+            "Failed to resolve installed package payload root '{}': {error}",
+            expected_package_root.display()
+        )
+    })?;
+    if !canonical_candidate_path.starts_with(&expected_canonical) {
+        return Err(format!(
+            "Runtime definition context '{}' escaped expected installed package payload root '{}'.",
+            candidate_path.display(),
+            expected_package_root.display()
+        ));
     }
-    let install_metadata = fs::symlink_metadata(&expected_install_root).ok()?;
-    let package_metadata = fs::symlink_metadata(&expected_package_root).ok()?;
+    let install_metadata = fs::symlink_metadata(&expected_install_root).map_err(|error| {
+        format!(
+            "Failed to inspect installed package alias root '{}': {error}",
+            expected_install_root.display()
+        )
+    })?;
+    let package_metadata = fs::symlink_metadata(&expected_package_root).map_err(|error| {
+        format!(
+            "Failed to inspect installed package payload root '{}': {error}",
+            expected_package_root.display()
+        )
+    })?;
     if metadata_is_link_like(&install_metadata)
         || !install_metadata.is_dir()
         || metadata_is_link_like(&package_metadata)
         || !package_metadata.is_dir()
     {
-        return None;
+        return Err(format!(
+            "Installed package paths for alias `{alias}` must be real directories and not symbolic links or reparse points."
+        ));
     }
+    validate_installed_package_project_metadata(expected_package_root.as_path(), alias.as_str())?;
 
-    Some(InstalledPackageRuntimeContext {
+    let mut context = InstalledPackageRuntimeContext {
         alias: package.alias,
         source_kind: package.source.kind,
         package_payload_root: expected_package_root,
@@ -1691,13 +2035,78 @@ pub(crate) fn runtime_context_for_package_root(
         current_entrypoint_path: None,
         entrypoints: package.entrypoints,
         permissions: package.permissions,
-    })
+    };
+    if let Some(required_capability) = required_capability {
+        let mut matching_entrypoint = None;
+        for entrypoint in &context.entrypoints {
+            let relative_path = normalize_portable_relative_path(
+                entrypoint.path.as_str(),
+                "Installed package entrypoint path",
+            )?;
+            let resolved = resolve_existing_path_under_root(
+                context.package_payload_root.as_path(),
+                relative_path.as_path(),
+                "Installed package entrypoint",
+            )?;
+            let canonical = fs::canonicalize(&resolved).map_err(|error| {
+                format!(
+                    "Failed to resolve installed package entrypoint '{}': {error}",
+                    resolved.display()
+                )
+            })?;
+            if canonical == canonical_candidate_path {
+                matching_entrypoint = Some(entrypoint);
+            }
+        }
+        let entrypoint = matching_entrypoint.ok_or_else(|| {
+            format!(
+                "Runtime definition '{}' is inside installed package alias `{alias}` but is not an exported package entrypoint.",
+                candidate_path.display()
+            )
+        })?;
+        if !entrypoint.runnable {
+            return Err(format!(
+                "Installed package entrypoint `{}::{}` is not runnable.",
+                alias, entrypoint.name
+            ));
+        }
+        if required_capability == InstalledEntrypointCapability::Hatch && !entrypoint.hatchable {
+            return Err(format!(
+                "Installed package entrypoint `{}::{}` is not hatchable.",
+                alias, entrypoint.name
+            ));
+        }
+        context.current_entrypoint_path = Some(entrypoint.path.clone());
+    }
+
+    Ok(Some(CheckedInstalledPackageRuntime { context, lease }))
+}
+
+pub(crate) fn checked_runtime_context_for_path(
+    candidate_path: &Path,
+) -> Result<Option<InstalledPackageRuntimeContext>, String> {
+    checked_runtime_lease_for_path(candidate_path, None)
+        .map(|checked| checked.map(|checked| checked.context))
+}
+
+pub(crate) fn checked_runtime_context_for_project_root(
+    project_root: &Path,
+) -> Result<Option<InstalledPackageRuntimeContext>, String> {
+    checked_runtime_context_for_path(project_root)
+}
+
+pub(crate) fn runtime_context_for_package_root(
+    package_root: &Path,
+) -> Option<InstalledPackageRuntimeContext> {
+    checked_runtime_context_for_project_root(package_root)
+        .ok()
+        .flatten()
 }
 
 pub(crate) fn runtime_context_for_resolved_entrypoint(
     resolved: &ResolvedPackageEntrypoint,
 ) -> Result<InstalledPackageRuntimeContext, String> {
-    let mut context = runtime_context_for_package_root(resolved.package_root.as_path())
+    let mut context = checked_runtime_context_for_project_root(resolved.package_root.as_path())?
         .ok_or_else(|| {
             format!(
                 "Installed package entrypoint `{}::{}` did not resolve to the verified package root for alias `{}`.",
@@ -1896,6 +2305,33 @@ fn validate_hosted_response_matches_request(
     Ok(())
 }
 
+fn validate_hosted_response_provenance(
+    response: &Value,
+    requested_owner_handle: Option<&str>,
+    requested_hosted_source_id: Option<&str>,
+) -> Result<(), String> {
+    if let Some(requested_source_id) = requested_hosted_source_id {
+        let returned_source_id = required_response_string(response, "hosted_source_id")?;
+        if returned_source_id != requested_source_id {
+            return Err(format!(
+                "Hosted pull response returned source id `{returned_source_id}` for requested source id `{requested_source_id}`."
+            ));
+        }
+    }
+
+    if let Some(requested_handle) = requested_owner_handle {
+        let returned_handle = required_response_string(response, "owner_handle")?;
+        let normalized_requested = requested_handle.trim().to_ascii_lowercase();
+        let normalized_returned = returned_handle.trim().to_ascii_lowercase();
+        if normalized_returned != normalized_requested {
+            return Err(format!(
+                "Hosted pull response returned owner handle `{returned_handle}` for requested owner `{requested_handle}`."
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_package_archive_size(compressed_bytes: usize) -> Result<(), String> {
     if compressed_bytes > MAX_PACKAGE_ARCHIVE_COMPRESSED_BYTES {
         return Err(format!(
@@ -1986,6 +2422,7 @@ fn write_staged_install(
     alias: &str,
     package_root: &Path,
     document: &InstalledPackageDocument,
+    preserve_existing_data: bool,
 ) -> Result<(), String> {
     let packages_root = packages_root();
     let packages_staging_root = ensure_packages_staging_root()?;
@@ -2095,7 +2532,7 @@ fn write_staged_install(
     }
 
     let current_data_root = install_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME);
-    let preserve_existing_data = match fs::symlink_metadata(&current_data_root) {
+    let existing_data_available = match fs::symlink_metadata(&current_data_root) {
         Ok(metadata) if metadata_is_link_like(&metadata) || !metadata.is_dir() => {
             let _ = fs::remove_dir_all(&staging_root);
             return Err(format!(
@@ -2126,14 +2563,30 @@ fn write_staged_install(
             error
         )
     })?;
-    let backup_metadata = fs::symlink_metadata(&backup_root).map_err(|error| {
-        format!(
-            "Failed to inspect recoverable backup '{}' for package alias '{}': {}",
-            backup_root.display(),
-            alias,
-            error
-        )
-    })?;
+    let backup_metadata = maybe_fail_staged_install(StagedInstallFailurePoint::BackupInspection)
+        .and_then(|_| {
+            fs::symlink_metadata(&backup_root).map_err(|error| {
+                format!(
+                    "Failed to inspect recoverable backup '{}' for package alias '{}': {}",
+                    backup_root.display(),
+                    alias,
+                    error
+                )
+            })
+        });
+    let backup_metadata = match backup_metadata {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return Err(staged_install_failure_with_recovery(
+                alias,
+                error,
+                &install_root,
+                &backup_root,
+                &staging_root,
+                false,
+            ));
+        }
+    };
     if metadata_is_link_like(&backup_metadata) || !backup_metadata.is_dir() {
         return Err(staged_install_failure_with_recovery(
             alias,
@@ -2159,7 +2612,7 @@ fn write_staged_install(
         ));
     }
 
-    let preserved_data_moved = if preserve_existing_data {
+    let preserved_data_moved = if preserve_existing_data && existing_data_available {
         let backup_data_root = backup_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME);
         if let Err(error) = fs::rename(&backup_data_root, &staged_data_root) {
             return Err(staged_install_failure_with_recovery(
@@ -2425,8 +2878,22 @@ fn load_installed_package(alias: &str) -> Result<InstalledPackageDocument, Strin
     })
 }
 
-fn uninstall_package(alias: &str) -> Result<(), String> {
+fn load_installed_package_if_present(
+    alias: &str,
+) -> Result<Option<InstalledPackageDocument>, String> {
     validate_package_alias(alias)?;
+    match fs::symlink_metadata(installed_package_root(alias)) {
+        Ok(_) => load_installed_package(alias).map(Some),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "Failed to inspect installed package alias `{alias}` before mutation: {error}"
+        )),
+    }
+}
+
+fn uninstall_package(alias: &str, delete_data: bool) -> Result<(), String> {
+    validate_package_alias(alias)?;
+    let _lock = acquire_package_alias_lock(alias)?;
     let packages_root = packages_root();
     let packages_metadata = fs::symlink_metadata(&packages_root).map_err(|error| {
         format!(
@@ -2464,6 +2931,47 @@ fn uninstall_package(alias: &str) -> Result<(), String> {
         return Err(format!(
             "Installed package alias '{}' must be a real directory.",
             alias
+        ));
+    }
+    let data_root = install_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME);
+    let data_is_nonempty = match fs::symlink_metadata(&data_root) {
+        Ok(metadata) if metadata_is_link_like(&metadata) || !metadata.is_dir() => {
+            return Err(format!(
+                "Package alias `{alias}` has an unsafe data root at '{}'; expected a real directory and not a symbolic link or reparse point.",
+                data_root.display()
+            ));
+        }
+        Ok(_) => fs::read_dir(&data_root)
+            .map_err(|error| {
+                format!(
+                    "Failed to inspect package alias `{alias}` data at '{}': {}",
+                    data_root.display(),
+                    error
+                )
+            })?
+            .next()
+            .transpose()
+            .map_err(|error| {
+                format!(
+                    "Failed to inspect package alias `{alias}` data at '{}': {}",
+                    data_root.display(),
+                    error
+                )
+            })?
+            .is_some(),
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect package alias `{alias}` data at '{}': {}",
+                data_root.display(),
+                error
+            ));
+        }
+    };
+    if data_is_nonempty && !delete_data {
+        return Err(format!(
+            "Package alias `{alias}` has persistent data at '{}'. Back up or export that directory, then re-run with --delete-data to confirm permanent deletion.",
+            data_root.display()
         ));
     }
     fs::remove_dir_all(&install_root).map_err(|error| {
@@ -2554,13 +3062,17 @@ fn validate_entrypoint_name(name: &str) -> Result<(), String> {
 }
 
 fn validate_identifier(value: &str, label: &str) -> Result<(), String> {
-    if value.is_empty()
+    if !value
+        .chars()
+        .next()
+        .map(|ch| ch.is_ascii_alphanumeric())
+        .unwrap_or(false)
         || !value
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
     {
         return Err(format!(
-            "{label} '{}' is invalid. Use only letters, numbers, '-' or '_'.",
+            "{label} '{}' is invalid. Start with a letter or number, then use only letters, numbers, '-' or '_'.",
             value
         ));
     }
@@ -2593,6 +3105,30 @@ fn packages_root() -> PathBuf {
 
 fn packages_staging_root() -> PathBuf {
     packages_root().join(".staging")
+}
+
+fn packages_lock_root() -> PathBuf {
+    packages_root().join(".locks")
+}
+
+fn acquire_package_alias_lock(
+    alias: &str,
+) -> Result<crate::commands::package_lock::PackageAliasLockGuard, String> {
+    ensure_real_directory(packages_root().as_path(), "Package store")?;
+    crate::commands::package_lock::try_acquire_package_alias_lock(
+        packages_lock_root().as_path(),
+        alias,
+    )
+}
+
+fn acquire_package_alias_read_lock(
+    alias: &str,
+) -> Result<crate::commands::package_lock::PackageAliasLockGuard, String> {
+    ensure_real_directory(packages_root().as_path(), "Package store")?;
+    crate::commands::package_lock::try_acquire_package_alias_read_lock(
+        packages_lock_root().as_path(),
+        alias,
+    )
 }
 
 fn ensure_packages_staging_root() -> Result<PathBuf, String> {
@@ -2652,12 +3188,15 @@ fn installed_package_data_root(alias: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_entrypoints, determine_install_action, ensure_hosted_permissions_are_accepted,
-        install_local_package, load_installed_package, normalize_portable_relative_path,
-        resolve_entrypoint_reference, resolve_package_data_path, runtime_context_for_package_root,
-        uninstall_package, InstallAction, InstallRequest, InstalledPackageRuntimeContext,
-        PackageManifestDocument, PackagePermissionProfileDocument, StagedInstallFailurePoint,
+        build_entrypoints, checked_runtime_context_for_path,
+        checked_runtime_context_for_project_root, determine_install_action,
+        ensure_hosted_permissions_are_accepted, install_local_package, load_installed_package,
+        normalize_portable_relative_path, resolve_entrypoint_reference, resolve_package_data_path,
+        runtime_context_for_package_root, uninstall_package, InstallAction, InstallRequest,
+        InstalledPackageRuntimeContext, PackageManifestDocument, PackagePermissionProfileDocument,
+        StagedInstallFailurePoint,
     };
+    use base64::Engine as _;
     use std::path::{Path, PathBuf};
 
     fn manifest(
@@ -2674,6 +3213,18 @@ mod tests {
             tools: Vec::new(),
             assets: Vec::new(),
             permissions: PackagePermissionProfileDocument::default(),
+        }
+    }
+
+    fn hosted_source(source_id: &str) -> super::InstalledPackageSourceDocument {
+        super::InstalledPackageSourceDocument {
+            kind: "hosted".to_string(),
+            path: None,
+            account_selector: Some("self".to_string()),
+            requested_owner_handle: None,
+            hosted_source_id: Some(source_id.to_string()),
+            hosted_version_id: Some("version-id".to_string()),
+            owner_handle: None,
         }
     }
 
@@ -2712,6 +3263,10 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(root.join("agents")).expect("agents dir should be writable");
+        std::fs::create_dir_all(root.join(".cargo-ai"))
+            .expect("project metadata dir should be writable");
+        std::fs::write(root.join(".cargo-ai/project.toml"), "format_version = 1\n")
+            .expect("project metadata should be writable");
         std::fs::write(
             root.join("cargo-ai-package.toml"),
             r#"format_version = 1
@@ -2743,6 +3298,8 @@ assets = ["schemas/customer.sql"]
             profile: "default".to_string(),
             replace: false,
             downgrade: false,
+            keep_data: false,
+            delete_data: false,
         }
     }
 
@@ -2893,6 +3450,8 @@ assets = ["schemas/customer.sql"]
             profile: "default".to_string(),
             replace: false,
             downgrade: false,
+            keep_data: false,
+            delete_data: false,
         };
         let action = install_local_package(&request).expect("install should succeed");
         assert!(matches!(action, InstallAction::New));
@@ -2918,9 +3477,407 @@ assets = ["schemas/customer.sql"]
             .definition_path
             .ends_with("package/agents/daily_digest.json"));
 
-        uninstall_package("data_integration").expect("uninstall should succeed");
+        let error = uninstall_package("data_integration", false)
+            .expect_err("active run/hatch resolutions should lease the alias");
+        assert!(error.contains("another Cargo AI process"));
+        drop((run_entrypoint, hatch_entrypoint));
+        uninstall_package("data_integration", false).expect("uninstall should succeed");
         assert!(load_installed_package("data_integration").is_err());
 
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn local_alias_run_and_hatch_remain_available_without_hosted_declaration() {
+        let _store = PackagesRootGuard::new("local-alias-project-compatibility");
+        let package_root = temp_package_root("local-alias-project-compatibility");
+        install_local_package(&local_install_request(&package_root))
+            .expect("local package should install");
+        let declaring_project = std::env::temp_dir().join(format!(
+            "cargo-ai-local-alias-declaring-project-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(declaring_project.join(".cargo-ai"))
+            .expect("declaring project metadata dir should exist");
+        std::fs::write(
+            declaring_project.join(".cargo-ai/project.toml"),
+            "format_version = 1\n",
+        )
+        .expect("declaring project metadata should exist");
+
+        assert!(super::resolve_entrypoint_reference_for_project(
+            "data_integration::lookup_account",
+            false,
+            Some(declaring_project.as_path()),
+        )
+        .expect("run should allow an undeclared local alias")
+        .is_some());
+        assert!(super::resolve_entrypoint_reference_for_project(
+            "data_integration::daily_digest",
+            true,
+            Some(declaring_project.as_path()),
+        )
+        .expect("hatch should allow an undeclared local alias")
+        .is_some());
+
+        std::fs::write(
+            declaring_project.join(".cargo-ai/project.toml"),
+            r#"format_version = 1
+
+[package_dependencies.data_integration]
+hosted_source_id = "hosted-source"
+version = "^1"
+"#,
+        )
+        .expect("hosted dependency declaration should be writable");
+        let error = super::resolve_entrypoint_reference_for_project(
+            "data_integration::lookup_account",
+            false,
+            Some(declaring_project.as_path()),
+        )
+        .expect_err("a hosted declaration must reject a local alias");
+        assert!(error.contains("installed alias came from `local_root`"));
+
+        remove_temp_dir_if_present(declaring_project.as_path());
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn hosted_alias_resolution_rejects_declared_source_mismatch() {
+        let _store = PackagesRootGuard::new("hosted-alias-source-mismatch");
+        let package_root = temp_package_root("hosted-alias-source-mismatch");
+        let prepared =
+            super::prepare_package_root(package_root.clone(), hosted_source("actual-source"), None)
+                .expect("hosted package should prepare");
+        super::materialize_prepared_package(
+            &prepared,
+            Some("data_integration"),
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect("hosted package should install");
+        let declaring_project = std::env::temp_dir().join(format!(
+            "cargo-ai-hosted-alias-declaring-project-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(declaring_project.join(".cargo-ai"))
+            .expect("declaring project metadata dir should exist");
+        std::fs::write(
+            declaring_project.join(".cargo-ai/project.toml"),
+            r#"format_version = 1
+
+[package_dependencies.data_integration]
+hosted_source_id = "different-source"
+version = "^1"
+"#,
+        )
+        .expect("hosted dependency declaration should be writable");
+
+        let error = super::resolve_entrypoint_reference_for_project(
+            "data_integration::lookup_account",
+            false,
+            Some(declaring_project.as_path()),
+        )
+        .expect_err("a mismatched hosted source must fail closed");
+        assert!(error.contains("expects hosted source id"));
+
+        remove_temp_dir_if_present(declaring_project.as_path());
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn direct_hosted_entrypoint_uses_caller_project_binding_when_present() {
+        let _store = PackagesRootGuard::new("direct-hosted-caller-binding");
+        let package_root = temp_package_root("direct-hosted-caller-binding");
+        let prepared =
+            super::prepare_package_root(package_root.clone(), hosted_source("actual-source"), None)
+                .expect("hosted package should prepare");
+        super::materialize_prepared_package(
+            &prepared,
+            Some("data_integration"),
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect("hosted package should install");
+        let direct_definition = super::installed_package_root("data_integration")
+            .join("package/agents/lookup_account.json");
+        assert!(super::checked_runtime_lease_for_path(
+            &direct_definition,
+            Some(super::InstalledEntrypointCapability::Run),
+        )
+        .expect("outside-project direct hosted entrypoint should follow top-level policy")
+        .is_some());
+
+        let caller_project = std::env::temp_dir().join(format!(
+            "cargo-ai-direct-hosted-caller-project-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(caller_project.join(".cargo-ai"))
+            .expect("caller metadata dir should exist");
+        let metadata_path = caller_project.join(".cargo-ai/project.toml");
+        std::fs::write(&metadata_path, "format_version = 1\n")
+            .expect("caller metadata should exist");
+        let undeclared = super::validate_installed_alias_dependency_for_project(
+            "data_integration",
+            &caller_project,
+        )
+        .expect_err("hosted direct path must be declared inside a caller project");
+        assert!(undeclared.contains("package_dependencies.data_integration"));
+
+        std::fs::write(
+            &metadata_path,
+            r#"[package_dependencies.data_integration]
+hosted_source_id = "different-source"
+version = "^1"
+"#,
+        )
+        .expect("source mismatch declaration should be writable");
+        let source_error = super::validate_installed_alias_dependency_for_project(
+            "data_integration",
+            &caller_project,
+        )
+        .expect_err("wrong source must fail");
+        assert!(source_error.contains("expects hosted source id"));
+
+        std::fs::write(
+            &metadata_path,
+            r#"[package_dependencies.data_integration]
+hosted_source_id = "actual-source"
+version = "^2"
+"#,
+        )
+        .expect("version mismatch declaration should be writable");
+        let version_error = super::validate_installed_alias_dependency_for_project(
+            "data_integration",
+            &caller_project,
+        )
+        .expect_err("wrong version must fail");
+        assert!(version_error.contains("does not match"));
+
+        remove_temp_dir_if_present(caller_project.as_path());
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn uninstall_requires_confirmation_for_nonempty_persistent_data() {
+        let _store = PackagesRootGuard::new("uninstall-data");
+        let package_root = temp_package_root("uninstall-data");
+        install_local_package(&local_install_request(&package_root))
+            .expect("install should succeed");
+        let data_root = super::installed_package_data_root("data_integration");
+        std::fs::write(data_root.join("state.json"), r#"{"kept":true}"#)
+            .expect("persistent data should be writable");
+
+        let error = uninstall_package("data_integration", false)
+            .expect_err("nonempty data should require explicit deletion");
+        assert!(error.contains("--delete-data"));
+        assert!(data_root.join("state.json").exists());
+
+        uninstall_package("data_integration", true)
+            .expect("explicit deletion should uninstall the package");
+        assert!(!super::installed_package_root("data_integration").exists());
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn replacement_preserves_alias_and_data_when_existing_receipt_is_malformed() {
+        let _store = PackagesRootGuard::new("malformed-existing-receipt");
+        let package_root = temp_package_root("malformed-existing-receipt");
+        install_local_package(&local_install_request(&package_root))
+            .expect("install should succeed");
+        let install_root = super::installed_package_root("data_integration");
+        let receipt_path = install_root.join(super::INSTALL_MANIFEST_FILE_NAME);
+        let data_path = install_root
+            .join(super::INSTALLED_PACKAGE_DATA_DIR_NAME)
+            .join("state.json");
+        std::fs::write(&data_path, "keep").expect("persistent data should be writable");
+        std::fs::write(&receipt_path, "not = [valid").expect("receipt should be corruptible");
+
+        let mut replacement = local_install_request(&package_root);
+        replacement.replace = true;
+        replacement.delete_data = true;
+        let error = install_local_package(&replacement)
+            .expect_err("malformed existing receipt must fail before replacement");
+        assert!(error.contains("Failed to parse installed package metadata"));
+        assert_eq!(
+            std::fs::read_to_string(&receipt_path).expect("receipt should remain untouched"),
+            "not = [valid"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&data_path).expect("data should remain untouched"),
+            "keep"
+        );
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn cross_source_replacement_requires_explicit_data_disposition() {
+        let existing = super::InstalledPackageDocument {
+            format_version: 1,
+            alias: "reports".to_string(),
+            package_name: "reports".to_string(),
+            package_version: "1.0.0".to_string(),
+            profile: "default".to_string(),
+            content_sha256: "abc".to_string(),
+            source: hosted_source("source-a"),
+            installed_at: "2026-07-25T00:00:00Z".to_string(),
+            permissions: PackagePermissionProfileDocument::default(),
+            entrypoints: Vec::new(),
+        };
+        let replacement = hosted_source("source-b");
+
+        let error = super::preserve_existing_data_for_install(
+            Some(&existing),
+            &replacement,
+            "reports",
+            false,
+            false,
+        )
+        .expect_err("cross-source replacement should require a disposition");
+        assert!(error.contains("--keep-data"));
+        assert!(error.contains("--delete-data"));
+        assert!(super::preserve_existing_data_for_install(
+            Some(&existing),
+            &replacement,
+            "reports",
+            true,
+            false,
+        )
+        .expect("explicit transfer should be accepted"));
+        assert!(!super::preserve_existing_data_for_install(
+            Some(&existing),
+            &replacement,
+            "reports",
+            false,
+            true,
+        )
+        .expect("explicit deletion should be accepted"));
+    }
+
+    #[test]
+    fn same_content_cross_source_replacement_writes_new_receipt_and_honors_data_choice() {
+        let _store = PackagesRootGuard::new("cross-source-materialization");
+        let package_root = temp_package_root("cross-source-materialization");
+        let prepared_a =
+            super::prepare_package_root(package_root.clone(), hosted_source("source-a"), None)
+                .expect("first hosted package should prepare");
+        super::materialize_prepared_package(
+            &prepared_a,
+            Some("reports"),
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect("first hosted package should install");
+        let data_root = super::installed_package_data_root("reports");
+        std::fs::write(data_root.join("state.json"), "keep")
+            .expect("package data should be writable");
+
+        let prepared_b =
+            super::prepare_package_root(package_root.clone(), hosted_source("source-b"), None)
+                .expect("replacement hosted package should prepare");
+        let kept = super::materialize_prepared_package(
+            &prepared_b,
+            Some("reports"),
+            true,
+            false,
+            false,
+            true,
+            false,
+        )
+        .expect("explicit cross-source data transfer should replace same content");
+        assert!(matches!(kept.action, InstallAction::Replace));
+        let installed = load_installed_package("reports").expect("new receipt should load");
+        assert_eq!(
+            installed.source.hosted_source_id.as_deref(),
+            Some("source-b")
+        );
+        assert_eq!(
+            std::fs::read_to_string(data_root.join("state.json")).expect("kept data should remain"),
+            "keep"
+        );
+
+        let deleted = super::materialize_prepared_package(
+            &prepared_b,
+            Some("reports"),
+            true,
+            false,
+            false,
+            false,
+            true,
+        )
+        .expect("explicit deletion should not be treated as a no-op");
+        assert!(matches!(deleted.action, InstallAction::Replace));
+        assert!(!data_root.join("state.json").exists());
+
+        let manifest_path = package_root.join("cargo-ai-package.toml");
+        let manifest = std::fs::read_to_string(&manifest_path).expect("manifest should read");
+        std::fs::write(
+            &manifest_path,
+            manifest.replace(
+                r#"project_version = "1.0.0""#,
+                r#"project_version = "0.5.0""#,
+            ),
+        )
+        .expect("manifest should downgrade");
+        let prepared_c =
+            super::prepare_package_root(package_root.clone(), hosted_source("source-c"), None)
+                .expect("older cross-source package should prepare");
+        let older = super::materialize_prepared_package(
+            &prepared_c,
+            Some("reports"),
+            true,
+            false,
+            false,
+            false,
+            true,
+        )
+        .expect("cross-source replacement should not require --downgrade");
+        assert!(matches!(older.action, InstallAction::Replace));
+        let installed = load_installed_package("reports").expect("older receipt should load");
+        assert_eq!(installed.package_version, "0.5.0");
+        assert_eq!(
+            installed.source.hosted_source_id.as_deref(),
+            Some("source-c")
+        );
+
+        let manifest = std::fs::read_to_string(&manifest_path).expect("manifest should read");
+        std::fs::write(
+            &manifest_path,
+            manifest.replace(
+                r#"project_version = "0.5.0""#,
+                r#"project_version = "9.0.0""#,
+            ),
+        )
+        .expect("manifest should upgrade");
+        let prepared_d =
+            super::prepare_package_root(package_root.clone(), hosted_source("source-d"), None)
+                .expect("newer cross-source package should prepare");
+        let newer = super::materialize_prepared_package(
+            &prepared_d,
+            Some("reports"),
+            true,
+            false,
+            false,
+            false,
+            true,
+        )
+        .expect("newer cross-source identity should remain a replacement");
+        assert!(matches!(newer.action, InstallAction::Replace));
+        let installed = load_installed_package("reports").expect("newer receipt should load");
+        assert_eq!(installed.package_version, "9.0.0");
+        assert_eq!(
+            installed.source.hosted_source_id.as_deref(),
+            Some("source-d")
+        );
         remove_temp_dir_if_present(package_root.as_path());
     }
 
@@ -2964,6 +3921,14 @@ assets = ["schemas/customer.sql"]
         assert_failed_upgrade_restores_previous_install(
             StagedInstallFailurePoint::AfterBackup,
             "failure-after-backup",
+        );
+    }
+
+    #[test]
+    fn package_upgrade_restores_alias_after_backup_inspection_failure() {
+        assert_failed_upgrade_restores_previous_install(
+            StagedInstallFailurePoint::BackupInspection,
+            "failure-backup-inspection",
         );
     }
 
@@ -3117,7 +4082,7 @@ assets = ["schemas/customer.sql"]
         let load_error = load_installed_package("data_integration")
             .expect_err("symlinked alias metadata should not be read");
         assert!(load_error.contains("symbolic link"));
-        let uninstall_error = uninstall_package("data_integration")
+        let uninstall_error = uninstall_package("data_integration", false)
             .expect_err("symlinked alias should not be uninstalled");
         assert!(uninstall_error.contains("symbolic link"));
         assert_eq!(
@@ -3125,6 +4090,31 @@ assets = ["schemas/customer.sql"]
                 .expect("external metadata should remain untouched"),
             "outside"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_alias_lock_rejects_symlinked_package_store_root() {
+        use std::os::unix::fs::symlink;
+
+        let store = PackagesRootGuard::new("package-lock-store-symlink");
+        let packages_root = super::packages_root();
+        let external_store = store.path.join("external-packages");
+        std::fs::create_dir_all(&external_store).expect("external store should exist");
+        std::fs::create_dir_all(
+            packages_root
+                .parent()
+                .expect("package store should have a parent"),
+        )
+        .expect("package store parent should exist");
+        symlink(&external_store, &packages_root).expect("package store symlink should be created");
+
+        let error = super::acquire_package_alias_lock("reports")
+            .err()
+            .expect("symlinked package store must not redirect lock creation");
+        assert!(error.contains("Package store"));
+        assert!(error.contains("symbolic link or reparse point"));
+        assert!(!external_store.join(".locks").exists());
     }
 
     #[test]
@@ -3217,12 +4207,19 @@ assets = ["schemas/customer.sql"]
             ..PackagePermissionProfileDocument::default()
         };
 
-        let error =
-            ensure_hosted_permissions_are_accepted(None, &permissions, "demo", "1.0.0", false)
-                .expect_err("subprocess permission should require explicit acceptance");
+        let source = hosted_source("source-id");
+        let error = ensure_hosted_permissions_are_accepted(
+            None,
+            &source,
+            &permissions,
+            "demo",
+            "1.0.0",
+            false,
+        )
+        .expect_err("subprocess permission should require explicit acceptance");
         assert!(error.contains("--accept-permissions"));
 
-        ensure_hosted_permissions_are_accepted(None, &permissions, "demo", "1.0.0", true)
+        ensure_hosted_permissions_are_accepted(None, &source, &permissions, "demo", "1.0.0", true)
             .expect("explicit acceptance should allow subprocess permission");
     }
 
@@ -3253,14 +4250,34 @@ assets = ["schemas/customer.sql"]
 
         assert!(ensure_hosted_permissions_are_accepted(
             Some(&existing),
+            &existing.source,
             &expanded,
             "demo",
             "1.1.0",
             false,
         )
         .is_err());
-        ensure_hosted_permissions_are_accepted(Some(&existing), &expanded, "demo", "1.1.0", true)
-            .expect("accepted transition should succeed");
+        ensure_hosted_permissions_are_accepted(
+            Some(&existing),
+            &existing.source,
+            &expanded,
+            "demo",
+            "1.1.0",
+            true,
+        )
+        .expect("accepted transition should succeed");
+
+        let different_source = hosted_source("different-source");
+        let reset_error = ensure_hosted_permissions_are_accepted(
+            Some(&existing),
+            &different_source,
+            &expanded,
+            "demo",
+            "1.1.0",
+            false,
+        )
+        .expect_err("a different hosted source must not inherit permission acceptance");
+        assert!(reset_error.contains("--accept-permissions"));
     }
 
     #[test]
@@ -3270,9 +4287,15 @@ assets = ["schemas/customer.sql"]
             ..PackagePermissionProfileDocument::default()
         };
 
-        let error =
-            ensure_hosted_permissions_are_accepted(None, &permissions, "demo", "1.0.0", true)
-                .expect_err("project access must remain unsupported");
+        let error = ensure_hosted_permissions_are_accepted(
+            None,
+            &hosted_source("source-id"),
+            &permissions,
+            "demo",
+            "1.0.0",
+            true,
+        )
+        .expect_err("project access must remain unsupported");
         assert!(error.contains("unsupported project/workspace access"));
         assert!(error.contains("even with `--accept-permissions`"));
     }
@@ -3294,6 +4317,76 @@ assets = ["schemas/customer.sql"]
             super::validate_hosted_response_matches_request(&response, "demo", Some("1.2.2"))
                 .expect_err("wrong exact version should fail");
         assert!(version_error.contains("exact requested version 1.2.2"));
+    }
+
+    #[test]
+    fn hosted_pull_provenance_validates_handle_and_stable_source_id() {
+        let response = serde_json::json!({
+            "owner_handle": "alice",
+            "hosted_source_id": "source-id"
+        });
+        super::validate_hosted_response_provenance(&response, Some("Alice"), None)
+            .expect("normalized requested handle should match response provenance");
+        super::validate_hosted_response_provenance(&response, None, Some("source-id"))
+            .expect("stable source id should match response provenance");
+
+        let owner_error = super::validate_hosted_response_provenance(&response, Some("bob"), None)
+            .expect_err("different owner should fail closed");
+        assert!(owner_error.contains("requested owner"));
+        let source_error =
+            super::validate_hosted_response_provenance(&response, None, Some("other-source"))
+                .expect_err("different source id should fail closed");
+        assert!(source_error.contains("requested source id"));
+    }
+
+    #[test]
+    fn invalid_prepared_archives_remove_their_staging_roots() {
+        let store = PackagesRootGuard::new("invalid-prepared-cleanup");
+        let source_root = temp_package_root("invalid-prepared-cleanup");
+        std::fs::remove_file(source_root.join("cargo-ai-package.toml"))
+            .expect("fixture manifest should be removable");
+        let archive = crate::commands::account::create_package_archive_bytes(&source_root)
+            .expect("invalid package fixture should still archive");
+        std::fs::create_dir_all(&store.path).expect("archive parent should be writable");
+        let archive_path = store.path.join("invalid-package.tar.gz");
+        std::fs::write(&archive_path, &archive).expect("archive fixture should be writable");
+
+        let local_error = super::prepare_archive_source(&archive_path, "invalid-package.tar.gz")
+            .expect_err("archive without a manifest should fail");
+        assert!(local_error.contains("Failed to read package manifest"));
+        assert_eq!(
+            std::fs::read_dir(super::packages_staging_root())
+                .expect("package staging root should remain readable")
+                .count(),
+            0,
+            "local archive validation failure must remove its staging tree"
+        );
+
+        let hosted_root = temp_package_root("invalid-hosted-prepared-cleanup");
+        let hosted_archive = crate::commands::account::create_package_archive_bytes(&hosted_root)
+            .expect("hosted fixture should archive");
+        let response = serde_json::json!({
+            "project": "unexpected_project",
+            "project_version": "1.0.0",
+            "hosted_source_id": "source-id",
+            "hosted_version_id": "version-id",
+            "package_sha256": crate::commands::account::sha256_hex(&hosted_archive),
+            "package_size_bytes": hosted_archive.len(),
+            "package_archive_base64": base64::engine::general_purpose::STANDARD.encode(&hosted_archive)
+        });
+        let hosted_error = super::prepare_hosted_response(&response, None, None)
+            .expect_err("hosted response with mismatched manifest should fail");
+        assert!(hosted_error.contains("did not match package manifest"));
+        assert_eq!(
+            std::fs::read_dir(super::packages_staging_root())
+                .expect("package staging root should remain readable")
+                .count(),
+            0,
+            "hosted response validation failure must remove its staging tree"
+        );
+
+        remove_temp_dir_if_present(source_root.as_path());
+        remove_temp_dir_if_present(hosted_root.as_path());
     }
 
     #[test]
@@ -3352,6 +4445,16 @@ subprocess = "blocked_without_explicit_grant"
     }
 
     #[test]
+    fn package_alias_and_entrypoint_reject_option_like_identifiers() {
+        let alias_error = super::validate_package_alias("-reports")
+            .expect_err("package alias must not be parsed as a CLI option");
+        assert!(alias_error.contains("Start with a letter or number"));
+        let entrypoint_error = super::validate_entrypoint_name("-daily")
+            .expect_err("entrypoint must not be parsed as a CLI option");
+        assert!(entrypoint_error.contains("Start with a letter or number"));
+    }
+
+    #[test]
     fn runtime_context_rejects_unverified_directory_named_package() {
         let _store = PackagesRootGuard::new("runtime-context-identity");
         let package_root = temp_package_root("runtime-context-identity");
@@ -3371,6 +4474,168 @@ subprocess = "blocked_without_explicit_grant"
                 .parent()
                 .expect("fake install root should have parent"),
         );
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn checked_runtime_context_rejects_malformed_receipt_for_exact_installed_root() {
+        let _store = PackagesRootGuard::new("runtime-context-malformed-receipt");
+        let package_root = temp_package_root("runtime-context-malformed-receipt");
+        install_local_package(&local_install_request(&package_root))
+            .expect("package should install");
+        let installed_root = super::installed_package_root("data_integration");
+        let installed_payload_root = installed_root.join(super::INSTALLED_PACKAGE_DIR_NAME);
+        std::fs::write(
+            installed_root.join(super::INSTALL_MANIFEST_FILE_NAME),
+            "not = [valid",
+        )
+        .expect("receipt should be corruptible");
+
+        let error = checked_runtime_context_for_project_root(&installed_payload_root)
+            .expect_err("exact installed package root must fail closed on corrupt metadata");
+        assert!(error.contains("Failed to parse installed package metadata"));
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_runtime_context_classifies_symlink_into_installed_payload() {
+        use std::os::unix::fs::symlink;
+
+        let _store = PackagesRootGuard::new("runtime-context-symlink-alias");
+        let package_root = temp_package_root("runtime-context-symlink-alias");
+        install_local_package(&local_install_request(&package_root))
+            .expect("package should install");
+        let installed_root = super::installed_package_root("data_integration");
+        let installed_payload_root = installed_root.join(super::INSTALLED_PACKAGE_DIR_NAME);
+        let linked_payload_root = std::env::temp_dir().join(format!(
+            "cargo-ai-linked-installed-payload-{}",
+            uuid::Uuid::new_v4()
+        ));
+        symlink(&installed_payload_root, &linked_payload_root)
+            .expect("payload symlink should be created");
+
+        assert!(
+            checked_runtime_context_for_project_root(&linked_payload_root)
+                .expect("valid installed metadata should load through an external symlink")
+                .is_some()
+        );
+        std::fs::write(
+            installed_root.join(super::INSTALL_MANIFEST_FILE_NAME),
+            "not = [valid",
+        )
+        .expect("receipt should be corruptible");
+        let error = checked_runtime_context_for_project_root(&linked_payload_root)
+            .expect_err("a symlink into corrupt installed metadata must fail closed");
+        assert!(error.contains("Failed to parse installed package metadata"));
+
+        std::fs::remove_file(&linked_payload_root).expect("payload symlink should be removable");
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn installed_definition_and_cwd_fail_closed_without_project_metadata() {
+        let _store = PackagesRootGuard::new("runtime-context-missing-project-metadata");
+        let package_root = temp_package_root("runtime-context-missing-project-metadata");
+        install_local_package(&local_install_request(&package_root))
+            .expect("package should install");
+        let installed_payload_root = super::installed_package_root("data_integration")
+            .join(super::INSTALLED_PACKAGE_DIR_NAME);
+        let definition_path = installed_payload_root.join("agents/lookup_account.json");
+        std::fs::remove_file(installed_payload_root.join(".cargo-ai/project.toml"))
+            .expect("installed project metadata should be removable");
+
+        let local_path_error = checked_runtime_context_for_path(&definition_path)
+            .expect_err("a direct installed JSON path must require project metadata");
+        assert!(local_path_error.contains("Installed package project metadata"));
+        let cwd_error = checked_runtime_context_for_path(&installed_payload_root)
+            .expect_err("inline/stdin from an installed payload must require project metadata");
+        assert!(cwd_error.contains("Installed package project metadata"));
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn direct_installed_definition_requires_exported_entrypoint_capability() {
+        let _store = PackagesRootGuard::new("runtime-context-entrypoint-capability");
+        let package_root = temp_package_root("runtime-context-entrypoint-capability");
+        install_local_package(&local_install_request(&package_root))
+            .expect("package should install");
+        let installed_payload_root = super::installed_package_root("data_integration")
+            .join(super::INSTALLED_PACKAGE_DIR_NAME);
+        let runnable = installed_payload_root.join("agents/lookup_account.json");
+        let hatchable = installed_payload_root.join("agents/daily_digest.json");
+        let private = installed_payload_root.join("agents/private.json");
+        std::fs::write(&private, "{}").expect("private definition should exist");
+
+        let checked = super::checked_runtime_lease_for_path(
+            &runnable,
+            Some(super::InstalledEntrypointCapability::Run),
+        )
+        .expect("runnable export should validate")
+        .expect("runnable export should be recognized as installed");
+        assert_eq!(
+            checked.context.current_entrypoint_path.as_deref(),
+            Some("agents/lookup_account.json")
+        );
+        let error = super::checked_runtime_lease_for_path(
+            &runnable,
+            Some(super::InstalledEntrypointCapability::Hatch),
+        )
+        .expect_err("run-only export must not hatch");
+        assert!(error.contains("is not hatchable"));
+        let checked = super::checked_runtime_lease_for_path(
+            &hatchable,
+            Some(super::InstalledEntrypointCapability::Hatch),
+        )
+        .expect("hatchable export should validate")
+        .expect("hatchable export should be recognized as installed");
+        assert_eq!(
+            checked.context.current_entrypoint_path.as_deref(),
+            Some("agents/daily_digest.json")
+        );
+        let error = super::checked_runtime_lease_for_path(
+            &private,
+            Some(super::InstalledEntrypointCapability::Run),
+        )
+        .expect_err("private installed JSON must not run as an exported entrypoint");
+        assert!(error.contains("not an exported package entrypoint"));
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_symlink_to_exported_installed_definition_preserves_entrypoint_identity() {
+        use std::os::unix::fs::symlink;
+
+        let _store = PackagesRootGuard::new("runtime-context-entrypoint-symlink");
+        let package_root = temp_package_root("runtime-context-entrypoint-symlink");
+        install_local_package(&local_install_request(&package_root))
+            .expect("package should install");
+        let installed_definition = super::installed_package_root("data_integration")
+            .join("package/agents/daily_digest.json");
+        let linked_definition = std::env::temp_dir().join(format!(
+            "cargo-ai-linked-installed-definition-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        symlink(&installed_definition, &linked_definition)
+            .expect("definition symlink should be created");
+
+        let checked = super::checked_runtime_lease_for_path(
+            &linked_definition,
+            Some(super::InstalledEntrypointCapability::Hatch),
+        )
+        .expect("symlink to hatchable export should validate")
+        .expect("symlink should be recognized as installed");
+        assert_eq!(checked.context.alias, "data_integration");
+        assert_eq!(
+            checked.context.current_entrypoint_path.as_deref(),
+            Some("agents/daily_digest.json")
+        );
+
+        std::fs::remove_file(linked_definition).expect("definition symlink should be removable");
         remove_temp_dir_if_present(package_root.as_path());
     }
 

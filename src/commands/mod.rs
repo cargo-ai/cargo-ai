@@ -18,6 +18,8 @@ pub mod mail;
 pub mod new;
 #[cfg(feature = "developer-tools")]
 pub mod package;
+pub(crate) mod package_dependencies;
+pub(crate) mod package_lock;
 pub mod packages;
 pub mod profile;
 pub mod run;

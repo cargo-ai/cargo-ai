@@ -12,18 +12,22 @@ struct HatchResolution {
     source: AgentDefinitionSource,
     project_root: Option<PathBuf>,
     installed_source_kind: Option<String>,
+    package_lease: Option<std::sync::Arc<crate::commands::package_lock::PackageAliasLockGuard>>,
 }
 
-fn project_root_for_hatch_source(source: &AgentDefinitionSource) -> Option<PathBuf> {
+fn project_root_for_hatch_source(
+    source: &AgentDefinitionSource,
+) -> Result<Option<PathBuf>, String> {
     match source {
         AgentDefinitionSource::LocalPath(path) => {
-            crate::commands::tools::maybe_find_project_root(Path::new(path))
+            crate::commands::package_dependencies::find_project_root(Path::new(path))
         }
         AgentDefinitionSource::RegistryName(_)
         | AgentDefinitionSource::InlineJson(_)
-        | AgentDefinitionSource::StdinJson(_) => current_lookup_dir("hatch")
-            .ok()
-            .and_then(|dir| crate::commands::tools::maybe_find_project_root(dir.as_path())),
+        | AgentDefinitionSource::StdinJson(_) => {
+            let current_dir = current_lookup_dir("hatch")?;
+            crate::commands::package_dependencies::find_project_root(current_dir.as_path())
+        }
     }
 }
 
@@ -122,11 +126,18 @@ fn resolve_hatch_input_in_dir(
             source,
             project_root: None,
             installed_source_kind: None,
+            package_lease: None,
         });
     }
 
+    let dependency_project_root =
+        crate::commands::package_dependencies::find_project_root(current_dir)?;
     if let Some(resolved) =
-        crate::commands::local_packages::resolve_entrypoint_reference(name_or_path, true)?
+        crate::commands::local_packages::resolve_entrypoint_reference_for_project(
+            name_or_path,
+            true,
+            dependency_project_root.as_deref(),
+        )?
     {
         return Ok(HatchResolution {
             project_name: resolved.entrypoint,
@@ -135,6 +146,7 @@ fn resolve_hatch_input_in_dir(
             ),
             project_root: Some(resolved.package_root),
             installed_source_kind: Some(resolved.source_kind),
+            package_lease: Some(resolved.lease),
         });
     }
 
@@ -153,6 +165,7 @@ fn resolve_hatch_input_in_dir(
         source,
         project_root: None,
         installed_source_kind: None,
+        package_lease: None,
     })
 }
 
@@ -233,7 +246,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     } else {
         None
     };
-    let resolution = match resolve_hatch_input(
+    let mut resolution = match resolve_hatch_input(
         name_or_path,
         sub_m.get_one::<String>("config").map(String::as_str),
         sub_m.get_one::<String>("json").map(String::as_str),
@@ -245,6 +258,64 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             return false;
         }
     };
+    let runtime_context_path = match &resolution.source {
+        AgentDefinitionSource::LocalPath(path) => PathBuf::from(path),
+        AgentDefinitionSource::RegistryName(_)
+        | AgentDefinitionSource::InlineJson(_)
+        | AgentDefinitionSource::StdinJson(_) => match current_lookup_dir("hatch") {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("x {error}");
+                return false;
+            }
+        },
+    };
+    let required_capability = matches!(resolution.source, AgentDefinitionSource::LocalPath(_))
+        .then_some(crate::commands::local_packages::InstalledEntrypointCapability::Hatch);
+    let checked_package_runtime =
+        match crate::commands::local_packages::checked_runtime_lease_for_path(
+            runtime_context_path.as_path(),
+            required_capability,
+        ) {
+            Ok(checked) => checked,
+            Err(error) => {
+                eprintln!("x {error}");
+                return false;
+            }
+        };
+    if let Some(checked) = checked_package_runtime {
+        let caller_project_root = match current_lookup_dir("hatch").and_then(|current_dir| {
+            crate::commands::package_dependencies::find_project_root(current_dir.as_path())
+        }) {
+            Ok(project_root) => project_root,
+            Err(error) => {
+                eprintln!("x {error}");
+                return false;
+            }
+        };
+        if let Some(caller_project_root) = caller_project_root.as_deref() {
+            let same_project = std::fs::canonicalize(caller_project_root)
+                .ok()
+                .zip(std::fs::canonicalize(&checked.context.package_payload_root).ok())
+                .map(|(caller, payload)| caller == payload)
+                .unwrap_or(false);
+            if !same_project {
+                if let Err(error) =
+                    crate::commands::local_packages::validate_installed_alias_dependency_for_project(
+                        checked.context.alias.as_str(),
+                        caller_project_root,
+                    )
+                {
+                    eprintln!("x {error}");
+                    return false;
+                }
+            }
+        }
+        resolution.project_root = Some(checked.context.package_payload_root);
+        resolution.installed_source_kind = Some(checked.context.source_kind);
+        resolution.package_lease = Some(checked.lease);
+    }
+    let _package_lease = resolution.package_lease.clone();
     let allow_hosted_code = sub_m.get_flag("allow_hosted_code");
     if let Err(error) = ensure_hosted_hatch_acknowledged(
         resolution.installed_source_kind.as_deref(),
@@ -285,11 +356,18 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                 return false;
             }
         };
+        let audit_project_root = match resolution.project_root.clone() {
+            Some(project_root) => Some(project_root),
+            None => match project_root_for_hatch_source(&resolution.source) {
+                Ok(project_root) => project_root,
+                Err(error) => {
+                    println!("x {error}");
+                    return false;
+                }
+            },
+        };
         let resolver = crate::commands::tools::ToolResolver::new(
-            resolution
-                .project_root
-                .clone()
-                .or_else(|| project_root_for_hatch_source(&resolution.source)),
+            audit_project_root,
             build_target.cache_key_target(),
         );
         match crate::commands::tools::audit_actions_for_tools(

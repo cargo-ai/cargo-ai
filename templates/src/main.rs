@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,6 +49,8 @@ const TOOL_PROTOCOL_VERSION: u32 = 1;
 const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str =
     "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
 const ACTION_LANE_OUTPUT_BUFFER_LIMIT: usize = 6;
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 tokio::task_local! {
     static ACTION_OUTPUT: ActionOutput;
@@ -1053,21 +1057,61 @@ fn load_project_runtime_defaults(
     Ok(metadata.runtime.and_then(|runtime| runtime.defaults))
 }
 
-fn maybe_find_project_root(start: &Path) -> Option<PathBuf> {
-    let mut current = if start.is_dir() {
+fn maybe_find_project_root(start: &Path) -> Result<Option<PathBuf>, String> {
+    let start_metadata = fs::metadata(start).map_err(|error| {
+        format!(
+            "Failed to inspect project search path '{}': {error}",
+            start.display()
+        )
+    })?;
+    let mut current = if start_metadata.is_dir() {
         start.to_path_buf()
     } else {
-        start.parent()?.to_path_buf()
+        let Some(parent) = start.parent() else {
+            return Ok(None);
+        };
+        parent.to_path_buf()
     };
 
     loop {
-        if current.join(PROJECT_METADATA_RELATIVE_PATH).exists() {
-            return Some(current);
+        let metadata_path = current.join(PROJECT_METADATA_RELATIVE_PATH);
+        match fs::symlink_metadata(&metadata_path) {
+            Ok(metadata) if metadata_is_link_like(&metadata) => {
+                return Err(format!(
+                    "Project metadata '{}' must not be a symbolic link or reparse point.",
+                    metadata_path.display()
+                ));
+            }
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(format!(
+                    "Project metadata '{}' must be a regular file.",
+                    metadata_path.display()
+                ));
+            }
+            Ok(_) => return Ok(Some(current)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect project metadata '{}': {error}",
+                    metadata_path.display()
+                ));
+            }
         }
         if !current.pop() {
-            return None;
+            return Ok(None);
         }
     }
+}
+
+#[cfg(windows)]
+fn metadata_is_link_like(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_link_like(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 fn bundled_tools_root_from_executable() -> Option<PathBuf> {
@@ -2885,9 +2929,16 @@ fn parse_runtime_var_value(
 async fn main() {
     let cmd_args = args::build_cli();
     let config = load_config();
-    let project_root = std::env::current_dir()
-        .ok()
-        .and_then(|dir| maybe_find_project_root(dir.as_path()));
+    let project_root = match std::env::current_dir()
+        .map_err(|error| format!("Failed to inspect current project directory: {error}"))
+        .and_then(|dir| maybe_find_project_root(dir.as_path()))
+    {
+        Ok(project_root) => project_root,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            std::process::exit(1);
+        }
+    };
     let full_run_started_at = Instant::now();
     let mut usage_agent_guard: Option<usage_log::UsageAgentRunGuard> = None;
     macro_rules! exit_failure {
@@ -3465,10 +3516,12 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_action_render_mode_for_capability, resolve_loaded_profile, ActionOutputMode,
-        LoadedProfileKind, RequestedActionRenderMode,
+        package_child_project_root_from, resolve_action_render_mode_for_capability,
+        resolve_loaded_profile, validate_agent_step_target, ActionOutputMode, LoadedProfileKind,
+        RequestedActionRenderMode,
     };
     use crate::config::schema::{Config, OpenAiAuth, Profile, ProfileAuthMode, WebResources};
+    use std::fs;
 
     fn profile(name: &str) -> Profile {
         Profile {
@@ -3492,6 +3545,123 @@ mod tests {
             openai_auth: None::<OpenAiAuth>,
             web_resources: None::<WebResources>,
         }
+    }
+
+    #[test]
+    fn hatched_package_child_fails_closed_without_declaring_project() {
+        let root = std::env::temp_dir().join(format!(
+            "cargo-ai-hatched-dependency-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("temporary directory should exist");
+
+        let error =
+            package_child_project_root_from(&root, "reports::daily", "invoke_dependency")
+                .expect_err("moved hatched binary must not resolve an unbound package child");
+        assert!(error.contains("fail closed"));
+
+        fs::create_dir_all(root.join(".cargo-ai")).expect("metadata directory should exist");
+        fs::write(
+            root.join(".cargo-ai/project.toml"),
+            "format_version = 1\n",
+        )
+        .expect("project metadata should be written");
+        assert_eq!(
+            package_child_project_root_from(&root, "reports::daily", "invoke_dependency")
+                .expect("an undeclared local alias should defer policy to Cargo AI"),
+            root
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hatched_package_child_rejects_option_like_identifier() {
+        let error = validate_agent_step_target("-reports::daily", "invoke_dependency")
+            .expect_err("option-like alias must not reach spawned Cargo AI");
+        assert!(error.contains("start with a letter or number"));
+    }
+
+    #[test]
+    fn hatched_project_discovery_rejects_nearest_directory_marker() {
+        let outer = std::env::temp_dir().join(format!(
+            "cargo-ai-hatched-outer-project-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let inner = outer.join("nested");
+        fs::create_dir_all(outer.join(".cargo-ai")).expect("outer metadata dir should exist");
+        fs::write(outer.join(".cargo-ai/project.toml"), "format_version = 1\n")
+            .expect("outer metadata should exist");
+        fs::create_dir_all(inner.join(".cargo-ai/project.toml"))
+            .expect("invalid inner marker should exist");
+
+        let error = package_child_project_root_from(
+            &inner,
+            "reports::daily",
+            "invoke_dependency",
+        )
+        .expect_err("invalid nearest marker must not fall through to the outer project");
+        assert!(error.contains("must be a regular file"));
+        let _ = fs::remove_dir_all(outer);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hatched_project_discovery_rejects_nearest_symlink_marker() {
+        use std::os::unix::fs::symlink;
+
+        let outer = std::env::temp_dir().join(format!(
+            "cargo-ai-hatched-symlink-project-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let inner = outer.join("nested");
+        fs::create_dir_all(outer.join(".cargo-ai")).expect("outer metadata dir should exist");
+        fs::write(outer.join(".cargo-ai/project.toml"), "format_version = 1\n")
+            .expect("outer metadata should exist");
+        fs::create_dir_all(inner.join(".cargo-ai")).expect("inner metadata dir should exist");
+        symlink(
+            outer.join(".cargo-ai/project.toml"),
+            inner.join(".cargo-ai/project.toml"),
+        )
+        .expect("inner marker symlink should exist");
+
+        let error = package_child_project_root_from(
+            &inner,
+            "reports::daily",
+            "invoke_dependency",
+        )
+        .expect_err("symlink nearest marker must not fall through to the outer project");
+        assert!(error.contains("must not be a symbolic link"));
+        let _ = fs::remove_dir_all(outer);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hatched_project_discovery_rejects_nearest_dangling_marker() {
+        use std::os::unix::fs::symlink;
+
+        let outer = std::env::temp_dir().join(format!(
+            "cargo-ai-hatched-dangling-project-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let inner = outer.join("nested");
+        fs::create_dir_all(outer.join(".cargo-ai")).expect("outer metadata dir should exist");
+        fs::write(outer.join(".cargo-ai/project.toml"), "format_version = 1\n")
+            .expect("outer metadata should exist");
+        fs::create_dir_all(inner.join(".cargo-ai")).expect("inner metadata dir should exist");
+        symlink(
+            inner.join("missing-project.toml"),
+            inner.join(".cargo-ai/project.toml"),
+        )
+        .expect("dangling inner marker should exist");
+
+        let error = package_child_project_root_from(
+            &inner,
+            "reports::daily",
+            "invoke_dependency",
+        )
+        .expect_err("dangling nearest marker must not fall through to the outer project");
+        assert!(error.contains("must not be a symbolic link"));
+        let _ = fs::remove_dir_all(outer);
     }
 
     #[test]
@@ -4971,6 +5141,9 @@ async fn run_agent_step(
 
     let invocation = resolve_child_artifact_invocation(artifact, action_name)?;
     let mut command = child_artifact_command(&invocation, artifact);
+    if artifact.split_once("::").is_some() {
+        command.current_dir(package_child_project_root(artifact, action_name)?);
+    }
     if let Some(action_execution_override) = action_execution_override {
         command.arg("--action-execution");
         command.arg(match action_execution_override {
@@ -5184,6 +5357,20 @@ fn resolve_child_artifact_invocation(
     action_name: &str,
 ) -> Result<ChildArtifactInvocation, String> {
     validate_agent_step_target(artifact, action_name)?;
+    if artifact.split_once("::").is_some() {
+        package_child_project_root(artifact, action_name)?;
+        let cargo_ai_exists = command_exists_on_path("cargo-ai");
+        if command_exists_on_path("cargo") && cargo_ai_exists {
+            return Ok(ChildArtifactInvocation::CargoSubcommand);
+        }
+        if cargo_ai_exists {
+            return Ok(ChildArtifactInvocation::StandaloneCargoAi);
+        }
+        return Err(format!(
+            "Action '{}' package child '{}' requires Cargo AI to be available as `cargo ai` or `cargo-ai` on PATH so the declaring project's package dependency can be validated.",
+            action_name, artifact
+        ));
+    }
     let artifact_path = Path::new(artifact);
     if !artifact_path.exists() {
         return Err(format!(
@@ -5210,6 +5397,30 @@ fn resolve_child_artifact_invocation(
         "Action '{}' agent step JSON artifact '{}' requires Cargo AI to be available as `cargo ai` or `cargo-ai` on PATH.",
         action_name, artifact
     ))
+}
+
+fn package_child_project_root(artifact: &str, action_name: &str) -> Result<PathBuf, String> {
+    let current_dir = std::env::current_dir().map_err(|error| {
+        format!(
+            "Action '{}' package child '{}' could not inspect the current directory: {}",
+            action_name, artifact, error
+        )
+    })?;
+    package_child_project_root_from(&current_dir, artifact, action_name)
+}
+
+fn package_child_project_root_from(
+    current_dir: &Path,
+    artifact: &str,
+    action_name: &str,
+) -> Result<PathBuf, String> {
+    let project_root = maybe_find_project_root(current_dir)?.ok_or_else(|| {
+        format!(
+            "Action '{}' package child '{}' requires execution inside a Cargo AI project. Hatched binaries fail closed when that declaring project context is unavailable.",
+            action_name, artifact
+        )
+    })?;
+    Ok(project_root)
 }
 
 fn child_artifact_command(
@@ -6347,6 +6558,25 @@ fn validate_agent_action_depth(
 }
 
 fn validate_agent_step_target(agent: &str, action_name: &str) -> Result<(), String> {
+    if let Some((alias, entrypoint)) = agent.split_once("::") {
+        let valid_identifier = |value: &str| {
+            value
+                .chars()
+                .next()
+                .map(|ch| ch.is_ascii_alphanumeric())
+                .unwrap_or(false)
+                && value
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        };
+        if valid_identifier(alias) && valid_identifier(entrypoint) {
+            return Ok(());
+        }
+        return Err(format!(
+            "Action '{}' package child '{}' must use `alias::entrypoint`; each identifier must start with a letter or number and then use only letters, numbers, '-' or '_'.",
+            action_name, agent
+        ));
+    }
     let agent_path = Path::new(agent);
     if agent.trim().is_empty() {
         return Err(format!(
