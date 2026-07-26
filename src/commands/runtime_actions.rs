@@ -7301,7 +7301,7 @@ auth_mode = "{auth_mode}"
     #[test]
     fn hosted_cross_package_child_checks_subprocess_permission_before_resolution() {
         let install_root = std::env::temp_dir().join(format!(
-            "cai2104-hosted-package-dependency-permission-{}",
+            "hosted-package-dependency-permission-{}",
             uuid::Uuid::new_v4()
         ));
         let blocked =
@@ -7320,7 +7320,7 @@ auth_mode = "{auth_mode}"
     #[test]
     fn package_child_uses_declaring_package_payload_as_project_root() {
         let install_root = std::env::temp_dir().join(format!(
-            "cai2104-hosted-package-dependency-root-{}",
+            "hosted-package-dependency-root-{}",
             uuid::Uuid::new_v4()
         ));
         let context = hosted_package_context(install_root.as_path(), "allowed");
@@ -7338,7 +7338,7 @@ auth_mode = "{auth_mode}"
     #[test]
     fn package_child_fails_closed_without_declaring_project_context() {
         let arbitrary_root = std::env::temp_dir().join(format!(
-            "cai2104-package-dependency-arbitrary-cwd-{}",
+            "package-dependency-arbitrary-cwd-{}",
             uuid::Uuid::new_v4()
         ));
         fs::create_dir_all(&arbitrary_root).expect("arbitrary directory should exist");
@@ -7358,11 +7358,11 @@ auth_mode = "{auth_mode}"
     #[test]
     fn package_child_prefers_absolute_definition_project_over_process_cwd() {
         let project_a = std::env::temp_dir().join(format!(
-            "cai2104-declaring-project-a-{}",
+            "declaring-project-definition-root-{}",
             uuid::Uuid::new_v4()
         ));
         let project_b = std::env::temp_dir().join(format!(
-            "cai2104-process-cwd-project-b-{}",
+            "declaring-project-process-cwd-{}",
             uuid::Uuid::new_v4()
         ));
         for root in [&project_a, &project_b] {
@@ -7388,7 +7388,7 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn declaring_project_scope_can_be_propagated_into_spawned_tasks() {
         let project_root = std::env::temp_dir().join(format!(
-            "cai2104-declaring-project-task-local-{}",
+            "declaring-project-task-local-{}",
             uuid::Uuid::new_v4()
         ));
         let expected = project_root.clone();

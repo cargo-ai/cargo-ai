@@ -1871,6 +1871,15 @@ fn validate_child_agent_target(raw_agent: &str, path: &str) -> Result<(), String
         ));
     }
 
+    if let Some((alias, entrypoint)) = agent.split_once("::") {
+        if is_package_child_identifier(alias) && is_package_child_identifier(entrypoint) {
+            return Ok(());
+        }
+        return Err(format!(
+            "{path}: package child references must use `alias::entrypoint`; each identifier must start with a letter or number and then use only letters, numbers, '-' or '_'"
+        ));
+    }
+
     let candidate = Path::new(agent);
     if candidate.is_absolute() {
         return Err(format!(
@@ -1901,6 +1910,17 @@ fn validate_child_agent_target(raw_agent: &str, path: &str) -> Result<(), String
     }
 
     Ok(())
+}
+
+fn is_package_child_identifier(value: &str) -> bool {
+    value
+        .chars()
+        .next()
+        .map(|ch| ch.is_ascii_alphanumeric())
+        .unwrap_or(false)
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
 
 fn validate_definition_owned_local_path(
@@ -2776,6 +2796,69 @@ mod tests {
             definition.actions()[0].run[0].agent.as_deref(),
             Some("./childagent")
         );
+    }
+
+    #[test]
+    fn matches_codegen_for_declared_package_child_reference_targets() {
+        let cfg = config_with(
+            r#""ok": { "type": "boolean" }"#,
+            r#"[
+          {
+            "name": "invoke_child",
+            "logic": { "==": [ { "var": "ok" }, true ] },
+            "run": [
+              { "kind": "agent", "artifact": "reports::daily-summary" }
+            ]
+          }
+        ]"#,
+        );
+
+        let definition = assert_runtime_and_codegen_accept(&cfg);
+        assert_eq!(
+            definition.actions()[0].run[0].agent.as_deref(),
+            Some("reports::daily-summary")
+        );
+    }
+
+    #[test]
+    fn matches_codegen_for_rejecting_malformed_package_child_references() {
+        for target in [
+            "reports::daily::extra",
+            "-reports::daily",
+            "reports::-daily",
+            "reports::daily/summary",
+            "reports::",
+            "::daily",
+        ] {
+            let cfg = config_with(
+                r#""ok": { "type": "boolean" }"#,
+                format!(
+                    r#"[
+          {{
+            "name": "invoke_child",
+            "logic": {{ "==": [ {{ "var": "ok" }}, true ] }},
+            "run": [
+              {{ "kind": "agent", "artifact": {target} }}
+            ]
+          }}
+        ]"#,
+                    target = serde_json::to_string(target)
+                        .expect("package child reference should encode as JSON")
+                )
+                .as_str(),
+            );
+
+            let (build_error, runtime_error) = assert_runtime_and_codegen_reject(&cfg);
+
+            assert!(
+                build_error.contains("alias::entrypoint"),
+                "unexpected build-time error for {target}: {build_error}"
+            );
+            assert!(
+                runtime_error.contains("alias::entrypoint"),
+                "unexpected runtime error for {target}: {runtime_error}"
+            );
+        }
     }
 
     #[test]

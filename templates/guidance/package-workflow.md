@@ -109,7 +109,7 @@ $CARGO_AI_HOME/packages/<alias>/
 
 `install.toml` is Cargo AI-owned provenance. `package/` is the verified payload for the active exact version. `data/` is package-owned persistent local state.
 
-Hosted update and rollback rematerialize `install.toml` and `package/`, then preserve `data/`. Install, update, rollback, and uninstall serialize each alias with an operating-system lock that is released automatically if the process exits. Do not add publisher-authored migrations or total-refresh behavior unless that is part of a separate, explicit story.
+Hosted update and rollback rematerialize `install.toml` and `package/`, then preserve `data/`. Install, update, rollback, and uninstall serialize each alias with an operating-system lock that is released automatically if the process exits. Publisher-authored migrations and total-refresh replacement are not supported.
 
 Uninstall removes `install.toml`, `package/`, and `data/`. When `data/` is nonempty, first back up or export it and then confirm permanent deletion explicitly:
 
