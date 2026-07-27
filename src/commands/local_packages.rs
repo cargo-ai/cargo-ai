@@ -5,7 +5,7 @@ use clap::ArgMatches;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{btree_map::Entry, BTreeMap};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 #[cfg(windows)]
@@ -20,6 +20,8 @@ const PACKAGE_MANIFEST_FILE_NAME: &str = "cargo-ai-package.toml";
 const INSTALL_MANIFEST_FILE_NAME: &str = "install.toml";
 const INSTALLED_PACKAGE_DIR_NAME: &str = "package";
 const INSTALLED_PACKAGE_DATA_DIR_NAME: &str = "data";
+const INSTALLED_PACKAGE_RUNTIME_DIR_NAME: &str = "runtime";
+const INSTALLED_PACKAGE_RUNTIME_TOOLS_DIR_NAME: &str = "tools";
 const MAX_PORTABLE_RELATIVE_PATH_BYTES: usize = 1_024;
 const MAX_PACKAGE_ARCHIVE_COMPRESSED_BYTES: usize = 10 * 1024 * 1024;
 const MAX_PACKAGE_ARCHIVE_BASE64_BYTES: usize =
@@ -628,6 +630,8 @@ fn materialize_prepared_package_under_lock(
     let package_name = required_package_name(&prepared.manifest)?;
     let package_version = required_package_version(&prepared.manifest)?;
     validate_permission_profile(&prepared.manifest.permissions)?;
+    let materialize_source_tools =
+        prepared.source.kind != "hosted" || prepared.manifest.permissions.subprocess == "allowed";
     let entrypoints = build_entrypoints(&prepared.manifest, &prepared.package_root)?;
     let existing = load_installed_package_if_present(alias)?;
     ensure_source_identity_replacement_is_explicit(
@@ -661,6 +665,15 @@ fn materialize_prepared_package_under_lock(
             downgrade,
         )?
     };
+    if matches!(action, InstallAction::Noop)
+        && !installed_package_runtime_is_complete(
+            alias,
+            prepared.manifest.tools.as_slice(),
+            materialize_source_tools,
+        )?
+    {
+        action = InstallAction::Replace;
+    }
     if matches!(action, InstallAction::Noop) && existing.is_some() && delete_data {
         action = InstallAction::Replace;
     }
@@ -691,6 +704,8 @@ fn materialize_prepared_package_under_lock(
             &prepared.package_root,
             &document,
             preserve_existing_data,
+            prepared.manifest.tools.as_slice(),
+            materialize_source_tools,
         )?;
     }
 
@@ -785,7 +800,7 @@ async fn update_hosted_package(
         )
     })?;
 
-    if resolved <= installed_version {
+    if resolved < installed_version {
         cleanup_prepared_package(&prepared);
         println!(
             "✓ Hosted package `{}` is already up to date at version {}.",
@@ -811,10 +826,22 @@ async fn update_hosted_package(
         }
     };
     cleanup_prepared_package(&prepared);
-    println!(
-        "✓ Hosted package `{}` updated to version {}.",
-        materialized.alias, materialized.package_version
-    );
+    if matches!(materialized.action, InstallAction::Noop) {
+        println!(
+            "✓ Hosted package `{}` is already up to date at version {}.",
+            materialized.alias, materialized.package_version
+        );
+    } else if resolved == installed_version {
+        println!(
+            "✓ Hosted package `{}` runtime repaired at version {}.",
+            materialized.alias, materialized.package_version
+        );
+    } else {
+        println!(
+            "✓ Hosted package `{}` updated to version {}.",
+            materialized.alias, materialized.package_version
+        );
+    }
     Ok(materialized.action)
 }
 
@@ -836,13 +863,6 @@ async fn rollback_hosted_package(
     let requested_version = Version::parse(target_version).map_err(|error| {
         format!("Hosted package rollback version '{target_version}' is not valid semver: {error}")
     })?;
-    if requested_version == installed_version {
-        println!(
-            "✓ Hosted package `{}` is already installed at version {}.",
-            alias, target_version
-        );
-        return Ok(InstallAction::Noop);
-    }
     if requested_version > installed_version {
         return Err(format!(
             "Rollback target {} is newer than installed version {}. Use `cargo ai packages update {}` to move forward.",
@@ -881,10 +901,22 @@ async fn rollback_hosted_package(
         }
     };
     cleanup_prepared_package(&prepared);
-    println!(
-        "✓ Hosted package `{}` rolled back to version {}.",
-        materialized.alias, materialized.package_version
-    );
+    if matches!(materialized.action, InstallAction::Noop) {
+        println!(
+            "✓ Hosted package `{}` is already installed at version {}.",
+            materialized.alias, materialized.package_version
+        );
+    } else if requested_version == installed_version {
+        println!(
+            "✓ Hosted package `{}` runtime repaired at version {}.",
+            materialized.alias, materialized.package_version
+        );
+    } else {
+        println!(
+            "✓ Hosted package `{}` rolled back to version {}.",
+            materialized.alias, materialized.package_version
+        );
+    }
     Ok(materialized.action)
 }
 
@@ -1813,7 +1845,7 @@ fn metadata_is_link_like(metadata: &fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
-fn resolve_existing_path_under_root(
+pub(crate) fn resolve_existing_path_under_root(
     root: &Path,
     relative_path: &Path,
     label: &str,
@@ -2128,6 +2160,86 @@ pub(crate) fn runtime_context_for_resolved_entrypoint(
     Ok(context)
 }
 
+pub(crate) fn resolve_package_runtime_tools_root(
+    context: &InstalledPackageRuntimeContext,
+) -> Result<Option<PathBuf>, String> {
+    let package_install_root = context.package_payload_root.parent().ok_or_else(|| {
+        format!(
+            "Package `{}` payload root '{}' has no installed alias parent.",
+            context.alias,
+            context.package_payload_root.display()
+        )
+    })?;
+    let data_install_root = context.package_data_root.parent().ok_or_else(|| {
+        format!(
+            "Package `{}` data root '{}' has no installed alias parent.",
+            context.alias,
+            context.package_data_root.display()
+        )
+    })?;
+    if package_install_root != data_install_root {
+        return Err(format!(
+            "Package `{}` payload and data roots do not share the same installed alias root.",
+            context.alias
+        ));
+    }
+    let runtime_root = package_install_root.join(INSTALLED_PACKAGE_RUNTIME_DIR_NAME);
+    match fs::symlink_metadata(&runtime_root) {
+        Ok(metadata) if metadata_is_link_like(&metadata) || !metadata.is_dir() => {
+            return Err(format!(
+                "Package `{}` runtime root '{}' must be a real directory and not a symbolic link or reparse point.",
+                context.alias,
+                runtime_root.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect package `{}` runtime root '{}': {}",
+                context.alias,
+                runtime_root.display(),
+                error
+            ));
+        }
+    }
+    let candidate_runtime_tools_root = runtime_root.join(INSTALLED_PACKAGE_RUNTIME_TOOLS_DIR_NAME);
+    match fs::symlink_metadata(&candidate_runtime_tools_root) {
+        Ok(metadata) if metadata_is_link_like(&metadata) || !metadata.is_dir() => {
+            return Err(format!(
+                "Package `{}` runtime tools root '{}' must be a real directory and not a symbolic link or reparse point.",
+                context.alias,
+                candidate_runtime_tools_root.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect package `{}` runtime tools root '{}': {}",
+                context.alias,
+                candidate_runtime_tools_root.display(),
+                error
+            ));
+        }
+    }
+    let runtime_tools_root = resolve_existing_path_under_root(
+        package_install_root,
+        Path::new(INSTALLED_PACKAGE_RUNTIME_DIR_NAME)
+            .join(INSTALLED_PACKAGE_RUNTIME_TOOLS_DIR_NAME)
+            .as_path(),
+        format!("Package `{}` runtime tools", context.alias).as_str(),
+    )?;
+    if !runtime_tools_root.is_dir() {
+        return Err(format!(
+            "Package `{}` runtime tools root '{}' must be a real directory.",
+            context.alias,
+            runtime_tools_root.display()
+        ));
+    }
+    Ok(Some(runtime_tools_root))
+}
+
 pub(crate) fn resolve_package_payload_path(
     context: &InstalledPackageRuntimeContext,
     relative_path: &Path,
@@ -2249,12 +2361,19 @@ pub(crate) fn resolve_package_data_path(
 }
 
 fn permission_profile_lines(permissions: &PackagePermissionProfileDocument) -> Vec<String> {
-    vec![
+    let mut lines = vec![
         format!("package payload: {}", permissions.package_payload),
         format!("package data:    {}", permissions.package_data),
         format!("project writes:  {}", permissions.project_workspace),
         format!("subprocess:      {}", permissions.subprocess),
-    ]
+    ];
+    if permissions.subprocess == "allowed" {
+        lines.push(
+            "warning: hosted `cargo build` may execute publisher build scripts and proc macros as unsandboxed code with the current user's ambient filesystem, environment, and network authority; install only trusted packages."
+                .to_string(),
+        );
+    }
+    lines
 }
 
 fn print_permission_summary(permissions: &PackagePermissionProfileDocument) {
@@ -2418,11 +2537,230 @@ fn validate_hosted_response_matches_manifest(
     Ok(())
 }
 
+fn installed_package_runtime_is_complete(
+    alias: &str,
+    declared_tools: &[String],
+    materialized_tools_required: bool,
+) -> Result<bool, String> {
+    let install_root = installed_package_root(alias);
+    let runtime_root = install_root.join(INSTALLED_PACKAGE_RUNTIME_DIR_NAME);
+    let runtime_metadata = match fs::symlink_metadata(&runtime_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect package alias `{alias}` runtime root '{}': {}",
+                runtime_root.display(),
+                error
+            ));
+        }
+    };
+    if metadata_is_link_like(&runtime_metadata) || !runtime_metadata.is_dir() {
+        return Err(format!(
+            "Package alias `{alias}` runtime root '{}' must be a real directory and not a symbolic link or reparse point.",
+            runtime_root.display()
+        ));
+    }
+    let runtime_tools_root = runtime_root.join(INSTALLED_PACKAGE_RUNTIME_TOOLS_DIR_NAME);
+    let runtime_tools_metadata = match fs::symlink_metadata(&runtime_tools_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect package alias `{alias}` runtime tools root '{}': {}",
+                runtime_tools_root.display(),
+                error
+            ));
+        }
+    };
+    if metadata_is_link_like(&runtime_tools_metadata) || !runtime_tools_metadata.is_dir() {
+        return Err(format!(
+            "Package alias `{alias}` runtime tools root '{}' must be a real directory and not a symbolic link or reparse point.",
+            runtime_tools_root.display()
+        ));
+    }
+    ensure_runtime_tree_is_safe(runtime_tools_root.as_path(), alias)?;
+    if !materialized_tools_required {
+        return fs::read_dir(&runtime_tools_root)
+            .map_err(|error| {
+                format!(
+                    "Failed to inspect package alias `{alias}` runtime tools root '{}': {}",
+                    runtime_tools_root.display(),
+                    error
+                )
+            })?
+            .next()
+            .transpose()
+            .map(|entry| entry.is_none())
+            .map_err(|error| {
+                format!(
+                    "Failed to inspect an entry under package alias `{alias}` runtime tools root '{}': {}",
+                    runtime_tools_root.display(),
+                    error
+                )
+            });
+    }
+
+    for tool_name in declared_tools {
+        let tool_relative = normalize_portable_relative_path(
+            tool_name,
+            format!("Package alias `{alias}` runtime tool name").as_str(),
+        )?;
+        if tool_relative.components().count() != 1 {
+            return Err(format!(
+                "Package alias `{alias}` runtime tool name '{}' must be a single portable path component.",
+                tool_name
+            ));
+        }
+        let tool_root = runtime_tools_root.join(tool_relative);
+        let tool_metadata = match fs::symlink_metadata(&tool_root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect package alias `{alias}` runtime tool '{}' root '{}': {}",
+                    tool_name,
+                    tool_root.display(),
+                    error
+                ));
+            }
+        };
+        if metadata_is_link_like(&tool_metadata) {
+            return Err(format!(
+                "Package alias `{alias}` runtime tool '{}' root '{}' must not be a symbolic link or reparse point.",
+                tool_name,
+                tool_root.display()
+            ));
+        }
+        if !tool_metadata.is_dir() {
+            return Ok(false);
+        }
+        let manifest_path = tool_root.join("tool.json");
+        let manifest_metadata = match fs::symlink_metadata(&manifest_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect package alias `{alias}` runtime tool '{}' metadata '{}': {}",
+                    tool_name,
+                    manifest_path.display(),
+                    error
+                ));
+            }
+        };
+        if metadata_is_link_like(&manifest_metadata) {
+            return Err(format!(
+                "Package alias `{alias}` runtime tool '{}' metadata '{}' must not be a symbolic link or reparse point.",
+                tool_name,
+                manifest_path.display()
+            ));
+        }
+        if !manifest_metadata.is_file() {
+            return Ok(false);
+        }
+        if !runtime_tool_manifest_artifact_paths_are_safe(
+            manifest_path.as_path(),
+            alias,
+            tool_name,
+        )? {
+            return Ok(false);
+        }
+    }
+    match crate::commands::tools::validate_package_runtime_tools(
+        runtime_tools_root.as_path(),
+        declared_tools,
+        crate::cargo_ai_metadata::current_build_target().as_str(),
+    ) {
+        Ok(()) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
+fn ensure_runtime_tree_is_safe(runtime_tools_root: &Path, alias: &str) -> Result<(), String> {
+    let entries = fs::read_dir(runtime_tools_root).map_err(|error| {
+        format!(
+            "Failed to inspect package alias `{alias}` runtime tools tree '{}': {}",
+            runtime_tools_root.display(),
+            error
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "Failed to inspect an entry under package alias `{alias}` runtime tools tree '{}': {}",
+                runtime_tools_root.display(),
+                error
+            )
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            format!(
+                "Failed to inspect package alias `{alias}` runtime path '{}': {}",
+                path.display(),
+                error
+            )
+        })?;
+        if metadata_is_link_like(&metadata) {
+            return Err(format!(
+                "Package alias `{alias}` runtime path '{}' must not be a symbolic link or reparse point.",
+                path.display()
+            ));
+        }
+        if metadata.is_dir() {
+            ensure_runtime_tree_is_safe(path.as_path(), alias)?;
+        } else if !metadata.is_file() {
+            return Err(format!(
+                "Package alias `{alias}` runtime path '{}' must be a regular file or directory.",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn runtime_tool_manifest_artifact_paths_are_safe(
+    manifest_path: &Path,
+    alias: &str,
+    tool_name: &str,
+) -> Result<bool, String> {
+    let contents = fs::read_to_string(manifest_path).map_err(|error| {
+        format!(
+            "Failed to read package alias `{alias}` runtime tool '{}' metadata '{}': {}",
+            tool_name,
+            manifest_path.display(),
+            error
+        )
+    })?;
+    let manifest: Value = match serde_json::from_str(contents.as_str()) {
+        Ok(manifest) => manifest,
+        Err(_) => return Ok(false),
+    };
+    let Some(artifacts) = manifest.get("artifacts").and_then(Value::as_object) else {
+        return Ok(false);
+    };
+    for artifact in artifacts.values() {
+        let Some(path) = artifact
+            .as_object()
+            .and_then(|artifact| artifact.get("path"))
+            .and_then(Value::as_str)
+        else {
+            return Ok(false);
+        };
+        normalize_portable_relative_path(
+            path,
+            format!("Package alias `{alias}` runtime tool '{tool_name}' artifact path").as_str(),
+        )?;
+    }
+    Ok(true)
+}
+
 fn write_staged_install(
     alias: &str,
     package_root: &Path,
     document: &InstalledPackageDocument,
     preserve_existing_data: bool,
+    declared_tools: &[String],
+    materialize_source_tools: bool,
 ) -> Result<(), String> {
     let packages_root = packages_root();
     let packages_staging_root = ensure_packages_staging_root()?;
@@ -2471,6 +2809,68 @@ fn write_staged_install(
             ));
         }
         copy_directory_recursive(package_root, staged_package_root.as_path())?;
+        let staged_archive_before_materialization =
+            crate::commands::account::create_package_archive_bytes(&staged_package_root)?;
+        let staged_payload_sha256_before_materialization =
+            crate::commands::account::sha256_hex(staged_archive_before_materialization.as_slice());
+        if document.source.kind != "hosted"
+            && staged_payload_sha256_before_materialization != document.content_sha256
+        {
+            return Err(format!(
+                "Package payload changed while staging: expected SHA-256 {}, found {}.",
+                document.content_sha256, staged_payload_sha256_before_materialization
+            ));
+        }
+        let staged_runtime_tools_root = ensure_directory_path_under_root(
+            staging_root.as_path(),
+            Path::new(INSTALLED_PACKAGE_RUNTIME_DIR_NAME)
+                .join(INSTALLED_PACKAGE_RUNTIME_TOOLS_DIR_NAME)
+                .as_path(),
+            "Staged package runtime tools directory",
+        )?;
+        let tool_build_scratch_root = ensure_directory_path_under_root(
+            staging_root.as_path(),
+            Path::new(".tool-build"),
+            "Staged package tool build scratch directory",
+        )?;
+        if materialize_source_tools {
+            let target = crate::cargo_ai_metadata::current_build_target();
+            let build_target =
+                crate::agent_builder::build_target::BuildTarget::from_cli(Some(target.as_str()))?;
+            let mut materialized = BTreeSet::new();
+            for tool_name in declared_tools {
+                if materialized.insert(tool_name.as_str()) {
+                    crate::commands::tools::materialize_source_tool_for_package_runtime(
+                        tool_name,
+                        &build_target,
+                        staged_package_root.as_path(),
+                        staged_runtime_tools_root.as_path(),
+                        tool_build_scratch_root.as_path(),
+                    )?;
+                }
+            }
+            crate::commands::tools::validate_package_runtime_tools(
+                staged_runtime_tools_root.as_path(),
+                declared_tools,
+                target.as_str(),
+            )?;
+        }
+        fs::remove_dir_all(&tool_build_scratch_root).map_err(|error| {
+            format!(
+                "Failed to remove staged package tool build scratch directory '{}': {}",
+                tool_build_scratch_root.display(),
+                error
+            )
+        })?;
+        let staged_archive =
+            crate::commands::account::create_package_archive_bytes(&staged_package_root)?;
+        let staged_content_sha256 = crate::commands::account::sha256_hex(staged_archive.as_slice());
+        if staged_content_sha256 != staged_payload_sha256_before_materialization {
+            return Err(format!(
+                "Installed package payload changed while materializing runtime tools: expected SHA-256 {}, found {}.",
+                staged_payload_sha256_before_materialization, staged_content_sha256
+            ));
+        }
         write_install_manifest(
             staging_root.join(INSTALL_MANIFEST_FILE_NAME).as_path(),
             document,
@@ -3140,7 +3540,7 @@ fn ensure_packages_staging_root() -> Result<PathBuf, String> {
     Ok(staging_root)
 }
 
-fn ensure_real_directory(path: &Path, label: &str) -> Result<(), String> {
+pub(crate) fn ensure_real_directory(path: &Path, label: &str) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata_is_link_like(&metadata) || !metadata.is_dir() => {
             return Err(format!(
@@ -3177,12 +3577,76 @@ fn ensure_real_directory(path: &Path, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn ensure_directory_path_under_root(
+    root: &Path,
+    relative_path: &Path,
+    label: &str,
+) -> Result<PathBuf, String> {
+    ensure_real_directory(root, format!("{label} root").as_str())?;
+    let mut resolved = root.to_path_buf();
+    for component in relative_path.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::Normal(segment) => resolved.push(segment),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("{label} must stay beneath '{}'.", root.display()));
+            }
+        }
+        match fs::symlink_metadata(&resolved) {
+            Ok(metadata) if metadata_is_link_like(&metadata) || !metadata.is_dir() => {
+                return Err(format!(
+                    "{label} '{}' must be a real directory and not a symbolic link or reparse point.",
+                    resolved.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                fs::create_dir(&resolved).map_err(|error| {
+                    format!(
+                        "Failed to create {label} '{}': {}",
+                        resolved.display(),
+                        error
+                    )
+                })?;
+                let metadata = fs::symlink_metadata(&resolved).map_err(|error| {
+                    format!(
+                        "Failed to inspect created {label} '{}': {}",
+                        resolved.display(),
+                        error
+                    )
+                })?;
+                if metadata_is_link_like(&metadata) || !metadata.is_dir() {
+                    return Err(format!(
+                        "{label} '{}' must be a real directory and not a symbolic link or reparse point.",
+                        resolved.display()
+                    ));
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect {label} '{}': {}",
+                    resolved.display(),
+                    error
+                ));
+            }
+        }
+    }
+    Ok(resolved)
+}
+
 fn installed_package_root(alias: &str) -> PathBuf {
     packages_root().join(alias)
 }
 
 fn installed_package_data_root(alias: &str) -> PathBuf {
     installed_package_root(alias).join(INSTALLED_PACKAGE_DATA_DIR_NAME)
+}
+
+#[cfg(test)]
+fn installed_package_runtime_tools_root(alias: &str) -> PathBuf {
+    installed_package_root(alias)
+        .join(INSTALLED_PACKAGE_RUNTIME_DIR_NAME)
+        .join(INSTALLED_PACKAGE_RUNTIME_TOOLS_DIR_NAME)
 }
 
 #[cfg(test)]
@@ -3197,6 +3661,7 @@ mod tests {
         StagedInstallFailurePoint,
     };
     use base64::Engine as _;
+    use serde_json::Value;
     use std::path::{Path, PathBuf};
 
     fn manifest(
@@ -3275,7 +3740,7 @@ project_version = "1.0.0"
 profile = "default"
 agent_definitions = ["agents/lookup_account.json"]
 hatched_agents = ["agents/daily_digest.json"]
-tools = ["database_query"]
+tools = []
 assets = ["schemas/customer.sql"]
 "#,
         )
@@ -3285,6 +3750,183 @@ assets = ["schemas/customer.sql"]
         std::fs::write(root.join("agents/daily_digest.json"), "{}")
             .expect("hatch definition should be writable");
         root
+    }
+
+    fn add_source_tool_fixture(package_root: &Path, tool_name: &str, marker: &str) {
+        let tool_source_root = package_root.join("tools").join(tool_name);
+        std::fs::create_dir_all(tool_source_root.join("src"))
+            .expect("tool source directory should be writable");
+        std::fs::create_dir_all(package_root.join(".cargo-ai/tools").join(tool_name))
+            .expect("tool metadata directory should be writable");
+        std::fs::write(
+            tool_source_root.join("Cargo.toml"),
+            format!("[package]\nname = \"{tool_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        )
+        .expect("tool Cargo.toml should be writable");
+        std::fs::write(
+            tool_source_root.join("Cargo.lock"),
+            format!(
+                "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = \"{tool_name}\"\nversion = \"0.1.0\"\n"
+            ),
+        )
+        .expect("tool Cargo.lock should be writable");
+        write_source_tool_fixture_main(package_root, tool_name, marker);
+        std::fs::write(
+            package_root
+                .join(".cargo-ai/tools")
+                .join(tool_name)
+                .join("tool.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "tool_id": tool_name,
+                "source": {
+                    "manifest_path": format!("tools/{tool_name}/Cargo.toml")
+                },
+                "binary": {
+                    "default_name": tool_name
+                },
+                "artifacts": {}
+            })
+            .to_string(),
+        )
+        .expect("tool metadata should be writable");
+
+        let manifest_path = package_root.join("cargo-ai-package.toml");
+        let manifest = std::fs::read_to_string(&manifest_path).expect("manifest should read");
+        std::fs::write(
+            &manifest_path,
+            manifest.replace("tools = []", format!("tools = [\"{tool_name}\"]").as_str()),
+        )
+        .expect("package manifest tools should update");
+    }
+
+    fn write_source_tool_fixture_main(package_root: &Path, tool_name: &str, marker: &str) {
+        std::fs::write(
+            package_root
+                .join("tools")
+                .join(tool_name)
+                .join("src/main.rs"),
+            format!("fn main() {{ println!(\"{marker}\"); }}\n"),
+        )
+        .expect("tool source should be writable");
+    }
+
+    fn write_broken_source_tool_fixture_main(package_root: &Path, tool_name: &str) {
+        std::fs::write(
+            package_root
+                .join("tools")
+                .join(tool_name)
+                .join("src/main.rs"),
+            "compile_error!(\"intentional package tool build failure\");\nfn main() {}\n",
+        )
+        .expect("broken tool source should be writable");
+    }
+
+    fn set_package_version(package_root: &Path, from: &str, to: &str) {
+        let manifest_path = package_root.join("cargo-ai-package.toml");
+        let manifest = std::fs::read_to_string(&manifest_path).expect("manifest should read");
+        std::fs::write(
+            &manifest_path,
+            manifest.replace(
+                format!("project_version = \"{from}\"").as_str(),
+                format!("project_version = \"{to}\"").as_str(),
+            ),
+        )
+        .expect("package version should update");
+    }
+
+    fn installed_runtime_tool_binary(alias: &str, tool_name: &str) -> PathBuf {
+        let target = crate::cargo_ai_metadata::current_build_target();
+        let build_target =
+            crate::agent_builder::build_target::BuildTarget::from_cli(Some(target.as_str()))
+                .expect("current target should resolve");
+        build_target.exported_binary_path(
+            super::installed_package_runtime_tools_root(alias)
+                .join(tool_name)
+                .join("bin")
+                .join(target)
+                .as_path(),
+            tool_name,
+        )
+    }
+
+    fn package_content_sha256(package_root: &Path) -> String {
+        let archive = crate::commands::account::create_package_archive_bytes(package_root)
+            .expect("package archive should build");
+        crate::commands::account::sha256_hex(archive.as_slice())
+    }
+
+    fn legacy_package_archive_bytes(package_root: &Path) -> Vec<u8> {
+        fn append_entries(package_root: &Path, current_root: &Path, entries: &mut Vec<Value>) {
+            let mut children = std::fs::read_dir(current_root)
+                .expect("legacy archive fixture directory should read")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("legacy archive fixture entries should read");
+            children.sort_by_key(std::fs::DirEntry::file_name);
+            for child in children {
+                let path = child.path();
+                let relative = path
+                    .strip_prefix(package_root)
+                    .expect("legacy archive fixture path should be relative")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let metadata = std::fs::symlink_metadata(&path)
+                    .expect("legacy archive fixture metadata should read");
+                if metadata.is_dir() {
+                    entries.push(serde_json::json!({
+                        "path": relative,
+                        "kind": "dir"
+                    }));
+                    append_entries(package_root, path.as_path(), entries);
+                } else {
+                    entries.push(serde_json::json!({
+                        "path": relative,
+                        "kind": "file",
+                        "contents_base64": base64::engine::general_purpose::STANDARD.encode(
+                            std::fs::read(&path)
+                                .expect("legacy archive fixture file should read")
+                        )
+                    }));
+                }
+            }
+        }
+
+        let mut entries = Vec::new();
+        append_entries(package_root, package_root, &mut entries);
+        serde_json::to_vec(&serde_json::json!({
+            "format_version": 1,
+            "entries": entries
+        }))
+        .expect("legacy archive fixture should serialize")
+    }
+
+    fn add_package_mutating_build_script(package_root: &Path, tool_name: &str) {
+        std::fs::write(
+            package_root.join("tools").join(tool_name).join("build.rs"),
+            r#"use std::path::PathBuf;
+
+fn main() {
+    let package_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    std::fs::write(
+        package_root.join("agents/lookup_account.json"),
+        "{\"mutated_by_build\":true}",
+    )
+    .expect("staged package mutation should succeed");
+}
+"#,
+        )
+        .expect("package-mutating build script should be writable");
+    }
+
+    fn run_fixture_tool(path: &Path) -> String {
+        let output = std::process::Command::new(path)
+            .output()
+            .expect("fixture tool should start");
+        assert!(output.status.success(), "fixture tool should succeed");
+        String::from_utf8(output.stdout)
+            .expect("fixture output should be utf8")
+            .trim()
+            .to_string()
     }
 
     fn remove_temp_dir_if_present(path: &Path) {
@@ -3485,6 +4127,712 @@ assets = ["schemas/customer.sql"]
         assert!(load_installed_package("data_integration").is_err());
 
         remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn local_install_materializes_declared_source_tool_without_mutating_source() {
+        let _store = PackagesRootGuard::new("materialize-source-tool");
+        let package_root = temp_package_root("materialize-source-tool");
+        add_source_tool_fixture(&package_root, "usage_importer", "materialized-v1");
+        let source_sha256_before = package_content_sha256(&package_root);
+
+        install_local_package(&local_install_request(&package_root))
+            .expect("source-backed package should install");
+
+        assert_eq!(package_content_sha256(&package_root), source_sha256_before);
+        assert!(!package_root.join("tools/usage_importer/target").exists());
+        let installed_package_root =
+            super::installed_package_root("data_integration").join("package");
+        assert_eq!(
+            package_content_sha256(installed_package_root.as_path()),
+            source_sha256_before
+        );
+        assert!(!installed_package_root
+            .join("tools/usage_importer/target")
+            .exists());
+        let installed = load_installed_package("data_integration").expect("receipt should load");
+        assert_eq!(installed.content_sha256, source_sha256_before);
+
+        let runtime_tool_binary =
+            installed_runtime_tool_binary("data_integration", "usage_importer");
+        assert_eq!(run_fixture_tool(&runtime_tool_binary), "materialized-v1");
+        assert!(
+            super::installed_package_runtime_tools_root("data_integration")
+                .join("usage_importer/tool.json")
+                .is_file()
+        );
+        assert!(!super::installed_package_root("data_integration")
+            .join(".tool-build")
+            .exists());
+
+        let context = super::runtime_context_for_package_root(installed_package_root.as_path())
+            .expect("installed package runtime context should resolve");
+        assert_eq!(
+            super::resolve_package_runtime_tools_root(&context)
+                .expect("runtime tools root lookup should succeed")
+                .expect("runtime tools root should resolve"),
+            super::installed_package_runtime_tools_root("data_integration")
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_ne!(
+                std::fs::metadata(&runtime_tool_binary)
+                    .expect("runtime tool metadata should load")
+                    .permissions()
+                    .mode()
+                    & 0o111,
+                0,
+                "runtime tool should remain executable"
+            );
+        }
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn source_tool_build_cannot_mutate_verified_package_payload() {
+        let _store = PackagesRootGuard::new("reject-tool-package-mutation");
+        let package_root = temp_package_root("reject-tool-package-mutation");
+        add_source_tool_fixture(&package_root, "usage_importer", "materialized-v1");
+        add_package_mutating_build_script(&package_root, "usage_importer");
+
+        let error = install_local_package(&local_install_request(&package_root))
+            .expect_err("a tool build that mutates the staged package must fail");
+
+        assert!(error.contains("payload changed while materializing runtime tools"));
+        assert!(!super::installed_package_root("data_integration").exists());
+        assert_eq!(
+            std::fs::read_to_string(package_root.join("agents/lookup_account.json"))
+                .expect("source payload should remain readable"),
+            "{}"
+        );
+        assert_eq!(
+            std::fs::read_dir(super::packages_staging_root())
+                .expect("staging root should remain readable")
+                .count(),
+            0
+        );
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn same_content_install_is_noop_but_repairs_missing_legacy_runtime() {
+        let _store = PackagesRootGuard::new("repair-legacy-runtime");
+        let package_root = temp_package_root("repair-legacy-runtime");
+        let request = local_install_request(&package_root);
+        install_local_package(&request).expect("initial package should install");
+        let data_root = super::installed_package_data_root("data_integration");
+        std::fs::write(data_root.join("state.json"), "preserve")
+            .expect("package data should be writable");
+
+        let noop = install_local_package(&request).expect("valid reinstall should succeed");
+        assert!(matches!(noop, InstallAction::Noop));
+
+        std::fs::remove_dir_all(
+            super::installed_package_root("data_integration")
+                .join(super::INSTALLED_PACKAGE_RUNTIME_DIR_NAME),
+        )
+        .expect("legacy runtime should be removable in the fixture");
+        let repaired = install_local_package(&request).expect("legacy runtime should repair");
+
+        assert!(matches!(repaired, InstallAction::Replace));
+        assert!(super::installed_package_runtime_tools_root("data_integration").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(data_root.join("state.json")).expect("data should remain"),
+            "preserve"
+        );
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn same_content_install_repairs_wrong_target_runtime_and_preserves_data() {
+        let _store = PackagesRootGuard::new("repair-wrong-target-runtime");
+        let package_root = temp_package_root("repair-wrong-target-runtime");
+        add_source_tool_fixture(&package_root, "usage_importer", "materialized-v1");
+        let request = local_install_request(&package_root);
+        install_local_package(&request).expect("initial package should install");
+        let data_root = super::installed_package_data_root("data_integration");
+        std::fs::write(data_root.join("state.json"), "preserve")
+            .expect("package data should be writable");
+        let manifest_path = super::installed_package_runtime_tools_root("data_integration")
+            .join("usage_importer/tool.json");
+        let mut manifest: Value = serde_json::from_slice(
+            std::fs::read(&manifest_path)
+                .expect("runtime manifest should read")
+                .as_slice(),
+        )
+        .expect("runtime manifest should parse");
+        let target = crate::cargo_ai_metadata::current_build_target();
+        let artifacts = manifest
+            .get_mut("artifacts")
+            .and_then(Value::as_object_mut)
+            .expect("runtime manifest should contain artifacts");
+        let artifact = artifacts
+            .remove(target.as_str())
+            .expect("current target artifact should exist");
+        artifacts.insert("unsupported-test-target".to_string(), artifact);
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("runtime manifest should serialize"),
+        )
+        .expect("wrong-target runtime manifest should be writable");
+
+        let action = install_local_package(&request).expect("wrong-target runtime should repair");
+
+        assert!(matches!(action, InstallAction::Replace));
+        assert_eq!(
+            run_fixture_tool(&installed_runtime_tool_binary(
+                "data_integration",
+                "usage_importer"
+            )),
+            "materialized-v1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(data_root.join("state.json")).expect("data should remain"),
+            "preserve"
+        );
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn same_content_install_repairs_missing_and_corrupt_runtime_artifacts() {
+        let _store = PackagesRootGuard::new("repair-invalid-runtime-artifact");
+        let package_root = temp_package_root("repair-invalid-runtime-artifact");
+        add_source_tool_fixture(&package_root, "usage_importer", "materialized-v1");
+        let request = local_install_request(&package_root);
+        install_local_package(&request).expect("initial package should install");
+        let data_root = super::installed_package_data_root("data_integration");
+        std::fs::write(data_root.join("state.json"), "preserve")
+            .expect("package data should be writable");
+        let runtime_binary = installed_runtime_tool_binary("data_integration", "usage_importer");
+        let manifest_path = super::installed_package_runtime_tools_root("data_integration")
+            .join("usage_importer/tool.json");
+
+        std::fs::remove_file(&runtime_binary).expect("runtime artifact should be removable");
+        let missing_action =
+            install_local_package(&request).expect("missing runtime artifact should repair");
+        assert!(matches!(missing_action, InstallAction::Replace));
+        assert_eq!(run_fixture_tool(&runtime_binary), "materialized-v1");
+
+        std::fs::remove_file(&runtime_binary).expect("runtime artifact should be removable");
+        std::fs::create_dir(&runtime_binary)
+            .expect("corrupt runtime artifact directory should be creatable");
+        let corrupt_action =
+            install_local_package(&request).expect("non-file runtime artifact should repair");
+        assert!(matches!(corrupt_action, InstallAction::Replace));
+        assert_eq!(run_fixture_tool(&runtime_binary), "materialized-v1");
+
+        std::fs::write(&manifest_path, "{not valid json")
+            .expect("malformed runtime manifest should be writable");
+        let malformed_action =
+            install_local_package(&request).expect("malformed runtime manifest should repair");
+        assert!(matches!(malformed_action, InstallAction::Replace));
+        assert_eq!(run_fixture_tool(&runtime_binary), "materialized-v1");
+        assert_eq!(
+            std::fs::read_to_string(data_root.join("state.json")).expect("data should remain"),
+            "preserve"
+        );
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn same_content_install_rejects_runtime_artifact_path_escape() {
+        let _store = PackagesRootGuard::new("reject-runtime-artifact-escape");
+        let package_root = temp_package_root("reject-runtime-artifact-escape");
+        add_source_tool_fixture(&package_root, "usage_importer", "materialized-v1");
+        let request = local_install_request(&package_root);
+        install_local_package(&request).expect("initial package should install");
+        let data_root = super::installed_package_data_root("data_integration");
+        std::fs::write(data_root.join("state.json"), "preserve")
+            .expect("package data should be writable");
+        let manifest_path = super::installed_package_runtime_tools_root("data_integration")
+            .join("usage_importer/tool.json");
+        let mut manifest: Value = serde_json::from_slice(
+            std::fs::read(&manifest_path)
+                .expect("runtime manifest should read")
+                .as_slice(),
+        )
+        .expect("runtime manifest should parse");
+        let target = crate::cargo_ai_metadata::current_build_target();
+        manifest["artifacts"][target.as_str()]["path"] = serde_json::json!("../../outside");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("runtime manifest should serialize"),
+        )
+        .expect("escaping runtime manifest should be writable");
+
+        let error = install_local_package(&request)
+            .expect_err("runtime artifact path traversal must fail closed");
+
+        assert!(error.contains("parent traversal"));
+        assert_eq!(
+            std::fs::read_to_string(data_root.join("state.json")).expect("data should remain"),
+            "preserve"
+        );
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_content_install_rejects_runtime_artifact_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let store = PackagesRootGuard::new("reject-runtime-artifact-symlink");
+        let package_root = temp_package_root("reject-runtime-artifact-symlink");
+        add_source_tool_fixture(&package_root, "usage_importer", "materialized-v1");
+        let request = local_install_request(&package_root);
+        install_local_package(&request).expect("initial package should install");
+        let data_root = super::installed_package_data_root("data_integration");
+        std::fs::write(data_root.join("state.json"), "preserve")
+            .expect("package data should be writable");
+        let runtime_binary = installed_runtime_tool_binary("data_integration", "usage_importer");
+        let outside_binary = store.path.join("outside-binary");
+        std::fs::write(&outside_binary, "outside").expect("outside fixture should be writable");
+        std::fs::remove_file(&runtime_binary).expect("runtime artifact should be removable");
+        symlink(&outside_binary, &runtime_binary).expect("runtime symlink should be creatable");
+
+        let error =
+            install_local_package(&request).expect_err("runtime artifact symlink must fail closed");
+
+        assert!(error.contains("symbolic link") || error.contains("reparse point"));
+        assert_eq!(
+            std::fs::read_to_string(data_root.join("state.json")).expect("data should remain"),
+            "preserve"
+        );
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn legacy_runtime_tools_root_absence_is_nonfatal() {
+        let install_root = std::env::temp_dir().join(format!(
+            "cargo-ai-legacy-runtime-root-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let data_root = install_root.join("data");
+        std::fs::create_dir_all(install_root.join("package")).expect("package root should exist");
+        std::fs::create_dir_all(&data_root).expect("data root should exist");
+        let context = runtime_context(data_root);
+
+        assert!(super::resolve_package_runtime_tools_root(&context)
+            .expect("legacy runtime lookup should succeed")
+            .is_none());
+
+        remove_temp_dir_if_present(install_root.as_path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_tools_root_rejects_symbolic_link_redirect() {
+        use std::os::unix::fs::symlink;
+
+        let install_root = std::env::temp_dir().join(format!(
+            "cargo-ai-runtime-root-link-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let outside_root = std::env::temp_dir().join(format!(
+            "cargo-ai-runtime-root-link-outside-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let data_root = install_root.join("data");
+        std::fs::create_dir_all(install_root.join("package")).expect("package root should exist");
+        std::fs::create_dir_all(&data_root).expect("data root should exist");
+        std::fs::create_dir_all(outside_root.join("tools")).expect("outside runtime should exist");
+        symlink(&outside_root, install_root.join("runtime"))
+            .expect("runtime symlink should be created");
+        let context = runtime_context(data_root);
+
+        let error = super::resolve_package_runtime_tools_root(&context)
+            .expect_err("runtime redirect should fail");
+
+        assert!(error.contains("symbolic link") || error.contains("reparse point"));
+        remove_temp_dir_if_present(install_root.as_path());
+        remove_temp_dir_if_present(outside_root.as_path());
+    }
+
+    #[test]
+    fn failed_source_tool_materialization_preserves_existing_alias_and_data() {
+        let _store = PackagesRootGuard::new("failed-tool-materialization");
+        let package_root = temp_package_root("failed-tool-materialization");
+        add_source_tool_fixture(&package_root, "usage_importer", "materialized-v1");
+        let request = local_install_request(&package_root);
+        install_local_package(&request).expect("initial package should install");
+        let data_root = super::installed_package_data_root("data_integration");
+        std::fs::write(data_root.join("state.json"), "preserve")
+            .expect("package data should be writable");
+        let runtime_tool_binary =
+            installed_runtime_tool_binary("data_integration", "usage_importer");
+        let runtime_binary_before =
+            std::fs::read(&runtime_tool_binary).expect("runtime tool should read");
+
+        set_package_version(&package_root, "1.0.0", "1.1.0");
+        write_broken_source_tool_fixture_main(&package_root, "usage_importer");
+        let error = install_local_package(&request)
+            .expect_err("broken source tool should fail before alias replacement");
+
+        assert!(error.contains("Locked Cargo build failed"));
+        let installed = load_installed_package("data_integration").expect("receipt should load");
+        assert_eq!(installed.package_version, "1.0.0");
+        assert_eq!(
+            std::fs::read_to_string(data_root.join("state.json")).expect("data should remain"),
+            "preserve"
+        );
+        assert_eq!(
+            std::fs::read(&runtime_tool_binary).expect("prior runtime tool should remain"),
+            runtime_binary_before
+        );
+        assert_eq!(run_fixture_tool(&runtime_tool_binary), "materialized-v1");
+        assert_eq!(
+            std::fs::read_dir(super::packages_staging_root())
+                .expect("staging should remain readable")
+                .count(),
+            0
+        );
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn package_upgrade_replaces_runtime_tools_and_preserves_data() {
+        let _store = PackagesRootGuard::new("replace-runtime-tools");
+        let package_root = temp_package_root("replace-runtime-tools");
+        add_source_tool_fixture(&package_root, "usage_importer", "materialized-v1");
+        let request = local_install_request(&package_root);
+        install_local_package(&request).expect("initial package should install");
+        let data_root = super::installed_package_data_root("data_integration");
+        std::fs::write(data_root.join("state.json"), "preserve")
+            .expect("package data should be writable");
+        let runtime_tool_binary =
+            installed_runtime_tool_binary("data_integration", "usage_importer");
+        let runtime_binary_before =
+            std::fs::read(&runtime_tool_binary).expect("runtime tool should read");
+
+        set_package_version(&package_root, "1.0.0", "1.1.0");
+        write_source_tool_fixture_main(&package_root, "usage_importer", "materialized-v2");
+        let expected_package_sha256 = package_content_sha256(&package_root);
+        let action = install_local_package(&request).expect("package upgrade should succeed");
+
+        assert!(matches!(action, InstallAction::Upgrade));
+        let installed = load_installed_package("data_integration").expect("receipt should load");
+        assert_eq!(installed.package_version, "1.1.0");
+        assert_eq!(installed.content_sha256, expected_package_sha256);
+        assert_eq!(
+            std::fs::read_to_string(data_root.join("state.json")).expect("data should remain"),
+            "preserve"
+        );
+        assert_ne!(
+            std::fs::read(&runtime_tool_binary).expect("new runtime tool should read"),
+            runtime_binary_before
+        );
+        assert_eq!(run_fixture_tool(&runtime_tool_binary), "materialized-v2");
+        assert_eq!(
+            package_content_sha256(
+                super::installed_package_root("data_integration")
+                    .join("package")
+                    .as_path()
+            ),
+            expected_package_sha256
+        );
+        assert!(!super::installed_package_root("data_integration")
+            .join(".tool-build")
+            .exists());
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn hosted_blocked_package_does_not_build_declared_source_tools() {
+        let _store = PackagesRootGuard::new("hosted-blocked-tool");
+        let package_root = temp_package_root("hosted-blocked-tool");
+        add_source_tool_fixture(&package_root, "usage_importer", "must-not-build");
+        write_broken_source_tool_fixture_main(&package_root, "usage_importer");
+        let prepared =
+            super::prepare_package_root(package_root.clone(), hosted_source("source-a"), None)
+                .expect("hosted package should prepare");
+
+        super::materialize_prepared_package(
+            &prepared,
+            Some("data_integration"),
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect("blocked hosted package should install without executing tool source");
+
+        assert_eq!(
+            std::fs::read_dir(super::installed_package_runtime_tools_root(
+                "data_integration"
+            ))
+            .expect("runtime tools root should exist")
+            .count(),
+            0
+        );
+        assert!(!super::installed_package_root("data_integration")
+            .join(".tool-build")
+            .exists());
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn hosted_allowed_tool_build_requires_acceptance_then_materializes() {
+        let _store = PackagesRootGuard::new("hosted-allowed-tool");
+        let package_root = temp_package_root("hosted-allowed-tool");
+        add_source_tool_fixture(&package_root, "usage_importer", "materialized-hosted");
+        write_broken_source_tool_fixture_main(&package_root, "usage_importer");
+        let mut unaccepted =
+            super::prepare_package_root(package_root.clone(), hosted_source("source-a"), None)
+                .expect("hosted package should prepare");
+        unaccepted.manifest.permissions.subprocess = "allowed".to_string();
+
+        let error = super::materialize_prepared_package(
+            &unaccepted,
+            Some("data_integration"),
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect_err("subprocess permission should be accepted before any tool build");
+
+        assert!(error.contains("--accept-permissions"));
+        assert!(!super::installed_package_root("data_integration").exists());
+        assert!(!package_root.join("tools/usage_importer/target").exists());
+
+        write_source_tool_fixture_main(&package_root, "usage_importer", "materialized-hosted");
+        let mut accepted =
+            super::prepare_package_root(package_root.clone(), hosted_source("source-a"), None)
+                .expect("hosted package should prepare after source repair");
+        accepted.manifest.permissions.subprocess = "allowed".to_string();
+
+        super::materialize_prepared_package(
+            &accepted,
+            Some("data_integration"),
+            false,
+            false,
+            true,
+            false,
+            false,
+        )
+        .expect("accepted subprocess permission should allow tool materialization");
+
+        let runtime_tool_binary =
+            installed_runtime_tool_binary("data_integration", "usage_importer");
+        assert_eq!(
+            run_fixture_tool(&runtime_tool_binary),
+            "materialized-hosted"
+        );
+        assert!(!package_root.join("tools/usage_importer/target").exists());
+        assert!(!super::installed_package_root("data_integration")
+            .join(".tool-build")
+            .exists());
+
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn hosted_legacy_wire_hash_survives_install_and_runtime_repair() {
+        let _store = PackagesRootGuard::new("hosted-legacy-wire-hash");
+        let package_root = temp_package_root("hosted-legacy-wire-hash");
+        let archive = legacy_package_archive_bytes(&package_root);
+        let wire_sha256 = crate::commands::account::sha256_hex(archive.as_slice());
+        let response = serde_json::json!({
+            "project": "data_integration",
+            "project_version": "1.0.0",
+            "hosted_source_id": "source-id",
+            "hosted_version_id": "version-id",
+            "package_sha256": wire_sha256,
+            "package_size_bytes": archive.len(),
+            "package_archive_base64": base64::engine::general_purpose::STANDARD.encode(&archive)
+        });
+        let prepared = super::prepare_hosted_response(&response, None, None)
+            .expect("supported legacy hosted archive should prepare");
+        let canonical_sha256 = package_content_sha256(prepared.package_root.as_path());
+        assert_ne!(
+            canonical_sha256, wire_sha256,
+            "legacy wire bytes should differ from the canonical archive"
+        );
+
+        let initial = super::materialize_prepared_package(
+            &prepared,
+            Some("data_integration"),
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect("legacy hosted package should install");
+        assert!(matches!(initial.action, InstallAction::New));
+        let data_root = super::installed_package_data_root("data_integration");
+        std::fs::write(data_root.join("state.json"), "preserve")
+            .expect("package data should be writable");
+        let installed = load_installed_package("data_integration").expect("receipt should load");
+        assert_eq!(installed.content_sha256, wire_sha256);
+
+        std::fs::remove_dir_all(
+            super::installed_package_root("data_integration")
+                .join(super::INSTALLED_PACKAGE_RUNTIME_DIR_NAME),
+        )
+        .expect("derived runtime should be removable");
+        let repaired = super::materialize_prepared_package(
+            &prepared,
+            Some("data_integration"),
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect("legacy hosted package runtime should repair");
+
+        assert!(matches!(repaired.action, InstallAction::Replace));
+        assert!(super::installed_package_runtime_tools_root("data_integration").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(data_root.join("state.json")).expect("data should remain"),
+            "preserve"
+        );
+        let installed = load_installed_package("data_integration").expect("receipt should load");
+        assert_eq!(installed.content_sha256, wire_sha256);
+
+        super::cleanup_prepared_package(&prepared);
+        remove_temp_dir_if_present(package_root.as_path());
+    }
+
+    #[test]
+    fn hosted_permission_lifecycle_replaces_runtime_transactionally() {
+        let _store = PackagesRootGuard::new("hosted-permission-lifecycle");
+        let allowed_root = temp_package_root("hosted-permission-lifecycle-allowed");
+        set_package_version(&allowed_root, "1.0.0", "2.0.0");
+        add_source_tool_fixture(&allowed_root, "usage_importer", "allowed-v2");
+        let mut allowed =
+            super::prepare_package_root(allowed_root.clone(), hosted_source("source-a"), None)
+                .expect("allowed hosted package should prepare");
+        allowed.manifest.permissions.subprocess = "allowed".to_string();
+
+        let blocked_root = temp_package_root("hosted-permission-lifecycle-blocked");
+        add_source_tool_fixture(&blocked_root, "usage_importer", "must-not-run");
+        write_broken_source_tool_fixture_main(&blocked_root, "usage_importer");
+        let blocked =
+            super::prepare_package_root(blocked_root.clone(), hosted_source("source-a"), None)
+                .expect("blocked hosted package should prepare");
+
+        let initial = super::materialize_prepared_package(
+            &allowed,
+            Some("data_integration"),
+            false,
+            false,
+            true,
+            false,
+            false,
+        )
+        .expect("accepted allowed package should install");
+        assert!(matches!(initial.action, InstallAction::New));
+        let data_root = super::installed_package_data_root("data_integration");
+        std::fs::write(data_root.join("state.json"), "preserve")
+            .expect("package data should be writable");
+        assert_eq!(
+            run_fixture_tool(&installed_runtime_tool_binary(
+                "data_integration",
+                "usage_importer"
+            )),
+            "allowed-v2"
+        );
+
+        let rollback = super::materialize_prepared_package(
+            &blocked,
+            Some("data_integration"),
+            false,
+            true,
+            false,
+            false,
+            false,
+        )
+        .expect("permission contraction should roll back without building blocked tools");
+        assert!(matches!(rollback.action, InstallAction::Downgrade));
+        assert_eq!(
+            std::fs::read_dir(super::installed_package_runtime_tools_root(
+                "data_integration"
+            ))
+            .expect("blocked runtime tools root should exist")
+            .count(),
+            0
+        );
+        let installed = load_installed_package("data_integration").expect("receipt should load");
+        assert_eq!(installed.package_version, "1.0.0");
+        assert_eq!(
+            installed.permissions.subprocess,
+            "blocked_without_explicit_grant"
+        );
+        assert_eq!(
+            std::fs::read_to_string(data_root.join("state.json")).expect("data should remain"),
+            "preserve"
+        );
+
+        let unaccepted = super::materialize_prepared_package(
+            &allowed,
+            Some("data_integration"),
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect_err("permission expansion should require fresh acceptance");
+        assert!(unaccepted.contains("--accept-permissions"));
+        let installed = load_installed_package("data_integration").expect("receipt should load");
+        assert_eq!(installed.package_version, "1.0.0");
+        assert_eq!(
+            std::fs::read_dir(super::installed_package_runtime_tools_root(
+                "data_integration"
+            ))
+            .expect("blocked runtime tools root should remain")
+            .count(),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(data_root.join("state.json")).expect("data should remain"),
+            "preserve"
+        );
+
+        let update = super::materialize_prepared_package(
+            &allowed,
+            Some("data_integration"),
+            false,
+            false,
+            true,
+            false,
+            false,
+        )
+        .expect("accepted permission expansion should rebuild runtime tools");
+        assert!(matches!(update.action, InstallAction::Upgrade));
+        assert_eq!(
+            run_fixture_tool(&installed_runtime_tool_binary(
+                "data_integration",
+                "usage_importer"
+            )),
+            "allowed-v2"
+        );
+        let installed = load_installed_package("data_integration").expect("receipt should load");
+        assert_eq!(installed.package_version, "2.0.0");
+        assert_eq!(installed.permissions.subprocess, "allowed");
+        assert_eq!(
+            std::fs::read_to_string(data_root.join("state.json")).expect("data should remain"),
+            "preserve"
+        );
+
+        remove_temp_dir_if_present(allowed_root.as_path());
+        remove_temp_dir_if_present(blocked_root.as_path());
     }
 
     #[test]
@@ -4221,6 +5569,21 @@ version = "^2"
 
         ensure_hosted_permissions_are_accepted(None, &source, &permissions, "demo", "1.0.0", true)
             .expect("explicit acceptance should allow subprocess permission");
+    }
+
+    #[test]
+    fn hosted_subprocess_permission_summary_discloses_unsandboxed_build_authority() {
+        let permissions = PackagePermissionProfileDocument {
+            subprocess: "allowed".to_string(),
+            ..PackagePermissionProfileDocument::default()
+        };
+
+        let summary = super::permission_profile_lines(&permissions).join("\n");
+
+        assert!(summary.contains("publisher build scripts and proc macros"));
+        assert!(summary.contains("unsandboxed code"));
+        assert!(summary.contains("ambient filesystem, environment, and network authority"));
+        assert!(summary.contains("install only trusted packages"));
     }
 
     #[test]

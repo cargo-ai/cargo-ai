@@ -18,6 +18,10 @@ version = "0.1.0"
 [tools]
 allow_global_fallback = true
 
+# Request only when hosted package entrypoints need a declared tool or subprocess.
+[package.permissions]
+subprocess = "allowed"
+
 # Bind every project-level alias reference to one hosted identity and version range.
 [package_dependencies.data_integration]
 hosted_source_id = "<opaque source id from cargo ai packages inspect>"
@@ -31,6 +35,8 @@ assets = ["assets/prompts/"]
 ```
 
 Keep build lists explicit. `cargo ai package` and `cargo ai build` do not infer tools or agents from JSON references.
+
+The package permission request is also explicit. Omit `[package.permissions]` when subprocess execution is not needed; Cargo AI keeps it blocked by default. Unsupported permission keys or values fail during packaging. A hosted install or version transition still requires the user to review and accept an `allowed` subprocess request. Treat that acceptance as a publisher-trust decision: hosted Rust tool materialization may execute build scripts, procedural macros, and related Cargo build-time code without an operating-system sandbox, using the current user's ambient filesystem, environment, and network authority.
 
 ## Build And Local Install
 
@@ -55,7 +61,9 @@ cargo ai hatch data_integration::daily_digest
 cargo ai packages uninstall data_integration
 ```
 
-Local alias behavior is version-aware: same version and hash is a no-op, newer semver upgrades, older semver requires `--downgrade`, and same-version content replacement or different package identity requires `--replace`.
+Local alias behavior is version-aware: same version and hash is normally a no-op, newer semver upgrades, older semver requires `--downgrade`, and same-version content replacement or different package identity requires `--replace`. Reinstalling the same content repairs missing, corrupt, or wrong-target disposable runtime state while preserving `data/`.
+
+Local-source installation builds declared source-backed tools with `cargo build --locked` for the current target. Compilation and artifact validation happen in the alias transaction: verified `package/` stays unchanged, only managed executable state enters disposable `runtime/`, and a failure leaves the previous alias plus `data/` recoverable. A compatible Rust toolchain and any uncached dependencies must be available.
 
 Bare package names without `--account` are local-only. They must not trigger network lookup.
 
@@ -96,6 +104,8 @@ Replacing an alias with a different source identity resets permission acceptance
 
 Published versions for one hosted package identity must increase by semver. If a user needs to change same-version content, they should publish a higher version.
 
+For hosted packages, Cargo AI compiles declared source tools only after the verified manifest requests `subprocess = "allowed"` and the user accepts that exact transition. The locked Cargo build is not sandboxed, so accept only trusted publisher code. A blocked hosted version can still run tool-free entrypoints; Cargo AI does not compile or execute its tools. Repeating `update` at the current latest version or `rollback --to` the current version repairs disposable runtime state when needed.
+
 ## Installed Layout And Permissions
 
 Installed aliases use:
@@ -104,14 +114,16 @@ Installed aliases use:
 $CARGO_AI_HOME/packages/<alias>/
   install.toml
   package/
+  runtime/
+    tools/
   data/
 ```
 
-`install.toml` is Cargo AI-owned provenance. `package/` is the verified payload for the active exact version. `data/` is package-owned persistent local state.
+`install.toml` is Cargo AI-owned provenance. `package/` is the verified payload for the active exact version. `runtime/` is Cargo AI-owned, target-specific derived state for that version. Installed package tool resolution is confined to this version-bound runtime and never falls back to project or machine tools. `data/` is package-owned persistent local state.
 
-Hosted update and rollback rematerialize `install.toml` and `package/`, then preserve `data/`. Install, update, rollback, and uninstall serialize each alias with an operating-system lock that is released automatically if the process exits. Publisher-authored migrations and total-refresh replacement are not supported.
+Hosted update and rollback rematerialize `install.toml`, `package/`, and `runtime/`, then preserve `data/`. Install, update, rollback, and uninstall serialize each alias with an operating-system lock that is released automatically if the process exits. Publisher-authored migrations and total-refresh replacement are not supported.
 
-Uninstall removes `install.toml`, `package/`, and `data/`. When `data/` is nonempty, first back up or export it and then confirm permanent deletion explicitly:
+Uninstall removes `install.toml`, `package/`, `runtime/`, and `data/`. When `data/` is nonempty, first back up or export it and then confirm permanent deletion explicitly:
 
 ```bash
 cargo ai packages uninstall data_integration --delete-data
@@ -121,13 +133,14 @@ Installed package entrypoints resolve Cargo AI-controlled child `usage_log` path
 
 Default hosted package runtime boundaries:
 - `package/` is readable verified payload.
+- `runtime/` is disposable local materialization for the active package version and target; it is not publisher data and does not persist through version transitions.
 - `data/` is the default writable package-owned root.
 - project/workspace writes require an explicit grant and are not implied by install.
 - Cargo AI-controlled file writes validate relative paths and reject traversal out of `data/`.
 - unconstrained `exec` and tool subprocess steps are blocked for hosted packages unless the installed package permission profile explicitly allows them.
 - first install or a version transition that newly requests subprocess execution requires `--accept-permissions` after review.
 - project/workspace `read` and `read_write` requests are unsupported and fail even with `--accept-permissions`.
-- hosted JSON child agents must be declared package exports; direct child executables require the accepted subprocess permission and resolve only from verified `package/`.
+- installed JSON child agents must be declared package exports; hosted direct child executables require the accepted subprocess permission and resolve only from verified `package/`.
 - definition-owned image/file inputs resolve inside verified `package/`; caller filesystem access requires an explicit runtime named-input override.
 - package-generated relative child inputs resolve under `data/`; nested agents cannot reinterpret text or generated values as external filesystem paths.
 

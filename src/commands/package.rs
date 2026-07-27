@@ -25,7 +25,35 @@ struct ProjectMetadataDocument {
     #[serde(default)]
     build: BTreeMap<String, BuildProfileDocument>,
     #[serde(default)]
+    package: ProjectPackageDocument,
+    #[serde(default)]
     package_dependencies: PackageDependencies,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ProjectPackageDocument {
+    #[serde(default)]
+    permissions: ProjectPackagePermissionsDocument,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ProjectPackagePermissionsDocument {
+    #[serde(default = "default_project_subprocess_permission")]
+    subprocess: String,
+}
+
+impl Default for ProjectPackagePermissionsDocument {
+    fn default() -> Self {
+        Self {
+            subprocess: default_project_subprocess_permission(),
+        }
+    }
+}
+
+fn default_project_subprocess_permission() -> String {
+    "blocked_without_explicit_grant".to_string()
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -127,6 +155,7 @@ struct GeneratedProjectMetadataDocument {
     #[serde(skip_serializing_if = "Option::is_none")]
     runtime: Option<ProjectRuntimeDocument>,
     tools: GeneratedProjectToolsPolicyDocument,
+    package: ProjectPackageDocument,
     build: BTreeMap<String, BuildProfileDocument>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     package_dependencies: PackageDependencies,
@@ -169,6 +198,7 @@ struct LoadedProjectMetadata {
     project_identity: Option<ProjectIdentityDocument>,
     runtime_defaults: Option<ProjectRuntimeDefaultsDocument>,
     build_profile: BuildProfileDocument,
+    package_permissions: PackagePermissionProfileDocument,
     package_dependencies: PackageDependencies,
 }
 
@@ -247,6 +277,7 @@ pub(crate) fn assemble_current_project_package(
         loaded_metadata.project_identity.as_ref(),
         loaded_metadata.runtime_defaults.as_ref(),
         &loaded_metadata.build_profile,
+        &loaded_metadata.package_permissions,
         &loaded_metadata.package_dependencies,
         &output_root,
         force,
@@ -338,12 +369,30 @@ fn load_project_metadata(
         ));
     }
     validate_dependency_declarations(&metadata.package_dependencies)?;
+    let package_permissions = package_permission_profile(&metadata.package)?;
 
     Ok(LoadedProjectMetadata {
         project_identity: normalize_project_identity(metadata.project.take()),
         runtime_defaults: metadata.runtime.and_then(|runtime| runtime.defaults),
         build_profile: profile,
+        package_permissions,
         package_dependencies: metadata.package_dependencies,
+    })
+}
+
+fn package_permission_profile(
+    package: &ProjectPackageDocument,
+) -> Result<PackagePermissionProfileDocument, String> {
+    let subprocess = package.permissions.subprocess.as_str();
+    if !matches!(subprocess, "blocked_without_explicit_grant" | "allowed") {
+        return Err(format!(
+            "Unsupported package permission `package.permissions.subprocess = \"{subprocess}\"`. Expected `blocked_without_explicit_grant` or `allowed`."
+        ));
+    }
+
+    Ok(PackagePermissionProfileDocument {
+        subprocess: subprocess.to_string(),
+        ..PackagePermissionProfileDocument::default()
     })
 }
 
@@ -396,6 +445,7 @@ fn assemble_package_root(
     project_identity: Option<&ProjectIdentityDocument>,
     runtime_defaults: Option<&ProjectRuntimeDefaultsDocument>,
     build_profile: &BuildProfileDocument,
+    package_permissions: &PackagePermissionProfileDocument,
     package_dependencies: &PackageDependencies,
     output_root: &PackageOutputRoot,
     force: bool,
@@ -458,6 +508,7 @@ fn assemble_package_root(
         runtime_defaults,
         profile_name,
         &build_profile,
+        package_permissions,
         package_dependencies,
     )?;
 
@@ -470,7 +521,7 @@ fn assemble_package_root(
         hatched_agents: build_profile.hatched_agents.clone(),
         tools: build_profile.tools.clone(),
         assets: build_profile.assets.clone(),
-        permissions: PackagePermissionProfileDocument::default(),
+        permissions: package_permissions.clone(),
     };
     write_package_manifest(output_root.path.as_path(), &manifest)?;
 
@@ -509,10 +560,10 @@ fn validate_output_source_boundaries(
     }
 
     for tool_name in &build_profile.tools {
+        let context = load_project_source_tool_context(project_root, tool_name)?;
         let tool_manifest_path = crate::commands::tools::project_tools_root(project_root)
             .join(tool_name)
             .join("tool.json");
-        let context = load_project_source_tool_context(project_root, tool_name)?;
         sources.push((format!("Tool '{tool_name}' metadata"), tool_manifest_path));
         sources.push((
             format!("Tool '{tool_name}' source"),
@@ -672,6 +723,7 @@ fn load_project_source_tool_context(
     project_root: &Path,
     tool_name: &str,
 ) -> Result<ProjectSourceToolContext, String> {
+    crate::commands::tools::validate_tool_identifier(tool_name)?;
     let tool_manifest_path = crate::commands::tools::project_tools_root(project_root)
         .join(tool_name)
         .join("tool.json");
@@ -833,6 +885,7 @@ fn write_generated_project_metadata(
     runtime_defaults: Option<&ProjectRuntimeDefaultsDocument>,
     profile_name: &str,
     build_profile: &BuildProfileDocument,
+    package_permissions: &PackagePermissionProfileDocument,
     package_dependencies: &PackageDependencies,
 ) -> Result<(), String> {
     let metadata_path = package_root.join(PROJECT_METADATA_RELATIVE_PATH);
@@ -858,6 +911,11 @@ fn write_generated_project_metadata(
             }),
         tools: GeneratedProjectToolsPolicyDocument {
             allow_global_fallback: false,
+        },
+        package: ProjectPackageDocument {
+            permissions: ProjectPackagePermissionsDocument {
+                subprocess: package_permissions.subprocess.clone(),
+            },
         },
         build,
         package_dependencies: package_dependencies.clone(),
@@ -1351,8 +1409,8 @@ fn normalize_path(path: impl AsRef<Path>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        assemble_package_root, load_project_metadata, resolve_package_output_root,
-        PackageManifestDocument, PackagePermissionProfileDocument,
+        assemble_package_root, load_project_metadata, load_project_source_tool_context,
+        resolve_package_output_root, PackageManifestDocument, PackagePermissionProfileDocument,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -1425,6 +1483,25 @@ mod tests {
         .expect("tool manifest should be written");
     }
 
+    #[test]
+    fn package_tool_lookup_rejects_nonportable_ids_before_path_resolution() {
+        let project_root = temp_dir("nonportable-tool-id");
+        fs::create_dir_all(&project_root).expect("project root should exist");
+
+        for invalid in ["foo/bar", r"foo\bar", "..", "C:foo"] {
+            let error = load_project_source_tool_context(&project_root, invalid)
+                .expect_err("non-portable package tool id should fail");
+            assert!(
+                error.contains("portable")
+                    || error.contains("traversal")
+                    || error.contains("drive-relative"),
+                "unexpected error for {invalid:?}: {error}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(project_root);
+    }
+
     fn write_machine_tool_fixture(root: &PathBuf, tool_id: &str) {
         let tool_dir = root.join("tools").join(tool_id);
         fs::create_dir_all(&tool_dir).expect("machine tool dir should be created");
@@ -1467,8 +1544,50 @@ agent_definitions = ["agents/demo.json"]
             loaded_metadata.build_profile.agent_definitions,
             vec!["agents/demo.json".to_string()]
         );
+        assert_eq!(
+            loaded_metadata.package_permissions,
+            PackagePermissionProfileDocument::default()
+        );
 
         let _ = fs::remove_dir_all(&project_root);
+    }
+
+    #[test]
+    fn load_project_metadata_rejects_invalid_package_permission_authoring() {
+        for (stem, package_metadata, expected) in [
+            (
+                "unknown-package-field",
+                "[package]\nunexpected = true\n",
+                "unknown field `unexpected`",
+            ),
+            (
+                "unknown-permission-field",
+                "[package.permissions]\npackage_data = \"read_write\"\n",
+                "unknown field `package_data`",
+            ),
+            (
+                "unsupported-subprocess",
+                "[package.permissions]\nsubprocess = \"unrestricted\"\n",
+                "Unsupported package permission `package.permissions.subprocess = \"unrestricted\"`",
+            ),
+        ] {
+            let project_root = temp_dir(stem);
+            write_project_metadata(
+                &project_root,
+                format!(
+                    "format_version = 1\n\n{package_metadata}\n[build.default]\nagent_definitions = [\"agents/demo.json\"]\n"
+                )
+                .as_str(),
+            );
+
+            let error = load_project_metadata(&project_root, "default")
+                .expect_err("invalid package permission metadata should fail");
+            assert!(
+                error.contains(expected),
+                "expected error containing {expected:?}, got {error:?}"
+            );
+            let _ = fs::remove_dir_all(project_root);
+        }
     }
 
     #[test]
@@ -1488,6 +1607,9 @@ version = "0.1.0"
 
 [tools]
 allow_global_fallback = true
+
+[package.permissions]
+subprocess = "allowed"
 
 [package_dependencies.reports]
 hosted_source_id = "source-reports"
@@ -1527,11 +1649,16 @@ assets = ["assets/prompts/"]
             loaded_metadata.project_identity.as_ref(),
             loaded_metadata.runtime_defaults.as_ref(),
             &loaded_metadata.build_profile,
+            &loaded_metadata.package_permissions,
             &loaded_metadata.package_dependencies,
             &output_root,
             false,
         )
         .expect("package should assemble");
+        let allowed_permissions = PackagePermissionProfileDocument {
+            subprocess: "allowed".to_string(),
+            ..PackagePermissionProfileDocument::default()
+        };
 
         assert_eq!(
             manifest,
@@ -1544,7 +1671,7 @@ assets = ["assets/prompts/"]
                 hatched_agents: vec!["agents/hello_runner.json".to_string()],
                 tools: vec!["hello_tool".to_string()],
                 assets: vec!["assets/prompts/".to_string()],
-                permissions: PackagePermissionProfileDocument::default(),
+                permissions: allowed_permissions.clone(),
             }
         );
 
@@ -1578,6 +1705,8 @@ assets = ["assets/prompts/"]
         assert!(generated_project.contains("name = \"hello_package\""));
         assert!(generated_project.contains("version = \"0.1.0\""));
         assert!(generated_project.contains("allow_global_fallback = false"));
+        assert!(generated_project.contains("[package.permissions]"));
+        assert!(generated_project.contains("subprocess = \"allowed\""));
         assert!(generated_project.contains("[build.default]"));
         assert!(generated_project.contains("hatched_agents = [\"agents/hello_runner.json\"]"));
         assert!(generated_project.contains("[package_dependencies.reports]"));
@@ -1590,6 +1719,14 @@ assets = ["assets/prompts/"]
         )
         .expect("package manifest should parse");
         assert_eq!(package_manifest, manifest);
+        assert_eq!(package_manifest.permissions, allowed_permissions);
+
+        let generated_metadata = load_project_metadata(&output_root.path, "default")
+            .expect("generated package project metadata should reload");
+        assert_eq!(
+            generated_metadata.package_permissions,
+            package_manifest.permissions
+        );
 
         let packaged_tool_manifest: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(
@@ -1650,6 +1787,7 @@ tools = ["machine_only"]
             loaded_metadata.project_identity.as_ref(),
             loaded_metadata.runtime_defaults.as_ref(),
             &loaded_metadata.build_profile,
+            &loaded_metadata.package_permissions,
             &loaded_metadata.package_dependencies,
             &output_root,
             false,
@@ -1693,6 +1831,7 @@ assets = ["target"]
             loaded_metadata.project_identity.as_ref(),
             loaded_metadata.runtime_defaults.as_ref(),
             &loaded_metadata.build_profile,
+            &loaded_metadata.package_permissions,
             &loaded_metadata.package_dependencies,
             &output_root,
             false,
@@ -1741,6 +1880,7 @@ assets = ["assets"]
             loaded_metadata.project_identity.as_ref(),
             loaded_metadata.runtime_defaults.as_ref(),
             &loaded_metadata.build_profile,
+            &loaded_metadata.package_permissions,
             &loaded_metadata.package_dependencies,
             &output_root,
             true,
@@ -1791,6 +1931,7 @@ assets = ["assets/linked.txt"]
             loaded_metadata.project_identity.as_ref(),
             loaded_metadata.runtime_defaults.as_ref(),
             &loaded_metadata.build_profile,
+            &loaded_metadata.package_permissions,
             &loaded_metadata.package_dependencies,
             &output_root,
             false,
@@ -1822,6 +1963,7 @@ assets = ["assets/linked.txt"]
             loaded_metadata.project_identity.as_ref(),
             loaded_metadata.runtime_defaults.as_ref(),
             &loaded_metadata.build_profile,
+            &loaded_metadata.package_permissions,
             &loaded_metadata.package_dependencies,
             &output_root,
             true,
