@@ -157,6 +157,7 @@ struct PreparedPackage {
     temporary_root: Option<PathBuf>,
 }
 
+#[derive(Debug)]
 struct TemporaryPackageRootGuard {
     path: Option<PathBuf>,
 }
@@ -174,6 +175,16 @@ impl TemporaryPackageRootGuard {
 
     fn release(mut self) {
         self.path = None;
+    }
+
+    fn cleanup(mut self, label: &str) -> Result<(), String> {
+        let Some(path) = self.path.as_deref() else {
+            return Ok(());
+        };
+        fs::remove_dir_all(path)
+            .map_err(|error| format!("Failed to remove {label} '{}': {}", path.display(), error))?;
+        self.path = None;
+        Ok(())
     }
 }
 
@@ -2828,12 +2839,12 @@ fn write_staged_install(
                 .as_path(),
             "Staged package runtime tools directory",
         )?;
-        let tool_build_scratch_root = ensure_directory_path_under_root(
-            staging_root.as_path(),
-            Path::new(".tool-build"),
-            "Staged package tool build scratch directory",
-        )?;
-        if materialize_source_tools {
+        let tool_build_scratch_guard = if materialize_source_tools {
+            Some(create_tool_build_scratch_root(staging_root.as_path())?)
+        } else {
+            None
+        };
+        if let Some(tool_build_scratch_guard) = tool_build_scratch_guard.as_ref() {
             let target = crate::cargo_ai_metadata::current_build_target();
             let build_target =
                 crate::agent_builder::build_target::BuildTarget::from_cli(Some(target.as_str()))?;
@@ -2845,7 +2856,7 @@ fn write_staged_install(
                         &build_target,
                         staged_package_root.as_path(),
                         staged_runtime_tools_root.as_path(),
-                        tool_build_scratch_root.as_path(),
+                        tool_build_scratch_guard.path(),
                     )?;
                 }
             }
@@ -2855,13 +2866,9 @@ fn write_staged_install(
                 target.as_str(),
             )?;
         }
-        fs::remove_dir_all(&tool_build_scratch_root).map_err(|error| {
-            format!(
-                "Failed to remove staged package tool build scratch directory '{}': {}",
-                tool_build_scratch_root.display(),
-                error
-            )
-        })?;
+        if let Some(tool_build_scratch_guard) = tool_build_scratch_guard {
+            tool_build_scratch_guard.cleanup("temporary package tool build root")?;
+        }
         let staged_archive =
             crate::commands::account::create_package_archive_bytes(&staged_package_root)?;
         let staged_content_sha256 = crate::commands::account::sha256_hex(staged_archive.as_slice());
@@ -3540,6 +3547,70 @@ fn ensure_packages_staging_root() -> Result<PathBuf, String> {
     Ok(staging_root)
 }
 
+fn create_tool_build_scratch_root(
+    _staging_root: &Path,
+) -> Result<TemporaryPackageRootGuard, String> {
+    #[cfg(windows)]
+    {
+        create_unique_tool_build_scratch_root(std::env::temp_dir().as_path())
+    }
+
+    #[cfg(not(windows))]
+    {
+        let path = ensure_directory_path_under_root(
+            _staging_root,
+            Path::new(".tool-build"),
+            "Staged package tool build scratch directory",
+        )?;
+        Ok(TemporaryPackageRootGuard::new(path))
+    }
+}
+
+#[cfg(any(windows, test))]
+fn create_unique_tool_build_scratch_root(
+    parent: &Path,
+) -> Result<TemporaryPackageRootGuard, String> {
+    ensure_real_directory(parent, "Temporary package tool build parent")?;
+    for _ in 0..8 {
+        let candidate = parent.join(format!("cai-t-{}", Uuid::new_v4().simple()));
+        match fs::create_dir(&candidate) {
+            Ok(()) => {
+                let metadata = match fs::symlink_metadata(&candidate) {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        let _ = fs::remove_dir(&candidate);
+                        return Err(format!(
+                            "Failed to inspect temporary package tool build root '{}': {}",
+                            candidate.display(),
+                            error
+                        ));
+                    }
+                };
+                if metadata_is_link_like(&metadata) || !metadata.is_dir() {
+                    let _ = fs::remove_dir(&candidate);
+                    return Err(format!(
+                        "Temporary package tool build root '{}' must be a real directory and not a symbolic link or reparse point.",
+                        candidate.display()
+                    ));
+                }
+                return Ok(TemporaryPackageRootGuard::new(candidate));
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to create temporary package tool build root '{}': {}",
+                    candidate.display(),
+                    error
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "Failed to allocate a unique temporary package tool build root under '{}'.",
+        parent.display()
+    ))
+}
+
 pub(crate) fn ensure_real_directory(path: &Path, label: &str) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata_is_link_like(&metadata) || !metadata.is_dir() => {
@@ -3750,6 +3821,75 @@ assets = ["schemas/customer.sql"]
         std::fs::write(root.join("agents/daily_digest.json"), "{}")
             .expect("hatch definition should be writable");
         root
+    }
+
+    #[test]
+    fn unique_tool_build_scratch_roots_are_short_and_cleaned_on_every_exit() {
+        let parent = std::env::temp_dir().join(format!(
+            "cargo-ai-tool-build-parent-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&parent).expect("temporary build parent should be writable");
+
+        let first = super::create_unique_tool_build_scratch_root(parent.as_path())
+            .expect("first scratch root should be created");
+        let second = super::create_unique_tool_build_scratch_root(parent.as_path())
+            .expect("second scratch root should be created");
+        let first_path = first.path().to_path_buf();
+        let second_path = second.path().to_path_buf();
+
+        assert_ne!(first_path, second_path);
+        for path in [&first_path, &second_path] {
+            assert_eq!(path.parent(), Some(parent.as_path()));
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("scratch root should have a UTF-8 name");
+            assert!(name.starts_with("cai-t-"));
+            assert_eq!(name.len(), 38);
+            assert!(path.is_dir());
+        }
+
+        std::fs::write(first_path.join("artifact"), "built")
+            .expect("scratch output should be writable");
+        first
+            .cleanup("test package tool build root")
+            .expect("explicit success cleanup should remove the first root");
+        assert!(!first_path.exists());
+
+        std::fs::write(second_path.join("partial-artifact"), "failed")
+            .expect("partial scratch output should be writable");
+        drop(second);
+        assert!(!second_path.exists());
+
+        std::fs::remove_dir(&parent).expect("empty build parent should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unique_tool_build_scratch_root_rejects_linked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "cargo-ai-tool-build-linked-parent-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let real_parent = root.join("real");
+        let linked_parent = root.join("linked");
+        std::fs::create_dir_all(&real_parent).expect("real build parent should be writable");
+        symlink(&real_parent, &linked_parent).expect("linked build parent should be created");
+
+        let error = super::create_unique_tool_build_scratch_root(linked_parent.as_path())
+            .expect_err("linked build parent must be rejected");
+
+        assert!(error.contains("symbolic link") || error.contains("reparse point"));
+        assert_eq!(
+            std::fs::read_dir(&real_parent)
+                .expect("real parent should remain readable")
+                .count(),
+            0
+        );
+        std::fs::remove_dir_all(&root).expect("linked-parent fixture should be removable");
     }
 
     fn add_source_tool_fixture(package_root: &Path, tool_name: &str, marker: &str) {

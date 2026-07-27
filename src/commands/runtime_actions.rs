@@ -7278,8 +7278,14 @@ auth_mode = "{auth_mode}"
             uuid::Uuid::new_v4()
         ));
         let context = local_package_context(install_root.as_path());
-        let static_path = context.package_payload_root.join("assets/reference.png");
-        let dynamic_path = context.package_data_root.join("images/generated.png");
+        let static_path = context
+            .package_payload_root
+            .join("assets")
+            .join("reference.png");
+        let dynamic_path = context
+            .package_data_root
+            .join("images")
+            .join("generated.png");
         fs::create_dir_all(
             static_path
                 .parent()
@@ -7312,8 +7318,8 @@ auth_mode = "{auth_mode}"
         )
         .expect("installed reference paths should resolve from package storage");
 
-        assert_eq!(resolved[0].source, static_path.to_string_lossy());
-        assert_eq!(resolved[1].source, dynamic_path.to_string_lossy());
+        assert_eq!(PathBuf::from(&resolved[0].source), static_path);
+        assert_eq!(PathBuf::from(&resolved[1].source), dynamic_path);
 
         let _ = fs::remove_dir_all(install_root);
     }
