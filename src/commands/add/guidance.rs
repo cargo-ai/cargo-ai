@@ -30,6 +30,10 @@ const START_HERE_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/start-here.md"
 ));
+const PACKAGE_WORKFLOW_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/package-workflow.md"
+));
 const USAGE_LEDGER_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/usage-ledger.md"
@@ -100,7 +104,7 @@ struct GuidanceArtifact {
     contents: &'static str,
 }
 
-const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 21] = [
+const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 22] = [
     GuidanceArtifact {
         relative_path: BUNDLE_ENTRY_PATH,
         contents: CODEX_GUIDANCE_TEMPLATE,
@@ -124,6 +128,10 @@ const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 21] = [
     GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/start-here.md",
         contents: START_HERE_TEMPLATE,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/package-workflow.md",
+        contents: PACKAGE_WORKFLOW_TEMPLATE,
     },
     GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/usage-ledger.md",
@@ -407,6 +415,7 @@ fn run_impl(sub_m: &ArgMatches) -> Result<(), String> {
 mod tests {
     use super::{
         guidance_success_ui_response, write_guidance_bundle, GuidanceBundleReport, GuidanceStyle,
+        PACKAGE_WORKFLOW_TEMPLATE,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -435,7 +444,7 @@ mod tests {
             Some("AGENTS.md")
         );
         assert!(report.root_output_written);
-        assert_eq!(report.artifact_paths.len(), 22);
+        assert_eq!(report.artifact_paths.len(), 23);
         assert!(dir.join("AGENTS.md").exists());
         assert!(dir.join(".cargo-ai/guidance/codex-agents.md").exists());
         assert!(dir
@@ -447,6 +456,7 @@ mod tests {
             .exists());
         assert!(dir.join(".cargo-ai/guidance/examples/README.md").exists());
         assert!(dir.join(".cargo-ai/guidance/start-here.md").exists());
+        assert!(dir.join(".cargo-ai/guidance/package-workflow.md").exists());
         assert!(dir.join(".cargo-ai/guidance/usage-ledger.md").exists());
         assert!(dir.join(".cargo-ai/guidance/tool-authoring.md").exists());
         assert!(dir.join(".cargo-ai/guidance/tool-contract.md").exists());
@@ -483,6 +493,7 @@ mod tests {
             .expect("guidance output should be readable");
         assert!(guidance.contains("Cargo AI Agent Authoring (Codex)"));
         assert!(guidance.contains(".cargo-ai/guidance/start-here.md"));
+        assert!(guidance.contains(".cargo-ai/guidance/package-workflow.md"));
         assert!(guidance.contains(".cargo-ai/guidance/usage-ledger.md"));
         assert!(guidance.contains(".cargo-ai/guidance/tool-authoring.md"));
         assert!(guidance.contains(".cargo-ai/guidance/tool-contract.md"));
@@ -500,6 +511,19 @@ mod tests {
             .expect("bundle entry guidance should be readable");
         assert!(bundle_entry.contains("Cargo AI Agent Authoring (Codex)"));
         assert!(bundle_entry.contains(".cargo-ai/guidance/start-here.md"));
+        assert!(bundle_entry.contains(".cargo-ai/guidance/package-workflow.md"));
+
+        let package_workflow =
+            fs::read_to_string(dir.join(".cargo-ai/guidance/package-workflow.md"))
+                .expect("package workflow guidance should be readable");
+        assert_eq!(package_workflow, PACKAGE_WORKFLOW_TEMPLATE);
+        assert!(package_workflow.contains("cargo ai packages publish"));
+        assert!(package_workflow.contains("cargo ai packages update"));
+        assert!(package_workflow.contains("cargo ai packages rollback"));
+        assert!(package_workflow.contains("--accept-permissions"));
+        assert!(package_workflow.contains("runtime/"));
+        assert!(package_workflow.contains("data/"));
+        assert!(package_workflow.contains("[package_dependencies"));
 
         let rules = fs::read_to_string(dir.join(".cargo-ai/guidance/action-rules.md"))
             .expect("action rules should be readable");
@@ -515,6 +539,7 @@ mod tests {
         assert!(start_here.contains("current machine"));
         assert!(start_here.contains("portable across macOS, Windows, and Linux"));
         assert!(start_here.contains("usage-ledger.md"));
+        assert!(start_here.contains("`package-workflow.md`"));
 
         let usage_ledger = fs::read_to_string(dir.join(".cargo-ai/guidance/usage-ledger.md"))
             .expect("usage ledger guidance should be readable");
@@ -528,6 +553,7 @@ mod tests {
         assert!(tool_authoring.contains("cargo ai add tool <tool_name>"));
         assert!(tool_authoring.contains("cargo ai tools build <tool_name> --target <triple>"));
         assert!(tool_authoring.contains("tool-contract.md"));
+        assert!(tool_authoring.contains("`package-workflow.md`"));
 
         let tool_contract = fs::read_to_string(dir.join(".cargo-ai/guidance/tool-contract.md"))
             .expect("tool contract guidance should be readable");
@@ -572,13 +598,19 @@ mod tests {
         let report =
             write_guidance_bundle(&dir, GuidanceStyle::Codex).expect("guidance write should work");
         assert!(!report.root_output_written);
-        assert_eq!(report.artifact_paths.len(), 21);
+        assert_eq!(report.artifact_paths.len(), 22);
         assert_eq!(
             fs::read_to_string(dir.join("AGENTS.md")).expect("existing AGENTS should be readable"),
             "existing guidance\n"
         );
         assert!(dir.join(".cargo-ai/guidance/codex-agents.md").exists());
         assert!(dir.join(".cargo-ai/guidance/action-rules.md").exists());
+        assert!(dir.join(".cargo-ai/guidance/package-workflow.md").exists());
+        assert_eq!(
+            fs::read_to_string(dir.join(".cargo-ai/guidance/package-workflow.md"))
+                .expect("package workflow guidance should be readable"),
+            PACKAGE_WORKFLOW_TEMPLATE
+        );
 
         let response = guidance_success_ui_response(&report);
         assert_eq!(
