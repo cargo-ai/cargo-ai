@@ -32,6 +32,27 @@ tokio::task_local! {
     static ACTION_OUTPUT: ActionOutput;
 }
 
+tokio::task_local! {
+    static DECLARING_PROJECT_ROOT: Option<PathBuf>;
+}
+
+pub(crate) async fn scope_declaring_project_root<F>(
+    project_root: Option<PathBuf>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    DECLARING_PROJECT_ROOT.scope(project_root, future).await
+}
+
+fn current_declaring_project_root() -> Option<PathBuf> {
+    DECLARING_PROJECT_ROOT
+        .try_with(|project_root| project_root.clone())
+        .ok()
+        .flatten()
+}
+
 #[derive(Clone)]
 pub(crate) struct ActionOutput {
     inner: Arc<Mutex<ActionOutputState>>,
@@ -1116,6 +1137,7 @@ async fn apply_actions_parallel(
     let mut matched_actions = Vec::new();
     let mut lane_tasks = Vec::new();
     let action_output = current_action_output();
+    let declaring_project_root = current_declaring_project_root();
 
     for (action_index, action) in actions.iter().enumerate() {
         if abort_signal.is_triggered() {
@@ -1134,6 +1156,7 @@ async fn apply_actions_parallel(
         let provider_context_clone = provider_context.clone();
         let abort_signal_clone = abort_signal.clone();
         let action_output_clone = action_output.clone();
+        let declaring_project_root_clone = declaring_project_root.clone();
 
         lane_tasks.push(tokio::spawn(async move {
             let lane_future = async move {
@@ -1151,6 +1174,8 @@ async fn apply_actions_parallel(
                 )
                 .await
             };
+            let lane_future =
+                DECLARING_PROJECT_ROOT.scope(declaring_project_root_clone, lane_future);
 
             if let Some(output) = action_output_clone {
                 ACTION_OUTPUT.scope(output, lane_future).await
@@ -2510,10 +2535,17 @@ async fn run_agent_step_with_provider_context(
         provider_context.package_context.as_ref(),
     )?;
     let mut command = child_artifact_command(&invocation);
-    if let Some(context) = provider_context
+    if crate::commands::package_dependencies::is_package_reference(artifact) {
+        let declaring_project_root = package_child_project_root(
+            provider_context.package_context.as_ref(),
+            action_name,
+            artifact,
+        )?;
+        command.current_dir(declaring_project_root);
+    } else if let Some(context) = provider_context
         .package_context
         .as_ref()
-        .filter(|context| context.source_kind == "hosted")
+        .filter(|context| context.source_kind == "hosted" || artifact_is_json_definition(artifact))
     {
         command.current_dir(context.package_data_root.as_path());
     }
@@ -2776,8 +2808,49 @@ fn resolve_child_artifact_invocation(
     action_name: &str,
     package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
 ) -> Result<ChildArtifactInvocation, String> {
+    if crate::commands::package_dependencies::is_package_reference(artifact) {
+        if let Some(context) = package_context.filter(|context| context.source_kind == "hosted") {
+            if !crate::commands::local_packages::hosted_package_allows_subprocess(context) {
+                return Err(format!(
+                    "Action '{}' cross-package child '{}' is blocked for hosted package alias '{}'. This invocation starts another Cargo AI process and requires an explicitly accepted subprocess permission.",
+                    action_name, artifact, context.alias
+                ));
+            }
+        }
+        let project_root = package_child_project_root(package_context, action_name, artifact)?;
+        crate::commands::local_packages::resolve_entrypoint_reference_for_project(
+            artifact,
+            false,
+            Some(project_root.as_path()),
+        )?
+        .ok_or_else(|| {
+            format!(
+                "Action '{}' package child '{}' is not a valid `alias::entrypoint` reference.",
+                action_name, artifact
+            )
+        })?;
+
+        let cargo_ai_exists = command_exists_on_path("cargo-ai");
+        if command_exists_on_path("cargo") && cargo_ai_exists {
+            return Ok(ChildArtifactInvocation::CargoSubcommand(
+                artifact.to_string(),
+            ));
+        }
+        if cargo_ai_exists {
+            return Ok(ChildArtifactInvocation::StandaloneCargoAi(
+                artifact.to_string(),
+            ));
+        }
+        return Err(format!(
+            "Action '{}' package child '{}' requires Cargo AI to be available as `cargo ai` or `cargo-ai` on PATH.",
+            action_name, artifact
+        ));
+    }
+
     validate_agent_step_target(artifact, action_name)?;
-    if let Some(context) = package_context.filter(|context| context.source_kind == "hosted") {
+    if let Some(context) = package_context
+        .filter(|context| context.source_kind == "hosted" || artifact_is_json_definition(artifact))
+    {
         let (package_relative_path, artifact_path) =
             crate::commands::local_packages::resolve_package_payload_path_from_current_entrypoint(
                 context, artifact,
@@ -2806,9 +2879,14 @@ fn resolve_child_artifact_invocation(
                 entrypoint.runnable && entrypoint.path == package_relative_path
             })
             .ok_or_else(|| {
+                let source_label = if context.source_kind == "hosted" {
+                    "hosted"
+                } else {
+                    "installed"
+                };
                 format!(
-                    "Action '{}' hosted child agent '{}' must resolve to a declared runnable export in package alias '{}'.",
-                    action_name, artifact, context.alias
+                    "Action '{}' {} child agent '{}' must resolve to a declared runnable export in package alias '{}'.",
+                    action_name, source_label, artifact, context.alias
                 )
             })?;
         let reference = format!("{}::{}", context.alias, exported.name);
@@ -2819,9 +2897,14 @@ fn resolve_child_artifact_invocation(
         if cargo_ai_exists {
             return Ok(ChildArtifactInvocation::StandaloneCargoAi(reference));
         }
+        let source_label = if context.source_kind == "hosted" {
+            "hosted"
+        } else {
+            "installed"
+        };
         return Err(format!(
-            "Action '{}' hosted child agent '{}' requires Cargo AI to be available as `cargo ai` or `cargo-ai` on PATH.",
-            action_name, artifact
+            "Action '{}' {} child agent '{}' requires Cargo AI to be available as `cargo ai` or `cargo-ai` on PATH.",
+            action_name, source_label, artifact
         ));
     }
 
@@ -2855,6 +2938,49 @@ fn resolve_child_artifact_invocation(
         "Action '{}' agent step JSON artifact '{}' requires Cargo AI to be available as `cargo ai` or `cargo-ai` on PATH.",
         action_name, artifact
     ))
+}
+
+fn package_child_project_root(
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
+    action_name: &str,
+    artifact: &str,
+) -> Result<PathBuf, String> {
+    let declaring_project_root = current_declaring_project_root();
+    let current_dir = std::env::current_dir().ok();
+    package_child_project_root_from(
+        package_context,
+        declaring_project_root.as_deref(),
+        current_dir.as_deref(),
+        action_name,
+        artifact,
+    )
+}
+
+fn package_child_project_root_from(
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
+    declaring_project_root: Option<&Path>,
+    current_dir: Option<&Path>,
+    action_name: &str,
+    artifact: &str,
+) -> Result<PathBuf, String> {
+    let selected_root = package_context
+        .map(|context| context.package_payload_root.clone())
+        .or_else(|| declaring_project_root.map(Path::to_path_buf));
+    let selected_root = match selected_root {
+        Some(root) => Some(root),
+        None => match current_dir {
+            Some(current_dir) => {
+                crate::commands::package_dependencies::find_project_root(current_dir)?
+            }
+            None => None,
+        },
+    };
+    selected_root.ok_or_else(|| {
+            format!(
+                "Action '{}' package child '{}' requires a project `.cargo-ai/project.toml` with a matching `[package_dependencies.<alias>]` declaration.",
+                action_name, artifact
+            )
+        })
 }
 
 fn child_artifact_command(invocation: &ChildArtifactInvocation) -> tokio::process::Command {
@@ -3775,7 +3901,7 @@ fn child_input_args_with_package_context(
                         action_name,
                         &format!("child-agent image path input {}", index + 1),
                     )?;
-                    let resolved = resolve_hosted_child_input_path(
+                    let resolved = resolve_installed_child_input_path(
                         resolved_path.as_str(),
                         child_input_uses_dynamic_parts(path),
                         action_name,
@@ -3801,7 +3927,7 @@ fn child_input_args_with_package_context(
                         action_name,
                         &format!("child-agent file path input {}", index + 1),
                     )?;
-                    let resolved = resolve_hosted_child_input_path(
+                    let resolved = resolve_installed_child_input_path(
                         resolved_path.as_str(),
                         child_input_uses_dynamic_parts(path),
                         action_name,
@@ -3902,7 +4028,7 @@ fn child_override_looks_like_external_path(value: &str) -> bool {
         || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
 }
 
-fn resolve_hosted_child_input_path(
+fn resolve_installed_child_input_path(
     raw_path: &str,
     dynamic: bool,
     action_name: &str,
@@ -3911,7 +4037,7 @@ fn resolve_hosted_child_input_path(
     package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
 ) -> Result<String, String> {
     validate_child_input_path(raw_path, action_name, input_index, input_kind)?;
-    let Some(context) = package_context.filter(|context| context.source_kind == "hosted") else {
+    let Some(context) = package_context else {
         return Ok(raw_path.to_string());
     };
 
@@ -4168,9 +4294,7 @@ fn resolve_generate_image_reference_images(
                 )
                 .map_err(|error| format!("Action '{}': {error}", action_name))?;
                 validate_generate_image_reference_path(resolved.as_str(), action_name, index + 1)?;
-                if let Some(context) =
-                    package_context.filter(|context| context.source_kind == "hosted")
-                {
+                if let Some(context) = package_context {
                     let resolved = if child_input_uses_dynamic_parts(path) {
                         crate::commands::local_packages::resolve_package_data_path(
                             context,
@@ -4481,8 +4605,9 @@ mod tests {
         format_backend_ui_message, format_elapsed_duration, insert_action_output_variable,
         matching_run_steps,
         resolve_action_render_mode_for_capability as resolve_action_output_mode_for_capability,
-        resolve_child_artifact_invocation, resolve_generate_image_step_profile_context,
-        resolve_hosted_child_input_path, resolve_run_args, resolve_string_parts, run_agent_step,
+        resolve_child_artifact_invocation, resolve_generate_image_reference_images,
+        resolve_generate_image_step_profile_context, resolve_installed_child_input_path,
+        resolve_run_args, resolve_string_parts, run_agent_step,
         run_agent_step_with_provider_context, run_completion_message_for_depth, run_exec_step,
         run_generate_image_step, run_header_line, run_tool_step, step_matches_platform,
         validate_agent_action_depth, ActionOutput, ActionOutputMode, ActionProviderContext,
@@ -4739,6 +4864,14 @@ mod tests {
                 ..crate::commands::local_packages::PackagePermissionProfileDocument::default()
             },
         }
+    }
+
+    fn local_package_context(
+        install_root: &Path,
+    ) -> crate::commands::local_packages::InstalledPackageRuntimeContext {
+        let mut context = hosted_package_context(install_root, "blocked_without_explicit_grant");
+        context.source_kind = "local".to_string();
+        context
     }
 
     fn profile_config_with_server_and_auth(
@@ -7061,7 +7194,7 @@ auth_mode = "{auth_mode}"
         )
         .expect("payload reference should exist");
 
-        let static_path = resolve_hosted_child_input_path(
+        let static_path = resolve_installed_child_input_path(
             "assets/reference.png",
             false,
             "invoke_child",
@@ -7075,7 +7208,7 @@ auth_mode = "{auth_mode}"
             context.package_payload_root.join("assets/reference.png")
         );
 
-        let dynamic_path = resolve_hosted_child_input_path(
+        let dynamic_path = resolve_installed_child_input_path(
             "images/generated.png",
             true,
             "invoke_child",
@@ -7088,6 +7221,105 @@ auth_mode = "{auth_mode}"
             PathBuf::from(dynamic_path),
             context.package_data_root.join("images/generated.png")
         );
+
+        let _ = fs::remove_dir_all(install_root);
+    }
+
+    #[test]
+    fn local_installed_child_static_and_dynamic_paths_use_payload_and_data_roots() {
+        let install_root = std::env::temp_dir().join(format!(
+            "local-installed-child-inputs-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let context = local_package_context(install_root.as_path());
+        fs::create_dir_all(context.package_payload_root.join("assets"))
+            .expect("payload assets should exist");
+        fs::write(
+            context.package_payload_root.join("assets/reference.png"),
+            "image",
+        )
+        .expect("payload reference should exist");
+
+        let static_path = resolve_installed_child_input_path(
+            "assets/reference.png",
+            false,
+            "invoke_child",
+            1,
+            "image",
+            Some(&context),
+        )
+        .expect("static package path should resolve from payload");
+        assert_eq!(
+            PathBuf::from(static_path),
+            context.package_payload_root.join("assets/reference.png")
+        );
+
+        let dynamic_path = resolve_installed_child_input_path(
+            "images/generated.png",
+            true,
+            "invoke_child",
+            1,
+            "image",
+            Some(&context),
+        )
+        .expect("dynamic package path should resolve from data");
+        assert_eq!(
+            PathBuf::from(dynamic_path),
+            context.package_data_root.join("images/generated.png")
+        );
+
+        let _ = fs::remove_dir_all(install_root);
+    }
+
+    #[test]
+    fn local_installed_reference_paths_use_payload_and_data_roots() {
+        let install_root = std::env::temp_dir().join(format!(
+            "local-installed-reference-inputs-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let context = local_package_context(install_root.as_path());
+        let static_path = context
+            .package_payload_root
+            .join("assets")
+            .join("reference.png");
+        let dynamic_path = context
+            .package_data_root
+            .join("images")
+            .join("generated.png");
+        fs::create_dir_all(
+            static_path
+                .parent()
+                .expect("static reference should have a parent"),
+        )
+        .expect("payload assets should exist");
+        fs::create_dir_all(
+            dynamic_path
+                .parent()
+                .expect("dynamic reference should have a parent"),
+        )
+        .expect("package data images should exist");
+        fs::write(&static_path, "static image").expect("static reference should exist");
+        fs::write(&dynamic_path, "dynamic image").expect("dynamic reference should exist");
+
+        let references = vec![
+            crate::GenerateImageReference::Path {
+                path: vec![crate::RunArg::Literal("assets/reference.png".to_string())],
+            },
+            crate::GenerateImageReference::Path {
+                path: vec![crate::RunArg::Variable("generated_path".to_string())],
+            },
+        ];
+        let resolved = resolve_generate_image_reference_images(
+            Some(&references),
+            &json!({ "generated_path": "images/generated.png" }),
+            "generate_art",
+            &no_named_inputs(),
+            Some(&context),
+        )
+        .expect("installed reference paths should resolve from package storage");
+
+        assert_eq!(PathBuf::from(&resolved[0].source), static_path);
+        assert_eq!(PathBuf::from(&resolved[1].source), dynamic_path);
 
         let _ = fs::remove_dir_all(install_root);
     }
@@ -7127,6 +7359,116 @@ auth_mode = "{auth_mode}"
 
     #[cfg(unix)]
     #[test]
+    fn local_installed_json_child_resolves_through_declared_alias_export() {
+        let test_path = TestPathCommands::new();
+        test_path.write_command("cargo", "#!/bin/sh\nexit 0\n");
+        test_path.write_command("cargo-ai", "#!/bin/sh\nexit 0\n");
+        let install_root = std::env::temp_dir().join(format!(
+            "local-installed-child-export-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let context = local_package_context(install_root.as_path());
+        fs::write(
+            context.package_payload_root.join("agents/observer.json"),
+            "{}",
+        )
+        .expect("observer should exist");
+        fs::write(context.package_payload_root.join("agents/child.json"), "{}")
+            .expect("child should exist");
+
+        let invocation =
+            resolve_child_artifact_invocation("./child.json", "invoke_child", Some(&context))
+                .expect("declared local installed child should resolve");
+        match invocation {
+            ChildArtifactInvocation::CargoSubcommand(reference) => {
+                assert_eq!(reference, "image_generator::child");
+            }
+            _ => panic!("local installed JSON child should use the cargo subcommand"),
+        }
+
+        let _ = fs::remove_dir_all(install_root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_installed_json_child_runs_from_package_data_root() {
+        let test_path = TestPathCommands::new();
+        test_path.write_command("cargo", "#!/bin/sh\npwd > child-cwd.txt\n");
+        test_path.write_command("cargo-ai", "#!/bin/sh\nexit 0\n");
+        let install_root = std::env::temp_dir().join(format!(
+            "local-installed-child-cwd-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let context = local_package_context(install_root.as_path());
+        fs::write(
+            context.package_payload_root.join("agents/observer.json"),
+            "{}",
+        )
+        .expect("observer should exist");
+        fs::write(context.package_payload_root.join("agents/child.json"), "{}")
+            .expect("child should exist");
+
+        let mut provider = provider_context();
+        provider.profile_name = None;
+        provider.package_context = Some(context.clone());
+        let step = crate::RunStep {
+            tool_name: None,
+            tool_params: std::collections::BTreeMap::new(),
+            ignore_tools: false,
+            kind: "agent".to_string(),
+            program: None,
+            model: None,
+            profile: None,
+            output_variable: None,
+            status_variable: None,
+            error_variable: None,
+            failure_mode: None,
+            when: None,
+            args: Vec::new(),
+            prompt: None,
+            path: None,
+            subject: None,
+            text: None,
+            agent: Some("./child.json".to_string()),
+            usage_log: None,
+            run_vars: None,
+            input_overrides: None,
+            inputs: None,
+            reference_images: None,
+            input_mode: None,
+            platforms: None,
+        };
+
+        let result = run_agent_step_with_provider_context(
+            &step,
+            &json!({}),
+            &no_named_inputs(),
+            0,
+            "invoke_child",
+            1,
+            &provider,
+            None,
+            5,
+            configured_agent_action_runtime_budget(Some(600)),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "local installed child should run: {result:?}"
+        );
+        let recorded = fs::read_to_string(context.package_data_root.join("child-cwd.txt"))
+            .expect("child should record its working directory");
+        assert_eq!(
+            PathBuf::from(recorded.trim()),
+            fs::canonicalize(&context.package_data_root)
+                .expect("package data root should canonicalize")
+        );
+
+        let _ = fs::remove_dir_all(install_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn hosted_json_child_rejects_undeclared_payload_file() {
         let test_path = TestPathCommands::new();
         test_path.write_command("cargo", "#!/bin/sh\nexit 0\n");
@@ -7146,6 +7488,31 @@ auth_mode = "{auth_mode}"
         let error =
             resolve_child_artifact_invocation("./private.json", "invoke_child", Some(&context))
                 .expect_err("undeclared hosted child should be rejected");
+        assert!(error.contains("declared runnable export"));
+
+        let _ = fs::remove_dir_all(install_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_installed_json_child_rejects_undeclared_payload_file() {
+        let test_path = TestPathCommands::new();
+        test_path.write_command("cargo", "#!/bin/sh\nexit 0\n");
+        test_path.write_command("cargo-ai", "#!/bin/sh\nexit 0\n");
+        let install_root = std::env::temp_dir().join(format!(
+            "local-installed-child-private-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let context = local_package_context(install_root.as_path());
+        fs::write(
+            context.package_payload_root.join("agents/private.json"),
+            "{}",
+        )
+        .expect("private child should exist");
+
+        let error =
+            resolve_child_artifact_invocation("./private.json", "invoke_child", Some(&context))
+                .expect_err("undeclared local installed child should be rejected");
         assert!(error.contains("declared runnable export"));
 
         let _ = fs::remove_dir_all(install_root);
@@ -7182,6 +7549,117 @@ auth_mode = "{auth_mode}"
         }
 
         let _ = fs::remove_dir_all(install_root);
+    }
+
+    #[test]
+    fn hosted_cross_package_child_checks_subprocess_permission_before_resolution() {
+        let install_root = std::env::temp_dir().join(format!(
+            "hosted-package-dependency-permission-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let blocked =
+            hosted_package_context(install_root.as_path(), "blocked_without_explicit_grant");
+
+        let error = resolve_child_artifact_invocation(
+            "reports::daily",
+            "invoke_dependency",
+            Some(&blocked),
+        )
+        .expect_err("hosted package dependency should not bypass subprocess permission");
+        assert!(error.contains("explicitly accepted subprocess permission"));
+        let _ = fs::remove_dir_all(install_root);
+    }
+
+    #[test]
+    fn package_child_uses_declaring_package_payload_as_project_root() {
+        let install_root = std::env::temp_dir().join(format!(
+            "hosted-package-dependency-root-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let context = hosted_package_context(install_root.as_path(), "allowed");
+
+        let project_root = super::package_child_project_root(
+            Some(&context),
+            "invoke_dependency",
+            "reports::daily",
+        )
+        .expect("installed package context should supply its declaring project root");
+        assert_eq!(project_root, context.package_payload_root);
+        let _ = fs::remove_dir_all(install_root);
+    }
+
+    #[test]
+    fn package_child_fails_closed_without_declaring_project_context() {
+        let arbitrary_root = std::env::temp_dir().join(format!(
+            "package-dependency-arbitrary-cwd-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&arbitrary_root).expect("arbitrary directory should exist");
+
+        let error = super::package_child_project_root_from(
+            None,
+            None,
+            Some(arbitrary_root.as_path()),
+            "invoke_dependency",
+            "reports::daily",
+        )
+        .expect_err("package child must not resolve without declaring project context");
+        assert!(error.contains("[package_dependencies.<alias>]"));
+        let _ = fs::remove_dir_all(arbitrary_root);
+    }
+
+    #[test]
+    fn package_child_prefers_absolute_definition_project_over_process_cwd() {
+        let project_a = std::env::temp_dir().join(format!(
+            "declaring-project-definition-root-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let project_b = std::env::temp_dir().join(format!(
+            "declaring-project-process-cwd-{}",
+            uuid::Uuid::new_v4()
+        ));
+        for root in [&project_a, &project_b] {
+            fs::create_dir_all(root.join(".cargo-ai")).expect("project metadata dir should exist");
+            fs::write(root.join(".cargo-ai/project.toml"), "format_version = 1\n")
+                .expect("project metadata should exist");
+        }
+
+        let selected = super::package_child_project_root_from(
+            None,
+            Some(project_a.as_path()),
+            Some(project_b.as_path()),
+            "invoke_dependency",
+            "reports::daily",
+        )
+        .expect("declaring project should be selected before process cwd");
+        assert_eq!(selected, project_a);
+
+        let _ = fs::remove_dir_all(project_a);
+        let _ = fs::remove_dir_all(project_b);
+    }
+
+    #[tokio::test]
+    async fn declaring_project_scope_can_be_propagated_into_spawned_tasks() {
+        let project_root = std::env::temp_dir().join(format!(
+            "declaring-project-task-local-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let expected = project_root.clone();
+
+        let observed = super::scope_declaring_project_root(Some(project_root), async move {
+            let captured = super::current_declaring_project_root();
+            tokio::spawn(async move {
+                super::scope_declaring_project_root(captured, async {
+                    super::current_declaring_project_root()
+                })
+                .await
+            })
+            .await
+            .expect("spawned task should complete")
+        })
+        .await;
+
+        assert_eq!(observed.as_deref(), Some(expected.as_path()));
     }
 
     #[cfg(unix)]

@@ -544,12 +544,12 @@ fn resolved_named_inputs_for_run(
     Ok(named_inputs)
 }
 
-fn resolve_hosted_named_input_paths(
+fn resolve_installed_named_input_paths(
     sub_m: &ArgMatches,
     named_inputs: &mut [crate::Input],
     package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
 ) -> Result<(), String> {
-    let Some(context) = package_context.filter(|context| context.source_kind == "hosted") else {
+    let Some(context) = package_context else {
         return Ok(());
     };
 
@@ -969,6 +969,40 @@ fn interpreted_usage_agent_info(project_root: Option<&Path>) -> serde_json::Valu
     value
 }
 
+fn runtime_tool_resolver(
+    project_root: Option<PathBuf>,
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
+    target_triple: impl Into<String>,
+) -> Result<crate::commands::tools::ToolResolver, String> {
+    let resolver = crate::commands::tools::ToolResolver::new(project_root, target_triple);
+    let Some(context) = package_context else {
+        return Ok(resolver);
+    };
+    let bundled_root =
+        crate::commands::local_packages::resolve_package_runtime_tools_root(context)?;
+    Ok(resolver.with_installed_package_runtime(bundled_root))
+}
+
+fn audit_runtime_actions_for_tools(
+    actions: &[crate::Action],
+    resolver: &crate::commands::tools::ToolResolver,
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
+    current_platform: Option<&str>,
+) -> Result<Vec<crate::commands::tools::ResolvedTool>, String> {
+    if let Some(context) = package_context.filter(|context| {
+        context.source_kind == "hosted"
+            && !crate::commands::local_packages::hosted_package_allows_subprocess(context)
+    }) {
+        if crate::commands::tools::actions_have_applicable_tool_steps(actions, current_platform) {
+            return Err(format!(
+                "Tool steps are blocked for hosted package alias '{}'. The installed package permission profile does not allow unconstrained tool subprocess execution.",
+                context.alias
+            ));
+        }
+    }
+    crate::commands::tools::audit_actions_for_tools(actions, resolver, current_platform)
+}
+
 pub(crate) async fn run_with_definition(
     sub_m: &ArgMatches,
     definition: &dyn InvocationDefinition,
@@ -1162,15 +1196,22 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     let ignore_tools = sub_m.get_flag("ignore_tools");
     let usage_agent_info =
         usage_agent_info.unwrap_or_else(|| interpreted_usage_agent_info(project_root.as_deref()));
-    let tool_resolver = Arc::new(crate::commands::tools::ToolResolver::new(
-        project_root.clone(),
-        crate::cargo_ai_metadata::current_build_target(),
-    ));
     let package_context = package_context.or_else(|| {
         project_root
             .as_deref()
             .and_then(crate::commands::local_packages::runtime_context_for_package_root)
     });
+    let tool_resolver = match runtime_tool_resolver(
+        project_root.clone(),
+        package_context.as_ref(),
+        crate::cargo_ai_metadata::current_build_target(),
+    ) {
+        Ok(resolver) => Arc::new(resolver),
+        Err(error) => {
+            eprintln!("x {error}");
+            return false;
+        }
+    };
     let usage_log_arg = sub_m.get_one::<String>("usage_log").map(String::as_str);
     let usage_log_setup = match crate::usage_log::UsageLogContext::from_runtime(
         usage_log_arg,
@@ -1189,9 +1230,10 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     };
 
     if !ignore_tools {
-        if let Err(error) = crate::commands::tools::audit_actions_for_tools(
+        if let Err(error) = audit_runtime_actions_for_tools(
             &actions,
             tool_resolver.as_ref(),
+            package_context.as_ref(),
             runtime_current_platform_label(),
         ) {
             eprintln!("x {error}");
@@ -1207,7 +1249,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         }
     };
     if let Err(error) =
-        resolve_hosted_named_input_paths(sub_m, &mut named_inputs, package_context.as_ref())
+        resolve_installed_named_input_paths(sub_m, &mut named_inputs, package_context.as_ref())
     {
         eprintln!("x {error}");
         return false;
@@ -1729,15 +1771,19 @@ fn runtime_current_platform_label() -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cli_override_descriptions, effective_action_execution_for_run, profile_selection_messages,
+        audit_runtime_actions_for_tools, cli_override_descriptions,
+        effective_action_execution_for_run, profile_selection_messages,
         render_runtime_failure_lines, resolve_runtime_vars_from_specs,
         resolved_action_execution_override_for_run, resolved_render_mode_for_run,
-        unknown_server_messages, validate_structural_action_only_inputs, LoadedProfileKind,
+        runtime_tool_resolver, unknown_server_messages, validate_structural_action_only_inputs,
+        LoadedProfileKind,
     };
     use crate::commands::runtime_actions::RequestedActionRenderMode;
+    use crate::commands::tools::{ToolResolver, ToolScope};
     use crate::providers::ProviderKind;
     use clap::Command;
     use serde_json::json;
+    use std::path::{Path, PathBuf};
 
     fn input_debug_strings(inputs: &[crate::Input]) -> Vec<String> {
         inputs.iter().map(|input| format!("{input:?}")).collect()
@@ -1756,6 +1802,75 @@ mod tests {
             ))
             .try_get_matches_from(args)
             .expect("cargo-ai args should parse")
+    }
+
+    fn installed_runtime_context(
+        install_root: &Path,
+    ) -> crate::commands::local_packages::InstalledPackageRuntimeContext {
+        crate::commands::local_packages::InstalledPackageRuntimeContext {
+            alias: "data_integration".to_string(),
+            source_kind: "local".to_string(),
+            package_payload_root: install_root.join("package"),
+            package_data_root: install_root.join("data"),
+            current_entrypoint_path: Some("agents/report.json".to_string()),
+            entrypoints: Vec::new(),
+            permissions: crate::commands::local_packages::PackagePermissionProfileDocument::default(
+            ),
+        }
+    }
+
+    fn write_runtime_tool_fixture(
+        tools_root: &Path,
+        tool_id: &str,
+        target: &str,
+        binary_name: &str,
+    ) -> PathBuf {
+        let tool_root = tools_root.join(tool_id);
+        std::fs::create_dir_all(&tool_root).expect("tool root should exist");
+        let binary_path = tool_root.join(binary_name);
+        std::fs::write(&binary_path, tool_id).expect("tool binary should exist");
+        let mut artifacts = serde_json::Map::new();
+        artifacts.insert(target.to_string(), json!({ "path": binary_name }));
+        let manifest = json!({
+            "schema_version": 1,
+            "tool_id": tool_id,
+            "binary": { "default_name": binary_name },
+            "artifacts": artifacts,
+        });
+        std::fs::write(
+            tool_root.join("tool.json"),
+            serde_json::to_vec_pretty(&manifest).expect("tool manifest should serialize"),
+        )
+        .expect("tool manifest should exist");
+        binary_path
+    }
+
+    #[cfg(unix)]
+    fn write_describe_probe_tool(tools_root: &Path, marker_path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let binary_path = write_runtime_tool_fixture(
+            tools_root,
+            "usage_importer",
+            "test-target",
+            "usage_importer",
+        );
+        let describe = r#"{"protocol_version":1,"name":"usage_importer","description":"probe","params":{},"result":{"type":"string","nullable":true},"resource_profile":{"network":"none","filesystem_read":"none","filesystem_write":"none","subprocess":"none","env_read":"none","credential_access":"none"},"self_test":{"supported":false,"safe":false},"examples":{"minimal_invoke":{"protocol_version":1,"params":{}},"full_invoke":{"protocol_version":1,"params":{}}}}"#;
+        std::fs::write(
+            &binary_path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"describe\" ]; then\nprintf touched > '{}'\nprintf '%s\\n' '{}'\nfi\n",
+                marker_path.display(),
+                describe
+            ),
+        )
+        .expect("probe tool should exist");
+        let mut permissions = std::fs::metadata(&binary_path)
+            .expect("probe metadata should exist")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(binary_path, permissions)
+            .expect("probe tool should be executable");
     }
 
     fn runtime_var_spec(
@@ -1792,6 +1907,284 @@ mod tests {
             }"#,
         )
         .expect("test runtime definition should parse")
+    }
+
+    fn test_tool_runtime_definition() -> crate::runtime_definition::RuntimeAgentDefinition {
+        crate::runtime_definition::RuntimeAgentDefinition::from_str(
+            r#"{
+                "version": "2026-03-03.r1",
+                "inputs": [{ "type": "text", "text": "Audit tools." }],
+                "agent_schema": {
+                    "type": "object",
+                    "properties": {
+                        "answer": { "type": "string" }
+                    },
+                    "required": ["answer"]
+                },
+                "actions": [
+                    {
+                        "name": "import_usage",
+                        "logic": { "==": [1, 1] },
+                        "run": [
+                            {
+                                "kind": "tool",
+                                "name": "usage_importer",
+                                "params": {}
+                            }
+                        ]
+                    }
+                ]
+            }"#,
+        )
+        .expect("tool runtime definition should parse")
+    }
+
+    #[test]
+    fn installed_runtime_tool_resolver_prefers_package_runtime_tools() {
+        let install_root = std::env::temp_dir().join(format!(
+            "installed-runtime-tool-precedence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let context = installed_runtime_context(install_root.as_path());
+        let project_tools_root = context.package_payload_root.join(".cargo-ai/tools");
+        let runtime_tools_root = install_root.join("runtime/tools");
+        std::fs::create_dir_all(context.package_payload_root.join(".cargo-ai"))
+            .expect("package metadata root should exist");
+        std::fs::create_dir_all(&context.package_data_root)
+            .expect("package data root should exist");
+        std::fs::write(
+            context.package_payload_root.join(".cargo-ai/project.toml"),
+            "format_version = 1\n",
+        )
+        .expect("package project metadata should exist");
+        let bundled_binary = write_runtime_tool_fixture(
+            runtime_tools_root.as_path(),
+            "usage_importer",
+            "test-target",
+            "bundled-importer",
+        );
+        write_runtime_tool_fixture(
+            project_tools_root.as_path(),
+            "usage_importer",
+            "test-target",
+            "project-importer",
+        );
+
+        let resolver = runtime_tool_resolver(
+            Some(context.package_payload_root.clone()),
+            Some(&context),
+            "test-target",
+        )
+        .expect("installed runtime tools root should attach to the resolver");
+        let resolved = resolver
+            .resolve_tool("usage_importer")
+            .expect("installed runtime tool should resolve");
+
+        assert_eq!(resolved.scope, ToolScope::Bundled);
+        assert_eq!(resolved.binary_path, bundled_binary);
+
+        let _ = std::fs::remove_dir_all(install_root);
+    }
+
+    #[test]
+    fn installed_runtime_tool_resolver_allows_legacy_missing_runtime() {
+        let install_root = std::env::temp_dir().join(format!(
+            "installed-legacy-runtime-tools-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let context = installed_runtime_context(install_root.as_path());
+        std::fs::create_dir_all(context.package_payload_root.join(".cargo-ai"))
+            .expect("package metadata root should exist");
+        std::fs::create_dir_all(&context.package_data_root)
+            .expect("package data root should exist");
+        std::fs::write(
+            context.package_payload_root.join(".cargo-ai/project.toml"),
+            "format_version = 1\n",
+        )
+        .expect("package project metadata should exist");
+
+        runtime_tool_resolver(
+            Some(context.package_payload_root.clone()),
+            Some(&context),
+            "test-target",
+        )
+        .expect("legacy tool-free aliases should not require a runtime directory");
+
+        let _ = std::fs::remove_dir_all(install_root);
+    }
+
+    #[test]
+    fn installed_runtime_tool_resolver_rejects_unsafe_runtime_root() {
+        let install_root = std::env::temp_dir().join(format!(
+            "installed-unsafe-runtime-tools-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let context = installed_runtime_context(install_root.as_path());
+        std::fs::create_dir_all(&context.package_payload_root)
+            .expect("package payload root should exist");
+        std::fs::create_dir_all(&context.package_data_root)
+            .expect("package data root should exist");
+        std::fs::write(install_root.join("runtime"), "not a directory")
+            .expect("unsafe runtime fixture should exist");
+
+        let error = runtime_tool_resolver(None, Some(&context), "test-target")
+            .expect_err("unsafe installed runtime roots must fail closed");
+        assert!(error.contains("must be a real directory"));
+
+        let _ = std::fs::remove_dir_all(install_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_installed_tool_resolver_never_falls_back_to_project_or_machine_tools() {
+        let _guard = crate::commands::runtime_actions::TEST_ENV_LOCK
+            .lock()
+            .expect("environment lock should not be poisoned");
+        let original_cargo_ai_home = std::env::var_os("CARGO_AI_HOME");
+        let test_root = std::env::temp_dir().join(format!(
+            "installed-runtime-tool-confinement-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let install_root = test_root.join("install");
+        let machine_home = test_root.join("machine-home");
+        let context = installed_runtime_context(install_root.as_path());
+        std::fs::create_dir_all(context.package_payload_root.join(".cargo-ai"))
+            .expect("package metadata root should exist");
+        std::fs::create_dir_all(&context.package_data_root)
+            .expect("package data root should exist");
+        std::fs::create_dir_all(install_root.join("runtime/tools"))
+            .expect("empty runtime tools root should exist");
+        std::fs::write(
+            context.package_payload_root.join(".cargo-ai/project.toml"),
+            "format_version = 1\n\n[tools]\nallow_global_fallback = true\n",
+        )
+        .expect("package project metadata should exist");
+        write_runtime_tool_fixture(
+            context
+                .package_payload_root
+                .join(".cargo-ai/tools")
+                .as_path(),
+            "usage_importer",
+            "test-target",
+            "project-importer",
+        );
+        write_runtime_tool_fixture(
+            machine_home.join("tools").as_path(),
+            "usage_importer",
+            "test-target",
+            "machine-importer",
+        );
+        std::env::set_var("CARGO_AI_HOME", &machine_home);
+
+        let project_error = runtime_tool_resolver(
+            Some(context.package_payload_root.clone()),
+            Some(&context),
+            "test-target",
+        )
+        .expect("installed resolver should construct")
+        .resolve_tool("usage_importer")
+        .expect_err("project tool fallback must be disabled for installed packages");
+        let machine_error = runtime_tool_resolver(None, Some(&context), "test-target")
+            .expect("installed resolver should construct without a project root")
+            .resolve_tool("usage_importer")
+            .expect_err("machine tool fallback must be disabled for installed packages");
+
+        match original_cargo_ai_home {
+            Some(value) => std::env::set_var("CARGO_AI_HOME", value),
+            None => std::env::remove_var("CARGO_AI_HOME"),
+        }
+        assert!(project_error.contains("version-bound runtime tools"));
+        assert!(machine_error.contains("version-bound runtime tools"));
+
+        let _ = std::fs::remove_dir_all(test_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blocked_hosted_tool_audit_never_executes_any_describe_candidate() {
+        let _guard = crate::commands::runtime_actions::TEST_ENV_LOCK
+            .lock()
+            .expect("environment lock should not be poisoned");
+        let original_cargo_ai_home = std::env::var_os("CARGO_AI_HOME");
+        let test_root = std::env::temp_dir().join(format!(
+            "blocked-hosted-tool-audit-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let project_root = test_root.join("project");
+        let machine_home = test_root.join("machine-home");
+        let install_root = test_root.join("install");
+        let project_marker = test_root.join("project-describe-ran");
+        let machine_marker = test_root.join("machine-describe-ran");
+        let runtime_marker = test_root.join("runtime-describe-ran");
+        std::fs::create_dir_all(project_root.join(".cargo-ai"))
+            .expect("project metadata root should exist");
+        std::fs::write(
+            project_root.join(".cargo-ai/project.toml"),
+            "format_version = 1\n",
+        )
+        .expect("project metadata should exist");
+        write_describe_probe_tool(
+            project_root.join(".cargo-ai/tools").as_path(),
+            &project_marker,
+        );
+        write_describe_probe_tool(machine_home.join("tools").as_path(), &machine_marker);
+
+        let mut context = installed_runtime_context(install_root.as_path());
+        context.source_kind = "hosted".to_string();
+        std::fs::create_dir_all(&context.package_payload_root)
+            .expect("package payload root should exist");
+        std::fs::create_dir_all(&context.package_data_root)
+            .expect("package data root should exist");
+        let runtime_tools_root = install_root.join("runtime/tools");
+        write_describe_probe_tool(runtime_tools_root.as_path(), &runtime_marker);
+        std::env::set_var("CARGO_AI_HOME", &machine_home);
+
+        let actions = test_tool_runtime_definition().actions();
+        let candidates = vec![
+            (
+                "project",
+                ToolResolver::new(Some(project_root), "test-target"),
+                project_marker,
+            ),
+            (
+                "machine",
+                ToolResolver::new(None, "test-target"),
+                machine_marker,
+            ),
+            (
+                "runtime",
+                runtime_tool_resolver(
+                    Some(context.package_payload_root.clone()),
+                    Some(&context),
+                    "test-target",
+                )
+                .expect("hosted runtime resolver should construct"),
+                runtime_marker,
+            ),
+        ];
+        let outcomes = candidates
+            .into_iter()
+            .map(|(label, resolver, marker)| {
+                let result =
+                    audit_runtime_actions_for_tools(&actions, &resolver, Some(&context), None);
+                (label, result, marker.exists())
+            })
+            .collect::<Vec<_>>();
+
+        match original_cargo_ai_home {
+            Some(value) => std::env::set_var("CARGO_AI_HOME", value),
+            None => std::env::remove_var("CARGO_AI_HOME"),
+        }
+        for (label, result, marker_exists) in outcomes {
+            let error = result.expect_err("blocked hosted tool audit must fail before describe");
+            assert!(
+                error.contains("blocked for hosted package alias"),
+                "unexpected {label} error: {error}"
+            );
+            assert!(!marker_exists, "{label} describe probe must not execute");
+        }
+
+        let _ = std::fs::remove_dir_all(test_root);
     }
 
     #[test]
@@ -2199,10 +2592,11 @@ mod tests {
         assert!(error.contains("supported file extension"));
     }
 
-    #[test]
-    fn hosted_named_path_inputs_separate_package_assets_from_caller_grants() {
+    fn assert_installed_named_path_inputs_separate_package_assets_from_caller_grants(
+        source_kind: &str,
+    ) {
         let install_root = std::env::temp_dir().join(format!(
-            "cai2102-hosted-named-inputs-{}",
+            "installed-{source_kind}-named-inputs-{}",
             uuid::Uuid::new_v4()
         ));
         let package_root = install_root.join("package");
@@ -2213,7 +2607,7 @@ mod tests {
             .expect("package image should exist");
         let context = crate::commands::local_packages::InstalledPackageRuntimeContext {
             alias: "image_generator".to_string(),
-            source_kind: "hosted".to_string(),
+            source_kind: source_kind.to_string(),
             package_payload_root: package_root.clone(),
             package_data_root: data_root,
             current_entrypoint_path: Some("agents/observer.json".to_string()),
@@ -2231,7 +2625,7 @@ mod tests {
             kind: crate::InputKind::Image,
             value: Some("assets/default.png".to_string()),
         }];
-        super::resolve_hosted_named_input_paths(baked_runtime_m, &mut baked, Some(&context))
+        super::resolve_installed_named_input_paths(baked_runtime_m, &mut baked, Some(&context))
             .expect("package-owned image should resolve inside the verified payload");
         assert_eq!(
             baked[0].value.as_deref(),
@@ -2254,8 +2648,12 @@ mod tests {
             kind: crate::InputKind::Image,
             value: Some(caller_path.clone()),
         }];
-        super::resolve_hosted_named_input_paths(explicit_runtime_m, &mut explicit, Some(&context))
-            .expect("caller-provided image should remain an explicit caller path");
+        super::resolve_installed_named_input_paths(
+            explicit_runtime_m,
+            &mut explicit,
+            Some(&context),
+        )
+        .expect("caller-provided image should remain an explicit caller path");
         assert_eq!(
             explicit[0].value.as_deref(),
             std::env::current_dir()
@@ -2265,6 +2663,16 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(install_root);
+    }
+
+    #[test]
+    fn hosted_named_path_inputs_separate_package_assets_from_caller_grants() {
+        assert_installed_named_path_inputs_separate_package_assets_from_caller_grants("hosted");
+    }
+
+    #[test]
+    fn local_installed_named_path_inputs_separate_package_assets_from_caller_grants() {
+        assert_installed_named_path_inputs_separate_package_assets_from_caller_grants("local");
     }
 
     #[test]

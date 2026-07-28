@@ -91,6 +91,25 @@ struct PublishPayload {
     package_archive_base64: String,
 }
 
+#[cfg(feature = "developer-tools")]
+struct PublishStagingGuard {
+    path: PathBuf,
+}
+
+#[cfg(feature = "developer-tools")]
+impl PublishStagingGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+#[cfg(feature = "developer-tools")]
+impl Drop for PublishStagingGuard {
+    fn drop(&mut self) {
+        let _ = remove_path_without_following_links(self.path.as_path());
+    }
+}
+
 const PULLED_PROJECT_METADATA_RELATIVE_PATH: &str = ".cargo-ai/project.toml";
 const PACKAGE_MANIFEST_FILE_NAME: &str = "cargo-ai-package.toml";
 const PULLED_PACKAGE_RECEIPT_RELATIVE_PATH: &str = ".cargo-ai/origin/cargo-ai-package.toml";
@@ -105,6 +124,11 @@ const HOSTED_ARCHIVE_MAX_ENTRIES: usize = 10_000;
 const HOSTED_ARCHIVE_MAX_PATH_BYTES: usize = 1_024;
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_FAIL_PULL_ACTIVATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 #[derive(Clone, Copy)]
 struct ArchiveLimits {
@@ -254,7 +278,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
         {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("x Request failed: {e:?}");
+                eprintln!("x Request failed: {e}");
                 return false;
             }
         },
@@ -278,7 +302,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("x Request failed: {e:?}");
+                    eprintln!("x Request failed: {e}");
                     return false;
                 }
             }
@@ -293,13 +317,14 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
             access_token_owned.as_str(),
             name,
             owner_handle.as_deref(),
+            None,
             version.as_deref(),
         )
         .await
         {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("x Request failed: {e:?}");
+                eprintln!("x Request failed: {e}");
                 return false;
             }
         },
@@ -314,7 +339,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("x Request failed: {e:?}");
+                    eprintln!("x Request failed: {e}");
                     return false;
                 }
             }
@@ -330,7 +355,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("x Request failed: {e:?}");
+                    eprintln!("x Request failed: {e}");
                     return false;
                 }
             }
@@ -385,7 +410,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            eprintln!("x Request failed after session refresh: {e:?}");
+                            eprintln!("x Request failed after session refresh: {e}");
                             return false;
                         }
                     },
@@ -409,7 +434,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
                         {
                             Ok(r) => r,
                             Err(e) => {
-                                eprintln!("x Request failed after session refresh: {e:?}");
+                                eprintln!("x Request failed after session refresh: {e}");
                                 return false;
                             }
                         }
@@ -424,13 +449,14 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
                         retry_access_token.as_str(),
                         name,
                         owner_handle.as_deref(),
+                        None,
                         version.as_deref(),
                     )
                     .await
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            eprintln!("x Request failed after session refresh: {e:?}");
+                            eprintln!("x Request failed after session refresh: {e}");
                             return false;
                         }
                     },
@@ -445,7 +471,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
                         {
                             Ok(r) => r,
                             Err(e) => {
-                                eprintln!("x Request failed after session refresh: {e:?}");
+                                eprintln!("x Request failed after session refresh: {e}");
                                 return false;
                             }
                         }
@@ -461,7 +487,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
                         {
                             Ok(r) => r,
                             Err(e) => {
-                                eprintln!("x Request failed after session refresh: {e:?}");
+                                eprintln!("x Request failed after session refresh: {e}");
                                 return false;
                             }
                         }
@@ -477,6 +503,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
 
     if let ProjectsCommand::Pull {
         name,
+        owner_handle,
         version,
         output_dir,
         force,
@@ -484,9 +511,12 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
     } = &projects_command
     {
         if is_project_pull_success(&response) {
-            if let Err(error) =
-                validate_project_pull_response_matches_request(&response, name, version.as_deref())
-            {
+            if let Err(error) = validate_project_pull_response_matches_request(
+                &response,
+                name,
+                owner_handle.as_deref(),
+                version.as_deref(),
+            ) {
                 eprintln!("x {error}");
                 return false;
             }
@@ -528,7 +558,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
 
 #[cfg(feature = "developer-tools")]
 fn prepare_publish_payload(profile_name: &str) -> Result<PublishPayload, String> {
-    let project_root = current_project_root().ok_or_else(|| {
+    let project_root = current_project_root()?.ok_or_else(|| {
         "No Cargo AI project metadata was found from the current directory upward.".to_string()
     })?;
     let staging_output_dir = project_root
@@ -536,25 +566,27 @@ fn prepare_publish_payload(profile_name: &str) -> Result<PublishPayload, String>
         .join("cargo-ai")
         .join("publish-tmp")
         .join(Uuid::new_v4().to_string());
+    let staging_guard = PublishStagingGuard::new(staging_output_dir.clone());
     let staging_output_dir_raw = staging_output_dir.to_string_lossy().to_string();
 
     println!("Packaging profile `{profile_name}`...");
     println!("Project: {}", project_root.display());
 
-    let assemble_result = crate::commands::package::assemble_current_project_package(
+    let assembled = crate::commands::package::assemble_current_project_package(
         profile_name,
         Some(staging_output_dir_raw.as_str()),
         true,
         false,
-    );
-    let assembled = match assemble_result {
-        Ok(assembled) => assembled,
-        Err(error) => {
-            let _ = fs::remove_dir_all(&staging_output_dir);
-            return Err(error);
-        }
-    };
+    )?;
 
+    finish_publish_payload(assembled, staging_guard)
+}
+
+#[cfg(feature = "developer-tools")]
+fn finish_publish_payload(
+    assembled: crate::commands::package::AssembledPackage,
+    _staging_guard: PublishStagingGuard,
+) -> Result<PublishPayload, String> {
     let project_name = assembled.manifest_project_name.ok_or_else(|| {
         "Project publish requires `.cargo-ai/project.toml` `[project].name`.".to_string()
     })?;
@@ -599,8 +631,6 @@ fn prepare_publish_payload(profile_name: &str) -> Result<PublishPayload, String>
     );
     println!();
 
-    let _ = fs::remove_dir_all(&staging_output_dir);
-
     if estimated_request_size_bytes > SAFE_PROJECT_PUBLISH_REQUEST_LIMIT_BYTES {
         return Err(format!(
             "Estimated publish request size {} exceeds the current safe package-publish ceiling of about {}. Keep packaged assets minimal and remove large sample files before publishing.",
@@ -628,10 +658,10 @@ fn render_account_projects_response(response: &Value) {
     }
 }
 
-fn current_project_root() -> Option<PathBuf> {
-    std::env::current_dir()
-        .ok()
-        .and_then(|dir| crate::commands::tools::maybe_find_project_root(dir.as_path()))
+fn current_project_root() -> Result<Option<PathBuf>, String> {
+    let current_dir = std::env::current_dir()
+        .map_err(|error| format!("Failed to inspect the current project directory: {error}"))?;
+    crate::commands::package_dependencies::find_project_root(current_dir.as_path())
 }
 
 fn is_project_pull_success(response: &Value) -> bool {
@@ -645,6 +675,7 @@ fn is_project_pull_success(response: &Value) -> bool {
 pub(crate) fn validate_project_pull_response_matches_request(
     response: &Value,
     requested_name: &str,
+    requested_owner_handle: Option<&str>,
     requested_version: Option<&str>,
 ) -> Result<(), String> {
     let resolved_name = response
@@ -657,6 +688,23 @@ pub(crate) fn validate_project_pull_response_matches_request(
         return Err(format!(
             "Hosted pull response returned package `{resolved_name}` for requested package `{requested_name}`."
         ));
+    }
+
+    if let Some(requested_handle) = requested_owner_handle {
+        let returned_handle = response
+            .get("owner_handle")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                "Hosted pull response did not include `owner_handle` for an explicit owner request."
+                    .to_string()
+            })?;
+        if returned_handle.to_ascii_lowercase() != requested_handle.trim().to_ascii_lowercase() {
+            return Err(format!(
+                "Hosted pull response returned owner handle `{returned_handle}` for requested owner `{requested_handle}`."
+            ));
+        }
     }
 
     let resolved_version_raw = response
@@ -728,11 +776,34 @@ fn restore_pulled_project(response: &Value, output_path: &Path, force: bool) -> 
         ));
     }
 
-    prepare_output_directory(output_path, force)?;
-    extract_package_archive_bytes(archive_bytes.as_slice(), output_path)?;
-    validate_restored_package_manifest(response, output_path)?;
-    relocate_pulled_package_receipt(output_path)?;
-    write_pulled_package_hosted_receipt(response, output_path)
+    let output_path = resolve_pull_output_path(output_path, force)?;
+    let transaction_id = Uuid::new_v4();
+    let output_parent = output_path
+        .parent()
+        .expect("validated pull output path should have a parent");
+    let staging_path = output_parent.join(format!(".cargo-ai-pull-{transaction_id}-staging"));
+    let backup_path = output_parent.join(format!(".cargo-ai-pull-{transaction_id}-backup"));
+    fs::create_dir(&staging_path).map_err(|error| {
+        format!(
+            "Failed to create pull staging directory '{}': {}",
+            staging_path.display(),
+            error
+        )
+    })?;
+
+    let prepare_result = (|| {
+        ensure_archive_path_is_safe(&staging_path, Path::new(""))?;
+        extract_package_archive_bytes(archive_bytes.as_slice(), &staging_path)?;
+        validate_restored_package_manifest(response, &staging_path)?;
+        relocate_pulled_package_receipt(&staging_path)?;
+        write_pulled_package_hosted_receipt(response, &staging_path)
+    })();
+    if let Err(error) = prepare_result {
+        let _ = remove_path_without_following_links(&staging_path);
+        return Err(error);
+    }
+
+    replace_output_with_staged(&output_path, &staging_path, &backup_path, force)
 }
 
 fn validate_restored_package_manifest(response: &Value, project_root: &Path) -> Result<(), String> {
@@ -909,13 +980,50 @@ fn write_pulled_package_hosted_receipt(
     })
 }
 
-fn prepare_output_directory(path: &Path, force: bool) -> Result<(), String> {
-    match fs::symlink_metadata(path) {
+fn resolve_pull_output_path(path: &Path, force: bool) -> Result<PathBuf, String> {
+    let file_name = path.file_name().ok_or_else(|| {
+        format!(
+            "Output path '{}' must name a project directory and cannot be a filesystem root.",
+            path.display()
+        )
+    })?;
+    let raw_parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let absolute_parent = if raw_parent.is_absolute() {
+        normalize_filesystem_path(raw_parent)
+    } else {
+        normalize_filesystem_path(
+            std::env::current_dir()
+                .map_err(|error| format!("Failed to resolve current directory: {error}"))?
+                .join(raw_parent),
+        )
+    };
+    inspect_real_directory_components(&absolute_parent)?;
+    fs::create_dir_all(&absolute_parent).map_err(|error| {
+        format!(
+            "Failed to create pull output parent directory '{}': {}",
+            absolute_parent.display(),
+            error
+        )
+    })?;
+    inspect_real_directory_components(&absolute_parent)?;
+    let canonical_parent = fs::canonicalize(&absolute_parent).map_err(|error| {
+        format!(
+            "Failed to resolve pull output parent directory '{}': {}",
+            absolute_parent.display(),
+            error
+        )
+    })?;
+    let resolved_path = canonical_parent.join(file_name);
+
+    match fs::symlink_metadata(&resolved_path) {
         Ok(metadata) => {
             if archive_metadata_is_link_like(&metadata) {
                 return Err(format!(
                     "Output path '{}' must not be a symbolic link or reparse point.",
-                    path.display()
+                    resolved_path.display()
                 ));
             }
             if !force {
@@ -924,43 +1032,228 @@ fn prepare_output_directory(path: &Path, force: bool) -> Result<(), String> {
                     path.display()
                 ));
             }
-
-            if metadata.is_dir() {
-                fs::remove_dir_all(path).map_err(|error| {
-                    format!(
-                        "Failed to replace existing output directory '{}': {}",
-                        path.display(),
-                        error
-                    )
-                })?;
-            } else {
-                fs::remove_file(path).map_err(|error| {
-                    format!(
-                        "Failed to replace existing output path '{}': {}",
-                        path.display(),
-                        error
-                    )
-                })?;
+            if !metadata.is_dir() && !metadata.is_file() {
+                return Err(format!(
+                    "Output path '{}' must be a regular file or directory before replacement.",
+                    resolved_path.display()
+                ));
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(format!(
                 "Failed to inspect output path '{}': {}",
-                path.display(),
+                resolved_path.display(),
                 error
             ));
         }
     }
+    Ok(resolved_path)
+}
 
-    fs::create_dir_all(path).map_err(|error| {
+fn replace_output_with_staged(
+    output_path: &Path,
+    staging_path: &Path,
+    backup_path: &Path,
+    force: bool,
+) -> Result<(), String> {
+    let output_metadata = match fs::symlink_metadata(output_path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            let _ = remove_path_without_following_links(staging_path);
+            return Err(format!(
+                "Failed to inspect output path '{}' before replacement: {}",
+                output_path.display(),
+                error
+            ));
+        }
+    };
+
+    let Some(output_metadata) = output_metadata else {
+        return fs::rename(staging_path, output_path).map_err(|error| {
+            let _ = remove_path_without_following_links(staging_path);
+            format!(
+                "Failed to move validated pull output from '{}' to '{}': {}",
+                staging_path.display(),
+                output_path.display(),
+                error
+            )
+        });
+    };
+    if archive_metadata_is_link_like(&output_metadata) {
+        let _ = remove_path_without_following_links(staging_path);
+        return Err(format!(
+            "Output path '{}' must not be a symbolic link or reparse point.",
+            output_path.display()
+        ));
+    }
+    if !force {
+        let _ = remove_path_without_following_links(staging_path);
+        return Err(format!(
+            "Output directory '{}' already exists. Re-run with --force to replace it, or choose --output-dir <DIR>.",
+            output_path.display()
+        ));
+    }
+    if !output_metadata.is_dir() && !output_metadata.is_file() {
+        let _ = remove_path_without_following_links(staging_path);
+        return Err(format!(
+            "Output path '{}' must be a regular file or directory before replacement.",
+            output_path.display()
+        ));
+    }
+
+    fs::rename(output_path, backup_path).map_err(|error| {
+        let _ = remove_path_without_following_links(staging_path);
         format!(
-            "Failed to create output directory '{}': {}",
-            path.display(),
+            "Failed to create recoverable pull backup '{}' for '{}': {}",
+            backup_path.display(),
+            output_path.display(),
             error
         )
     })?;
-    ensure_archive_path_is_safe(path, Path::new(""))
+    let replacement_result = maybe_fail_pull_activation().and_then(|_| {
+        fs::rename(staging_path, output_path)
+            .map_err(|error| format!("failed to rename staged output: {error}"))
+    });
+    if let Err(replacement_error) = replacement_result {
+        return match fs::rename(backup_path, output_path) {
+            Ok(()) => {
+                let _ = remove_path_without_following_links(staging_path);
+                Err(format!(
+                    "Failed to activate validated pull output '{}': {} Previous output was restored.",
+                    output_path.display(),
+                    replacement_error
+                ))
+            }
+            Err(recovery_error) => Err(format!(
+                "Failed to activate validated pull output '{}': {} Automatic recovery failed: {}. Previous output remains at '{}'; staged output remains at '{}'.",
+                output_path.display(),
+                replacement_error,
+                recovery_error,
+                backup_path.display(),
+                staging_path.display()
+            )),
+        };
+    }
+
+    if let Err(error) = remove_path_without_following_links(backup_path) {
+        eprintln!(
+            "Warning: pull output was replaced, but prior output backup '{}' could not be removed: {}",
+            backup_path.display(),
+            error
+        );
+    }
+    Ok(())
+}
+
+fn maybe_fail_pull_activation() -> Result<(), String> {
+    #[cfg(test)]
+    if TEST_FAIL_PULL_ACTIVATION.with(|fail| fail.replace(false)) {
+        return Err("Injected pull activation failure for testing.".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn fail_next_pull_activation() {
+    TEST_FAIL_PULL_ACTIVATION.with(|fail| fail.set(true));
+}
+
+fn remove_path_without_following_links(path: &Path) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect cleanup path '{}': {}",
+                path.display(),
+                error
+            ));
+        }
+    };
+    if metadata.is_dir() && !archive_metadata_is_link_like(&metadata) {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+    .map_err(|error| format!("Failed to remove '{}': {}", path.display(), error))
+}
+
+fn inspect_real_directory_components(path: &Path) -> Result<(), String> {
+    let trusted_boundaries = trusted_pull_output_boundaries();
+    let trusted_boundary = trusted_boundaries
+        .iter()
+        .filter(|boundary| path.starts_with(boundary))
+        .max_by_key(|boundary| boundary.components().count());
+    let (mut current_path, remaining_path) = match trusted_boundary {
+        Some(boundary) => {
+            let canonical_boundary = fs::canonicalize(boundary).map_err(|error| {
+                format!(
+                    "Failed to resolve trusted pull output boundary '{}': {}",
+                    boundary.display(),
+                    error
+                )
+            })?;
+            let remaining = path
+                .strip_prefix(boundary)
+                .map_err(|_| "Pull output escaped its trusted boundary.".to_string())?;
+            (canonical_boundary, remaining)
+        }
+        None => (PathBuf::new(), path),
+    };
+    for component in remaining_path.components() {
+        current_path.push(component.as_os_str());
+        match fs::symlink_metadata(&current_path) {
+            Ok(metadata) if archive_metadata_is_link_like(&metadata) => {
+                return Err(format!(
+                    "Output path must not traverse symbolic link or reparse point '{}'.",
+                    current_path.display()
+                ));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(format!(
+                    "Output path ancestor '{}' must be a real directory.",
+                    current_path.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect output path ancestor '{}': {}",
+                    current_path.display(),
+                    error
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn trusted_pull_output_boundaries() -> Vec<PathBuf> {
+    let mut boundaries = vec![normalize_filesystem_path(std::env::temp_dir())];
+    if let Ok(current_dir) = std::env::current_dir() {
+        boundaries.push(normalize_filesystem_path(current_dir));
+    }
+    boundaries
+        .into_iter()
+        .filter(|boundary| boundary.is_absolute() && boundary.exists())
+        .collect()
+}
+
+fn normalize_filesystem_path(path: impl AsRef<Path>) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.as_ref().components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn build_local_pull_ui(
@@ -1037,10 +1330,16 @@ fn display_path(path: &Path) -> String {
 }
 
 pub(crate) fn create_package_archive_bytes(package_root: &Path) -> Result<Vec<u8>, String> {
+    let canonical_package_root = validate_archive_source_root(package_root)?;
     let encoder = GzEncoder::new(Vec::new(), Compression::default());
     let mut archive_builder = Builder::new(encoder);
     archive_builder.mode(HeaderMode::Deterministic);
-    append_compressed_archive_entries(&mut archive_builder, package_root, package_root)?;
+    append_compressed_archive_entries(
+        &mut archive_builder,
+        package_root,
+        &canonical_package_root,
+        package_root,
+    )?;
     let encoder = archive_builder
         .into_inner()
         .map_err(|error| format!("Failed to finalize compressed project archive: {error}"))?;
@@ -1052,8 +1351,17 @@ pub(crate) fn create_package_archive_bytes(package_root: &Path) -> Result<Vec<u8
 fn append_compressed_archive_entries<W: Write>(
     archive_builder: &mut Builder<W>,
     package_root: &Path,
+    canonical_package_root: &Path,
     current_path: &Path,
 ) -> Result<(), String> {
+    let current_metadata =
+        validate_archive_source_path(package_root, canonical_package_root, current_path)?;
+    if !current_metadata.is_dir() {
+        return Err(format!(
+            "Packaged path '{}' must be a real directory.",
+            current_path.display()
+        ));
+    }
     let mut children = fs::read_dir(current_path)
         .map_err(|error| {
             format!(
@@ -1074,6 +1382,8 @@ fn append_compressed_archive_entries<W: Write>(
 
     for child in children {
         let child_path = child.path();
+        let child_metadata =
+            validate_archive_source_path(package_root, canonical_package_root, &child_path)?;
         let relative_path = child_path
             .strip_prefix(package_root)
             .map_err(|_| {
@@ -1086,7 +1396,7 @@ fn append_compressed_archive_entries<W: Write>(
             .to_string_lossy()
             .replace('\\', "/");
 
-        if child_path.is_dir() {
+        if child_metadata.is_dir() {
             archive_builder
                 .append_dir(relative_path.as_str(), child_path.as_path())
                 .map_err(|error| {
@@ -1096,8 +1406,13 @@ fn append_compressed_archive_entries<W: Write>(
                         error
                     )
                 })?;
-            append_compressed_archive_entries(archive_builder, package_root, child_path.as_path())?;
-        } else {
+            append_compressed_archive_entries(
+                archive_builder,
+                package_root,
+                canonical_package_root,
+                child_path.as_path(),
+            )?;
+        } else if child_metadata.is_file() {
             let mut file = File::open(child_path.as_path()).map_err(|error| {
                 format!(
                     "Failed to read packaged file '{}' while building project archive: {}",
@@ -1114,6 +1429,11 @@ fn append_compressed_archive_entries<W: Write>(
                         error
                     )
                 })?;
+        } else {
+            return Err(format!(
+                "Packaged path '{}' must be a regular file or directory.",
+                child_path.display()
+            ));
         }
     }
 
@@ -1325,22 +1645,31 @@ fn extract_legacy_package_archive_bytes(
 }
 
 pub(crate) fn directory_size_bytes(root: &Path) -> Result<u64, String> {
-    let metadata = fs::metadata(root).map_err(|error| {
-        format!(
-            "Failed to read packaged path metadata '{}' while measuring size: {}",
-            root.display(),
-            error
-        )
-    })?;
+    let canonical_root = validate_archive_source_root(root)?;
+    directory_size_bytes_under_root(root, &canonical_root, root)
+}
+
+fn directory_size_bytes_under_root(
+    root: &Path,
+    canonical_root: &Path,
+    current_path: &Path,
+) -> Result<u64, String> {
+    let metadata = validate_archive_source_path(root, canonical_root, current_path)?;
     if metadata.is_file() {
         return Ok(metadata.len());
     }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "Packaged path '{}' must be a regular file or directory.",
+            current_path.display()
+        ));
+    }
 
     let mut total = 0_u64;
-    let entries = fs::read_dir(root).map_err(|error| {
+    let entries = fs::read_dir(current_path).map_err(|error| {
         format!(
             "Failed to read packaged directory '{}' while measuring size: {}",
-            root.display(),
+            current_path.display(),
             error
         )
     })?;
@@ -1348,15 +1677,101 @@ pub(crate) fn directory_size_bytes(root: &Path) -> Result<u64, String> {
         let entry = entry.map_err(|error| {
             format!(
                 "Failed to read packaged directory entry under '{}' while measuring size: {}",
-                root.display(),
+                current_path.display(),
                 error
             )
         })?;
         total = total
-            .checked_add(directory_size_bytes(entry.path().as_path())?)
+            .checked_add(directory_size_bytes_under_root(
+                root,
+                canonical_root,
+                entry.path().as_path(),
+            )?)
             .ok_or_else(|| "Packaged directory size exceeded supported limits.".to_string())?;
     }
     Ok(total)
+}
+
+fn validate_archive_source_root(package_root: &Path) -> Result<PathBuf, String> {
+    let metadata = fs::symlink_metadata(package_root).map_err(|error| {
+        format!(
+            "Failed to inspect package root '{}' while building project archive: {}",
+            package_root.display(),
+            error
+        )
+    })?;
+    if archive_metadata_is_link_like(&metadata) || !metadata.is_dir() {
+        return Err(format!(
+            "Package root '{}' must be a real directory and not a symbolic link or reparse point.",
+            package_root.display()
+        ));
+    }
+    fs::canonicalize(package_root).map_err(|error| {
+        format!(
+            "Failed to resolve package root '{}' while building project archive: {}",
+            package_root.display(),
+            error
+        )
+    })
+}
+
+fn validate_archive_source_path(
+    package_root: &Path,
+    canonical_package_root: &Path,
+    source_path: &Path,
+) -> Result<fs::Metadata, String> {
+    let relative_path = source_path.strip_prefix(package_root).map_err(|_| {
+        format!(
+            "Packaged path '{}' is not inside package root '{}'.",
+            source_path.display(),
+            package_root.display()
+        )
+    })?;
+    let mut current_path = package_root.to_path_buf();
+    let mut metadata = fs::symlink_metadata(package_root).map_err(|error| {
+        format!(
+            "Failed to inspect package root '{}': {}",
+            package_root.display(),
+            error
+        )
+    })?;
+    for component in relative_path.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::Normal(segment) => current_path.push(segment),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err("Packaged path escaped the package root.".to_string());
+            }
+        }
+        metadata = fs::symlink_metadata(&current_path).map_err(|error| {
+            format!(
+                "Failed to inspect packaged path '{}': {}",
+                current_path.display(),
+                error
+            )
+        })?;
+        if archive_metadata_is_link_like(&metadata) {
+            return Err(format!(
+                "Packaged path must not traverse symbolic link or reparse point '{}'.",
+                current_path.display()
+            ));
+        }
+    }
+    let canonical_source_path = fs::canonicalize(source_path).map_err(|error| {
+        format!(
+            "Failed to resolve packaged path '{}': {}",
+            source_path.display(),
+            error
+        )
+    })?;
+    if !canonical_source_path.starts_with(canonical_package_root) {
+        return Err(format!(
+            "Packaged path '{}' resolves outside package root '{}'.",
+            source_path.display(),
+            package_root.display()
+        ));
+    }
+    Ok(metadata)
 }
 
 pub(crate) fn format_bytes(bytes: u64) -> String {
@@ -1543,11 +1958,16 @@ mod tests {
     use super::{
         create_package_archive_bytes, extract_compressed_package_archive_bytes,
         extract_legacy_package_archive_bytes, extract_package_archive_bytes,
-        extract_package_archive_bytes_with_limits, relocate_pulled_package_receipt, sha256_hex,
-        validate_archive_base64_size, validate_project_pull_response_matches_request,
-        validate_relative_archive_path, validate_restored_package_manifest, ArchiveLimits,
-        PackageArchiveDocument, PackageArchiveEntry, PulledPackageHostedReceiptDocument,
+        extract_package_archive_bytes_with_limits, relocate_pulled_package_receipt,
+        restore_pulled_project, sha256_hex, validate_archive_base64_size,
+        validate_project_pull_response_matches_request, validate_relative_archive_path,
+        validate_restored_package_manifest, ArchiveLimits, PackageArchiveDocument,
+        PackageArchiveEntry, PulledPackageHostedReceiptDocument,
     };
+    #[cfg(feature = "developer-tools")]
+    use super::{finish_publish_payload, PublishStagingGuard};
+    #[cfg(feature = "developer-tools")]
+    use crate::commands::package::AssembledPackage;
     use base64::Engine as _;
     use std::fs;
     use std::path::PathBuf;
@@ -1559,6 +1979,50 @@ mod tests {
             .expect("system time should be after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("cargo-ai-projects-command-test-{stem}-{nanos}"))
+    }
+
+    #[cfg(feature = "developer-tools")]
+    #[test]
+    fn publish_staging_is_removed_after_post_assembly_validation_errors() {
+        for (stem, project_name, project_version, expected_error) in [
+            (
+                "publish-cleanup-missing-name",
+                None,
+                Some("1.0.0"),
+                "[project].name",
+            ),
+            (
+                "publish-cleanup-invalid-version",
+                Some("demo"),
+                Some("not-semver"),
+                "not valid semver",
+            ),
+        ] {
+            let staging_root = temp_dir(stem);
+            fs::create_dir_all(&staging_root).expect("staging root should exist");
+            fs::write(staging_root.join("sentinel.txt"), "temporary")
+                .expect("staging sentinel should be writable");
+            let assembled = AssembledPackage {
+                root_path: staging_root.clone(),
+                manifest_project_name: project_name.map(str::to_string),
+                manifest_project_version: project_version.map(str::to_string),
+                manifest_value: serde_json::json!({"format_version": 1}),
+                archive_bytes: b"archive".to_vec(),
+                assembled_size_bytes: 7,
+                archive_size_bytes: 7,
+                estimated_publish_request_size_bytes: 7,
+            };
+
+            let error =
+                finish_publish_payload(assembled, PublishStagingGuard::new(staging_root.clone()))
+                    .expect_err("invalid post-assembly metadata should reject publish");
+
+            assert!(error.contains(expected_error));
+            assert!(
+                !staging_root.exists(),
+                "publish staging must be removed on every validation error"
+            );
+        }
     }
 
     #[test]
@@ -1612,6 +2076,135 @@ mod tests {
 
         let _ = fs::remove_dir_all(source_root);
         let _ = fs::remove_dir_all(dest_root);
+    }
+
+    fn hosted_pull_response(
+        archive_bytes: &[u8],
+        project_name: &str,
+        project_version: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "project": project_name,
+            "project_version": project_version,
+            "hosted_source_id": "source-id",
+            "hosted_version_id": "version-id",
+            "package_sha256": sha256_hex(archive_bytes),
+            "package_size_bytes": archive_bytes.len(),
+            "package_archive_base64": base64::engine::general_purpose::STANDARD.encode(archive_bytes)
+        })
+    }
+
+    fn write_pull_source(root: &std::path::Path, project_name: &str) {
+        fs::create_dir_all(root.join(".cargo-ai")).expect("project metadata root should exist");
+        fs::create_dir_all(root.join("assets")).expect("asset root should exist");
+        fs::write(root.join(".cargo-ai/project.toml"), "format_version = 1\n")
+            .expect("project metadata should be writable");
+        fs::write(
+            root.join("cargo-ai-package.toml"),
+            format!(
+                "format_version = 1\nproject_name = \"{project_name}\"\nproject_version = \"1.0.0\"\n"
+            ),
+        )
+        .expect("package manifest should be writable");
+        fs::write(root.join("assets/new.txt"), "new").expect("package asset should be writable");
+    }
+
+    #[test]
+    fn forced_pull_validates_staging_before_replacing_existing_output() {
+        let source_root = temp_dir("transaction-source-invalid");
+        let output_root = temp_dir("transaction-output-invalid");
+        write_pull_source(&source_root, "actual");
+        let archive =
+            create_package_archive_bytes(&source_root).expect("fixture archive should serialize");
+        fs::create_dir_all(&output_root).expect("existing output should exist");
+        fs::write(output_root.join("sentinel.txt"), "old")
+            .expect("existing sentinel should be writable");
+        let response = hosted_pull_response(&archive, "different", "1.0.0");
+
+        let error = restore_pulled_project(&response, &output_root, true)
+            .expect_err("manifest mismatch should reject staged pull");
+        assert!(error.contains("did not match hosted response identity"));
+        assert_eq!(
+            fs::read_to_string(output_root.join("sentinel.txt"))
+                .expect("existing output should be preserved"),
+            "old"
+        );
+        assert!(!output_root.join("assets/new.txt").exists());
+
+        let _ = fs::remove_dir_all(source_root);
+        let _ = fs::remove_dir_all(output_root);
+    }
+
+    #[test]
+    fn forced_pull_activates_only_the_fully_validated_staged_output() {
+        let source_root = temp_dir("transaction-source-valid");
+        let output_root = temp_dir("transaction-output-valid");
+        write_pull_source(&source_root, "demo");
+        let archive =
+            create_package_archive_bytes(&source_root).expect("fixture archive should serialize");
+        fs::create_dir_all(&output_root).expect("existing output should exist");
+        fs::write(output_root.join("sentinel.txt"), "old")
+            .expect("existing sentinel should be writable");
+        let response = hosted_pull_response(&archive, "demo", "1.0.0");
+
+        restore_pulled_project(&response, &output_root, true)
+            .expect("validated staged pull should replace existing output");
+        assert!(!output_root.join("sentinel.txt").exists());
+        assert_eq!(
+            fs::read_to_string(output_root.join("assets/new.txt"))
+                .expect("restored asset should be readable"),
+            "new"
+        );
+        assert!(output_root
+            .join(".cargo-ai/origin/cargo-ai-package.toml")
+            .exists());
+        assert!(output_root
+            .join(".cargo-ai/origin/cargo-ai-package-receipt.toml")
+            .exists());
+
+        let _ = fs::remove_dir_all(source_root);
+        let _ = fs::remove_dir_all(output_root);
+    }
+
+    #[test]
+    fn forced_pull_restores_existing_output_after_late_activation_failure() {
+        let transaction_root = temp_dir("transaction-late-failure");
+        let source_root = transaction_root.join("source");
+        let output_root = transaction_root.join("output");
+        write_pull_source(&source_root, "demo");
+        let archive =
+            create_package_archive_bytes(&source_root).expect("fixture archive should serialize");
+        fs::create_dir_all(&output_root).expect("existing output should exist");
+        fs::write(output_root.join("sentinel.txt"), "old")
+            .expect("existing sentinel should be writable");
+        let response = hosted_pull_response(&archive, "demo", "1.0.0");
+        super::fail_next_pull_activation();
+
+        let error = restore_pulled_project(&response, &output_root, true)
+            .expect_err("injected late activation failure should reject pull");
+        assert!(error.contains("Previous output was restored"));
+        assert_eq!(
+            fs::read_to_string(output_root.join("sentinel.txt"))
+                .expect("previous output should be restored"),
+            "old"
+        );
+        assert!(!output_root.join("assets/new.txt").exists());
+        let retained_transaction_paths = fs::read_dir(&transaction_root)
+            .expect("transaction parent should remain readable")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".cargo-ai-pull-")
+            })
+            .count();
+        assert_eq!(
+            retained_transaction_paths, 0,
+            "successful recovery should clean staging and backup paths"
+        );
+
+        let _ = fs::remove_dir_all(transaction_root);
     }
 
     #[test]
@@ -1842,19 +2435,43 @@ mod tests {
     fn hosted_pull_response_must_match_requested_identity_and_version() {
         let response = serde_json::json!({
             "project": "demo",
-            "project_version": "1.2.3"
+            "project_version": "1.2.3",
+            "owner_handle": "alice"
         });
-        validate_project_pull_response_matches_request(&response, "demo", Some("1.2.3"))
-            .expect("matching hosted response should pass");
+        validate_project_pull_response_matches_request(
+            &response,
+            "demo",
+            Some("Alice"),
+            Some("1.2.3"),
+        )
+        .expect("matching hosted response should pass");
 
         let package_error =
-            validate_project_pull_response_matches_request(&response, "other", None)
+            validate_project_pull_response_matches_request(&response, "other", None, None)
                 .expect_err("wrong package identity should fail");
         assert!(package_error.contains("requested package `other`"));
         let version_error =
-            validate_project_pull_response_matches_request(&response, "demo", Some("1.2.2"))
+            validate_project_pull_response_matches_request(&response, "demo", None, Some("1.2.2"))
                 .expect_err("wrong exact version should fail");
         assert!(version_error.contains("exact requested version 1.2.2"));
+
+        let owner_error =
+            validate_project_pull_response_matches_request(&response, "demo", Some("bob"), None)
+                .expect_err("wrong explicit owner should fail");
+        assert!(owner_error.contains("requested owner `bob`"));
+
+        let missing_owner = serde_json::json!({
+            "project": "demo",
+            "project_version": "1.2.3"
+        });
+        let missing_owner_error = validate_project_pull_response_matches_request(
+            &missing_owner,
+            "demo",
+            Some("alice"),
+            None,
+        )
+        .expect_err("missing explicit owner provenance should fail");
+        assert!(missing_owner_error.contains("did not include `owner_handle`"));
     }
 
     #[test]
@@ -1890,7 +2507,7 @@ project_version = "1.2.3"
     #[cfg(unix)]
     #[test]
     fn pull_output_rejects_symlink_root_without_touching_target() {
-        use super::prepare_output_directory;
+        use super::resolve_pull_output_path;
         use std::os::unix::fs::symlink;
 
         let root = temp_dir("pull-output-symlink");
@@ -1901,7 +2518,7 @@ project_version = "1.2.3"
             .expect("external sentinel should be writable");
         symlink(&external, &output).expect("output symlink should be created");
 
-        let error = prepare_output_directory(&output, true)
+        let error = resolve_pull_output_path(&output, true)
             .expect_err("symlinked output root should be rejected");
         assert!(error.contains("symbolic link"));
         assert_eq!(
@@ -1911,6 +2528,42 @@ project_version = "1.2.3"
         );
 
         let _ = fs::remove_file(output);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_and_pull_output_reject_linked_ancestors() {
+        use super::resolve_pull_output_path;
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("linked-boundaries");
+        let package_root = root.join("package");
+        let external = root.join("external");
+        fs::create_dir_all(&package_root).expect("package root should exist");
+        fs::create_dir_all(&external).expect("external root should exist");
+        fs::write(external.join("secret.txt"), "outside")
+            .expect("external fixture should be writable");
+        symlink(external.join("secret.txt"), package_root.join("linked.txt"))
+            .expect("linked package file should be created");
+        let archive_error = create_package_archive_bytes(&package_root)
+            .expect_err("archive creation should reject linked entries");
+        assert!(archive_error.contains("symbolic link"));
+
+        let linked_parent = root.join("linked-parent");
+        symlink(&external, &linked_parent).expect("linked output parent should be created");
+        let output_error = resolve_pull_output_path(&linked_parent.join("project"), true)
+            .expect_err("pull output should reject a linked ancestor");
+        assert!(output_error.contains("symbolic link"));
+        assert!(!external.join("project").exists());
+        assert_eq!(
+            fs::read_to_string(external.join("secret.txt"))
+                .expect("external fixture should remain readable"),
+            "outside"
+        );
+
+        let _ = fs::remove_file(package_root.join("linked.txt"));
+        let _ = fs::remove_file(linked_parent);
         let _ = fs::remove_dir_all(root);
     }
 

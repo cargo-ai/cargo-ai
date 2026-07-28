@@ -62,6 +62,68 @@ Example:
 CARGO_AI_HOME="$HOME/.cargo-ai" cargo-ai run ./agent.json
 ```
 
+## Isolate Development And Test Runs
+
+Use a dedicated Cargo AI Home whenever you run a locally built binary. Keep the
+development home outside your normal Cargo directory and any `.cargo-ai*`
+recovery directories.
+
+From a Cargo AI source checkout:
+
+```bash
+export CARGO_AI_HOME="/path/to/disposable/cargo-ai-home"
+export CARGO_AI_DISABLE_KEYCHAIN=1
+cargo run -- version
+```
+
+For reinstall testing, isolate the executable as well as its state:
+
+```bash
+cargo install --path . --root /path/to/disposable/cargo-ai-install --force
+CARGO_AI_HOME="/path/to/disposable/cargo-ai-home" \
+  CARGO_AI_DISABLE_KEYCHAIN=1 \
+  /path/to/disposable/cargo-ai-install/bin/cargo-ai version
+```
+
+Do not populate a development home by copying live credentials. Create only the
+profiles and test state that the development scenario requires. Disabling the
+keychain matters because operating-system keychain entries are not namespaced
+by `CARGO_AI_HOME`.
+
+## Failure-Safe Automatic State Updates
+
+Cargo AI distinguishes a missing `config.toml` from an existing file that it
+cannot read or parse. A missing config may be initialized. An unreadable or
+malformed config produces a path-specific warning and blocks automatic
+credential migration, metadata persistence, and update-check persistence for
+that invocation. Cargo AI does not treat the failure as permission to replace
+the file with defaults.
+
+For a valid config, automatic writers:
+
+- update only the fields they own while preserving unrecognized fields
+- skip the write when the owned values are already current
+- stage and validate replacement TOML beside the active file
+- use owner-only file permissions on Unix
+- retain a `config.toml.bak` recovery copy only when the prior valid state
+  contains known non-secret fields
+
+Unrecognized fields always remain in the active config. Cargo AI omits the
+managed backup when it cannot prove that every copied field is non-secret.
+During startup reconciliation, Cargo AI preserves an existing exact
+`config.toml.bak` only when it strictly validates as fully known and
+non-secret; an unsafe or unverifiable managed backup may be removed.
+
+One-time legacy credential migration persists detected credentials before it
+replaces `config.toml` with a validated scrubbed copy. It does not create a
+pre-scrub backup containing legacy tokens. If credential persistence or config
+replacement fails, the original config remains available and later automatic
+writers are skipped for that invocation.
+
+Cargo AI manages only the active home and its `config.toml.bak`. It does not
+discover, import, rotate, rename, or delete sibling `.cargo-ai*` directories
+that you maintain as recovery copies.
+
 ## Installed With Cargo vs Standalone Binary
 
 This behavior is the same whether you:

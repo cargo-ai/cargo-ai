@@ -52,7 +52,7 @@ cargo ai --help
 
 Full install guidance, PATH details, and current platform posture live under [docs/install](./docs/install/README.md). The step-by-step Cargo workflow is here: [Install with Cargo](./docs/install/cargo.md).
 
-By default, Cargo AI stores config, credentials, and internal workspaces under `~/.cargo/.cargo-ai` (or `$CARGO_HOME/.cargo-ai`). Set `CARGO_AI_HOME` if you want Cargo AI to use a different root directory. See [Cargo AI Home](./docs/cargo-ai-home.md) for the full resolution order, stored state, and first-run behavior.
+By default, Cargo AI stores config, credentials, and internal workspaces under `~/.cargo/.cargo-ai` (or `$CARGO_HOME/.cargo-ai`). Set `CARGO_AI_HOME` if you want Cargo AI to use a different root directory. Locally built binaries and reinstall tests should always use a dedicated development home and isolated install root rather than live state. See [Cargo AI Home](./docs/cargo-ai-home.md) for the full resolution order, development-isolation guidance, and failure-safe automatic-update behavior.
 
 ### 1. Choose your model setup
 
@@ -1091,6 +1091,15 @@ Phase 3A package rules stay narrow on purpose:
 - package outputs get their own generated `.cargo-ai/project.toml` plus `cargo-ai-package.toml` so the folder is inspectable and can be treated as a portable project snapshot
 - when the source project declares `[project].name` and `[project].version`, package output carries those values into both generated manifests for later publish/pull identity
 
+Packages that need to execute a declared tool or another subprocess after a hosted install must request that permission explicitly:
+
+```toml
+[package.permissions]
+subprocess = "allowed"
+```
+
+Omitting this section keeps subprocess execution blocked. Cargo AI does not infer the permission from a tool declaration, and unsupported package permission keys or values fail during packaging. Hosted installation still requires the user to review and accept the requested expansion. That acceptance is a publisher-trust decision: materializing hosted Rust tools can execute package build scripts, procedural macros, and related Cargo build-time code without an operating-system sandbox, using the current user's ambient filesystem, environment, and network authority. Install subprocess-enabled hosted packages only from a source you trust.
+
 ## Account-Backed Flows
 
 After registration, you can use Cargo AI as more than a local hatching tool:
@@ -1128,6 +1137,9 @@ cargo ai packages list --account
 
 # List another owner's public packages
 cargo ai packages list --account alice
+
+# Add archived packages to the active hosted listing
+cargo ai packages list --account --include-archived
 
 # Publish the current project package (developer-tools build)
 cargo ai packages publish
@@ -1192,11 +1204,15 @@ cargo ai hatch data_integration::daily_digest --allow-hosted-code
 # Inspect or remove a local package alias
 cargo ai packages inspect data_integration
 cargo ai packages uninstall data_integration
+# Nonempty persistent data requires an explicit destructive confirmation
+cargo ai packages uninstall data_integration --delete-data
 ```
 
-Local install behavior is version-aware for the same alias: same version and content is a no-op, newer semver upgrades by default, older semver requires `--downgrade`, and same-version content replacement or a different package identity requires `--replace`.
+Local install behavior is version-aware for the same alias: same version and content is normally a no-op, newer semver upgrades by default, older semver requires `--downgrade`, and same-version content replacement or a different package identity requires `--replace`. A same-content reinstall rematerializes missing, corrupt, or wrong-target disposable runtime state while preserving `data/`. A local-source install transactionally builds declared source-backed tools with the package lockfile for the current target. It keeps the verified source payload unchanged, installs only the managed executable and metadata under the alias's disposable runtime area, and leaves the prior alias plus `data/` recoverable if compilation or validation fails. This requires a compatible Rust toolchain and access to any dependencies not already cached locally.
 
-Hosted install uses the same local alias store, but hosted source identity comes from the server/API rather than a public URL. Omitting `--version` resolves the latest eligible hosted version at install time, then pins that exact version in `install.toml`. `update` checks the same hosted source identity and only moves forward when a newer eligible semver exists. `rollback` never means latest; it switches to the exact `--to <version>` you request. Install, update, and rollback print the requested permission profile before materialization. A first install or transition that newly enables subprocess execution requires `--accept-permissions`; project/workspace `read` and `read_write` requests remain unsupported.
+Hosted install uses the same local alias store, but hosted source identity comes from the server/API rather than a public URL. Omitting `--version` resolves the latest eligible hosted version at install time, then pins that exact version in `install.toml`. `update` and `rollback` resolve through that stable source id rather than the original owner handle, then verify the returned identity; an owner-handle rename therefore does not strand an installed alias. Explicit owner-handle installs and pulls verify normalized owner provenance. `update` only moves forward when a newer eligible semver exists, while `rollback` switches to the exact `--to <version>` you request. Repeating `update` at the current latest version or `rollback --to` the current version also repairs disposable runtime state when needed. Install, update, and rollback print the requested permission profile before materialization. A first install or transition that newly enables subprocess execution requires `--accept-permissions`; project/workspace `read` and `read_write` requests remain unsupported. Cargo AI compiles a hosted package's declared source tools only after that exact subprocess request has been accepted. The build is locked but not sandboxed: package build scripts, procedural macros, and related build-time code run with the invoking user's ambient authority. A blocked hosted version may still run tool-free entrypoints, but it is neither compiled nor allowed to execute tools.
+
+Replacing an alias with a different hosted source resets permission acceptance and never silently transfers state. Use `--replace --keep-data` only after reviewing that the new publisher may read the old `data/`, or use `--replace --delete-data` to start with empty state. Install, update, rollback, and uninstall hold an operating-system lock from the first alias read through mutation completion; the lock is released automatically when the process exits.
 
 Installed package layout under Cargo AI Home is:
 
@@ -1204,10 +1220,22 @@ Installed package layout under Cargo AI Home is:
 $CARGO_AI_HOME/packages/<alias>/
   install.toml
   package/
+  runtime/
+    tools/
   data/
 ```
 
-`package/` is the verified payload for the active exact version and is rematerialized on hosted update or rollback. `data/` is the package-owned persistent state area and is preserved across normal hosted update/rollback. Installed package entrypoints resolve Cargo AI-controlled child `usage_log` writes under `data/`, which lets a parent/observer agent import metadata-only JSONL into package-owned SQLite or another package-owned store. Definition-owned image/file inputs resolve from verified `package/`; only an explicit runtime input override can grant access to a caller-selected path. `cargo ai packages inspect <alias>` shows opaque hosted source/version IDs, optional owner handle, package hash, entrypoints, and the accepted permission profile. Hosted JSON child agents resolve through declared `alias::entrypoint` exports. Direct child executables are blocked unless subprocess permission was explicitly accepted, and then resolve only inside verified `package/` while running from `data/`. Hatching a hosted alias requires `--allow-hosted-code` because the exported executable is trusted code outside the installed permission boundary.
+`package/` is the verified payload for the active exact version and is rematerialized on hosted update or rollback. `runtime/` is Cargo AI-owned, target-specific derived state; it is rebuilt transactionally for the active version and never treated as publisher content or persistent package data. Installed package tool resolution is confined to that version-bound runtime and never falls back to project or machine tools. `data/` is the package-owned persistent state area and is preserved across normal hosted update/rollback. Uninstall fails safely when `data/` is nonempty until you back it up or export it and pass `--delete-data`. Installed package entrypoints resolve Cargo AI-controlled child `usage_log` writes under `data/`, which lets a parent/observer agent import metadata-only JSONL into package-owned SQLite or another package-owned store. Definition-owned image/file inputs resolve from verified `package/`; only an explicit runtime input override can grant access to a caller-selected path. `cargo ai packages inspect <alias>` shows opaque hosted source/version IDs, optional owner handle, package hash, entrypoints, and the accepted permission profile. Installed JSON child agents resolve through declared `alias::entrypoint` exports. Direct child executables remain subject to the hosted subprocess gate, resolve only inside verified `package/`, and run from `data/`. Hatching a hosted alias requires `--allow-hosted-code` because the exported executable is trusted code outside the installed permission boundary.
+
+Projects bind package references in `.cargo-ai/project.toml`:
+
+```toml
+[package_dependencies.data_integration]
+hosted_source_id = "<opaque source id from cargo ai packages inspect>"
+version = ">=1.2, <2.0"
+```
+
+Within a project, Cargo AI verifies that `data_integration::lookup_account` resolves to an installed hosted alias with the declared source id and a version matching the semver requirement before run, hatch, or child execution. Undeclared local-source aliases remain available for development, while a hosted declaration never binds a local alias. Package assembly preserves hosted bindings. A hosted package needs an accepted subprocess permission for a cross-package child. Hatched binaries fail closed for package-child references unless launched inside a Cargo AI project. They also require `cargo ai` or `cargo-ai` on `PATH`; that spawned Cargo AI process applies the full local/hosted identity and version policy.
 
 Hosted package archives are rejected before extraction when they exceed 10 MiB compressed, 100 MiB expanded, 10,000 entries, or 1,024 bytes in a normalized relative entry path. Absolute, parent-traversing, drive-relative, UNC, device-root, symbolic-link, and Windows reparse-point paths are rejected.
 
@@ -1240,7 +1268,7 @@ When you want deeper details, use these files:
 
 - `cargo ai hatch --check` validates scaffold and compile behavior with `cargo check` without exporting a binary.
 - Generated binaries use your configured/default profile unless you override runtime flags.
-- Standalone recipients do not need Cargo AI installed if they run the binary with explicit runtime flags such as `--server`, `--model`, optional `--url`, optional `--token`, and optional `--render-mode`.
+- Standalone recipients do not need Cargo AI installed when the binary has no `alias::entrypoint` package-child references and they run it with explicit runtime flags such as `--server`, `--model`, optional `--url`, optional `--token`, and optional `--render-mode`. Package-child references require `cargo ai` or `cargo-ai` on `PATH` so the installed alias policy can be enforced.
 - `--profile <name>` is strict for generated binaries: if the named profile is missing, the run fails closed instead of falling back to another profile or to profileless auth.
 - For the standalone OpenAI account path, run the generated binary with `--server openai --model <model>` and no `--token`; if a local Codex session is available, the binary reuses it automatically.
 - On machines without Cargo AI installed/configured, `./my_agent version` treats local sync comparison as not checked and points users to `./my_agent inspect` for embedded provenance.

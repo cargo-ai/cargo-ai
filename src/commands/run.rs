@@ -86,17 +86,43 @@ fn load_run_definition_from_source(
     Ok((definition, contents))
 }
 
-fn project_root_for_definition_source(source: &AgentDefinitionSource) -> Option<PathBuf> {
+fn project_root_for_definition_source(
+    source: &AgentDefinitionSource,
+) -> Result<Option<PathBuf>, String> {
     match source {
         AgentDefinitionSource::LocalPath(path) => {
-            crate::commands::tools::maybe_find_project_root(Path::new(path))
+            crate::commands::package_dependencies::find_project_root(Path::new(path))
         }
         AgentDefinitionSource::RegistryName(_)
         | AgentDefinitionSource::InlineJson(_)
-        | AgentDefinitionSource::StdinJson(_) => std::env::current_dir()
-            .ok()
-            .and_then(|dir| crate::commands::tools::maybe_find_project_root(dir.as_path())),
+        | AgentDefinitionSource::StdinJson(_) => {
+            let current_dir = std::env::current_dir()
+                .map_err(|error| format!("Failed to inspect current project directory: {error}"))?;
+            crate::commands::package_dependencies::find_project_root(current_dir.as_path())
+        }
     }
+}
+
+fn runtime_context_path_for_definition_source(
+    source: &AgentDefinitionSource,
+) -> Result<PathBuf, String> {
+    match source {
+        AgentDefinitionSource::LocalPath(path) => Ok(PathBuf::from(path)),
+        AgentDefinitionSource::RegistryName(_)
+        | AgentDefinitionSource::InlineJson(_)
+        | AgentDefinitionSource::StdinJson(_) => std::env::current_dir()
+            .map_err(|error| format!("Failed to inspect current runtime directory: {error}")),
+    }
+}
+
+fn caller_project_root_for_installed_context(
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
+    current_dir: &Path,
+) -> Result<Option<PathBuf>, String> {
+    if package_context.is_none() {
+        return Ok(None);
+    }
+    crate::commands::package_dependencies::find_project_root(current_dir)
 }
 
 fn usage_agent_info_for_definition_source(
@@ -255,12 +281,17 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                                 return false;
                             }
                         };
-                    return super::runtime::run_with_definition_in_context_and_usage_agent(
-                        sub_m,
-                        &definition,
-                        Some(resolved.package_root),
-                        Some(usage_agent_info),
-                        Some(package_context),
+                    let _package_lease = resolved.lease.clone();
+                    let declaring_project_root = Some(resolved.package_root.clone());
+                    return super::runtime_actions::scope_declaring_project_root(
+                        declaring_project_root,
+                        super::runtime::run_with_definition_in_context_and_usage_agent(
+                            sub_m,
+                            &definition,
+                            Some(resolved.package_root.clone()),
+                            Some(usage_agent_info),
+                            Some(package_context),
+                        ),
                     )
                     .await;
                 }
@@ -280,6 +311,77 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             return false;
         }
     };
+    let runtime_context_path = match runtime_context_path_for_definition_source(&definition_source)
+    {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("x {error}");
+            return false;
+        }
+    };
+    let required_capability = matches!(definition_source, AgentDefinitionSource::LocalPath(_))
+        .then_some(crate::commands::local_packages::InstalledEntrypointCapability::Run);
+    let checked_package_runtime =
+        match crate::commands::local_packages::checked_runtime_lease_for_path(
+            runtime_context_path.as_path(),
+            required_capability,
+        ) {
+            Ok(context) => context,
+            Err(error) => {
+                eprintln!("x {error}");
+                return false;
+            }
+        };
+    let (package_context, _package_lease) = match checked_package_runtime {
+        Some(checked) => (Some(checked.context), Some(checked.lease)),
+        None => (None, None),
+    };
+    if let Some(context) = package_context.as_ref() {
+        let caller_project_root = match std::env::current_dir() {
+            Ok(current_dir) => match caller_project_root_for_installed_context(
+                package_context.as_ref(),
+                current_dir.as_path(),
+            ) {
+                Ok(project_root) => project_root,
+                Err(error) => {
+                    eprintln!("x {error}");
+                    return false;
+                }
+            },
+            Err(error) => {
+                eprintln!("x Failed to inspect current project directory: {error}");
+                return false;
+            }
+        };
+        if let Some(caller_project_root) = caller_project_root.as_deref() {
+            let same_project = std::fs::canonicalize(caller_project_root)
+                .ok()
+                .zip(std::fs::canonicalize(&context.package_payload_root).ok())
+                .map(|(caller, payload)| caller == payload)
+                .unwrap_or(false);
+            if !same_project {
+                if let Err(error) =
+                    crate::commands::local_packages::validate_installed_alias_dependency_for_project(
+                        context.alias.as_str(),
+                        caller_project_root,
+                    )
+                {
+                    eprintln!("x {error}");
+                    return false;
+                }
+            }
+        }
+    }
+    let project_root = match package_context.as_ref() {
+        Some(context) => Some(context.package_payload_root.clone()),
+        None => match project_root_for_definition_source(&definition_source) {
+            Ok(project_root) => project_root,
+            Err(error) => {
+                eprintln!("x {error}");
+                return false;
+            }
+        },
+    };
 
     let (definition, definition_json) = match load_run_definition_from_source(&definition_source) {
         Ok(loaded) => loaded,
@@ -288,19 +390,21 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             return false;
         }
     };
-    let project_root = project_root_for_definition_source(&definition_source);
     let usage_agent_info = usage_agent_info_for_definition_source(
         &definition_source,
         definition_json.as_str(),
         project_root.as_deref(),
     );
 
-    super::runtime::run_with_definition_in_context_and_usage_agent(
-        sub_m,
-        &definition,
-        project_root,
-        Some(usage_agent_info),
-        None,
+    super::runtime_actions::scope_declaring_project_root(
+        project_root.clone(),
+        super::runtime::run_with_definition_in_context_and_usage_agent(
+            sub_m,
+            &definition,
+            project_root,
+            Some(usage_agent_info),
+            package_context,
+        ),
     )
     .await
 }
@@ -308,9 +412,11 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        definition_sha256_from_json_str, resolve_run_definition_source_in_dir,
+        caller_project_root_for_installed_context, definition_sha256_from_json_str,
+        project_root_for_definition_source, resolve_run_definition_source_in_dir,
         usage_agent_info_for_definition_source, AgentDefinitionSource,
     };
+    use std::fs;
     use std::path::Path;
 
     fn minimal_definition_json() -> &'static str {
@@ -444,5 +550,40 @@ mod tests {
             definition_sha256_from_json_str(left).expect("left hash should compute"),
             definition_sha256_from_json_str(right).expect("right hash should compute")
         );
+    }
+
+    #[test]
+    fn ordinary_absolute_definition_ignores_malformed_caller_project_marker() {
+        let unique = uuid::Uuid::new_v4();
+        let project_a = std::env::temp_dir().join(format!("cargo-ai-run-project-a-{unique}"));
+        let project_b = std::env::temp_dir().join(format!("cargo-ai-run-project-b-{unique}"));
+        fs::create_dir_all(project_a.join(".cargo-ai"))
+            .expect("project A metadata dir should exist");
+        fs::write(
+            project_a.join(".cargo-ai/project.toml"),
+            "format_version = 1\n",
+        )
+        .expect("project A metadata should exist");
+        let definition_path = project_a.join("agent.json");
+        fs::write(&definition_path, minimal_definition_json())
+            .expect("project A definition should exist");
+        fs::create_dir_all(project_b.join(".cargo-ai/project.toml"))
+            .expect("project B malformed marker should exist");
+
+        assert_eq!(
+            caller_project_root_for_installed_context(None, project_b.as_path())
+                .expect("ordinary runs must not inspect caller package bindings"),
+            None
+        );
+        let source =
+            AgentDefinitionSource::LocalPath(definition_path.to_string_lossy().to_string());
+        assert_eq!(
+            project_root_for_definition_source(&source)
+                .expect("source project discovery should succeed"),
+            Some(project_a.clone())
+        );
+
+        let _ = fs::remove_dir_all(project_a);
+        let _ = fs::remove_dir_all(project_b);
     }
 }

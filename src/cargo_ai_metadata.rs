@@ -1,33 +1,20 @@
 //! Local Cargo-AI metadata persistence for generated-agent drift checks.
 //!
-//! Phase 1 scope:
+//! Responsibilities:
 //! - Persist current `cargo-ai` version and template/schema version in global config.
 //! - Persist local install/build metadata for the current `cargo-ai` binary.
 //! - Keep behavior deterministic and local-only (no network calls).
-use crate::config::loader::{config_path, load_config};
-use crate::config::schema::{
-    default_secret_store_mode, CargoAiMetadata as CargoAiMetadataConfig, Config,
-};
+use crate::config::loader::{config_path, load_config, load_config_from_path, ConfigLoad};
+use crate::config::schema::CargoAiMetadata as CargoAiMetadataConfig;
+#[cfg(test)]
+use crate::config::schema::Config;
+use crate::config::storage::{persist_loaded_section_fields, persist_section_fields_at};
 use crate::schema_version;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
-
-fn default_config() -> Config {
-    Config {
-        profile: Vec::new(),
-        cargo_ai_token: None,
-        default_profile: None,
-        secret_store: Some(default_secret_store_mode()),
-        account: None,
-        openai_auth: None,
-        web_resources: None,
-        update_check: None,
-        cargo_ai_metadata: None,
-    }
-}
 
 fn current_template_schema_version() -> String {
     schema_version::current_schema_version()
@@ -91,23 +78,6 @@ pub fn current_binary_sha256() -> Result<String, String> {
     binary_sha256_for_path(&path)
 }
 
-fn write_config_at_path(path: &Path, cfg: &Config) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "Failed to create config directory '{}': {error}",
-                parent.display()
-            )
-        })?;
-    }
-
-    let serialized = toml::to_string_pretty(cfg)
-        .map_err(|error| format!("Failed to serialize config: {error}"))?;
-
-    fs::write(path, serialized)
-        .map_err(|error| format!("Failed to write config '{}': {error}", path.display()))
-}
-
 fn install_id_or_new(existing: Option<&str>) -> String {
     existing
         .map(str::trim)
@@ -116,6 +86,7 @@ fn install_id_or_new(existing: Option<&str>) -> String {
         .unwrap_or_else(|| Uuid::new_v4().to_string())
 }
 
+#[cfg(test)]
 fn persist_metadata_in_config(
     cfg: &mut Config,
     cargo_ai_version: &str,
@@ -140,15 +111,79 @@ fn persist_metadata_values(
     cargo_ai_build_target: &str,
     cargo_ai_binary_sha256: &str,
 ) -> Result<(), String> {
-    let mut cfg = load_config().unwrap_or_else(default_config);
-    persist_metadata_in_config(
-        &mut cfg,
+    persist_metadata_values_at(
+        &config_path(),
         cargo_ai_version,
         template_schema_version,
         cargo_ai_build_target,
         cargo_ai_binary_sha256,
-    );
-    write_config_at_path(&config_path(), &cfg)
+    )
+}
+
+fn persist_metadata_values_at(
+    path: &Path,
+    cargo_ai_version: &str,
+    template_schema_version: &str,
+    cargo_ai_build_target: &str,
+    cargo_ai_binary_sha256: &str,
+) -> Result<(), String> {
+    match load_config_from_path(path).map_err(|error| error.to_string())? {
+        ConfigLoad::Missing => {
+            let fields = metadata_fields(
+                cargo_ai_version,
+                template_schema_version,
+                cargo_ai_build_target,
+                cargo_ai_binary_sha256,
+                install_id_or_new(None),
+            );
+            persist_section_fields_at(path, "cargo_ai_metadata", &fields)?;
+        }
+        ConfigLoad::Loaded(loaded) => {
+            let existing_install_id = loaded
+                .config()
+                .cargo_ai_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.cargo_ai_install_id.as_deref())
+                .map(str::to_string);
+            let fields = metadata_fields(
+                cargo_ai_version,
+                template_schema_version,
+                cargo_ai_build_target,
+                cargo_ai_binary_sha256,
+                install_id_or_new(existing_install_id.as_deref()),
+            );
+            persist_loaded_section_fields(&loaded, "cargo_ai_metadata", &fields)?;
+        }
+    }
+    Ok(())
+}
+
+fn metadata_fields(
+    cargo_ai_version: &str,
+    template_schema_version: &str,
+    cargo_ai_build_target: &str,
+    cargo_ai_binary_sha256: &str,
+    install_id: String,
+) -> [(&'static str, Option<toml::Value>); 5] {
+    [
+        (
+            "cargo_ai_version",
+            Some(toml::Value::String(cargo_ai_version.to_string())),
+        ),
+        (
+            "template_schema_version",
+            Some(toml::Value::String(template_schema_version.to_string())),
+        ),
+        (
+            "cargo_ai_build_target",
+            Some(toml::Value::String(cargo_ai_build_target.to_string())),
+        ),
+        ("cargo_ai_install_id", Some(toml::Value::String(install_id))),
+        (
+            "cargo_ai_binary_sha256",
+            Some(toml::Value::String(cargo_ai_binary_sha256.to_string())),
+        ),
+    ]
 }
 
 pub fn persist_current_metadata() -> Result<(), String> {
@@ -195,7 +230,7 @@ pub fn load_request_metadata() -> Option<CargoAiMetadataConfig> {
 mod tests {
     use super::{
         binary_sha256_for_path, normalized_metadata, persist_metadata_in_config,
-        write_config_at_path,
+        persist_metadata_values_at,
     };
     use crate::config::schema::{CargoAiMetadata, Config};
     use crate::schema_version;
@@ -355,18 +390,19 @@ mod tests {
     }
 
     #[test]
-    fn write_config_persists_cargo_ai_metadata_section() {
-        let mut cfg = default_test_config();
-        persist_metadata_in_config(
-            &mut cfg,
+    fn metadata_writer_persists_owned_section() {
+        let path = temp_file_path("write");
+        fs::write(&path, "profile = []\nunknown = \"preserve\"\n")
+            .expect("test config should be written");
+
+        persist_metadata_values_at(
+            &path,
             CURRENT_CARGO_AI_VERSION,
             "2026-03-03.r1",
             "aarch64-apple-darwin",
             "abc123",
-        );
-
-        let path = temp_file_path("write");
-        write_config_at_path(&path, &cfg).expect("config should be written");
+        )
+        .expect("metadata should be persisted");
 
         let written = fs::read_to_string(&path).expect("written config should be readable");
         assert!(written.contains("cargo_ai_metadata"));
@@ -376,6 +412,45 @@ mod tests {
         assert!(written.contains("template_schema_version = \"2026-03-03.r1\""));
         assert!(written.contains("cargo_ai_build_target = \"aarch64-apple-darwin\""));
         assert!(written.contains("cargo_ai_binary_sha256 = \"abc123\""));
+        assert!(written.contains("unknown = \"preserve\""));
+
+        let _ = fs::remove_file(path.with_file_name(format!(
+            "{}.bak",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .expect("test path should have a file name")
+        )));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn metadata_writer_leaves_malformed_config_byte_identical() {
+        let path = temp_file_path("malformed");
+        let original = "profile = [\n";
+        fs::write(&path, original).expect("test config should be written");
+
+        let error = persist_metadata_values_at(
+            &path,
+            CURRENT_CARGO_AI_VERSION,
+            "2026-03-03.r1",
+            "aarch64-apple-darwin",
+            "abc123",
+        )
+        .expect_err("malformed config must block metadata persistence");
+
+        assert!(error.contains(&path.display().to_string()));
+        assert_eq!(
+            fs::read_to_string(&path).expect("config should remain readable"),
+            original
+        );
+        assert!(!path
+            .with_file_name(format!(
+                "{}.bak",
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("test path should have a file name")
+            ))
+            .exists());
 
         let _ = fs::remove_file(path);
     }

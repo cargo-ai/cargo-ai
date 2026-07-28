@@ -37,6 +37,7 @@ pub fn command() -> Command {
                     Arg::new("include_archived")
                         .long("include-archived")
                         .help("Include archived hosted packages")
+                        .requires("account")
                         .action(ArgAction::SetTrue),
                 )
                 .arg(
@@ -119,6 +120,22 @@ pub fn command() -> Command {
                         .help("Accept reviewed hosted package permissions for this install")
                         .requires("account")
                         .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("keep_data")
+                        .long("keep-data")
+                        .help("Transfer existing alias data during an explicit cross-source replacement")
+                        .requires("replace")
+                        .conflicts_with("delete_data")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("delete_data")
+                        .long("delete-data")
+                        .help("Delete existing alias data during an explicit replacement")
+                        .requires("replace")
+                        .conflicts_with("keep_data")
+                        .action(ArgAction::SetTrue),
                 ),
         )
         .subcommand(
@@ -187,6 +204,12 @@ pub fn command() -> Command {
                         .value_name("ALIAS")
                         .num_args(1)
                         .index(1),
+                )
+                .arg(
+                    Arg::new("delete_data")
+                        .long("delete-data")
+                        .help("Confirm deletion when the package alias has persistent data")
+                        .action(ArgAction::SetTrue),
                 ),
         )
         .subcommand(
@@ -365,6 +388,18 @@ mod tests {
     }
 
     #[test]
+    fn include_archived_requires_hosted_account_listing() {
+        let error = super::command()
+            .try_get_matches_from(["packages", "list", "--include-archived"])
+            .expect_err("local listing must not silently ignore --include-archived");
+        assert!(error.to_string().contains("--account"));
+
+        super::command()
+            .try_get_matches_from(["packages", "list", "--account", "--include-archived"])
+            .expect("hosted listing should accept --include-archived");
+    }
+
+    #[test]
     fn install_supports_local_source_profile_alias_and_safety_flags() {
         let matches = super::command()
             .try_get_matches_from([
@@ -498,5 +533,49 @@ mod tests {
             .expect_err("local install must not accept hosted permissions");
 
         assert!(error.to_string().contains("--account"));
+    }
+
+    #[test]
+    fn replacement_and_uninstall_data_flags_are_deliberate() {
+        let replacement = super::command()
+            .try_get_matches_from([
+                "packages",
+                "install",
+                "demo",
+                "--account",
+                "--as",
+                "demo",
+                "--replace",
+                "--keep-data",
+            ])
+            .expect("explicit replacement data transfer should parse");
+        assert!(replacement
+            .subcommand_matches("install")
+            .expect("install should be available")
+            .get_flag("keep_data"));
+
+        let missing_replace = super::command()
+            .try_get_matches_from(["packages", "install", "./pkg", "--keep-data"])
+            .expect_err("data transfer must require explicit replacement");
+        assert!(missing_replace.to_string().contains("--replace"));
+        let conflicting = super::command()
+            .try_get_matches_from([
+                "packages",
+                "install",
+                "./pkg",
+                "--replace",
+                "--keep-data",
+                "--delete-data",
+            ])
+            .expect_err("replacement data dispositions must conflict");
+        assert!(conflicting.to_string().contains("cannot be used"));
+
+        let uninstall = super::command()
+            .try_get_matches_from(["packages", "uninstall", "demo", "--delete-data"])
+            .expect("explicit uninstall data deletion should parse");
+        assert!(uninstall
+            .subcommand_matches("uninstall")
+            .expect("uninstall should be available")
+            .get_flag("delete_data"));
     }
 }

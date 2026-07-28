@@ -2656,6 +2656,26 @@ fn validate_child_agent_target(raw_agent: &str, path: &str) -> Result<(), BuildE
         ));
     }
 
+    if let Some((alias, entrypoint)) = agent.split_once("::") {
+        let valid_identifier = |value: &str| {
+            value
+                .chars()
+                .next()
+                .map(|ch| ch.is_ascii_alphanumeric())
+                .unwrap_or(false)
+                && value
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        };
+        if valid_identifier(alias) && valid_identifier(entrypoint) {
+            return Ok(());
+        }
+        return Err(BuildError::config(
+            path,
+            "package child references must use `alias::entrypoint`; each identifier must start with a letter or number and then use only letters, numbers, '-' or '_'",
+        ));
+    }
+
     let candidate = Path::new(agent);
     if candidate.is_absolute() {
         return Err(BuildError::config(
@@ -4924,6 +4944,31 @@ mod tests {
                 .expect("explicit same-level child agent target should compile");
 
         assert!(generated.contains("agent: Some(\"./childagent\".to_string())"));
+    }
+
+    #[test]
+    fn accepts_declared_package_child_reference_syntax() {
+        let generated =
+            generate_agent_model_from_str(&config_with_child_agent_target("reports::daily"))
+                .expect("package child reference syntax should compile");
+
+        assert!(generated.contains("agent: Some(\"reports::daily\".to_string())"));
+    }
+
+    #[test]
+    fn rejects_malformed_package_child_reference() {
+        let error =
+            generate_agent_model_from_str(&config_with_child_agent_target("reports::daily::extra"))
+                .expect_err("malformed package child reference should fail")
+                .to_string();
+
+        assert!(error.contains("alias::entrypoint"));
+
+        let option_error =
+            generate_agent_model_from_str(&config_with_child_agent_target("-reports::daily"))
+                .expect_err("option-like package alias should fail")
+                .to_string();
+        assert!(option_error.contains("start with a letter or number"));
     }
 
     #[test]

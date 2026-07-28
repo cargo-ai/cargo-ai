@@ -193,6 +193,13 @@ pub(crate) struct ToolResolver {
     bundled_root: Option<PathBuf>,
     project_root: Option<PathBuf>,
     target_triple: String,
+    resolution_mode: ToolResolutionMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolResolutionMode {
+    Standard,
+    InstalledPackageRuntimeOnly,
 }
 
 impl ToolResolver {
@@ -201,12 +208,19 @@ impl ToolResolver {
             bundled_root: None,
             project_root,
             target_triple: target_triple.into(),
+            resolution_mode: ToolResolutionMode::Standard,
         }
     }
 
     #[allow(dead_code)]
     pub(crate) fn with_bundled_root(mut self, bundled_root: Option<PathBuf>) -> Self {
         self.bundled_root = bundled_root;
+        self
+    }
+
+    pub(crate) fn with_installed_package_runtime(mut self, bundled_root: Option<PathBuf>) -> Self {
+        self.bundled_root = bundled_root;
+        self.resolution_mode = ToolResolutionMode::InstalledPackageRuntimeOnly;
         self
     }
 
@@ -230,6 +244,13 @@ impl ToolResolver {
             )? {
                 return Ok(resolved);
             }
+        }
+
+        if self.resolution_mode == ToolResolutionMode::InstalledPackageRuntimeOnly {
+            return Err(format!(
+                "Tool '{}' was not found in the installed package's version-bound runtime tools.",
+                tool_id
+            ));
         }
 
         if let Some(project_root) = self.project_root.as_ref() {
@@ -396,6 +417,18 @@ pub(crate) fn audit_actions_for_tools(
         .into_values()
         .map(|contract| contract.resolved)
         .collect())
+}
+
+pub(crate) fn actions_have_applicable_tool_steps(
+    actions: &[crate::Action],
+    current_platform: Option<&str>,
+) -> bool {
+    actions.iter().any(|action| {
+        action.run.iter().any(|step| {
+            step.kind.eq_ignore_ascii_case("tool")
+                && step_matches_platform(step.platforms.as_deref(), current_platform)
+        })
+    })
 }
 
 pub(crate) fn validate_tool_step_against_contract(
@@ -712,6 +745,233 @@ pub(crate) fn build_source_tool(
         build_target.cache_key_target(),
     )
     .resolve_tool(tool_name)
+}
+
+pub(crate) fn materialize_source_tool_for_package_runtime(
+    tool_name: &str,
+    build_target: &crate::agent_builder::build_target::BuildTarget,
+    package_root: &Path,
+    runtime_tools_root: &Path,
+    scratch_root: &Path,
+) -> Result<ResolvedTool, String> {
+    validate_tool_identifier(tool_name)?;
+
+    let managed_manifest_relative = PathBuf::from(PROJECT_TOOLS_RELATIVE_PATH)
+        .join(tool_name)
+        .join(TOOL_MANIFEST_FILE_NAME);
+    let managed_manifest_path = crate::commands::local_packages::resolve_existing_path_under_root(
+        package_root,
+        managed_manifest_relative.as_path(),
+        format!("Packaged tool '{}' metadata", tool_name).as_str(),
+    )?;
+    if !managed_manifest_path.is_file() {
+        return Err(format!(
+            "Packaged tool '{}' metadata '{}' must be a regular file.",
+            tool_name,
+            managed_manifest_path.display()
+        ));
+    }
+    let managed_manifest = load_tool_manifest(managed_manifest_path.as_path(), tool_name)?;
+    let source = managed_manifest.source.as_ref().ok_or_else(|| {
+        format!(
+            "Packaged tool '{}' is not source-backed and cannot be materialized for an installed package runtime.",
+            tool_name
+        )
+    })?;
+    let source_manifest_relative =
+        crate::commands::local_packages::normalize_portable_relative_path(
+            source.manifest_path.as_str(),
+            format!("Packaged tool '{}' source manifest", tool_name).as_str(),
+        )?;
+    let source_manifest_path = crate::commands::local_packages::resolve_existing_path_under_root(
+        package_root,
+        source_manifest_relative.as_path(),
+        format!("Packaged tool '{}' source manifest", tool_name).as_str(),
+    )?;
+    if !source_manifest_path.is_file() {
+        return Err(format!(
+            "Packaged tool '{}' source manifest '{}' must be a regular file.",
+            tool_name,
+            source_manifest_path.display()
+        ));
+    }
+    let source_dir = source_manifest_path.parent().ok_or_else(|| {
+        format!(
+            "Packaged tool '{}' source manifest '{}' has no parent directory.",
+            tool_name,
+            source_manifest_path.display()
+        )
+    })?;
+    let binary_name = default_binary_name_for_manifest(&managed_manifest);
+
+    crate::commands::local_packages::ensure_real_directory(
+        scratch_root,
+        "Installed package tool build scratch root",
+    )?;
+    let tool_scratch_root = crate::commands::local_packages::ensure_directory_path_under_root(
+        scratch_root,
+        Path::new(tool_name),
+        format!("Installed package tool '{}' build scratch", tool_name).as_str(),
+    )?;
+    let cargo_target_root = tool_scratch_root.join("target");
+
+    let mut command = Command::new("cargo");
+    command
+        .arg("build")
+        .arg("--locked")
+        .arg("--manifest-path")
+        .arg(&source_manifest_path)
+        .arg("--target-dir")
+        .arg(&cargo_target_root)
+        .current_dir(source_dir)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if let Some(target) = build_target.cargo_target() {
+        command.arg("--target").arg(target);
+    }
+
+    let status = command.status().map_err(|error| {
+        format!(
+            "Failed to run locked Cargo build for packaged tool '{}': {}",
+            tool_name, error
+        )
+    })?;
+    if !status.success() {
+        return Err(format!(
+            "Locked Cargo build failed for packaged tool '{}'.",
+            tool_name
+        ));
+    }
+
+    let mut built_binary_dir = cargo_target_root.clone();
+    if let Some(target) = build_target.cargo_target() {
+        built_binary_dir.push(target);
+    }
+    built_binary_dir.push("debug");
+    let built_binary_path =
+        build_target.exported_binary_path(built_binary_dir.as_path(), binary_name.as_str());
+    let built_binary_relative = built_binary_path.strip_prefix(scratch_root).map_err(|_| {
+        format!(
+            "Built packaged tool '{}' artifact '{}' escaped its scratch root '{}'.",
+            tool_name,
+            built_binary_path.display(),
+            scratch_root.display()
+        )
+    })?;
+    let built_binary_path = crate::commands::local_packages::resolve_existing_path_under_root(
+        scratch_root,
+        built_binary_relative,
+        format!("Built packaged tool '{}' artifact", tool_name).as_str(),
+    )?;
+    if !built_binary_path.is_file() {
+        return Err(format!(
+            "Expected built packaged tool '{}' artifact '{}' was not produced as a regular file.",
+            tool_name,
+            built_binary_path.display()
+        ));
+    }
+
+    crate::commands::local_packages::ensure_real_directory(
+        runtime_tools_root,
+        "Installed package runtime tools root",
+    )?;
+    let runtime_tool_root = crate::commands::local_packages::ensure_directory_path_under_root(
+        runtime_tools_root,
+        Path::new(tool_name),
+        format!("Installed package runtime tool '{}' root", tool_name).as_str(),
+    )?;
+    let artifact_parent_relative = PathBuf::from("bin").join(build_target.cache_key_target());
+    let artifact_relative_path =
+        build_target.exported_binary_path(artifact_parent_relative.as_path(), binary_name.as_str());
+    let artifact_relative_text = artifact_relative_path.to_string_lossy().replace('\\', "/");
+    let artifact_relative_path = crate::commands::local_packages::normalize_portable_relative_path(
+        artifact_relative_text.as_str(),
+        format!("Installed package runtime tool '{}' artifact", tool_name).as_str(),
+    )?;
+    let artifact_parent_relative = artifact_relative_path.parent().ok_or_else(|| {
+        format!(
+            "Installed package runtime tool '{}' artifact path has no parent.",
+            tool_name
+        )
+    })?;
+    let artifact_parent = crate::commands::local_packages::ensure_directory_path_under_root(
+        runtime_tool_root.as_path(),
+        artifact_parent_relative,
+        format!(
+            "Installed package runtime tool '{}' artifact directory",
+            tool_name
+        )
+        .as_str(),
+    )?;
+    let artifact_file_name = artifact_relative_path.file_name().ok_or_else(|| {
+        format!(
+            "Installed package runtime tool '{}' artifact path has no file name.",
+            tool_name
+        )
+    })?;
+    let artifact_path = artifact_parent.join(artifact_file_name);
+    fs::copy(&built_binary_path, &artifact_path).map_err(|error| {
+        format!(
+            "Failed to copy packaged tool '{}' artifact into '{}': {}",
+            tool_name,
+            artifact_path.display(),
+            error
+        )
+    })?;
+
+    let manifest_path = runtime_tool_root.join(TOOL_MANIFEST_FILE_NAME);
+    write_utf8_file(
+        manifest_path.as_path(),
+        render_binary_tool_manifest_json(
+            tool_name,
+            binary_name.as_str(),
+            build_target.cache_key_target(),
+            artifact_relative_text.as_str(),
+        ),
+    )?;
+
+    resolve_tool_from_scope_root(
+        runtime_tools_root,
+        ToolScope::Bundled,
+        tool_name,
+        build_target.cache_key_target(),
+    )?
+    .ok_or_else(|| {
+        format!(
+            "Packaged tool '{}' was not materialized into the installed runtime tools root.",
+            tool_name
+        )
+    })
+}
+
+pub(crate) fn validate_package_runtime_tools(
+    runtime_tools_root: &Path,
+    tool_names: &[String],
+    target_triple: &str,
+) -> Result<(), String> {
+    crate::commands::local_packages::ensure_real_directory(
+        runtime_tools_root,
+        "Installed package runtime tools root",
+    )?;
+    let mut validated = BTreeMap::new();
+    for tool_name in tool_names {
+        if validated.insert(tool_name.as_str(), ()).is_some() {
+            continue;
+        }
+        resolve_tool_from_scope_root(
+            runtime_tools_root,
+            ToolScope::Bundled,
+            tool_name,
+            target_triple,
+        )?
+        .ok_or_else(|| {
+            format!(
+                "Installed package runtime tool '{}' is missing for target '{}'.",
+                tool_name, target_triple
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn load_project_source_tool_context(
@@ -1167,13 +1427,41 @@ fn resolve_tool_from_scope_root(
     tool_id: &str,
     target_triple: &str,
 ) -> Result<Option<ResolvedTool>, String> {
-    let tool_dir = scope_root.join(tool_id);
-    if !tool_dir.exists() {
-        return Ok(None);
+    validate_tool_identifier(tool_id)?;
+    let candidate_tool_dir = scope_root.join(tool_id);
+    match fs::symlink_metadata(&candidate_tool_dir) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect {} tool '{}' at '{}': {}",
+                display_scope(&scope),
+                tool_id,
+                candidate_tool_dir.display(),
+                error
+            ));
+        }
+    }
+    let tool_dir = crate::commands::local_packages::resolve_existing_path_under_root(
+        scope_root,
+        Path::new(tool_id),
+        format!("{} tool '{}' root", display_scope(&scope), tool_id).as_str(),
+    )?;
+    if !tool_dir.is_dir() {
+        return Err(format!(
+            "{} tool '{}' root '{}' must be a real directory.",
+            display_scope(&scope),
+            tool_id,
+            tool_dir.display()
+        ));
     }
 
-    let manifest_path = tool_dir.join(TOOL_MANIFEST_FILE_NAME);
-    if !manifest_path.exists() {
+    let manifest_path = crate::commands::local_packages::resolve_existing_path_under_root(
+        tool_dir.as_path(),
+        Path::new(TOOL_MANIFEST_FILE_NAME),
+        format!("{} tool '{}' manifest", display_scope(&scope), tool_id).as_str(),
+    )?;
+    if !manifest_path.is_file() {
         return Err(format!(
             "{} tool '{}' is missing '{}'.",
             display_scope(&scope),
@@ -1197,10 +1485,22 @@ fn resolve_tool_from_scope_root(
         )
     })?;
     let binary_name = default_binary_name_for_manifest(&manifest);
-    let binary_path = tool_dir.join(&artifact.path);
-    if !binary_path.exists() {
+    let binary_path = if scope == ToolScope::Bundled {
+        let artifact_relative = crate::commands::local_packages::normalize_portable_relative_path(
+            artifact.path.as_str(),
+            format!("Tool '{}' artifact path", tool_id).as_str(),
+        )?;
+        crate::commands::local_packages::resolve_existing_path_under_root(
+            tool_dir.as_path(),
+            artifact_relative.as_path(),
+            format!("Tool '{}' artifact", tool_id).as_str(),
+        )?
+    } else {
+        tool_dir.join(&artifact.path)
+    };
+    if !binary_path.is_file() {
         return Err(format!(
-            "Tool '{}' artifact '{}' does not exist on disk.",
+            "Tool '{}' artifact '{}' must be a regular file.",
             tool_id,
             binary_path.display()
         ));
@@ -1503,7 +1803,7 @@ fn describe_runtime_value(value: &Value) -> &'static str {
     }
 }
 
-fn validate_tool_identifier(name: &str) -> Result<(), String> {
+pub(crate) fn validate_tool_identifier(name: &str) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("Tool names cannot be empty.".to_string());
     }
@@ -1512,6 +1812,20 @@ fn validate_tool_identifier(name: &str) -> Result<(), String> {
     }
     if name.chars().any(char::is_whitespace) {
         return Err("Tool names cannot contain whitespace.".to_string());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(
+            "Tool names must be a single portable path component and cannot contain '/' or '\\'."
+                .to_string(),
+        );
+    }
+    let normalized =
+        crate::commands::local_packages::normalize_portable_relative_path(name, "Tool name")?;
+    if normalized.components().count() != 1 {
+        return Err(format!(
+            "Tool name '{}' must be a single portable path component.",
+            name
+        ));
     }
     Ok(())
 }
@@ -1664,11 +1978,13 @@ fn step_matches_platform(platforms: Option<&[String]>, current_platform: Option<
 #[cfg(test)]
 mod tests {
     use super::{
-        lint_project_source_tool, maybe_find_project_root, render_binary_tool_manifest_json,
+        lint_project_source_tool, materialize_source_tool_for_package_runtime,
+        maybe_find_project_root, render_binary_tool_manifest_json,
         render_source_tool_manifest_json, resolve_tool_from_scope_root, scaffold_local_tool,
-        validate_describe_document, validate_local_tool_name, ResolvedTool, ToolDescribeDocument,
-        ToolDescribeExamples, ToolDescribeParam, ToolDescribeResourceProfile, ToolDescribeResult,
-        ToolDescribeSelfTest, ToolResolver, ToolScope,
+        validate_describe_document, validate_local_tool_name, validate_package_runtime_tools,
+        validate_tool_identifier, ResolvedTool, ToolDescribeDocument, ToolDescribeExamples,
+        ToolDescribeParam, ToolDescribeResourceProfile, ToolDescribeResult, ToolDescribeSelfTest,
+        ToolResolver, ToolScope,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1792,6 +2108,71 @@ mod tests {
     }
 
     #[test]
+    fn tool_artifact_path_rejects_parent_traversal() {
+        let root = temp_dir("artifact-parent-traversal");
+        let tool_dir = root.join("hello_tool");
+        fs::create_dir_all(&tool_dir).expect("tool directory should exist");
+        fs::write(root.join("outside-tool"), "outside").expect("outside file should exist");
+        fs::write(
+            tool_dir.join("tool.json"),
+            render_binary_tool_manifest_json(
+                "hello_tool",
+                "hello_tool",
+                "test-target",
+                "../outside-tool",
+            ),
+        )
+        .expect("tool manifest should be written");
+
+        let error = resolve_tool_from_scope_root(
+            root.as_path(),
+            ToolScope::Bundled,
+            "hello_tool",
+            "test-target",
+        )
+        .expect_err("artifact traversal should fail");
+
+        assert!(error.contains("parent traversal") || error.contains("stay beneath"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tool_artifact_path_rejects_symbolic_link() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("artifact-symlink");
+        let tool_dir = root.join("hello_tool");
+        let artifact_dir = tool_dir.join("bin/test-target");
+        fs::create_dir_all(&artifact_dir).expect("artifact directory should exist");
+        let outside = root.join("outside-tool");
+        fs::write(&outside, "outside").expect("outside file should exist");
+        symlink(&outside, artifact_dir.join("hello_tool"))
+            .expect("artifact symlink should be created");
+        fs::write(
+            tool_dir.join("tool.json"),
+            render_binary_tool_manifest_json(
+                "hello_tool",
+                "hello_tool",
+                "test-target",
+                "bin/test-target/hello_tool",
+            ),
+        )
+        .expect("tool manifest should be written");
+
+        let error = resolve_tool_from_scope_root(
+            root.as_path(),
+            ToolScope::Bundled,
+            "hello_tool",
+            "test-target",
+        )
+        .expect_err("artifact symlink should fail");
+
+        assert!(error.contains("symbolic link") || error.contains("reparse point"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn finds_project_root_by_managed_metadata() {
         let root = temp_dir("project-root");
         let nested = root.join("examples").join("agents");
@@ -1872,6 +2253,69 @@ mod tests {
     fn local_tool_name_validation_rejects_whitespace() {
         let err = validate_local_tool_name("bad name").expect_err("whitespace should fail");
         assert!(err.contains("whitespace"));
+    }
+
+    #[test]
+    fn tool_identifier_rejects_nonportable_path_shapes_on_every_platform() {
+        for invalid in [
+            "foo/bar",
+            r"foo\bar",
+            ".",
+            "..",
+            "../foo",
+            "C:foo",
+            r"C:\foo",
+            "/absolute",
+            r"\\server\share",
+        ] {
+            assert!(
+                validate_tool_identifier(invalid).is_err(),
+                "non-portable tool identifier should fail: {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_identifier_allows_portable_hyphen_underscore_dot_and_unicode_names() {
+        for valid in ["render-cover_2", "résumé.tool-v2"] {
+            validate_tool_identifier(valid)
+                .unwrap_or_else(|error| panic!("portable tool identifier {valid:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn package_materialization_and_completeness_reject_nested_tool_ids_consistently() {
+        let root = temp_dir("package-tool-id-validation");
+        let package_root = root.join("package");
+        let runtime_tools_root = root.join("runtime/tools");
+        let scratch_root = root.join("scratch");
+        let build_target =
+            crate::agent_builder::build_target::BuildTarget::from_cli(Some("aarch64-apple-darwin"))
+                .expect("test target should resolve");
+
+        let materialize_error = materialize_source_tool_for_package_runtime(
+            "foo/bar",
+            &build_target,
+            &package_root,
+            &runtime_tools_root,
+            &scratch_root,
+        )
+        .expect_err("nested forward-slash tool id must fail before materialization");
+        assert!(materialize_error.contains("single portable path component"));
+        assert!(!scratch_root.exists());
+        assert!(!runtime_tools_root.exists());
+
+        fs::create_dir_all(&runtime_tools_root).expect("runtime tools root should exist");
+        let completeness_error = validate_package_runtime_tools(
+            &runtime_tools_root,
+            &[r"foo\bar".to_string()],
+            "aarch64-apple-darwin",
+        )
+        .expect_err("nested backslash tool id must fail completeness validation");
+        assert!(completeness_error.contains("single portable path component"));
+        assert!(!runtime_tools_root.join("foo").exists());
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
