@@ -596,7 +596,6 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             stdout: bool,
             force: bool,
         },
-        Hatch(AccountHatchCommand),
         Visibility {
             name: String,
             definition_path: Option<String>,
@@ -765,49 +764,6 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             stdout: pull_m.get_flag("stdout"),
             force: pull_m.get_flag("force"),
         }
-    } else if developer_tools_enabled() {
-        if let Some(hatch_m) = agents_m.subcommand_matches("hatch") {
-            match parse_hatch_command(hatch_m) {
-                Ok(hatch) => AgentsCommand::Hatch(hatch),
-                Err(error) => {
-                    eprintln!("x {}", error);
-                    return false;
-                }
-            }
-        } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
-            let Some(name) = visibility_m.get_one::<String>("name") else {
-                eprintln!("x Missing agent name. Provide --name <NAME>.");
-                return false;
-            };
-            AgentsCommand::Visibility {
-                name: name.to_string(),
-                definition_path: visibility_m
-                    .get_one::<String>("definition_path")
-                    .map(|s| s.to_string()),
-                is_public: visibility_m.get_flag("public"),
-                public_from: visibility_m
-                    .get_one::<String>("public_from")
-                    .map(|s| s.to_string()),
-                public_until: visibility_m
-                    .get_one::<String>("public_until")
-                    .map(|s| s.to_string()),
-            }
-        } else if let Some(archive_m) = agents_m.subcommand_matches("archive") {
-            let Some(name) = archive_m.get_one::<String>("name") else {
-                eprintln!("x Missing agent name. Provide --name <NAME>.");
-                return false;
-            };
-            AgentsCommand::Archive {
-                name: name.to_string(),
-                definition_path: archive_m
-                    .get_one::<String>("definition_path")
-                    .map(|s| s.to_string()),
-                is_archived: archive_m.get_flag("archive"),
-            }
-        } else {
-            println!("No agents subcommand found. Try 'cargo ai agents list|push|pull|visibility|archive'.");
-            return false;
-        }
     } else if let Some(visibility_m) = agents_m.subcommand_matches("visibility") {
         let Some(name) = visibility_m.get_one::<String>("name") else {
             eprintln!("x Missing agent name. Provide --name <NAME>.");
@@ -854,13 +810,6 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
     };
     let access_token_owned = auth.access_token;
     let refresh_token = auth.refresh_token;
-
-    if let AgentsCommand::Hatch(hatch) = &agents_command {
-        crate::commands::hatch_pipeline::print_hatch_start(&hatch.local_name, hatch.mode);
-        crate::commands::hatch_pipeline::print_hatch_progress(
-            crate::commands::hatch_pipeline::HatchProgressStep::PreparingDefinition,
-        );
-    }
 
     // 4. Execute first attempt using current access token.
     let mut response = match &agents_command {
@@ -921,15 +870,6 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                 return false;
             }
         },
-        AgentsCommand::Hatch(hatch) => {
-            match request_hatch_pull(access_token_owned.as_str(), hatch).await {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("x Request failed: {e}");
-                    return false;
-                }
-            }
-        }
         AgentsCommand::Visibility {
             name,
             definition_path,
@@ -1076,15 +1016,6 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                             return false;
                         }
                     },
-                    AgentsCommand::Hatch(hatch) => {
-                        match request_hatch_pull(retry_access_token.as_str(), hatch).await {
-                            Ok(r) => r,
-                            Err(e) => {
-                                eprintln!("x Request failed after session refresh: {e}");
-                                return false;
-                            }
-                        }
-                    }
                     AgentsCommand::Visibility {
                         name,
                         definition_path,
@@ -1220,10 +1151,6 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
     if let Some(pretty_definition) = pull_stdout_payload {
         println!("{pretty_definition}");
         return true;
-    }
-
-    if let AgentsCommand::Hatch(hatch) = &agents_command {
-        return continue_hatch_from_response(hatch, &response);
     }
 
     let list_display_truncation = match &agents_command {
