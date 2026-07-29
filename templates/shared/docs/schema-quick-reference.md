@@ -3,8 +3,11 @@
 Use this as a concise reference while authoring agent configs.
 
 ## Required top-level fields
-- `version`
+- `agent_definition_schema_version`
   - format: `YYYY-MM-DD.rN` (example: `2026-03-03.r1`)
+  - identifies the Cargo AI contract used to interpret the definition, not the agent or package version
+  - package version is `.cargo-ai/project.toml` `[project].version`
+  - copy this value from the current Cargo AI template or guidance; do not invent it from the current date, a package/project version, or the Cargo AI product version
 - `inputs`
 - `agent_schema`
 - `actions`

@@ -457,8 +457,11 @@ mod tests {
     #[test]
     fn positional_json_shorthand_derives_project_name() {
         let config_path = temp_json_path("adder_test");
-        fs::write(&config_path, r#"{"version":"2026-03-03.r1"}"#)
-            .expect("test file should be writable");
+        fs::write(
+            &config_path,
+            r#"{"agent_definition_schema_version":"2026-03-03.r1"}"#,
+        )
+        .expect("test file should be writable");
 
         let resolution =
             resolve_hatch_input(&config_path, None, None, None).expect("resolution should succeed");
@@ -476,8 +479,11 @@ mod tests {
     #[test]
     fn positional_json_shorthand_rejects_invalid_derived_name() {
         let config_path = temp_json_path("bad.name");
-        fs::write(&config_path, r#"{"version":"2026-03-03.r1"}"#)
-            .expect("test file should be writable");
+        fs::write(
+            &config_path,
+            r#"{"agent_definition_schema_version":"2026-03-03.r1"}"#,
+        )
+        .expect("test file should be writable");
 
         let err = match resolve_hatch_input(&config_path, None, None, None) {
             Ok(_) => panic!("resolution should fail"),
@@ -505,14 +511,16 @@ mod tests {
         let resolution = resolve_hatch_input(
             "adder_custom",
             None,
-            Some(r#"{"version":"2026-03-03.r1"}"#),
+            Some(r#"{"agent_definition_schema_version":"2026-03-03.r1"}"#),
             None,
         )
         .expect("inline json resolution should succeed");
         assert_eq!(resolution.project_name, "adder_custom");
         assert_eq!(
             resolution.source,
-            AgentDefinitionSource::InlineJson(r#"{"version":"2026-03-03.r1"}"#.to_string())
+            AgentDefinitionSource::InlineJson(
+                r#"{"agent_definition_schema_version":"2026-03-03.r1"}"#.to_string()
+            )
         );
     }
 
@@ -522,13 +530,15 @@ mod tests {
             "adder_custom",
             None,
             None,
-            Some(r#"{"version":"2026-03-03.r1"}"#),
+            Some(r#"{"agent_definition_schema_version":"2026-03-03.r1"}"#),
         )
         .expect("stdin json resolution should succeed");
         assert_eq!(resolution.project_name, "adder_custom");
         assert_eq!(
             resolution.source,
-            AgentDefinitionSource::StdinJson(r#"{"version":"2026-03-03.r1"}"#.to_string())
+            AgentDefinitionSource::StdinJson(
+                r#"{"agent_definition_schema_version":"2026-03-03.r1"}"#.to_string()
+            )
         );
     }
 
@@ -548,8 +558,11 @@ mod tests {
         let temp_dir = temp_dir_path("same-dir-fallback");
         fs::create_dir_all(&temp_dir).expect("temp dir should be writable");
         let local_config = temp_dir.join("adder_test.json");
-        fs::write(&local_config, r#"{"version":"2026-03-03.r1"}"#)
-            .expect("local config should be writable");
+        fs::write(
+            &local_config,
+            r#"{"agent_definition_schema_version":"2026-03-03.r1"}"#,
+        )
+        .expect("local config should be writable");
 
         let resolution = resolve_hatch_input_in_dir("adder_test", None, None, None, &temp_dir)
             .expect("resolution should succeed");

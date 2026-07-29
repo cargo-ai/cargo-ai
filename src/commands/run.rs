@@ -421,7 +421,7 @@ mod tests {
 
     fn minimal_definition_json() -> &'static str {
         r#"{
-            "version": "2026-03-11.r1",
+            "agent_definition_schema_version": "2026-03-11.r1",
             "inputs": [{"type": "text", "text": "Return a tiny answer."}],
             "agent_schema": {
                 "type": "object",
@@ -466,7 +466,7 @@ mod tests {
         let resolution = resolve_run_definition_source_in_dir(
             None,
             None,
-            Some(r#"{"version":"2026-03-03.r1"}"#),
+            Some(r#"{"agent_definition_schema_version":"2026-03-03.r1"}"#),
             None,
             Path::new("/tmp"),
         )
@@ -474,7 +474,9 @@ mod tests {
 
         assert_eq!(
             resolution,
-            AgentDefinitionSource::InlineJson(r#"{"version":"2026-03-03.r1"}"#.to_string())
+            AgentDefinitionSource::InlineJson(
+                r#"{"agent_definition_schema_version":"2026-03-03.r1"}"#.to_string()
+            )
         );
     }
 
@@ -484,14 +486,16 @@ mod tests {
             None,
             None,
             None,
-            Some(r#"{"version":"2026-03-03.r1"}"#),
+            Some(r#"{"agent_definition_schema_version":"2026-03-03.r1"}"#),
             Path::new("/tmp"),
         )
         .expect("stdin json source should succeed");
 
         assert_eq!(
             resolution,
-            AgentDefinitionSource::StdinJson(r#"{"version":"2026-03-03.r1"}"#.to_string())
+            AgentDefinitionSource::StdinJson(
+                r#"{"agent_definition_schema_version":"2026-03-03.r1"}"#.to_string()
+            )
         );
     }
 

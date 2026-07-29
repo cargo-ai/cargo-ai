@@ -60,8 +60,19 @@ impl RuntimeAgentDefinition {
             .map_err(|error| format!("failed to parse agent JSON: {error}"))?;
         let root_obj = expect_object(&root, "$")?;
 
-        let version = required_string(root_obj, "version", "$")?;
-        validate_schema_version(version, "$.version")?;
+        if root_obj.contains_key("version") {
+            return Err(
+                "$.version: legacy schema key `version` is no longer supported; rename it to `agent_definition_schema_version` and keep its existing schema-version value"
+                    .to_string(),
+            );
+        }
+
+        let schema_version = required_string(
+            root_obj,
+            crate::schema_version::AGENT_DEFINITION_SCHEMA_VERSION_KEY,
+            "$",
+        )?;
+        validate_schema_version(schema_version, "$.agent_definition_schema_version")?;
 
         let schema_properties = parse_schema_properties(root_obj)?;
         let has_output_schema_properties = !schema_properties.is_empty();
@@ -2442,7 +2453,7 @@ mod tests {
 
         format!(
             r#"{{
-    "version": "2026-03-03.r1"{inputs_block}{action_execution_block},
+    "agent_definition_schema_version": "2026-03-03.r1"{inputs_block}{action_execution_block},
     "agent_schema": {{
         "type": "object",
         "properties": {{
@@ -2470,11 +2481,81 @@ mod tests {
         (build_error, runtime_error)
     }
 
+    fn config_with_schema_header(header: &str) -> String {
+        format!(
+            r#"{{
+                {header},
+                "inputs": [{{ "type": "text", "text": "Return a numeric answer." }}],
+                "agent_schema": {{
+                    "type": "object",
+                    "properties": {{ "answer": {{ "type": "integer" }} }}
+                }},
+                "actions": []
+            }}"#
+        )
+    }
+
+    #[test]
+    fn schema_version_key_contract_matches_codegen_and_runtime() {
+        let canonical = config_with_schema_header(
+            r#""agent_definition_schema_version": "2099-12-31.r42",
+                "unrelated_root_field": true"#,
+        );
+        assert_runtime_and_codegen_accept(&canonical);
+
+        let legacy = config_with_schema_header(r#""version": "2026-03-03.r1""#);
+        let (build_error, runtime_error) = assert_runtime_and_codegen_reject(&legacy);
+        for error in [build_error, runtime_error] {
+            assert!(error.contains("$.version"));
+            assert!(error.contains("rename it to `agent_definition_schema_version`"));
+        }
+
+        for legacy_version in ["2026-03-03.r1", "2026-03-04.r1"] {
+            let both = config_with_schema_header(&format!(
+                r#""agent_definition_schema_version": "2026-03-03.r1",
+                "version": "{legacy_version}""#
+            ));
+            let (build_error, runtime_error) = assert_runtime_and_codegen_reject(&both);
+            for error in [build_error, runtime_error] {
+                assert!(error.contains("$.version"));
+                assert!(error.contains("rename it to `agent_definition_schema_version`"));
+            }
+        }
+
+        let missing = config_with_schema_header(r#""unrelated_root_field": true"#);
+        let (build_error, runtime_error) = assert_runtime_and_codegen_reject(&missing);
+        for error in [build_error, runtime_error] {
+            assert!(error.contains("$.agent_definition_schema_version"));
+            assert!(error.contains("missing required field"));
+        }
+
+        let invalid = config_with_schema_header(r#""agent_definition_schema_version": "0.0.10""#);
+        let (build_error, runtime_error) = assert_runtime_and_codegen_reject(&invalid);
+        for error in [build_error, runtime_error] {
+            assert!(error.contains("$.agent_definition_schema_version"));
+            assert!(error.contains("YYYY-MM-DD.rN"));
+        }
+
+        let non_string = config_with_schema_header(r#""agent_definition_schema_version": 1"#);
+        let (build_error, runtime_error) = assert_runtime_and_codegen_reject(&non_string);
+        for error in [build_error, runtime_error] {
+            assert!(error.contains("$.agent_definition_schema_version"));
+            assert!(error.contains("string"));
+        }
+
+        let empty = config_with_schema_header(r#""agent_definition_schema_version": "  ""#);
+        let (build_error, runtime_error) = assert_runtime_and_codegen_reject(&empty);
+        for error in [build_error, runtime_error] {
+            assert!(error.contains("$.agent_definition_schema_version"));
+            assert!(error.contains("YYYY-MM-DD.rN"));
+        }
+    }
+
     #[test]
     fn parses_adder_like_agent_definition() {
         let definition = RuntimeAgentDefinition::from_str(
             r#"{
-                "version": "2026-03-03.r1",
+                "agent_definition_schema_version": "2026-03-03.r1",
                 "inputs": [{ "type": "text", "text": "What is 2 + 2?" }],
                 "agent_schema": {
                     "type": "object",
@@ -2502,7 +2583,7 @@ mod tests {
     fn validates_provider_output_against_schema() {
         let definition = RuntimeAgentDefinition::from_str(
             r#"{
-                "version": "2026-03-03.r1",
+                "agent_definition_schema_version": "2026-03-03.r1",
                 "inputs": [{ "type": "text", "text": "Return a unit." }],
                 "agent_schema": {
                     "type": "object",
@@ -2564,7 +2645,7 @@ mod tests {
     fn structural_action_only_requires_named_inputs() {
         let error = RuntimeAgentDefinition::from_str(
             r#"{
-                "version": "2026-03-03.r1",
+                "agent_definition_schema_version": "2026-03-03.r1",
                 "inputs": [{ "type": "text", "text": "x" }],
                 "agent_schema": { "type": "object", "properties": {} },
                 "actions": [

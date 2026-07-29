@@ -630,7 +630,7 @@ mod tests {
         let result = run_hatch_pipeline_with_lock(
             HatchRequest::new(
                 "agent_lock_conflict_test".to_string(),
-                r#"{"version":"2026-03-03.r1"}"#.to_string(),
+                r#"{"agent_definition_schema_version":"2026-03-03.r1"}"#.to_string(),
                 HatchMode::Check,
                 false,
                 false,

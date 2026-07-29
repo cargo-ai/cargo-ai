@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 const SCHEMA_VERSION_FORMAT: &str = "YYYY-MM-DD.rN";
 const SCHEMA_VERSION_EXAMPLE: &str = "2026-03-03.r1";
+const AGENT_DEFINITION_SCHEMA_VERSION_KEY: &str = "agent_definition_schema_version";
 const SUPPORTED_ACTION_PLATFORMS: [&str; 3] = ["macos", "linux", "windows"];
 const SUPPORTED_FILE_EXTENSIONS: [&str; 24] = [
     "pdf", "docx", "csv", "xla", "xlb", "xlc", "xlm", "xls", "xlsx", "xlt", "xlw", "tsv", "iif",
@@ -456,8 +457,15 @@ fn sha256_hex(contents: &str) -> String {
 fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
     let root_obj = expect_object(root, "$")?;
 
-    let schema_version = get_required_string(root_obj, "version", "$")?;
-    validate_schema_version(schema_version, "$.version")?;
+    if root_obj.contains_key("version") {
+        return Err(BuildError::config(
+            "$.version",
+            "legacy schema key `version` is no longer supported; rename it to `agent_definition_schema_version` and keep its existing schema-version value",
+        ));
+    }
+
+    let schema_version = get_required_string(root_obj, AGENT_DEFINITION_SCHEMA_VERSION_KEY, "$")?;
+    validate_schema_version(schema_version, "$.agent_definition_schema_version")?;
 
     let runtime_vars = parse_runtime_vars(root_obj)?;
     let action_execution = parse_action_execution(root_obj)?;
@@ -4914,7 +4922,7 @@ mod tests {
             serde_json::to_string(target).expect("child agent target should encode as JSON");
         format!(
             r#"{{
-    "version": "2026-03-03.r1",
+    "agent_definition_schema_version": "2026-03-03.r1",
     "inputs": [
         {{ "type": "text", "text": "Test prompt" }}
     ],
@@ -4975,7 +4983,7 @@ mod tests {
     fn accepts_child_agent_usage_log_path() {
         let generated = generate_agent_model_from_str(
             r#"{
-    "version": "2026-03-03.r1",
+    "agent_definition_schema_version": "2026-03-03.r1",
     "inputs": [
         { "type": "text", "text": "Test prompt" }
     ],
@@ -5038,7 +5046,7 @@ mod tests {
     fn accepts_generate_image_without_explicit_model() {
         let generated = generate_agent_model_from_str(
             r#"{
-    "version": "2026-03-03.r1",
+    "agent_definition_schema_version": "2026-03-03.r1",
     "inputs": [
         { "type": "text", "text": "Describe the image to create." }
     ],
@@ -5072,7 +5080,7 @@ mod tests {
     fn accepts_step_level_profile_for_agent_and_generate_image() {
         let generated = generate_agent_model_from_str(
             r#"{
-    "version": "2026-03-03.r1",
+    "agent_definition_schema_version": "2026-03-03.r1",
     "runtime_vars": {
         "child_profile": { "type": "string" }
     },
@@ -5117,7 +5125,7 @@ mod tests {
     fn rejects_profile_on_exec_actions() {
         let error = generate_agent_model_from_str(
             r#"{
-    "version": "2026-03-03.r1",
+    "agent_definition_schema_version": "2026-03-03.r1",
     "inputs": [
         { "type": "text", "text": "Test prompt" }
     ],

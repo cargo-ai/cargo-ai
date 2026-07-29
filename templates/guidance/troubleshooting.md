@@ -7,10 +7,12 @@ Use this file when `cargo ai hatch <agent-name> --config <config.json> --check` 
 ### Missing required top-level keys
 
 Check that the JSON includes:
-- `version`
+- `agent_definition_schema_version`
 - `inputs`
 - `agent_schema`
 - `actions`
+
+If the definition uses the legacy top-level `version` key, rename it to `agent_definition_schema_version` without changing its value. Copy schema-version values from current Cargo AI templates or guidance rather than inventing one from the current date or a package/project version.
 
 ### Wrong field for a step kind
 
