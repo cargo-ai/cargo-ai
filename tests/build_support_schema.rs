@@ -82,7 +82,7 @@ fn config_with_optional_inputs_and_action_execution(
 
     format!(
         r#"{{
-    "version": "2026-03-03.r1"{inputs_block}{action_execution_block},
+    "agent_definition_schema_version": "2026-03-03.r1"{inputs_block}{action_execution_block},
     "agent_schema": {{
         "type": "object",
         "properties": {{
@@ -1564,7 +1564,7 @@ fn rejects_cross_action_reference_to_status_variable() {
 #[test]
 fn accepts_pdf_file_inputs() {
     let cfg = r#"{
-    "version": "2026-03-03.r1",
+    "agent_definition_schema_version": "2026-03-03.r1",
     "inputs": [
         { "type": "file", "path": "./reports/q1.pdf" }
     ],
@@ -1587,7 +1587,7 @@ fn accepts_pdf_file_inputs() {
 #[test]
 fn accepts_docx_file_inputs() {
     let cfg = r#"{
-    "version": "2026-03-03.r1",
+    "agent_definition_schema_version": "2026-03-03.r1",
     "inputs": [
         { "type": "file", "path": "./reports/q1.docx" }
     ],
@@ -1610,7 +1610,7 @@ fn accepts_docx_file_inputs() {
 #[test]
 fn accepts_csv_file_inputs() {
     let cfg = r#"{
-    "version": "2026-03-03.r1",
+    "agent_definition_schema_version": "2026-03-03.r1",
     "inputs": [
         { "type": "file", "path": "./reports/q1.csv" }
     ],
@@ -1640,7 +1640,7 @@ fn accepts_phase_three_file_inputs() {
     for extension in extensions {
         let cfg = format!(
             r#"{{
-    "version": "2026-03-03.r1",
+    "agent_definition_schema_version": "2026-03-03.r1",
     "inputs": [
         {{ "type": "file", "path": "./reports/q1.{extension}" }}
     ],
@@ -1669,7 +1669,7 @@ fn accepts_phase_three_file_inputs() {
 #[test]
 fn rejects_unsupported_file_inputs() {
     let cfg = r#"{
-    "version": "2026-03-03.r1",
+    "agent_definition_schema_version": "2026-03-03.r1",
     "inputs": [
         { "type": "file", "path": "./reports/q1.txt" }
     ],
@@ -1773,7 +1773,7 @@ fn rejects_agent_parent_traversal_path() {
 #[test]
 fn rejects_image_input_parent_traversal_path() {
     let cfg = r#"{
-    "version": "2026-03-03.r1",
+    "agent_definition_schema_version": "2026-03-03.r1",
     "inputs": [
         { "type": "image", "path": "./../4.png" }
     ],
@@ -1797,7 +1797,7 @@ fn rejects_image_input_parent_traversal_path() {
 #[test]
 fn rejects_image_input_absolute_path() {
     let cfg = serde_json::json!({
-        "version": "2026-03-03.r1",
+        "agent_definition_schema_version": "2026-03-03.r1",
         "inputs": [
             { "type": "image", "path": absolute_test_path("4.png") }
         ],
@@ -2232,7 +2232,7 @@ fn generates_canonical_build_provenance_constants() {
         { "type": "text", "text": "Return a numeric answer." }
       ],
       "actions": [],
-      "version": "2026-03-03.r1",
+      "agent_definition_schema_version": "2026-03-03.r1",
       "agent_schema": {
         "properties": {
           "answer": {
@@ -2251,7 +2251,7 @@ fn generates_canonical_build_provenance_constants() {
     )
     .expect("build provenance source should be generated");
 
-    let expected_definition = r#"{"actions":[],"agent_schema":{"properties":{"answer":{"type":"integer"}},"type":"object"},"inputs":[{"text":"Return a numeric answer.","type":"text"}],"version":"2026-03-03.r1"}"#;
+    let expected_definition = r#"{"actions":[],"agent_definition_schema_version":"2026-03-03.r1","agent_schema":{"properties":{"answer":{"type":"integer"}},"type":"object"},"inputs":[{"text":"Return a numeric answer.","type":"text"}]}"#;
     let mut hasher = Sha256::new();
     hasher.update(expected_definition.as_bytes());
     let expected_hash = format!("{:x}", hasher.finalize());

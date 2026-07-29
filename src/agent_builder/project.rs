@@ -337,23 +337,23 @@ mod tests {
     }
 
     #[test]
-    fn resolves_template_schema_version_from_agentcfg_version() {
+    fn resolves_template_schema_version_from_agent_definition_schema_version() {
         let version = schema_version::extract_schema_version_from_agentcfg(
-            r#"{"version":"2026-03-03.r2","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
+            r#"{"agent_definition_schema_version":"2026-03-03.r2","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
         );
         assert_eq!(version.as_deref(), Some("2026-03-03.r2"));
     }
 
     #[test]
-    fn rejects_legacy_semver_agentcfg_version() {
+    fn rejects_invalid_agent_definition_schema_version() {
         let version = schema_version::extract_schema_version_from_agentcfg(
-            r#"{"version":"0.0.10","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
+            r#"{"agent_definition_schema_version":"0.0.10","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
         );
         assert!(version.is_none());
     }
 
     #[test]
-    fn falls_back_to_current_schema_version_when_agentcfg_version_is_missing() {
+    fn falls_back_to_current_schema_version_when_canonical_key_is_missing() {
         let version = schema_version::extract_schema_version_from_agentcfg(
             r#"{"inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
         );

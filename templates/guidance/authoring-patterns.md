@@ -7,12 +7,14 @@ These patterns shape the JSON that drives the generated CLI tool.
 
 Keep top-level keys in this order:
 
-1. `version`
+1. `agent_definition_schema_version`
 2. `inputs`
 3. optional `action_execution`
 4. optional `runtime_vars`
 5. `agent_schema`
 6. `actions`
+
+`agent_definition_schema_version` identifies the Cargo AI contract used to interpret the definition. It is not the agent or package version; package version is `[project].version`. Copy the value from the current Cargo AI template or guidance instead of inventing one from the current date, a project/package version, or the Cargo AI product version.
 
 Keep each action in this order:
 

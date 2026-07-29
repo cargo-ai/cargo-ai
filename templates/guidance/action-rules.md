@@ -9,12 +9,14 @@ For broader shape and validation rules, also read:
 
 ## Top-Level Shape
 - Required top-level keys:
-  - `version`
+  - `agent_definition_schema_version`
   - optional `inputs`
   - optional `action_execution`
   - optional `runtime_vars`
   - `agent_schema`
   - `actions`
+
+`agent_definition_schema_version` identifies the Cargo AI contract used to interpret the definition. It is not an agent or package version; copy it from the current Cargo AI template or guidance rather than inventing a value from the current date or another version surface.
 
 ## Top-Level Action Execution
 - `action_execution`

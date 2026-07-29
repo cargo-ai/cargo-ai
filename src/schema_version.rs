@@ -7,6 +7,7 @@ use serde_json::Value;
 const ROOT_AGENTCFG: &str = include_str!("../.agentcfg");
 
 pub const SCHEMA_VERSION_EXAMPLE: &str = "2026-03-03.r1";
+pub const AGENT_DEFINITION_SCHEMA_VERSION_KEY: &str = "agent_definition_schema_version";
 
 pub fn current_schema_version() -> String {
     extract_schema_version_from_agentcfg(ROOT_AGENTCFG)
@@ -17,7 +18,7 @@ pub fn extract_schema_version_from_agentcfg(agentcfg_contents: &str) -> Option<S
     serde_json::from_str::<Value>(agentcfg_contents)
         .ok()
         .and_then(|json| {
-            json.get("version")
+            json.get(AGENT_DEFINITION_SCHEMA_VERSION_KEY)
                 .and_then(|value| value.as_str())
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
@@ -116,14 +117,19 @@ mod tests {
     #[test]
     fn extracts_only_valid_schema_versions_from_agentcfg() {
         let valid = extract_schema_version_from_agentcfg(
-            r#"{"version":"2026-03-03.r2","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
+            r#"{"agent_definition_schema_version":"2026-03-03.r2","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
         );
         assert_eq!(valid.as_deref(), Some("2026-03-03.r2"));
 
         let invalid = extract_schema_version_from_agentcfg(
-            r#"{"version":"0.0.10","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
+            r#"{"agent_definition_schema_version":"0.0.10","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
         );
         assert!(invalid.is_none());
+
+        let legacy = extract_schema_version_from_agentcfg(
+            r#"{"version":"2026-03-03.r2","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
+        );
+        assert!(legacy.is_none());
     }
 
     #[test]

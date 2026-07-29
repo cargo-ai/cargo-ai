@@ -267,15 +267,15 @@ mod tests {
     #[test]
     fn template_schema_version_uses_date_revision_format_when_present() {
         let value = schema_version::extract_schema_version_from_agentcfg(
-            r#"{"version":"2026-03-03.r2","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
+            r#"{"agent_definition_schema_version":"2026-03-03.r2","inputs":[{"type":"text","text":"x"}],"agent_schema":{"type":"object","properties":{}},"actions":[]}"#,
         );
         assert_eq!(value.as_deref(), Some("2026-03-03.r2"));
     }
 
     #[test]
-    fn template_schema_version_rejects_legacy_semver_values() {
+    fn template_schema_version_rejects_invalid_values() {
         let agentcfg = format!(
-            r#"{{"version":"{CURRENT_CARGO_AI_VERSION}","inputs":[{{"type":"text","text":"x"}}],"agent_schema":{{"type":"object","properties":{{}}}},"actions":[]}}"#
+            r#"{{"agent_definition_schema_version":"{CURRENT_CARGO_AI_VERSION}","inputs":[{{"type":"text","text":"x"}}],"agent_schema":{{"type":"object","properties":{{}}}},"actions":[]}}"#
         );
         let value = schema_version::extract_schema_version_from_agentcfg(&agentcfg);
         assert!(value.is_none());

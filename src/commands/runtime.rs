@@ -1888,7 +1888,7 @@ mod tests {
     fn test_runtime_definition() -> crate::runtime_definition::RuntimeAgentDefinition {
         crate::runtime_definition::RuntimeAgentDefinition::from_str(
             r#"{
-                "version": "2026-03-03.r1",
+                "agent_definition_schema_version": "2026-03-03.r1",
                 "inputs": [{ "type": "text", "text": "Return an answer." }],
                 "agent_schema": {
                     "type": "object",
@@ -1912,7 +1912,7 @@ mod tests {
     fn test_tool_runtime_definition() -> crate::runtime_definition::RuntimeAgentDefinition {
         crate::runtime_definition::RuntimeAgentDefinition::from_str(
             r#"{
-                "version": "2026-03-03.r1",
+                "agent_definition_schema_version": "2026-03-03.r1",
                 "inputs": [{ "type": "text", "text": "Audit tools." }],
                 "agent_schema": {
                     "type": "object",

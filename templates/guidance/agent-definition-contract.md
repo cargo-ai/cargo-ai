@@ -9,19 +9,22 @@ Unless a section says otherwise, the supported field lists below are exhaustive 
 
 Every agent definition must be a JSON object with these keys in this order:
 
-1. `version`
+1. `agent_definition_schema_version`
 2. optional `inputs`
 3. optional `action_execution`
 4. optional `runtime_vars`
 5. `agent_schema`
 6. `actions`
 
-## `version`
+## `agent_definition_schema_version`
 
 - Required.
 - Non-empty string.
 - Format: `YYYY-MM-DD.rN`
 - Example: `2026-03-03.r1`
+- This identifies the Cargo AI contract used to interpret this definition. It is not the agent or package version; package version is `[project].version`.
+- Copy the schema version from the current Cargo AI template or guidance. Do not invent one from the current date, an agent/package/project version, or the Cargo AI product version.
+- The legacy top-level `version` key is invalid. Rename that key without changing its schema-version value.
 
 ## `inputs`
 
@@ -476,7 +479,8 @@ For `kind: "agent"`:
 
 Expect `cargo ai hatch <agent-name> --config <config.json> --check` to reject at least these cases:
 - missing required top-level keys
-- malformed `version`
+- legacy `version`
+- malformed `agent_definition_schema_version`
 - unsupported `agent_schema` property types
 - nested arrays, deeper nested objects, or unsupported union types in `agent_schema`
 - invalid `description`, `enum`, or numeric-bound metadata on a property

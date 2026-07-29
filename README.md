@@ -174,7 +174,7 @@ A minimal agent looks like this:
 
 ```json
 {
-  "version": "2026-03-03.r1",
+  "agent_definition_schema_version": "2026-03-03.r1",
   "inputs": [
     {
       "type": "text",
@@ -205,6 +205,8 @@ A minimal agent looks like this:
   ]
 }
 ```
+
+`agent_definition_schema_version` identifies the Cargo AI contract used to interpret the definition. It is not the agent or package version; package version is `.cargo-ai/project.toml` `[project].version`. Copy the schema value from the current Cargo AI template or guidance rather than inventing one from the current date, an agent/package/project version, or the Cargo AI product version. The legacy top-level `version` key is rejected.
 
 That JSON can run directly through Cargo AI:
 
@@ -276,7 +278,7 @@ You can also author a structural action-only worker by leaving `agent_schema.pro
 
 ```json
 {
-  "version": "2026-03-03.r1",
+  "agent_definition_schema_version": "2026-03-03.r1",
   "inputs": [
     { "name": "menu_image", "type": "image" }
   ],

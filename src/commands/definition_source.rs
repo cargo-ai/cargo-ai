@@ -173,8 +173,11 @@ mod tests {
         let temp_dir = temp_dir_path("local-json");
         fs::create_dir_all(&temp_dir).expect("temp dir should be writable");
         let local_config = temp_dir.join("adder.test.json");
-        fs::write(&local_config, r#"{"version":"2026-03-03.r1"}"#)
-            .expect("local config should be writable");
+        fs::write(
+            &local_config,
+            r#"{"agent_definition_schema_version":"2026-03-03.r1"}"#,
+        )
+        .expect("local config should be writable");
 
         let resolved = resolve_local_definition_path_in_dir(
             local_config.to_string_lossy().as_ref(),
@@ -192,8 +195,11 @@ mod tests {
         let temp_dir = temp_dir_path("same-dir");
         fs::create_dir_all(&temp_dir).expect("temp dir should be writable");
         let local_config = temp_dir.join("adder_test.json");
-        fs::write(&local_config, r#"{"version":"2026-03-03.r1"}"#)
-            .expect("local config should be writable");
+        fs::write(
+            &local_config,
+            r#"{"agent_definition_schema_version":"2026-03-03.r1"}"#,
+        )
+        .expect("local config should be writable");
 
         let resolved = resolve_definition_source_in_dir("adder_test", &temp_dir, "run")
             .expect("resolution should succeed");
@@ -245,17 +251,17 @@ mod tests {
     fn inline_and_stdin_definition_contents_round_trip() {
         assert_eq!(
             super::load_definition_contents(&AgentDefinitionSource::InlineJson(
-                "{\"version\":\"2026-03-03.r1\"}".to_string()
+                "{\"agent_definition_schema_version\":\"2026-03-03.r1\"}".to_string()
             ))
             .expect("inline json should round trip"),
-            "{\"version\":\"2026-03-03.r1\"}"
+            "{\"agent_definition_schema_version\":\"2026-03-03.r1\"}"
         );
         assert_eq!(
             super::load_definition_contents(&AgentDefinitionSource::StdinJson(
-                "{\"version\":\"2026-03-03.r1\"}".to_string()
+                "{\"agent_definition_schema_version\":\"2026-03-03.r1\"}".to_string()
             ))
             .expect("stdin json should round trip"),
-            "{\"version\":\"2026-03-03.r1\"}"
+            "{\"agent_definition_schema_version\":\"2026-03-03.r1\"}"
         );
     }
 }
