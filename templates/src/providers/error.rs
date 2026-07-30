@@ -6,13 +6,30 @@ use std::fmt;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ProviderKind {
+    Anthropic,
     Ollama,
     OpenAi,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ProviderTransport {
+    AnthropicMessages,
+    OllamaOpenAiCompatible,
+    OpenAiNative,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct ProviderCapabilities {
+    pub(crate) requires_token: bool,
+    pub(crate) supports_image_input: bool,
+    pub(crate) supports_file_input: bool,
+    pub(crate) supports_generate_image: bool,
 }
 
 impl ProviderKind {
     pub(crate) fn from_server_value(server: &str) -> Option<Self> {
         match server.trim().to_ascii_lowercase().as_str() {
+            "anthropic" => Some(Self::Anthropic),
             "ollama" => Some(Self::Ollama),
             "openai" => Some(Self::OpenAi),
             _ => None,
@@ -21,6 +38,7 @@ impl ProviderKind {
 
     pub(crate) fn display_name(self) -> &'static str {
         match self {
+            Self::Anthropic => "Anthropic",
             Self::Ollama => "Ollama",
             Self::OpenAi => "OpenAI",
         }
@@ -28,8 +46,40 @@ impl ProviderKind {
 
     pub(crate) fn default_url(self) -> &'static str {
         match self {
+            Self::Anthropic => "https://api.anthropic.com/v1/messages",
             Self::Ollama => "http://localhost:11434/v1/chat/completions",
             Self::OpenAi => "https://api.openai.com/v1/chat/completions",
+        }
+    }
+
+    pub(crate) fn transport(self) -> ProviderTransport {
+        match self {
+            Self::Anthropic => ProviderTransport::AnthropicMessages,
+            Self::Ollama => ProviderTransport::OllamaOpenAiCompatible,
+            Self::OpenAi => ProviderTransport::OpenAiNative,
+        }
+    }
+
+    pub(crate) fn capabilities(self) -> ProviderCapabilities {
+        match self {
+            Self::Anthropic => ProviderCapabilities {
+                requires_token: true,
+                supports_image_input: true,
+                supports_file_input: false,
+                supports_generate_image: false,
+            },
+            Self::Ollama => ProviderCapabilities {
+                requires_token: false,
+                supports_image_input: true,
+                supports_file_input: true,
+                supports_generate_image: true,
+            },
+            Self::OpenAi => ProviderCapabilities {
+                requires_token: true,
+                supports_image_input: true,
+                supports_file_input: true,
+                supports_generate_image: true,
+            },
         }
     }
 }
@@ -90,6 +140,14 @@ impl ProviderError {
         }
     }
 
+    pub(crate) fn invalid_request(provider: ProviderKind, message: impl Into<String>) -> Self {
+        Self {
+            provider,
+            kind: ProviderErrorKind::InvalidRequest,
+            message: message.into(),
+        }
+    }
+
     pub(crate) fn provider(&self) -> ProviderKind {
         self.provider
     }
@@ -135,6 +193,9 @@ fn provider_hint(
 ) -> Option<&'static str> {
     match kind {
         ProviderErrorKind::ModelNotFound => match provider {
+            ProviderKind::Anthropic => {
+                Some("Verify the Claude model name and confirm your Anthropic Console organization has access to it.")
+            }
             ProviderKind::Ollama => Some(
                 "Run `ollama list` to inspect installed models, then `ollama pull <model>` for missing models.",
             ),
@@ -143,6 +204,9 @@ fn provider_hint(
             }
         },
         ProviderErrorKind::Unauthorized => match provider {
+            ProviderKind::Anthropic => Some(
+                "Verify your Anthropic API key (`--token` or profile token), Console API credits, and model access. Claude.ai subscriptions do not include API usage.",
+            ),
             ProviderKind::OpenAi => {
                 Some("Verify your OpenAI token (`--token` or profile token), or re-run `cargo ai auth login openai`, and confirm model access.")
             }
@@ -151,6 +215,9 @@ fn provider_hint(
             ),
         },
         ProviderErrorKind::RateLimited => match provider {
+            ProviderKind::Anthropic => Some(
+                "Anthropic rate limit reached; retry later or review your Console usage limits.",
+            ),
             ProviderKind::OpenAi => {
                 Some("OpenAI rate limit reached; retry later or adjust your account/model limits.")
             }
@@ -159,17 +226,23 @@ fn provider_hint(
             ),
         },
         ProviderErrorKind::Connectivity => match provider {
-            ProviderKind::Ollama => Some(
-                "Ensure Ollama is running (`ollama serve`) and the configured URL is reachable.",
+            ProviderKind::Anthropic => Some(
+                "Check network connectivity and ensure the configured Anthropic Messages URL is reachable.",
             ),
+            ProviderKind::Ollama => {
+                Some("Ensure Ollama is running (`ollama serve`) and the configured URL is reachable.")
+            }
             ProviderKind::OpenAi => Some(
                 "Check network connectivity and ensure the configured OpenAI URL is reachable.",
             ),
         },
         ProviderErrorKind::Timeout => match provider {
-            ProviderKind::Ollama => Some(
-                "Request timed out; ensure Ollama/model is responsive or increase `--inference-timeout-in-sec`.",
+            ProviderKind::Anthropic => Some(
+                "Request timed out; retry later or increase `--inference-timeout-in-sec`.",
             ),
+            ProviderKind::Ollama => {
+                Some("Request timed out; ensure Ollama/model is responsive or increase `--inference-timeout-in-sec`.")
+            }
             ProviderKind::OpenAi => {
                 Some("Request timed out; retry later or increase `--inference-timeout-in-sec`.")
             }
@@ -188,9 +261,9 @@ fn provider_hint(
                 Some("Check `--model`, `--url`, and request parameters for invalid values.")
             }
         }
-        ProviderErrorKind::InvalidResponse => Some(
-            "The provider returned an unexpected response shape; verify model and endpoint compatibility.",
-        ),
+        ProviderErrorKind::InvalidResponse => {
+            Some("The provider returned an unexpected response shape; verify model and endpoint compatibility.")
+        }
         ProviderErrorKind::Unknown => None,
     }
 }
@@ -235,11 +308,12 @@ pub(crate) fn validate_provider_request(
         ));
     }
 
-    if provider == ProviderKind::OpenAi && token.trim().is_empty() {
-        issues.push(
-            "❌ Missing OpenAI token. Provide `--token <TOKEN>`, run `cargo ai auth login openai`, or configure `cargo ai profile set <name> --token <TOKEN> --auth api_key`."
-                .to_string(),
-        );
+    if provider.capabilities().requires_token && token.trim().is_empty() {
+        issues.push(match provider {
+            ProviderKind::Anthropic => "❌ Missing Anthropic API key. Provide `--token <TOKEN>` or configure `cargo ai profile set <name> --token <TOKEN> --auth api_key`. Claude.ai subscriptions do not provide API credentials.".to_string(),
+            ProviderKind::OpenAi => "❌ Missing OpenAI token. Provide `--token <TOKEN>`, run `cargo ai auth login openai`, or configure `cargo ai profile set <name> --token <TOKEN> --auth api_key`.".to_string(),
+            ProviderKind::Ollama => unreachable!("Ollama does not require a token"),
+        });
     }
 
     if issues.is_empty() {
@@ -268,6 +342,19 @@ pub(crate) fn validate_provider_content_parts(
     let normalized_url = url.trim().to_ascii_lowercase();
     let mut issues = Vec::new();
 
+    if includes_images && !provider.capabilities().supports_image_input {
+        issues.push(format!(
+            "❌ Image inputs are not supported by the {} adapter.",
+            provider.display_name()
+        ));
+    }
+    if includes_files && !provider.capabilities().supports_file_input {
+        issues.push(format!(
+            "❌ File inputs are not supported by the {} adapter. Use text, URL-text, or a supported image input.",
+            provider.display_name()
+        ));
+    }
+
     if provider == ProviderKind::Ollama
         && (normalized_url.contains("/api/generate") || normalized_url.contains("/api/chat"))
     {
@@ -294,12 +381,20 @@ pub(crate) fn validate_provider_content_parts(
 
 #[cfg(test)]
 mod tests {
-    use super::{ProviderError, ProviderKind, provider_error_messages, validate_provider_request};
+    use super::{
+        provider_error_messages, validate_provider_content_parts, validate_provider_request,
+        ProviderError, ProviderKind,
+    };
+    use crate::providers::runtime::ContentPart;
     use reqwest::StatusCode;
     use tokio::net::TcpListener;
 
     #[test]
     fn parses_provider_kind_from_server_value() {
+        assert_eq!(
+            ProviderKind::from_server_value("Anthropic"),
+            Some(ProviderKind::Anthropic)
+        );
         assert_eq!(
             ProviderKind::from_server_value("ollama"),
             Some(ProviderKind::Ollama)
@@ -312,6 +407,25 @@ mod tests {
     }
 
     #[test]
+    fn provider_identity_is_distinct_from_transport_and_capabilities() {
+        assert_eq!(
+            ProviderKind::Anthropic.transport(),
+            super::ProviderTransport::AnthropicMessages
+        );
+        assert_eq!(
+            ProviderKind::Ollama.transport(),
+            super::ProviderTransport::OllamaOpenAiCompatible
+        );
+        assert!(
+            !ProviderKind::Anthropic
+                .capabilities()
+                .supports_generate_image
+        );
+        assert!(ProviderKind::Anthropic.capabilities().supports_image_input);
+        assert!(!ProviderKind::Anthropic.capabilities().supports_file_input);
+    }
+
+    #[test]
     fn classifies_model_not_found_from_http_status() {
         let error = ProviderError::from_http_status(
             ProviderKind::Ollama,
@@ -319,16 +433,12 @@ mod tests {
             "{\"error\":\"model 'mixtral' not found\"}",
         );
         let messages = provider_error_messages(&error);
-        assert!(
-            messages
-                .iter()
-                .any(|line| line.contains("Issue communicating with the AI server (Ollama)"))
-        );
-        assert!(
-            messages
-                .iter()
-                .any(|line| line.contains("ollama pull <model>"))
-        );
+        assert!(messages
+            .iter()
+            .any(|line| line.contains("Issue communicating with the AI server (Ollama)")));
+        assert!(messages
+            .iter()
+            .any(|line| line.contains("ollama pull <model>")));
     }
 
     #[test]
@@ -339,16 +449,12 @@ mod tests {
             "{\"error\":\"invalid api key\"}",
         );
         let messages = provider_error_messages(&error);
-        assert!(
-            messages
-                .iter()
-                .any(|line| line.contains("Issue communicating with the AI server (OpenAI)"))
-        );
-        assert!(
-            messages
-                .iter()
-                .any(|line| line.contains("Verify your OpenAI token"))
-        );
+        assert!(messages
+            .iter()
+            .any(|line| line.contains("Issue communicating with the AI server (OpenAI)")));
+        assert!(messages
+            .iter()
+            .any(|line| line.contains("Verify your OpenAI token")));
     }
 
     #[test]
@@ -360,11 +466,34 @@ mod tests {
             "",
         )
         .expect_err("expected token validation failure");
-        assert!(
-            issues
-                .iter()
-                .any(|line| line.contains("Missing OpenAI token"))
-        );
+        assert!(issues
+            .iter()
+            .any(|line| line.contains("Missing OpenAI token")));
+    }
+
+    #[test]
+    fn validates_anthropic_token_and_file_capability() {
+        let issues = validate_provider_request(
+            ProviderKind::Anthropic,
+            "claude-test",
+            ProviderKind::Anthropic.default_url(),
+            "",
+        )
+        .expect_err("expected token validation failure");
+        assert!(issues.iter().any(|line| line.contains("Anthropic API key")));
+
+        let issues = validate_provider_content_parts(
+            ProviderKind::Anthropic,
+            ProviderKind::Anthropic.default_url(),
+            &[ContentPart::File {
+                filename: "report.pdf".to_string(),
+                file_data: "data:application/pdf;base64,cGRm".to_string(),
+            }],
+        )
+        .expect_err("expected file capability failure");
+        assert!(issues
+            .iter()
+            .any(|line| line.contains("File inputs are not supported")));
     }
 
     #[test]
@@ -374,11 +503,39 @@ mod tests {
             "Failed to parse JSON from provider",
         );
         let messages = provider_error_messages(&error);
-        assert!(
-            messages
-                .iter()
-                .any(|line| line.contains("unexpected response shape"))
+        assert!(messages
+            .iter()
+            .any(|line| line.contains("unexpected response shape")));
+    }
+
+    #[test]
+    fn invalid_request_with_file_input_uses_file_specific_hint() {
+        let error = ProviderError::from_http_status(
+            ProviderKind::OpenAi,
+            StatusCode::BAD_REQUEST,
+            "{\"error\":\"file inputs are not supported for this model\"}",
         );
+        let messages = provider_error_messages(&error);
+        assert!(messages
+            .iter()
+            .any(|line| line.contains("rejected the supplied file input")));
+    }
+
+    #[test]
+    fn rejects_file_inputs_on_non_openai_ollama_transport() {
+        let issues = validate_provider_content_parts(
+            ProviderKind::Ollama,
+            "http://localhost:11434/api/chat",
+            &[ContentPart::File {
+                filename: "report.pdf".to_string(),
+                file_data: "data:application/pdf;base64,JVBERi0xLjQK".to_string(),
+            }],
+        )
+        .expect_err("expected transport validation failure");
+
+        assert!(issues
+            .iter()
+            .any(|line| line.contains("File inputs require a transport")));
     }
 
     #[tokio::test]

@@ -41,7 +41,7 @@ pub fn build_cli() -> ArgMatches {
             Arg::new("server")
                 .long("server")
                 .short('s')
-                .help("Client Type - Ollama or OpenAI")
+                .help("Provider - Anthropic, Ollama, or OpenAI")
                 .global(true)
         )
         .arg(
@@ -62,6 +62,14 @@ pub fn build_cli() -> ArgMatches {
             Arg::new("token")
                 .long("token")
                 .help("API token")
+                .global(true)
+        )
+        .arg(
+            Arg::new("max_output_tokens")
+                .long("max-output-tokens")
+                .help("Maximum provider output tokens for this invocation")
+                .value_name("TOKENS")
+                .value_parser(clap::value_parser!(u32).range(1..))
                 .global(true)
         )
         .arg(

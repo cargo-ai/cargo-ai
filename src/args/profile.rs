@@ -29,7 +29,7 @@ pub fn command() -> Command {
                     Arg::new("server")
                         .long("server")
                         .short('s')
-                        .help("LLM server (e.g., openai or ollama)")
+                        .help("LLM server (e.g., anthropic, openai, or ollama)")
                         .required(true)
                         .value_name("SERVER"),
                 )
@@ -57,6 +57,14 @@ pub fn command() -> Command {
                         .value_name("URL"),
                 )
                 .arg(
+                    Arg::new("max_output_tokens")
+                        .long("max-output-tokens")
+                        .help("Maximum provider output tokens for this profile")
+                        .required(false)
+                        .value_name("TOKENS")
+                        .value_parser(clap::value_parser!(u32).range(1..)),
+                )
+                .arg(
                     Arg::new("description")
                         .long("description")
                         .short('d')
@@ -82,6 +90,8 @@ pub fn command() -> Command {
                             "auth",
                             "url",
                             "clear_url",
+                            "max_output_tokens",
+                            "clear_max_output_tokens",
                             "description",
                             "clear_description",
                             "token",
@@ -95,6 +105,11 @@ pub fn command() -> Command {
                 .group(
                     ArgGroup::new("url_update")
                         .args(["url", "clear_url"])
+                        .multiple(false),
+                )
+                .group(
+                    ArgGroup::new("max_output_tokens_update")
+                        .args(["max_output_tokens", "clear_max_output_tokens"])
                         .multiple(false),
                 )
                 .group(
@@ -117,7 +132,7 @@ pub fn command() -> Command {
                     Arg::new("server")
                         .long("server")
                         .short('s')
-                        .help("Update server (e.g., openai or ollama)")
+                        .help("Update server (e.g., anthropic, openai, or ollama)")
                         .required(false)
                         .value_name("SERVER"),
                 )
@@ -148,6 +163,21 @@ pub fn command() -> Command {
                     Arg::new("clear_url")
                         .long("clear-url")
                         .help("Remove custom transformer server URL")
+                        .required(false)
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("max_output_tokens")
+                        .long("max-output-tokens")
+                        .help("Set the maximum provider output tokens")
+                        .required(false)
+                        .value_name("TOKENS")
+                        .value_parser(clap::value_parser!(u32).range(1..)),
+                )
+                .arg(
+                    Arg::new("clear_max_output_tokens")
+                        .long("clear-max-output-tokens")
+                        .help("Remove the profile output-token override")
                         .required(false)
                         .action(ArgAction::SetTrue),
                 )

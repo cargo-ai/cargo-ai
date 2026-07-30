@@ -805,6 +805,7 @@ impl ActionProviderContext {
 
 fn provider_server_name(provider: crate::providers::ProviderKind) -> &'static str {
     match provider {
+        crate::providers::ProviderKind::Anthropic => "anthropic",
         crate::providers::ProviderKind::Ollama => "ollama",
         crate::providers::ProviderKind::OpenAi => "openai",
     }
@@ -2081,6 +2082,17 @@ async fn run_generate_image_step(
     let output_path = resolve_string_parts(path_parts, data, action_name, "path")
         .map_err(|error| format!("Action '{}': {error}", action_name))?;
     let output_format = generated_image_output_format(output_path.as_str(), action_name)?;
+    if !effective_provider_context
+        .provider
+        .capabilities()
+        .supports_generate_image
+    {
+        return Err(format!(
+            "Action '{}' generate_image is not supported by the {} adapter. Select an OpenAI or Ollama step profile.",
+            action_name,
+            effective_provider_context.provider.display_name()
+        ));
+    }
     validate_generate_image_output_format_for_provider(
         effective_provider_context.provider,
         output_format,
@@ -2110,6 +2122,12 @@ async fn run_generate_image_step(
     let provider_started_at = Instant::now();
     let image_response = match tokio::time::timeout(remaining, async {
         match effective_provider_context.provider {
+            crate::providers::ProviderKind::Anthropic => {
+                Err(crate::providers::ProviderError::invalid_request(
+                    crate::providers::ProviderKind::Anthropic,
+                    "Anthropic image generation is not supported.",
+                ))
+            }
             crate::providers::ProviderKind::OpenAi => {
                 crate::providers::send_openai_image_request(
                     &effective_provider_context.url,
@@ -2391,6 +2409,15 @@ async fn resolve_generate_image_step_profile_context(
                 .map(|session| session.access_token)?
         }
         ProfileAuthMode::None => match provider {
+            crate::providers::ProviderKind::Anthropic => {
+                return Err(format!(
+                    "Action '{}' generate_image step profile '{}' auth mode is '{}'. Anthropic requires '{}'.",
+                    action_name,
+                    profile.name,
+                    ProfileAuthMode::None.as_str(),
+                    ProfileAuthMode::ApiKey.as_str()
+                ));
+            }
             crate::providers::ProviderKind::Ollama => String::new(),
             crate::providers::ProviderKind::OpenAi => {
                 return Err(format!(

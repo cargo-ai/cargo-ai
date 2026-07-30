@@ -52,6 +52,15 @@ pub(crate) struct ProviderTextResponse {
     pub(crate) usage: Option<ProviderUsage>,
 }
 
+pub(crate) struct ProviderTextRequest<'a> {
+    pub(crate) model: &'a str,
+    pub(crate) content_parts: &'a [ContentPart],
+    pub(crate) timeout_in_sec: u64,
+    pub(crate) token: &'a str,
+    pub(crate) response_schema: &'a serde_json::Value,
+    pub(crate) max_output_tokens: Option<u32>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProviderImageResponse {
     pub(crate) bytes: Vec<u8>,
