@@ -203,6 +203,10 @@ fn assert_success(output: &Output, request: &str, usage_path: &Path) {
     let body: Value = serde_json::from_str(body).expect("request body should be JSON");
     assert_eq!(body["model"], "claude-smoke");
     assert_eq!(body["max_tokens"], 128);
+    assert!(
+        body.get("temperature").is_none(),
+        "Anthropic requests must omit model-deprecated sampling controls"
+    );
     assert_eq!(body["output_config"]["format"]["type"], "json_schema");
     assert!(body["messages"][0]["content"]
         .as_array()

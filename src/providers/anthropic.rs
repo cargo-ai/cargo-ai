@@ -1,6 +1,6 @@
 use super::{
     runtime::{ContentPart, ProviderTextResponse, ProviderUsage},
-    ProviderError, ProviderKind, DEFAULT_TEMPERATURE,
+    ProviderError, ProviderKind,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use reqwest::ClientBuilder;
@@ -15,7 +15,6 @@ struct Request<'a> {
     model: &'a str,
     max_tokens: u32,
     messages: Vec<RequestMessage>,
-    temperature: f64,
     output_config: OutputConfig<'a>,
 }
 
@@ -226,7 +225,6 @@ pub(crate) async fn send_request(
             role: "user",
             content: request_content_blocks(content_parts)?,
         }],
-        temperature: DEFAULT_TEMPERATURE,
         output_config: OutputConfig {
             format: OutputFormat {
                 r#type: "json_schema",
