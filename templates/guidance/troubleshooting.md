@@ -113,6 +113,7 @@ Check for:
 - selecting `server = "anthropic"` with `auth = "none"` or `auth = "openai_account"`; use `auth = "api_key"`
 - placing a real key in agent JSON or a command argument; store it with `cargo ai profile set <name> --stdin`
 - using a model ID that the selected Anthropic Console organization cannot access
+- setting `max_output_tokens` unusually low for a model with adaptive thinking; the cap includes thinking plus final text, so raise it if the provider returns no text block
 - pointing a custom URL at an OpenAI-compatible facade; Cargo AI's `anthropic` adapter expects the native Messages request and response contract
 - sending direct file input or selecting an Anthropic profile for `generate_image`; use text, URL-text, or image input, or select an OpenAI/Ollama step profile for image generation
 - assuming Cargo AI silently simplifies an unsupported JSON Schema; provider schema errors are surfaced so the authored contract remains visible
