@@ -51,11 +51,18 @@ pub(crate) async fn send_text_request(
             .await
         }
         error::ProviderTransport::OpenAiNative => {
+            let mut schema = request.response_schema.clone();
+            if let Some(object) = schema.as_object_mut() {
+                object.insert(
+                    "additionalProperties".to_string(),
+                    serde_json::Value::Bool(false),
+                );
+            }
             let response_format = serde_json::json!({
                 "type": "json_schema",
                 "json_schema": {
                     "name": "Output",
-                    "schema": request.response_schema,
+                    "schema": schema,
                     "strict": true
                 }
             });

@@ -1490,6 +1490,46 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_profile_output_token_limit_parses_for_add_and_set() {
+        let add_matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "profile",
+                "add",
+                "anthropic-prod",
+                "--server",
+                "anthropic",
+                "--model",
+                "claude-sonnet-5",
+                "--auth",
+                "api_key",
+                "--max-output-tokens",
+                "2048",
+            ])
+            .expect("Anthropic profile output-token limit should parse");
+        let add = add_matches
+            .subcommand_matches("profile")
+            .and_then(|matches| matches.subcommand_matches("add"))
+            .expect("profile add should be available");
+        assert_eq!(add.get_one::<u32>("max_output_tokens").copied(), Some(2048));
+
+        let set_matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "profile",
+                "set",
+                "anthropic-prod",
+                "--clear-max-output-tokens",
+            ])
+            .expect("clearing a profile output-token limit should parse");
+        let set = set_matches
+            .subcommand_matches("profile")
+            .and_then(|matches| matches.subcommand_matches("set"))
+            .expect("profile set should be available");
+        assert!(set.get_flag("clear_max_output_tokens"));
+    }
+
+    #[test]
     fn profile_add_rejects_legacy_token_flag() {
         let err = cli_command("cargo-ai")
             .try_get_matches_from([

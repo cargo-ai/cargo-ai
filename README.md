@@ -23,7 +23,7 @@ Cargo AI keeps agent behavior readable, auditable, and understandable through a 
 - **Handles Real Inputs**: work with text, images, URLs, and common files.
 - **Supports Advanced Logic**: add conditions and follow-up behavior without hand-building a custom app.
 - **Real Actions, Not Just Prompts**: run local commands, call child agents, pass command-line arguments, and send email follow-ups.
-- **Choose Your Own AI**: use OpenAI models today or open-source models through Ollama, with room for more providers over time.
+- **Choose Your Own AI**: use Anthropic or OpenAI directly, reuse an OpenAI account when it fits, or run open-source models through Ollama.
 - **You Own the Output**: hatch a local executable and generated code that you can keep, modify, and run wherever you want.
 - **Portable Across macOS, Linux, and Windows**: keep one readable agent definition and hatch it for the systems you care about.
 - **Easy to Share Through `cargo-ai.org`**: create a free account to publish definitions in minutes so other people can hatch them locally on their own machines.
@@ -89,7 +89,35 @@ cargo ai profile add openai \
 cargo ai profile set openai --token sk-*** --auth api_key
 ```
 
-**Option C: open-source models with Ollama**
+**Option C: Anthropic API**
+
+Use this path for Claude through Anthropic's native Messages API. A paid Claude.ai plan does not include Anthropic Console API usage; create a Console organization, add prepaid API credits, and create a dedicated API key before the first live run. See Anthropic's [account separation explanation](https://support.anthropic.com/en/articles/9876003-i-subscribe-to-a-paid-claude-ai-plan-why-do-i-have-to-pay-separately-for-api-usage-on-console) and [API credit guidance](https://support.anthropic.com/en/articles/8977456-how-do-i-pay-for-my-api-usage).
+
+```bash
+cargo ai profile add anthropic \
+  --server anthropic \
+  --model claude-sonnet-5 \
+  --auth api_key \
+  --max-output-tokens 4096
+
+printf '%s' "$ANTHROPIC_API_KEY" | cargo ai profile set anthropic --stdin
+cargo ai run adder_test --profile anthropic
+```
+
+The example model ID was confirmed against Anthropic's [current model table](https://platform.claude.com/docs/en/about-claude/models/overview) (Verified: 2026-07-29). Model availability varies by Console organization, so select a current model your organization can access instead of treating this example as a built-in catalog. Cargo AI defaults Anthropic profiles to `https://api.anthropic.com/v1/messages` and a `4096` output-token cap when `max_output_tokens` is omitted. Use `--url` for a custom Messages endpoint and `--max-output-tokens` for a one-run override.
+
+Anthropic supports text, client-fetched URL text, local image input, JSON-schema-directed output, usage accounting, and interpreted or hatched execution in this release. Direct file input and Anthropic `generate_image` are intentionally unsupported and fail explicitly. An Anthropic parent agent may still select an OpenAI or Ollama step-level profile for a supported `generate_image` action.
+
+Maintainers can reuse the isolated deterministic provider lane without an API key:
+
+```bash
+cargo test --test provider_smoke
+cargo test --test provider_smoke generated_anthropic_smoke_isolated_and_deterministic -- --ignored --exact
+```
+
+The first command covers interpreted success and failure paths; the second hatches and runs a standalone agent against the same native-protocol assertions. Both use a temporary `CARGO_AI_HOME`, a loopback mock, and fake credentials. The separately ignored `live_anthropic_smoke_uses_isolated_stdin_credentials` case requires `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL`; it writes the key to a temporary profile through stdin and never passes it as a process argument. It is intended for an explicit manual checkpoint, not default CI.
+
+**Option D: open-source models with Ollama**
 
 Use this path if you want to run `cargo-ai` without ChatGPT or OpenAI at all.
 
@@ -651,7 +679,7 @@ CARGO_AI_USAGE_LOG=./usage.jsonl cargo ai run ./my_agent.json --profile local-ol
 ./my_agent --usage-log ./usage.ndjson
 ```
 
-The file is newline-delimited JSON, also called JSON Lines: one complete JSON object per line. Cargo AI writes metadata-only events such as `usage_log_started`, `agent_run_started`, `provider_request_completed`, `tool_run_completed`, `agent_run_completed`, and `root_run_completed`. Provider usage is normalized to `input_tokens`, `output_tokens`, and `total_tokens` when OpenAI or Ollama reports counters; when a provider does not report usage, Cargo AI records timing/status and leaves usage null instead of estimating. The same `root_run_id` is propagated to direct child agents and tool-bridge-launched child agents, while each execution gets its own `agent_run_id` and `parent_agent_run_id` so repeated or recursive agents remain reconstructable.
+The file is newline-delimited JSON, also called JSON Lines: one complete JSON object per line. Cargo AI writes metadata-only events such as `usage_log_started`, `agent_run_started`, `provider_request_completed`, `tool_run_completed`, `agent_run_completed`, and `root_run_completed`. Provider usage is normalized to `input_tokens`, `output_tokens`, and `total_tokens` when Anthropic, OpenAI, or Ollama reports counters; when a provider does not report usage, Cargo AI records timing/status and leaves usage null instead of estimating. The same `root_run_id` is propagated to direct child agents and tool-bridge-launched child agents, while each execution gets its own `agent_run_id` and `parent_agent_run_id` so repeated or recursive agents remain reconstructable.
 
 Agent metadata identifies the best-known source for each event. Interpreted local JSON runs include `agent.source: "local_path"`, the JSON `artifact` path, a derived `name`, and a canonical `definition_sha256` when available. Registry, inline JSON, and stdin runs use matching source labels, and hatched agents report `agent.source: "hatched_agent"`, `generated: true`, and the executable artifact/name. Use `agent_run_id` for one execution, `definition_sha256` for exact interpreted-definition provenance, and `parent_agent_run_id` plus `depth` to render the run tree.
 
@@ -1273,6 +1301,7 @@ When you want deeper details, use these files:
 - Standalone recipients do not need Cargo AI installed when the binary has no `alias::entrypoint` package-child references and they run it with explicit runtime flags such as `--server`, `--model`, optional `--url`, optional `--token`, and optional `--render-mode`. Package-child references require `cargo ai` or `cargo-ai` on `PATH` so the installed alias policy can be enforced.
 - `--profile <name>` is strict for generated binaries: if the named profile is missing, the run fails closed instead of falling back to another profile or to profileless auth.
 - For the standalone OpenAI account path, run the generated binary with `--server openai --model <model>` and no `--token`; if a local Codex session is available, the binary reuses it automatically.
+- For standalone Anthropic execution, pass `--server anthropic --model <model> --token <token>` or use an `api_key` profile. Prefer a stored profile for real credentials so the API key does not enter shell history.
 - On machines without Cargo AI installed/configured, `./my_agent version` treats local sync comparison as not checked and points users to `./my_agent inspect` for embedded provenance.
 - Scheduling is not built into Cargo AI today. To run an agent on a schedule, use your operating system scheduler such as `cron` on macOS/Linux or Task Scheduler on Windows. We know scheduling matters and expect this area to expand over time.
 - Cargo AI recommends manual upgrade via:

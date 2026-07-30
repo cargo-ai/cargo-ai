@@ -58,6 +58,10 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
         source: "src/providers/runtime.rs",
     },
     TemplateSource {
+        destination: "src/providers/anthropic.rs",
+        source: "src/providers/anthropic.rs",
+    },
+    TemplateSource {
         destination: "src/providers/openai.rs",
         source: "src/providers/openai.rs",
     },

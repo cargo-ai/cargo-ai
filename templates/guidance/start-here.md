@@ -33,6 +33,16 @@ When the user wants token usage, runtime timing, provider timing, or embedding-f
 - keep usage logging opt-in with `--usage-log <path>` or `CARGO_AI_USAGE_LOG=<path>`
 - do not design a custom logging backend unless the user explicitly wants business logs or a destination-specific tool
 
+When selecting a model provider:
+- `anthropic` uses Anthropic's native Messages API and requires an `api_key` profile or explicit token
+- `openai` supports direct API-key profiles and the OpenAI-only account-session flow
+- `ollama` supports local no-token operation and optional API-key-compatible endpoints
+- Anthropic supports text, URL-text, image input, structured output, and normalized usage; it does not support direct file input or `generate_image` in the current release
+- for real Anthropic credentials, create the profile first and pipe the key to `cargo ai profile set <name> --stdin`; never put a key in agent JSON or guidance
+- a Claude.ai paid plan and Anthropic Console API billing are separate; do not imply that the consumer subscription supplies an API key or credits
+- choose a current model available to the user's provider account instead of inventing a model ID or treating examples as a built-in allowlist
+- a parent may use one provider while a `generate_image` or child-agent step selects another saved profile explicitly
+
 When the user says they need a reusable local tool or native helper:
 - confirm that they really need a project-local `kind: "tool"` capability rather than a plain `exec` step
 - if they need new executable code and Cargo is available, prefer Rust inside a `cargo ai add tool <name>` scaffold instead of ad hoc Python, Node, or shell helper scripts

@@ -159,6 +159,45 @@ fn normalize_usage(usage: Option<Usage>) -> Option<ProviderUsage> {
     })
 }
 
+fn find_unsupported_schema_keyword(
+    value: &serde_json::Value,
+    path: &str,
+) -> Option<(String, String)> {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                let child_path = format!("{path}.{key}");
+                if matches!(
+                    key.as_str(),
+                    "minimum" | "maximum" | "minLength" | "maxLength"
+                ) {
+                    return Some((key.clone(), child_path));
+                }
+                if let Some(found) = find_unsupported_schema_keyword(child, child_path.as_str()) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(items) => items.iter().enumerate().find_map(|(index, child)| {
+            find_unsupported_schema_keyword(child, format!("{path}[{index}]").as_str())
+        }),
+        _ => None,
+    }
+}
+
+fn validate_response_schema(response_schema: &serde_json::Value) -> Result<(), ProviderError> {
+    if let Some((keyword, path)) = find_unsupported_schema_keyword(response_schema, "$") {
+        return Err(ProviderError::invalid_request(
+            ProviderKind::Anthropic,
+            format!(
+                "Anthropic structured output does not support JSON Schema keyword `{keyword}` at `{path}`. Cargo AI will not remove or weaken the authored schema."
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn error_message(body: &[u8]) -> String {
     serde_json::from_slice::<ErrorEnvelope>(body)
         .map(|envelope| match envelope.error.r#type {
@@ -179,6 +218,7 @@ pub(crate) async fn send_request(
     response_schema: &serde_json::Value,
     max_output_tokens: Option<u32>,
 ) -> Result<ProviderTextResponse, ProviderError> {
+    validate_response_schema(response_schema)?;
     let request = Request {
         model,
         max_tokens: max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
@@ -379,5 +419,29 @@ mod tests {
         .expect_err("file input should fail");
 
         assert!(error.message().contains("file input is not supported"));
+    }
+
+    #[tokio::test]
+    async fn rejects_unsupported_schema_constraints_without_stripping() {
+        let unsupported_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": {"type": "integer", "minimum": 1}
+            }
+        });
+        let error = send_request(
+            "https://example.invalid/v1/messages",
+            "claude-test",
+            &[ContentPart::Text("Return one.".to_string())],
+            30,
+            "anthropic-test-token",
+            &unsupported_schema,
+            None,
+        )
+        .await
+        .expect_err("unsupported schema should fail before a request");
+
+        assert!(error.message().contains("keyword `minimum`"));
+        assert!(error.message().contains("will not remove or weaken"));
     }
 }

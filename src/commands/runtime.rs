@@ -2354,6 +2354,26 @@ mod tests {
     }
 
     #[test]
+    fn runtime_command_accepts_max_output_tokens_override() {
+        let cmd = matches(&[
+            "cargo-ai",
+            "run",
+            "--max-output-tokens",
+            "1024",
+            "--input-text",
+            "Return 4",
+        ]);
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
+
+        assert_eq!(
+            runtime_m.get_one::<u32>("max_output_tokens").copied(),
+            Some(1024)
+        );
+    }
+
+    #[test]
     fn runtime_command_accepts_max_runtime_override() {
         let cmd = matches(&[
             "cargo-ai",

@@ -95,7 +95,7 @@ Provider events include:
 - `usage.output_tokens`
 - `usage.total_tokens`
 
-OpenAI and Ollama usage counters are normalized into the same `input_tokens`, `output_tokens`, and `total_tokens` shape when reported. If a provider does not return counters, Cargo AI leaves `usage` null or omitted instead of estimating.
+Anthropic, OpenAI, and Ollama usage counters are normalized into the same `input_tokens`, `output_tokens`, and `total_tokens` shape when reported. If a provider does not return counters, Cargo AI leaves `usage` null or omitted instead of estimating.
 
 ## Metadata Boundary
 

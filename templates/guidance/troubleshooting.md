@@ -106,6 +106,17 @@ Check for:
 - expecting `url=...` to appear for the standard OpenAI API or ChatGPT account transports; it only appears when the effective URL is custom or materially different
 - assuming a child inherited the same context just because the parent emitted `child: started ...`; if the child changed context, look for a later child `using:` line
 
+### Anthropic provider confusion
+
+Check for:
+- using a Claude.ai consumer subscription as if it supplied Console API credits or an API key; Anthropic bills Console API usage separately
+- selecting `server = "anthropic"` with `auth = "none"` or `auth = "openai_account"`; use `auth = "api_key"`
+- placing a real key in agent JSON or a command argument; store it with `cargo ai profile set <name> --stdin`
+- using a model ID that the selected Anthropic Console organization cannot access
+- pointing a custom URL at an OpenAI-compatible facade; Cargo AI's `anthropic` adapter expects the native Messages request and response contract
+- sending direct file input or selecting an Anthropic profile for `generate_image`; use text, URL-text, or image input, or select an OpenAI/Ollama step profile for image generation
+- assuming Cargo AI silently simplifies an unsupported JSON Schema; provider schema errors are surfaced so the authored contract remains visible
+
 ### Portability drift
 
 If the user asked for portability across macOS, Windows, and Linux:
