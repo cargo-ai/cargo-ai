@@ -7,11 +7,13 @@ mod error;
 mod gemini;
 mod ollama;
 mod openai;
+mod openai_compatible;
 mod runtime;
+mod xai;
 
 pub(crate) use error::{
     provider_error_messages, validate_provider_content_parts, validate_provider_request,
-    ProviderError, ProviderKind,
+    AuthenticationPolicy, ProviderError, ProviderKind,
 };
 pub(crate) use ollama::send_image_request as send_ollama_image_request;
 pub(crate) use openai::send_image_request as send_openai_image_request;
@@ -53,13 +55,16 @@ pub(crate) async fn send_text_request(
             )
             .await
         }
-        error::ProviderTransport::OllamaOpenAiCompatible => {
-            ollama::send_request(
-                &url.to_string(),
-                &request.model.to_string(),
+        error::ProviderTransport::OpenAiCompatibleChat => {
+            openai_compatible::send_request(
+                provider,
+                url,
+                request.model,
                 request.content_parts,
                 request.timeout_in_sec,
-                request.response_schema.clone(),
+                request.token,
+                request.response_schema,
+                request.max_output_tokens,
             )
             .await
         }
@@ -86,6 +91,18 @@ pub(crate) async fn send_text_request(
                 request.timeout_in_sec,
                 &request.token.to_string(),
                 response_format,
+            )
+            .await
+        }
+        error::ProviderTransport::XaiResponses => {
+            xai::send_request(
+                url,
+                request.model,
+                request.content_parts,
+                request.timeout_in_sec,
+                request.token,
+                request.response_schema,
+                request.max_output_tokens,
             )
             .await
         }

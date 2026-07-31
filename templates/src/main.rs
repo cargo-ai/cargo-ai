@@ -23,7 +23,7 @@ use config::loader::{config_path, find_profile, load_config};
 use config::schema::{Profile, ProfileAuthMode, SecretStoreMode};
 use providers::{
     provider_error_messages, validate_provider_content_parts, validate_provider_request,
-    ProviderError, ProviderKind,
+    AuthenticationPolicy, ProviderError, ProviderKind,
 };
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
@@ -761,10 +761,10 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
 
     vec![
         format!("❌ Unknown AI server '{}'.", display_server),
-        "Use `--server anthropic`, `--server gemini`, `--server ollama`, or `--server openai`.".to_string(),
+        "Use `--server anthropic`, `--server gemini`, `--server mistral`, `--server ollama`, `--server openai`, or `--server xai`.".to_string(),
         "Hint: Set `--server` explicitly or configure a default profile with a supported server."
             .to_string(),
-        "Example: cargo ai run --server ollama --model mistral --input-text \"What is 2 + 2?\""
+        "Example: cargo ai run --server xai --model <grok-model> --input-text \"What is 2 + 2?\""
             .to_string(),
     ]
 }
@@ -1588,8 +1588,10 @@ fn provider_server_name(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Anthropic => "anthropic",
         ProviderKind::Gemini => "gemini",
+        ProviderKind::Mistral => "mistral",
         ProviderKind::Ollama => "ollama",
         ProviderKind::OpenAi => "openai",
+        ProviderKind::Xai => "xai",
     }
 }
 
@@ -1884,7 +1886,10 @@ fn resolved_invocation_auth_mode(
     use_openai_account_transport: bool,
 ) -> &'static str {
     match provider {
-        ProviderKind::Anthropic | ProviderKind::Gemini => {
+        ProviderKind::Anthropic
+        | ProviderKind::Gemini
+        | ProviderKind::Mistral
+        | ProviderKind::Xai => {
             if explicit_token_override {
                 "api_key"
             } else {
@@ -1893,7 +1898,15 @@ fn resolved_invocation_auth_mode(
                     .unwrap_or("none")
             }
         }
-        ProviderKind::Ollama => "none",
+        ProviderKind::Ollama => {
+            if explicit_token_override {
+                "api_key"
+            } else {
+                selected_profile
+                    .map(|profile| profile.auth_mode.as_str())
+                    .unwrap_or("none")
+            }
+        }
         ProviderKind::OpenAi => {
             if explicit_token_override {
                 return "api_key";
@@ -2519,6 +2532,27 @@ fn resolve_api_key_provider_token(
     }
 }
 
+fn resolve_optional_api_key_provider_token(
+    provider: ProviderKind,
+    selected_profile: Option<&SelectedProfile>,
+) -> Result<String, String> {
+    match selected_profile {
+        Some(profile) => match profile.auth_mode {
+            ProfileAuthMode::None => Ok(String::new()),
+            ProfileAuthMode::ApiKey => resolve_profile_api_token(profile),
+            ProfileAuthMode::OpenaiAccount => Err(format!(
+                "Profile '{}' auth mode is '{}', but {} supports only '{}' or '{}'.",
+                profile.name,
+                ProfileAuthMode::OpenaiAccount.as_str(),
+                provider.display_name(),
+                ProfileAuthMode::None.as_str(),
+                ProfileAuthMode::ApiKey.as_str()
+            )),
+        },
+        None => Ok(String::new()),
+    }
+}
+
 fn apply_profile(
     profile: &Profile,
     server: &mut String,
@@ -3006,7 +3040,7 @@ async fn main() {
     let mut server = String::new();
     let mut model = String::new();
     let mut url = String::new();
-    let mut token = String::new();
+    let token: String;
     let mut max_output_tokens: Option<u32> = None;
     let mut inference_timeout_in_sec: u64 = DEFAULT_INFERENCE_TIMEOUT_IN_SEC;
     let mut selected_profile: Option<SelectedProfile> = None;
@@ -3104,16 +3138,6 @@ async fn main() {
         token = cmd_token;
     } else {
         match provider {
-            ProviderKind::Anthropic | ProviderKind::Gemini => {
-                token = match resolve_api_key_provider_token(provider, selected_profile.as_ref()) {
-                    Ok(token) => token,
-                    Err(error) => {
-                        eprintln!("❌ {error}");
-                        exit_failure!();
-                    }
-                };
-            }
-            ProviderKind::Ollama => {}
             ProviderKind::OpenAi => {
                 token = match resolve_openai_token_for_request(
                     selected_profile.as_ref(),
@@ -3130,6 +3154,21 @@ async fn main() {
                         exit_failure!();
                     }
                 };
+            }
+            _ => {
+                token = match provider.capabilities().authentication {
+                    AuthenticationPolicy::RequiredApiKey => {
+                        resolve_api_key_provider_token(provider, selected_profile.as_ref())
+                    }
+                    AuthenticationPolicy::OptionalApiKey => {
+                        resolve_optional_api_key_provider_token(provider, selected_profile.as_ref())
+                    }
+                    AuthenticationPolicy::None => Ok(String::new()),
+                }
+                .unwrap_or_else(|error| {
+                    eprintln!("❌ {error}");
+                    exit_failure!();
+                });
             }
         }
     }
@@ -4722,6 +4761,10 @@ async fn run_generate_image_step(
                     ProviderKind::Gemini,
                     "Gemini image generation is not supported.",
                 )),
+                ProviderKind::Mistral => Err(ProviderError::invalid_request(
+                    ProviderKind::Mistral,
+                    "Mistral image generation is not supported.",
+                )),
                 ProviderKind::OpenAi => {
                     crate::providers::send_openai_image_request(
                         &effective_provider_context.url,
@@ -4744,6 +4787,10 @@ async fn run_generate_image_step(
                     )
                     .await
                 }
+                ProviderKind::Xai => Err(ProviderError::invalid_request(
+                    ProviderKind::Xai,
+                    "xAI image generation is not supported.",
+                )),
             }
         },
     )
@@ -4968,11 +5015,7 @@ async fn resolve_generate_image_step_profile_context(
     );
 
     let resolved_token = match provider {
-        ProviderKind::Anthropic => ResolvedOpenAiToken {
-            token: resolve_api_key_provider_token(provider, Some(&selected_profile))?,
-            uses_account_session: false,
-        },
-        ProviderKind::Gemini => ResolvedOpenAiToken {
+        ProviderKind::Anthropic | ProviderKind::Gemini | ProviderKind::Mistral | ProviderKind::Xai => ResolvedOpenAiToken {
             token: resolve_api_key_provider_token(provider, Some(&selected_profile))?,
             uses_account_session: false,
         },

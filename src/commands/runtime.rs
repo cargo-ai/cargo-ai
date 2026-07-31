@@ -11,7 +11,7 @@ use crate::config::schema::ProfileAuthMode;
 use crate::credentials::{openai_oauth, store};
 use crate::providers::{
     provider_error_messages, validate_provider_content_parts, validate_provider_request,
-    ProviderKind,
+    AuthenticationPolicy, ProviderKind,
 };
 
 const AGENT_ACTION_MAX_DEPTH_ENV: &str = "CARGO_AI_AGENT_ACTION_MAX_DEPTH";
@@ -49,10 +49,10 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
 
     vec![
         format!("x Unknown AI server '{}'.", display_server),
-        "Use `--server anthropic`, `--server gemini`, `--server ollama`, or `--server openai`.".to_string(),
+        "Use `--server anthropic`, `--server gemini`, `--server mistral`, `--server ollama`, `--server openai`, or `--server xai`.".to_string(),
         "Hint: Set `--server` explicitly or configure a default profile with a supported server."
             .to_string(),
-        "Example: cargo ai run --config ./agent.json --server ollama --model mistral --input-text \"What is 2 + 2?\""
+        "Example: cargo ai run --config ./agent.json --server xai --model <grok-model> --input-text \"What is 2 + 2?\""
             .to_string(),
     ]
 }
@@ -117,8 +117,10 @@ fn provider_display_name(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Anthropic => "anthropic",
         ProviderKind::Gemini => "gemini",
+        ProviderKind::Mistral => "mistral",
         ProviderKind::Ollama => "ollama",
         ProviderKind::OpenAi => "openai",
+        ProviderKind::Xai => "xai",
     }
 }
 
@@ -438,6 +440,27 @@ fn resolve_api_key_provider_token(
     }
 }
 
+fn resolve_optional_api_key_provider_token(
+    provider: ProviderKind,
+    selected_profile: Option<&SelectedProfile>,
+) -> Result<String, String> {
+    match selected_profile {
+        Some(profile) => match profile.auth_mode {
+            ProfileAuthMode::None => Ok(String::new()),
+            ProfileAuthMode::ApiKey => resolve_profile_api_token(profile),
+            ProfileAuthMode::OpenaiAccount => Err(format!(
+                "Profile '{}' auth mode is '{}', but {} supports only '{}' or '{}'.",
+                profile.name,
+                ProfileAuthMode::OpenaiAccount.as_str(),
+                provider.display_name(),
+                ProfileAuthMode::None.as_str(),
+                ProfileAuthMode::ApiKey.as_str()
+            )),
+        },
+        None => Ok(String::new()),
+    }
+}
+
 fn resolved_invocation_auth_mode(
     provider: ProviderKind,
     selected_profile: Option<&SelectedProfile>,
@@ -445,7 +468,10 @@ fn resolved_invocation_auth_mode(
     use_openai_account_transport: bool,
 ) -> &'static str {
     match provider {
-        ProviderKind::Anthropic | ProviderKind::Gemini => {
+        ProviderKind::Anthropic
+        | ProviderKind::Gemini
+        | ProviderKind::Mistral
+        | ProviderKind::Xai => {
             if explicit_token_override {
                 "api_key"
             } else {
@@ -454,7 +480,15 @@ fn resolved_invocation_auth_mode(
                     .unwrap_or("none")
             }
         }
-        ProviderKind::Ollama => "none",
+        ProviderKind::Ollama => {
+            if explicit_token_override {
+                "api_key"
+            } else {
+                selected_profile
+                    .map(|profile| profile.auth_mode.as_str())
+                    .unwrap_or("none")
+            }
+        }
         ProviderKind::OpenAi => {
             if explicit_token_override {
                 return "api_key";
@@ -1070,7 +1104,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     let mut server = String::new();
     let mut model = String::new();
     let mut url = String::new();
-    let mut token = String::new();
+    let token: String;
     let mut max_output_tokens: Option<u32> = None;
     let project_runtime_defaults = match load_project_runtime_defaults(project_root.as_deref()) {
         Ok(defaults) => defaults,
@@ -1217,13 +1251,27 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                 return false;
             }
         };
-    } else if provider.capabilities().requires_token {
-        token = match resolve_api_key_provider_token(provider, selected_profile.as_ref()) {
-            Ok(token) => token,
-            Err(error) => {
-                eprintln!("x {error}");
-                return false;
+    } else {
+        token = match provider.capabilities().authentication {
+            AuthenticationPolicy::RequiredApiKey => {
+                match resolve_api_key_provider_token(provider, selected_profile.as_ref()) {
+                    Ok(token) => token,
+                    Err(error) => {
+                        eprintln!("x {error}");
+                        return false;
+                    }
+                }
             }
+            AuthenticationPolicy::OptionalApiKey => {
+                match resolve_optional_api_key_provider_token(provider, selected_profile.as_ref()) {
+                    Ok(token) => token,
+                    Err(error) => {
+                        eprintln!("x {error}");
+                        return false;
+                    }
+                }
+            }
+            AuthenticationPolicy::None => String::new(),
         };
     }
 
@@ -2100,10 +2148,13 @@ mod tests {
         assert!(messages
             .iter()
             .any(|line| line.contains("Unknown AI server 'wat'")));
-        assert!(messages.iter().any(|line| line.contains("--server ollama")));
         assert!(messages
             .iter()
-            .any(|line| line.contains("cargo ai run --config ./agent.json --server ollama")));
+            .any(|line| line.contains("--server mistral")));
+        assert!(messages.iter().any(|line| line.contains("--server xai")));
+        assert!(messages
+            .iter()
+            .any(|line| line.contains("cargo ai run --config ./agent.json --server xai")));
     }
 
     #[test]

@@ -453,8 +453,10 @@ fn provider_json(
         "server": match provider {
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::Gemini => "gemini",
+            ProviderKind::Mistral => "mistral",
             ProviderKind::Ollama => "ollama",
             ProviderKind::OpenAi => "openai",
+            ProviderKind::Xai => "xai",
         },
         "profile": profile_name,
         "model": model,

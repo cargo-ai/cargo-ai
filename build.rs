@@ -70,12 +70,20 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
         source: "src/providers/openai.rs",
     },
     TemplateSource {
+        destination: "src/providers/openai_compatible.rs",
+        source: "src/providers/openai_compatible.rs",
+    },
+    TemplateSource {
         destination: "src/providers/ollama.rs",
         source: "src/providers/ollama.rs",
     },
     TemplateSource {
         destination: "src/providers/error.rs",
         source: "src/providers/error.rs",
+    },
+    TemplateSource {
+        destination: "src/providers/xai.rs",
+        source: "src/providers/xai.rs",
     },
     TemplateSource {
         destination: "src/config/loader.rs",

@@ -144,7 +144,59 @@ cargo test --test provider_smoke generated_gemini_smoke_isolated_and_determinist
 
 Both cases use a temporary `CARGO_AI_HOME`, a loopback Interactions fixture, and fake credentials. The separately ignored `live_gemini_smoke_uses_isolated_stdin_credentials` case requires `GEMINI_API_KEY` and `GEMINI_MODEL`; it stores the key in a temporary profile through stdin and is intended only for the explicit live checkpoint.
 
-**Option E: open-source models with Ollama**
+**Option E: xAI API (Grok models)**
+
+Use this path for Grok models through xAI's Responses API. Choose a model available to your xAI account; Cargo AI does not keep a model allowlist or certify every model/schema combination.
+
+```bash
+cargo ai profile add xai-api \
+  --server xai \
+  --model <grok-model> \
+  --auth api_key
+
+printf '%s' "$XAI_API_KEY" | cargo ai profile set xai-api --stdin
+cargo ai run adder_test --profile xai-api
+```
+
+Cargo AI defaults xAI profiles to `https://api.x.ai/v1/responses`, sends `store = false`, and maps an explicit `--max-output-tokens` value to `max_output_tokens`. The current compatibility slice supports text, client-fetched URL text, strict JSON-schema-directed output, normalized usage, and interpreted or hatched execution. Image input, direct file input, provider-hosted tools, and xAI `generate_image` are intentionally unsupported and fail explicitly.
+
+Cargo AI sends the complete authored return schema and validates the returned JSON locally before actions run. If the selected model rejects structured output or returns malformed/schema-invalid JSON, the run fails without weakening the schema, changing models, falling back to another provider, or running downstream actions.
+
+Maintainers can verify the integration without credentials, then run the separately ignored live integration check with an operator-selected model:
+
+```bash
+cargo test --test provider_smoke interpreted_xai_smoke_isolated_and_deterministic -- --exact
+cargo test --test provider_smoke generated_xai_smoke_isolated_and_deterministic -- --ignored --exact
+XAI_API_KEY=... XAI_MODEL=... cargo test --test provider_smoke live_xai_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+```
+
+The live case stores the key in a temporary isolated profile through stdin. It verifies provider wiring and the failure boundary; it is not certification of every Grok model.
+
+**Option F: Mistral API**
+
+Use this path for hosted Mistral models through Mistral's Chat Completions API. Activate API billing, create a key, and select a model available to your Mistral account.
+
+```bash
+cargo ai profile add mistral-api \
+  --server mistral \
+  --model <mistral-model> \
+  --auth api_key
+
+printf '%s' "$MISTRAL_API_KEY" | cargo ai profile set mistral-api --stdin
+cargo ai run adder_test --profile mistral-api
+```
+
+Cargo AI defaults Mistral profiles to `https://api.mistral.ai/v1/chat/completions` and maps an explicit `--max-output-tokens` value to `max_tokens`. The current compatibility slice supports text, client-fetched URL text, strict custom `json_schema` output, normalized usage, and interpreted or hatched execution. Image input, direct file input, native Mistral platform services, and Mistral `generate_image` are intentionally unsupported and fail explicitly. The same strict local-validation and no-fallback contract described for xAI applies.
+
+```bash
+cargo test --test provider_smoke interpreted_mistral_smoke_isolated_and_deterministic -- --exact
+cargo test --test provider_smoke generated_mistral_smoke_isolated_and_deterministic -- --ignored --exact
+MISTRAL_API_KEY=... MISTRAL_MODEL=... cargo test --test provider_smoke live_mistral_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+```
+
+The live case is an isolated, representative integration check—not a model catalog or per-model certification.
+
+**Option G: open-source models with Ollama**
 
 Use this path if you want to run `cargo-ai` without ChatGPT or OpenAI at all.
 
@@ -706,7 +758,7 @@ CARGO_AI_USAGE_LOG=./usage.jsonl cargo ai run ./my_agent.json --profile local-ol
 ./my_agent --usage-log ./usage.ndjson
 ```
 
-The file is newline-delimited JSON, also called JSON Lines: one complete JSON object per line. Cargo AI writes metadata-only events such as `usage_log_started`, `agent_run_started`, `provider_request_completed`, `tool_run_completed`, `agent_run_completed`, and `root_run_completed`. Provider usage is normalized to `input_tokens`, `output_tokens`, and `total_tokens` when Anthropic, Gemini, OpenAI, or Ollama reports counters; when a provider does not report usage, Cargo AI records timing/status and leaves usage null instead of estimating. The same `root_run_id` is propagated to direct child agents and tool-bridge-launched child agents, while each execution gets its own `agent_run_id` and `parent_agent_run_id` so repeated or recursive agents remain reconstructable.
+The file is newline-delimited JSON, also called JSON Lines: one complete JSON object per line. Cargo AI writes metadata-only events such as `usage_log_started`, `agent_run_started`, `provider_request_completed`, `tool_run_completed`, `agent_run_completed`, and `root_run_completed`. Provider usage is normalized to `input_tokens`, `output_tokens`, and `total_tokens` when Anthropic, Gemini, Mistral, Ollama, OpenAI, or xAI reports counters; when a provider does not report usage, Cargo AI records timing/status and leaves usage null instead of estimating. The same `root_run_id` is propagated to direct child agents and tool-bridge-launched child agents, while each execution gets its own `agent_run_id` and `parent_agent_run_id` so repeated or recursive agents remain reconstructable.
 
 Agent metadata identifies the best-known source for each event. Interpreted local JSON runs include `agent.source: "local_path"`, the JSON `artifact` path, a derived `name`, and a canonical `definition_sha256` when available. Registry, inline JSON, and stdin runs use matching source labels, and hatched agents report `agent.source: "hatched_agent"`, `generated: true`, and the executable artifact/name. Use `agent_run_id` for one execution, `definition_sha256` for exact interpreted-definition provenance, and `parent_agent_run_id` plus `depth` to render the run tree.
 
