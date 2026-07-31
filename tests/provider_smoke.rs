@@ -8,13 +8,40 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 const TEST_TOKEN: &str = "anthropic-provider-smoke-token";
 const GEMINI_TEST_TOKEN: &str = "gemini-provider-smoke-token";
 const MISTRAL_TEST_TOKEN: &str = "mistral-provider-smoke-token";
 const XAI_TEST_TOKEN: &str = "xai-provider-smoke-token";
+
+fn fixture_base_dir(runner_temp: Option<std::ffi::OsString>) -> PathBuf {
+    runner_temp
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+fn fixture_dir_name(process_id: u32, sequence: u64) -> String {
+    format!("cps-{process_id:x}-{sequence:x}")
+}
+
+fn create_fixture_root(base: &Path) -> PathBuf {
+    fs::create_dir_all(base).expect("provider smoke fixture base should be created");
+    loop {
+        let sequence = NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
+        let root = base.join(fixture_dir_name(std::process::id(), sequence));
+        match fs::create_dir(&root) {
+            Ok(()) => return root,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!(
+                "provider smoke fixture root {} should be created: {error}",
+                root.display()
+            ),
+        }
+    }
+}
 
 struct Fixture {
     root: PathBuf,
@@ -25,17 +52,10 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(name: &str) -> Self {
-        let sequence = NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "cargo-ai-provider-smoke-{name}-{}-{timestamp}-{sequence}",
-            std::process::id()
-        ));
-        let home = root.join("home");
+    fn new() -> Self {
+        let base = fixture_base_dir(std::env::var_os("RUNNER_TEMP"));
+        let root = create_fixture_root(&base);
+        let home = root.join("h");
         fs::create_dir_all(&home).expect("isolated Cargo AI Home should be created");
         let definition = root.join("anthropic_smoke.json");
         fs::write(&definition, definition_json()).expect("definition should be written");
@@ -60,6 +80,26 @@ impl Fixture {
             .env("CARGO_AI_DISABLE_KEYCHAIN", "1");
         command
     }
+}
+
+#[test]
+fn fixture_base_prefers_nonempty_runner_temp() {
+    let runner_temp = std::ffi::OsString::from("runner-temp");
+    assert_eq!(
+        fixture_base_dir(Some(runner_temp.clone())),
+        PathBuf::from(runner_temp)
+    );
+    assert_eq!(
+        fixture_base_dir(Some(std::ffi::OsString::new())),
+        std::env::temp_dir()
+    );
+    assert_eq!(fixture_base_dir(None), std::env::temp_dir());
+}
+
+#[test]
+fn fixture_directory_name_is_compact_and_deterministic() {
+    assert_eq!(fixture_dir_name(0x2a, 0xff), "cps-2a-ff");
+    assert!(fixture_dir_name(u32::MAX, u64::MAX).len() <= 29);
 }
 
 impl Drop for Fixture {
@@ -501,7 +541,7 @@ fn run_generated_hosted_smoke(
 
 #[test]
 fn interpreted_anthropic_smoke_isolated_and_deterministic() {
-    let fixture = Fixture::new("interpreted");
+    let fixture = Fixture::new();
     let mock = MockServer::success();
     let mut command = fixture.isolated_command(env!("CARGO_BIN_EXE_cargo-ai"));
     command
@@ -516,7 +556,7 @@ fn interpreted_anthropic_smoke_isolated_and_deterministic() {
 #[test]
 #[ignore = "run explicitly in the provider smoke CI lane"]
 fn generated_anthropic_smoke_isolated_and_deterministic() {
-    let fixture = Fixture::new("generated");
+    let fixture = Fixture::new();
     let output_dir = fixture.root.join("dist");
     let hatch = fixture
         .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
@@ -556,7 +596,7 @@ fn generated_anthropic_smoke_isolated_and_deterministic() {
 
 #[test]
 fn interpreted_gemini_smoke_isolated_and_deterministic() {
-    let fixture = Fixture::new("gemini-interpreted");
+    let fixture = Fixture::new();
     let mock = MockServer::gemini_success();
     let mut command = fixture.isolated_command(env!("CARGO_BIN_EXE_cargo-ai"));
     command
@@ -573,7 +613,7 @@ fn interpreted_gemini_smoke_isolated_and_deterministic() {
 #[test]
 #[ignore = "run explicitly in the provider smoke CI lane"]
 fn generated_gemini_smoke_isolated_and_deterministic() {
-    let fixture = Fixture::new("gemini-generated");
+    let fixture = Fixture::new();
     let output_dir = fixture.root.join("dist");
     let hatch = fixture
         .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
@@ -613,7 +653,7 @@ fn generated_gemini_smoke_isolated_and_deterministic() {
 
 #[test]
 fn interpreted_mistral_smoke_isolated_and_deterministic() {
-    let fixture = Fixture::new("mistral-interpreted");
+    let fixture = Fixture::new();
     run_interpreted_hosted_smoke(
         &fixture,
         "mistral",
@@ -626,7 +666,7 @@ fn interpreted_mistral_smoke_isolated_and_deterministic() {
 #[test]
 #[ignore = "run explicitly in the provider smoke CI lane"]
 fn generated_mistral_smoke_isolated_and_deterministic() {
-    let fixture = Fixture::new("mistral-generated");
+    let fixture = Fixture::new();
     run_generated_hosted_smoke(
         &fixture,
         "mistral_provider_smoke",
@@ -639,7 +679,7 @@ fn generated_mistral_smoke_isolated_and_deterministic() {
 
 #[test]
 fn interpreted_xai_smoke_isolated_and_deterministic() {
-    let fixture = Fixture::new("xai-interpreted");
+    let fixture = Fixture::new();
     run_interpreted_hosted_smoke(
         &fixture,
         "xai",
@@ -652,7 +692,7 @@ fn interpreted_xai_smoke_isolated_and_deterministic() {
 #[test]
 #[ignore = "run explicitly in the provider smoke CI lane"]
 fn generated_xai_smoke_isolated_and_deterministic() {
-    let fixture = Fixture::new("xai-generated");
+    let fixture = Fixture::new();
     run_generated_hosted_smoke(
         &fixture,
         "xai_provider_smoke",
@@ -777,7 +817,7 @@ fn assert_hosted_fail_closed_matrix(provider: &str) {
             "required JSON schema",
         ),
     ] {
-        let fixture = Fixture::new(&format!("{provider}-{name}"));
+        let fixture = Fixture::new();
         let mock = MockServer::respond_after_at(
             hosted_path(provider),
             Duration::ZERO,
@@ -796,7 +836,7 @@ fn assert_hosted_fail_closed_matrix(provider: &str) {
         );
     }
 
-    let fixture = Fixture::new(&format!("{provider}-malformed"));
+    let fixture = Fixture::new();
     let mock = MockServer::respond_after_at(
         hosted_path(provider),
         Duration::ZERO,
@@ -814,7 +854,7 @@ fn assert_hosted_fail_closed_matrix(provider: &str) {
         "unexpected malformed diagnostic:\n{text}"
     );
 
-    let fixture = Fixture::new(&format!("{provider}-schema-rejected"));
+    let fixture = Fixture::new();
     let provider_message = "selected model rejected json_schema";
     let body = if provider == "xai" {
         serde_json::json!({"error": {"message": provider_message}, "debug": "secret-debug"})
@@ -850,7 +890,7 @@ fn xai_invalid_returns_fail_closed_before_actions() {
 }
 
 fn assert_hosted_timeout_and_capability_failures(provider: &str) {
-    let fixture = Fixture::new(&format!("{provider}-failures"));
+    let fixture = Fixture::new();
     let (model, token) = hosted_test_values(provider);
     let mock = MockServer::respond_after_at(
         hosted_path(provider),
@@ -1005,7 +1045,7 @@ fn xai_timeout_and_capability_failures_are_actionable() {
 
 #[test]
 fn gemini_timeout_and_file_failures_are_actionable() {
-    let fixture = Fixture::new("gemini-failures");
+    let fixture = Fixture::new();
     let mock = MockServer::respond_after_at(
         "/v1beta/interactions",
         Duration::from_secs(2),
@@ -1073,7 +1113,7 @@ fn gemini_timeout_and_file_failures_are_actionable() {
 
 #[test]
 fn anthropic_timeout_and_file_failures_are_actionable() {
-    let fixture = Fixture::new("failures");
+    let fixture = Fixture::new();
     let mock = MockServer::respond_after(Duration::from_secs(2), 200, success_response());
     let timeout = fixture
         .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
@@ -1186,7 +1226,7 @@ fn anthropic_timeout_and_file_failures_are_actionable() {
 fn live_anthropic_smoke_uses_isolated_stdin_credentials() {
     let api_key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY is required");
     let model = std::env::var("ANTHROPIC_MODEL").expect("ANTHROPIC_MODEL is required");
-    let fixture = Fixture::new("live");
+    let fixture = Fixture::new();
     let cli = env!("CARGO_BIN_EXE_cargo-ai");
     let add = fixture
         .isolated_command(cli)
@@ -1258,7 +1298,7 @@ fn live_anthropic_smoke_uses_isolated_stdin_credentials() {
 fn live_gemini_smoke_uses_isolated_stdin_credentials() {
     let api_key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY is required");
     let model = std::env::var("GEMINI_MODEL").expect("GEMINI_MODEL is required");
-    let fixture = Fixture::new("gemini-live");
+    let fixture = Fixture::new();
     let cli = env!("CARGO_BIN_EXE_cargo-ai");
     let add = fixture
         .isolated_command(cli)
@@ -1328,7 +1368,7 @@ fn live_gemini_smoke_uses_isolated_stdin_credentials() {
 fn run_live_hosted_smoke(provider: &str, key_env: &str, model_env: &str) {
     let api_key = std::env::var(key_env).unwrap_or_else(|_| panic!("{key_env} is required"));
     let model = std::env::var(model_env).unwrap_or_else(|_| panic!("{model_env} is required"));
-    let fixture = Fixture::new(&format!("{provider}-live"));
+    let fixture = Fixture::new();
     let cli = env!("CARGO_BIN_EXE_cargo-ai");
     let profile = format!("{provider}-api");
     let add = fixture
