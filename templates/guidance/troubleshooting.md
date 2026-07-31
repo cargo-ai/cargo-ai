@@ -122,7 +122,7 @@ Check for:
 
 Check for:
 - selecting `server = "mistral"` with `auth = "none"` or `auth = "openai_account"`; use `auth = "api_key"`
-- using an API key before Mistral API billing is activated, or selecting a model the account cannot access
+- exhausting Mistral Studio Free-mode usage or rate limits, selecting a model the account cannot access, or using the Scale API Plan before its billing is active; check the organization's API Plan plus Usage and limits pages
 - pointing a custom URL at a native Mistral service other than Chat Completions; the adapter expects the `/v1/chat/completions` contract
 - sending image/file input or selecting a Mistral profile for `generate_image`; this compatibility slice supports text and URL-text only
 - assuming OpenAI-compatible transport changes the provider identity; diagnostics and usage must still report `mistral`

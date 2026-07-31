@@ -101,7 +101,7 @@ cargo ai profile add anthropic \
   --max-output-tokens 4096
 
 printf '%s' "$ANTHROPIC_API_KEY" | cargo ai profile set anthropic --stdin
-cargo ai run adder_test --profile anthropic
+cargo ai run --config ./adder_test.json --profile anthropic
 ```
 
 The example model ID was confirmed against Anthropic's [current model table](https://platform.claude.com/docs/en/about-claude/models/overview) (Verified: 2026-07-29). Model availability varies by Console organization, so select a current model your organization can access instead of treating this example as a built-in catalog. Cargo AI defaults Anthropic profiles to `https://api.anthropic.com/v1/messages` and a `4096` output-token cap when `max_output_tokens` is omitted. Use `--url` for a custom Messages endpoint and `--max-output-tokens` for a one-run override. Claude Sonnet 5 enables adaptive thinking by default, and its output cap covers both thinking and final text; an unusually small override can therefore finish without a text block on multimodal work. Raise the cap if that occurs. See Anthropic's [Sonnet 5 behavior changes](https://platform.claude.com/docs/en/about-claude/models/whats-new-sonnet-5) (Verified: 2026-07-30).
@@ -128,7 +128,7 @@ cargo ai profile add gemini \
   --auth api_key
 
 printf '%s' "$GEMINI_API_KEY" | cargo ai profile set gemini --stdin
-cargo ai run adder_test --profile gemini
+cargo ai run --config ./adder_test.json --profile gemini
 ```
 
 The example model ID and the Interactions endpoint were confirmed against Google's [Interactions API quickstart](https://ai.google.dev/gemini-api/docs/get-started) (Verified: 2026-07-30). Model availability varies by Google AI project, so select a current model your project can access rather than treating this example as a built-in catalog. Cargo AI defaults Gemini profiles to `https://generativelanguage.googleapis.com/v1beta/interactions`, sends `store = false`, and uses `--max-output-tokens` only when you explicitly configure a cap.
@@ -155,7 +155,7 @@ cargo ai profile add xai-api \
   --auth api_key
 
 printf '%s' "$XAI_API_KEY" | cargo ai profile set xai-api --stdin
-cargo ai run adder_test --profile xai-api
+cargo ai run --config ./adder_test.json --profile xai-api
 ```
 
 Cargo AI defaults xAI profiles to `https://api.x.ai/v1/responses`, sends `store = false`, and maps an explicit `--max-output-tokens` value to `max_output_tokens`. The current compatibility slice supports text, client-fetched URL text, strict JSON-schema-directed output, normalized usage, and interpreted or hatched execution. Image input, direct file input, provider-hosted tools, and xAI `generate_image` are intentionally unsupported and fail explicitly.
@@ -174,7 +174,7 @@ The live case stores the key in a temporary isolated profile through stdin. It v
 
 **Option F: Mistral API**
 
-Use this path for hosted Mistral models through Mistral's Chat Completions API. Activate API billing, create a key, and select a model available to your Mistral account.
+Use this path for hosted Mistral models through Mistral's Chat Completions API. Mistral Studio enables API Free mode by default without a credit card, subject to its usage and rate limits; create a key and select a model available to your account. Upgrade the separate API Plan to Scale for pay-as-you-go usage, higher limits, and additional paid features. This API plan is distinct from Mistral's Vibe subscriptions. See Mistral's [API Plan documentation](https://docs.mistral.ai/admin/billing-usage/subscriptions) (Verified: 2026-07-31).
 
 ```bash
 cargo ai profile add mistral-api \
@@ -183,7 +183,7 @@ cargo ai profile add mistral-api \
   --auth api_key
 
 printf '%s' "$MISTRAL_API_KEY" | cargo ai profile set mistral-api --stdin
-cargo ai run adder_test --profile mistral-api
+cargo ai run --config ./adder_test.json --profile mistral-api
 ```
 
 Cargo AI defaults Mistral profiles to `https://api.mistral.ai/v1/chat/completions` and maps an explicit `--max-output-tokens` value to `max_tokens`. The current compatibility slice supports text, client-fetched URL text, strict custom `json_schema` output, normalized usage, and interpreted or hatched execution. Image input, direct file input, native Mistral platform services, and Mistral `generate_image` are intentionally unsupported and fail explicitly. The same strict local-validation and no-fallback contract described for xAI applies.
@@ -217,7 +217,7 @@ cargo ai profile add ollama \
 ### 2. Run a sample agent directly
 
 ```bash
-cargo ai run adder_test --profile openai-account
+cargo ai run --config ./adder_test.json --profile openai-account
 ```
 
 You can also run a local definition with `cargo ai run ./adder_test.json` or
