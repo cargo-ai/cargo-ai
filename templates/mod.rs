@@ -36,11 +36,18 @@ const PROVIDERS_GEMINI_RS_TEMPLATE: &str = include_str!("src/providers/gemini.rs
 const PROVIDERS_OPENAI_RS_NAME: &str = "src/providers/openai.rs";
 const PROVIDERS_OPENAI_RS_TEMPLATE: &str = include_str!("src/providers/openai.rs");
 
+const PROVIDERS_OPENAI_COMPATIBLE_RS_NAME: &str = "src/providers/openai_compatible.rs";
+const PROVIDERS_OPENAI_COMPATIBLE_RS_TEMPLATE: &str =
+    include_str!("src/providers/openai_compatible.rs");
+
 const PROVIDERS_OLLAMA_RS_NAME: &str = "src/providers/ollama.rs";
 const PROVIDERS_OLLAMA_RS_TEMPLATE: &str = include_str!("src/providers/ollama.rs");
 
 const PROVIDERS_ERROR_RS_NAME: &str = "src/providers/error.rs";
 const PROVIDERS_ERROR_RS_TEMPLATE: &str = include_str!("src/providers/error.rs");
+
+const PROVIDERS_XAI_RS_NAME: &str = "src/providers/xai.rs";
+const PROVIDERS_XAI_RS_TEMPLATE: &str = include_str!("src/providers/xai.rs");
 
 const CONFIG_LOADER_RS_NAME: &str = "src/config/loader.rs";
 const CONFIG_LOADER_RS_TEMPLATE: &str = include_str!("src/config/loader.rs");
@@ -58,7 +65,7 @@ const CREDENTIALS_STORE_RS_NAME: &str = "src/credentials/store.rs";
 const CREDENTIALS_STORE_RS_TEMPLATE: &str = include_str!("src/credentials/store.rs");
 
 /// Template files emitted into a newly scaffolded agent workspace.
-pub const TEMPLATES: [(&str, &str); 19] = [
+pub const TEMPLATES: [(&str, &str); 21] = [
     (BUILD_RS_NAME, BUILD_RS_TEMPLATE),
     (BUILD_SUPPORT_RS_NAME, BUILD_SUPPORT_RS_TEMPLATE),
     (AGENTCFG_NAME, AGENTCFG_TEMPLATE),
@@ -71,8 +78,13 @@ pub const TEMPLATES: [(&str, &str); 19] = [
     (PROVIDERS_ANTHROPIC_RS_NAME, PROVIDERS_ANTHROPIC_RS_TEMPLATE),
     (PROVIDERS_GEMINI_RS_NAME, PROVIDERS_GEMINI_RS_TEMPLATE),
     (PROVIDERS_OPENAI_RS_NAME, PROVIDERS_OPENAI_RS_TEMPLATE),
+    (
+        PROVIDERS_OPENAI_COMPATIBLE_RS_NAME,
+        PROVIDERS_OPENAI_COMPATIBLE_RS_TEMPLATE,
+    ),
     (PROVIDERS_OLLAMA_RS_NAME, PROVIDERS_OLLAMA_RS_TEMPLATE),
     (PROVIDERS_ERROR_RS_NAME, PROVIDERS_ERROR_RS_TEMPLATE),
+    (PROVIDERS_XAI_RS_NAME, PROVIDERS_XAI_RS_TEMPLATE),
     (CONFIG_LOADER_RS_NAME, CONFIG_LOADER_RS_TEMPLATE),
     (CONFIG_MOD_RS_NAME, CONFIG_MOD_RS_TEMPLATE),
     (CONFIG_SCHEMA_RS_NAME, CONFIG_SCHEMA_RS_TEMPLATE),

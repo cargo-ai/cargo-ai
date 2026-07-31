@@ -118,6 +118,27 @@ Check for:
 - sending direct file input or selecting an Anthropic profile for `generate_image`; use text, URL-text, or image input, or select an OpenAI/Ollama step profile for image generation
 - assuming Cargo AI silently simplifies an unsupported JSON Schema; provider schema errors are surfaced so the authored contract remains visible
 
+### Mistral API provider confusion
+
+Check for:
+- selecting `server = "mistral"` with `auth = "none"` or `auth = "openai_account"`; use `auth = "api_key"`
+- exhausting Mistral Studio Free-mode usage or rate limits, selecting a model the account cannot access, or using the Scale API Plan before its billing is active; check the organization's API Plan plus Usage and limits pages
+- pointing a custom URL at a native Mistral service other than Chat Completions; the adapter expects the `/v1/chat/completions` contract
+- sending image/file input or selecting a Mistral profile for `generate_image`; this compatibility slice supports text and URL-text only
+- assuming OpenAI-compatible transport changes the provider identity; diagnostics and usage must still report `mistral`
+- treating a representative smoke model as certification of every Mistral model; model selection and model capabilities remain operator-controlled
+- retrying with weakened JSON or another model after a schema rejection; Cargo AI preserves the authored schema and fails closed
+
+### xAI provider confusion
+
+Check for:
+- selecting `server = "xai"` with `auth = "none"` or `auth = "openai_account"`; use `auth = "api_key"`
+- using `server = "grok"`; `xai` is the provider value and Grok is the model family
+- pointing a custom URL at Chat Completions; this adapter expects xAI Responses and sends `store = false`
+- sending image/file input, enabling provider-hosted tools, or selecting an xAI profile for `generate_image`; this compatibility slice supports text and URL-text only
+- treating a representative smoke model as certification of every Grok model; model selection and model capabilities remain operator-controlled
+- retrying with weakened JSON, another model, or another provider after a schema rejection; Cargo AI preserves the authored schema and fails closed before actions
+
 ### Gemini provider confusion
 
 Check for:

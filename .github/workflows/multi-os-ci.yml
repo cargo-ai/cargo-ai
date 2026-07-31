@@ -35,6 +35,26 @@ on:
         required: false
         type: string
         default: "gemini-3.6-flash"
+      run_live_mistral_smoke:
+        description: "Run the isolated live Mistral API smoke after deterministic provider checks"
+        required: false
+        type: boolean
+        default: false
+      mistral_model:
+        description: "Operator-selected Mistral model ID for the opt-in integration smoke"
+        required: false
+        type: string
+        default: ""
+      run_live_xai_smoke:
+        description: "Run the isolated live xAI smoke after deterministic provider checks"
+        required: false
+        type: boolean
+        default: false
+      xai_model:
+        description: "Operator-selected xAI model ID for the opt-in integration smoke"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   test:
@@ -46,6 +66,10 @@ jobs:
       ANTHROPIC_MODEL: ${{ inputs.anthropic_model }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_MODEL: ${{ inputs.gemini_model }}
+      MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+      MISTRAL_MODEL: ${{ inputs.mistral_model }}
+      XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+      XAI_MODEL: ${{ inputs.xai_model }}
 
     strategy:
       # Prevents one OS job failure (e.g., Ubuntu) from canceling all matrix jobs
@@ -74,6 +98,12 @@ jobs:
 
       - name: Run generated Gemini provider smoke
         run: cargo test --test provider_smoke generated_gemini_smoke_isolated_and_deterministic -- --ignored --exact
+
+      - name: Run generated Mistral provider smoke
+        run: cargo test --test provider_smoke generated_mistral_smoke_isolated_and_deterministic -- --ignored --exact
+
+      - name: Run generated xAI provider smoke
+        run: cargo test --test provider_smoke generated_xai_smoke_isolated_and_deterministic -- --ignored --exact
 
       - name: Build project
         run: cargo build --verbose
@@ -130,6 +160,40 @@ jobs:
       - name: Run isolated live Gemini smoke
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_gemini_smoke == true && env.GEMINI_API_KEY != '' && env.GEMINI_MODEL != '' }}
         run: cargo test --test provider_smoke live_gemini_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+
+      - name: Note live Mistral smoke policy
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.run_live_mistral_smoke }}" == "true" ]]; then
+            if [[ -n "$MISTRAL_API_KEY" && -n "$MISTRAL_MODEL" ]]; then
+              echo "Live Mistral integration smoke is enabled for this manual run."
+            else
+              echo "Live Mistral smoke was requested, but MISTRAL_API_KEY or the operator-selected model is missing; skipping it."
+            fi
+          else
+            echo "Skipping live Mistral smoke; deterministic interpreted and generated provider checks remain required."
+          fi
+        shell: bash
+
+      - name: Run isolated live Mistral smoke
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_mistral_smoke == true && env.MISTRAL_API_KEY != '' && env.MISTRAL_MODEL != '' }}
+        run: cargo test --test provider_smoke live_mistral_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+
+      - name: Note live xAI smoke policy
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.run_live_xai_smoke }}" == "true" ]]; then
+            if [[ -n "$XAI_API_KEY" && -n "$XAI_MODEL" ]]; then
+              echo "Live xAI integration smoke is enabled for this manual run."
+            else
+              echo "Live xAI smoke was requested, but XAI_API_KEY or the operator-selected model is missing; skipping it."
+            fi
+          else
+            echo "Skipping live xAI smoke; deterministic interpreted and generated provider checks remain required."
+          fi
+        shell: bash
+
+      - name: Run isolated live xAI smoke
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_xai_smoke == true && env.XAI_API_KEY != '' && env.XAI_MODEL != '' }}
+        run: cargo test --test provider_smoke live_xai_smoke_uses_isolated_stdin_credentials -- --ignored --exact
 
       - name: Run agent_adder with OpenAI token
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_openai_smoke == true && env.OPENAI_API_KEY != '' }}

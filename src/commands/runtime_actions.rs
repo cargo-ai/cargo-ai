@@ -807,8 +807,10 @@ fn provider_server_name(provider: crate::providers::ProviderKind) -> &'static st
     match provider {
         crate::providers::ProviderKind::Anthropic => "anthropic",
         crate::providers::ProviderKind::Gemini => "gemini",
+        crate::providers::ProviderKind::Mistral => "mistral",
         crate::providers::ProviderKind::Ollama => "ollama",
         crate::providers::ProviderKind::OpenAi => "openai",
+        crate::providers::ProviderKind::Xai => "xai",
     }
 }
 
@@ -2135,6 +2137,12 @@ async fn run_generate_image_step(
                     "Gemini image generation is not supported.",
                 ))
             }
+            crate::providers::ProviderKind::Mistral => {
+                Err(crate::providers::ProviderError::invalid_request(
+                    crate::providers::ProviderKind::Mistral,
+                    "Mistral image generation is not supported.",
+                ))
+            }
             crate::providers::ProviderKind::OpenAi => {
                 crate::providers::send_openai_image_request(
                     &effective_provider_context.url,
@@ -2156,6 +2164,12 @@ async fn run_generate_image_step(
                     &effective_provider_context.token,
                 )
                 .await
+            }
+            crate::providers::ProviderKind::Xai => {
+                Err(crate::providers::ProviderError::invalid_request(
+                    crate::providers::ProviderKind::Xai,
+                    "xAI image generation is not supported.",
+                ))
             }
         }
     })
@@ -2434,6 +2448,15 @@ async fn resolve_generate_image_step_profile_context(
                     ProfileAuthMode::ApiKey.as_str()
                 ));
             }
+            crate::providers::ProviderKind::Mistral => {
+                return Err(format!(
+                    "Action '{}' generate_image step profile '{}' auth mode is '{}'. Mistral requires '{}'.",
+                    action_name,
+                    profile.name,
+                    ProfileAuthMode::None.as_str(),
+                    ProfileAuthMode::ApiKey.as_str()
+                ));
+            }
             crate::providers::ProviderKind::Ollama => String::new(),
             crate::providers::ProviderKind::OpenAi => {
                 return Err(format!(
@@ -2443,6 +2466,15 @@ async fn resolve_generate_image_step_profile_context(
                     ProfileAuthMode::None.as_str(),
                     ProfileAuthMode::ApiKey.as_str(),
                     ProfileAuthMode::OpenaiAccount.as_str()
+                ));
+            }
+            crate::providers::ProviderKind::Xai => {
+                return Err(format!(
+                    "Action '{}' generate_image step profile '{}' auth mode is '{}'. xAI requires '{}'.",
+                    action_name,
+                    profile.name,
+                    ProfileAuthMode::None.as_str(),
+                    ProfileAuthMode::ApiKey.as_str()
                 ));
             }
         },

@@ -123,7 +123,9 @@ pub(crate) fn read_definition_json_from_stdin() -> Result<String, String> {
     validate_stdin_definition_contents(contents)
 }
 
-pub(crate) fn load_definition_contents(source: &AgentDefinitionSource) -> Result<String, String> {
+pub(crate) async fn load_definition_contents(
+    source: &AgentDefinitionSource,
+) -> Result<String, String> {
     match source {
         AgentDefinitionSource::LocalPath(path) => super::hatch_pipeline::read_local_config(path)
             .map_err(|error| {
@@ -133,12 +135,14 @@ pub(crate) fn load_definition_contents(source: &AgentDefinitionSource) -> Result
                 )
             }),
         AgentDefinitionSource::RegistryName(name) => {
-            super::hatch_pipeline::fetch_from_registry(name).map_err(|error| {
-                format!(
-                    "Failed to fetch agent configuration for '{}' from Cargo-AI registry.\nReason: {}\nHint: Ensure the agent name exists in the Cargo-AI registry or provide a local .json file path.",
-                    name, error
-                )
-            })
+            super::hatch_pipeline::fetch_from_registry(name)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "Failed to fetch agent configuration for '{}' from Cargo-AI registry.\nReason: {}\nHint: Ensure the agent name exists in the Cargo-AI registry or provide a local .json file path.",
+                        name, error
+                    )
+                })
         }
         AgentDefinitionSource::InlineJson(json) | AgentDefinitionSource::StdinJson(json) => {
             Ok(json.clone())
@@ -247,12 +251,13 @@ mod tests {
         assert_eq!(error, "No agent definition JSON was received from stdin.");
     }
 
-    #[test]
-    fn inline_and_stdin_definition_contents_round_trip() {
+    #[tokio::test]
+    async fn inline_and_stdin_definition_contents_round_trip() {
         assert_eq!(
             super::load_definition_contents(&AgentDefinitionSource::InlineJson(
                 "{\"agent_definition_schema_version\":\"2026-03-03.r1\"}".to_string()
             ))
+            .await
             .expect("inline json should round trip"),
             "{\"agent_definition_schema_version\":\"2026-03-03.r1\"}"
         );
@@ -260,6 +265,7 @@ mod tests {
             super::load_definition_contents(&AgentDefinitionSource::StdinJson(
                 "{\"agent_definition_schema_version\":\"2026-03-03.r1\"}".to_string()
             ))
+            .await
             .expect("stdin json should round trip"),
             "{\"agent_definition_schema_version\":\"2026-03-03.r1\"}"
         );

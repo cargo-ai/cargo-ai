@@ -8,21 +8,32 @@ use std::fmt;
 pub(crate) enum ProviderKind {
     Anthropic,
     Gemini,
+    Mistral,
     Ollama,
     OpenAi,
+    Xai,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ProviderTransport {
     AnthropicMessages,
     GeminiInteractions,
-    OllamaOpenAiCompatible,
+    OpenAiCompatibleChat,
     OpenAiNative,
+    XaiResponses,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum AuthenticationPolicy {
+    #[allow(dead_code)]
+    None,
+    OptionalApiKey,
+    RequiredApiKey,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct ProviderCapabilities {
-    pub(crate) requires_token: bool,
+    pub(crate) authentication: AuthenticationPolicy,
     pub(crate) supports_image_input: bool,
     pub(crate) supports_file_input: bool,
     pub(crate) supports_generate_image: bool,
@@ -33,8 +44,10 @@ impl ProviderKind {
         match server.trim().to_ascii_lowercase().as_str() {
             "anthropic" => Some(Self::Anthropic),
             "gemini" => Some(Self::Gemini),
+            "mistral" => Some(Self::Mistral),
             "ollama" => Some(Self::Ollama),
             "openai" => Some(Self::OpenAi),
+            "xai" => Some(Self::Xai),
             _ => None,
         }
     }
@@ -43,8 +56,10 @@ impl ProviderKind {
         match self {
             Self::Anthropic => "Anthropic",
             Self::Gemini => "Google Gemini",
+            Self::Mistral => "Mistral API",
             Self::Ollama => "Ollama",
             Self::OpenAi => "OpenAI",
+            Self::Xai => "xAI",
         }
     }
 
@@ -52,8 +67,10 @@ impl ProviderKind {
         match self {
             Self::Anthropic => "https://api.anthropic.com/v1/messages",
             Self::Gemini => "https://generativelanguage.googleapis.com/v1beta/interactions",
+            Self::Mistral => "https://api.mistral.ai/v1/chat/completions",
             Self::Ollama => "http://localhost:11434/v1/chat/completions",
             Self::OpenAi => "https://api.openai.com/v1/chat/completions",
+            Self::Xai => "https://api.x.ai/v1/responses",
         }
     }
 
@@ -61,36 +78,49 @@ impl ProviderKind {
         match self {
             Self::Anthropic => ProviderTransport::AnthropicMessages,
             Self::Gemini => ProviderTransport::GeminiInteractions,
-            Self::Ollama => ProviderTransport::OllamaOpenAiCompatible,
+            Self::Mistral | Self::Ollama => ProviderTransport::OpenAiCompatibleChat,
             Self::OpenAi => ProviderTransport::OpenAiNative,
+            Self::Xai => ProviderTransport::XaiResponses,
         }
     }
 
     pub(crate) fn capabilities(self) -> ProviderCapabilities {
         match self {
             Self::Anthropic => ProviderCapabilities {
-                requires_token: true,
+                authentication: AuthenticationPolicy::RequiredApiKey,
                 supports_image_input: true,
                 supports_file_input: false,
                 supports_generate_image: false,
             },
             Self::Gemini => ProviderCapabilities {
-                requires_token: true,
+                authentication: AuthenticationPolicy::RequiredApiKey,
                 supports_image_input: true,
                 supports_file_input: false,
                 supports_generate_image: false,
             },
+            Self::Mistral => ProviderCapabilities {
+                authentication: AuthenticationPolicy::RequiredApiKey,
+                supports_image_input: false,
+                supports_file_input: false,
+                supports_generate_image: false,
+            },
             Self::Ollama => ProviderCapabilities {
-                requires_token: false,
+                authentication: AuthenticationPolicy::OptionalApiKey,
                 supports_image_input: true,
                 supports_file_input: true,
                 supports_generate_image: true,
             },
             Self::OpenAi => ProviderCapabilities {
-                requires_token: true,
+                authentication: AuthenticationPolicy::RequiredApiKey,
                 supports_image_input: true,
                 supports_file_input: true,
                 supports_generate_image: true,
+            },
+            Self::Xai => ProviderCapabilities {
+                authentication: AuthenticationPolicy::RequiredApiKey,
+                supports_image_input: false,
+                supports_file_input: false,
+                supports_generate_image: false,
             },
         }
     }
@@ -198,6 +228,34 @@ fn classify_http_status(status: StatusCode, body: &str) -> ProviderErrorKind {
     }
 }
 
+pub(crate) fn sanitized_http_error_body(provider: ProviderKind, body: &[u8]) -> String {
+    let parsed = serde_json::from_slice::<serde_json::Value>(body).ok();
+    let message = parsed.as_ref().and_then(|value| {
+        value
+            .pointer("/error/message")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| value.get("message").and_then(serde_json::Value::as_str))
+            .or_else(|| value.get("detail").and_then(serde_json::Value::as_str))
+            .or_else(|| value.get("error").and_then(serde_json::Value::as_str))
+    });
+
+    let Some(message) = message.map(str::trim).filter(|message| !message.is_empty()) else {
+        return format!(
+            "{} returned an HTTP error response.",
+            provider.display_name()
+        );
+    };
+
+    const MAX_MESSAGE_CHARS: usize = 1_000;
+    if message.chars().count() <= MAX_MESSAGE_CHARS {
+        message.to_string()
+    } else {
+        let mut truncated = message.chars().take(MAX_MESSAGE_CHARS).collect::<String>();
+        truncated.push_str("...");
+        truncated
+    }
+}
+
 fn provider_hint(
     kind: ProviderErrorKind,
     provider: ProviderKind,
@@ -211,11 +269,17 @@ fn provider_hint(
             ProviderKind::Gemini => {
                 Some("Verify the Gemini model name and confirm your Google AI project has access to it.")
             }
+            ProviderKind::Mistral => {
+                Some("Verify the Mistral model name and confirm your Mistral workspace has access to it.")
+            }
             ProviderKind::Ollama => Some(
                 "Run `ollama list` to inspect installed models, then `ollama pull <model>` for missing models.",
             ),
             ProviderKind::OpenAi => {
                 Some("Verify the model name and confirm your account has access to it.")
+            }
+            ProviderKind::Xai => {
+                Some("Verify the Grok model name and confirm your xAI team and API key have access to it.")
             }
         },
         ProviderErrorKind::Unauthorized => match provider {
@@ -225,11 +289,17 @@ fn provider_hint(
             ProviderKind::Gemini => Some(
                 "Verify your Gemini API key (`--token` or profile token), Google AI project, billing or quota, and model access.",
             ),
+            ProviderKind::Mistral => Some(
+                "Verify your Mistral API key (`--token` or profile token), activated API payments, and model access.",
+            ),
             ProviderKind::OpenAi => {
                 Some("Verify your OpenAI token (`--token` or profile token), or re-run `cargo ai auth login openai`, and confirm model access.")
             }
             ProviderKind::Ollama => Some(
                 "Verify your Ollama endpoint and credentials (if your deployment requires auth).",
+            ),
+            ProviderKind::Xai => Some(
+                "Verify your xAI API key (`--token` or profile token), key ACLs, credits, and Grok model access.",
             ),
         },
         ProviderErrorKind::RateLimited => match provider {
@@ -239,11 +309,17 @@ fn provider_hint(
             ProviderKind::Gemini => Some(
                 "Gemini rate limit reached; retry later or review your Google AI project quota and billing.",
             ),
+            ProviderKind::Mistral => Some(
+                "Mistral rate limit reached; retry later or review your workspace limits and billing.",
+            ),
             ProviderKind::OpenAi => {
                 Some("OpenAI rate limit reached; retry later or adjust your account/model limits.")
             }
             ProviderKind::Ollama => Some(
                 "Ollama appears rate-limited; retry shortly or reduce concurrent local requests.",
+            ),
+            ProviderKind::Xai => Some(
+                "xAI rate limit reached; retry later or review your team limits and credits.",
             ),
         },
         ProviderErrorKind::Connectivity => match provider {
@@ -253,11 +329,17 @@ fn provider_hint(
             ProviderKind::Gemini => Some(
                 "Check network connectivity and ensure the configured Gemini Interactions URL is reachable.",
             ),
+            ProviderKind::Mistral => Some(
+                "Check network connectivity and ensure the configured Mistral Chat Completions URL is reachable.",
+            ),
             ProviderKind::Ollama => {
                 Some("Ensure Ollama is running (`ollama serve`) and the configured URL is reachable.")
             }
             ProviderKind::OpenAi => Some(
                 "Check network connectivity and ensure the configured OpenAI URL is reachable.",
+            ),
+            ProviderKind::Xai => Some(
+                "Check network connectivity and ensure the configured xAI Responses URL is reachable.",
             ),
         },
         ProviderErrorKind::Timeout => match provider {
@@ -267,10 +349,16 @@ fn provider_hint(
             ProviderKind::Gemini => Some(
                 "Request timed out; retry later or increase `--inference-timeout-in-sec`.",
             ),
+            ProviderKind::Mistral => Some(
+                "Request timed out; retry later or increase `--inference-timeout-in-sec`.",
+            ),
             ProviderKind::Ollama => {
                 Some("Request timed out; ensure Ollama/model is responsive or increase `--inference-timeout-in-sec`.")
             }
             ProviderKind::OpenAi => {
+                Some("Request timed out; retry later or increase `--inference-timeout-in-sec`.")
+            }
+            ProviderKind::Xai => {
                 Some("Request timed out; retry later or increase `--inference-timeout-in-sec`.")
             }
         },
@@ -335,12 +423,16 @@ pub(crate) fn validate_provider_request(
         ));
     }
 
-    if provider.capabilities().requires_token && token.trim().is_empty() {
+    if provider.capabilities().authentication == AuthenticationPolicy::RequiredApiKey
+        && token.trim().is_empty()
+    {
         issues.push(match provider {
             ProviderKind::Anthropic => "❌ Missing Anthropic API key. Provide `--token <TOKEN>` or configure `cargo ai profile set <name> --token <TOKEN> --auth api_key`. Claude.ai subscriptions do not provide API credentials.".to_string(),
             ProviderKind::Gemini => "❌ Missing Gemini API key. Provide `--token <TOKEN>` or configure `cargo ai profile set <name> --token <TOKEN> --auth api_key`.".to_string(),
+            ProviderKind::Mistral => "❌ Missing Mistral API key. Provide `--token <TOKEN>` or configure `cargo ai profile set <name> --token <TOKEN> --auth api_key`.".to_string(),
             ProviderKind::OpenAi => "❌ Missing OpenAI token. Provide `--token <TOKEN>`, run `cargo ai auth login openai`, or configure `cargo ai profile set <name> --token <TOKEN> --auth api_key`.".to_string(),
-            ProviderKind::Ollama => unreachable!("Ollama does not require a token"),
+            ProviderKind::Xai => "❌ Missing xAI API key. Provide `--token <TOKEN>` or configure `cargo ai profile set <name> --token <TOKEN> --auth api_key`.".to_string(),
+            ProviderKind::Ollama => unreachable!("Ollama accepts an optional API key"),
         });
     }
 
@@ -410,8 +502,8 @@ pub(crate) fn validate_provider_content_parts(
 #[cfg(test)]
 mod tests {
     use super::{
-        provider_error_messages, validate_provider_content_parts, validate_provider_request,
-        ProviderError, ProviderKind,
+        provider_error_messages, sanitized_http_error_body, validate_provider_content_parts,
+        validate_provider_request, ProviderError, ProviderKind,
     };
     use crate::providers::runtime::ContentPart;
     use reqwest::StatusCode;
@@ -435,6 +527,14 @@ mod tests {
             ProviderKind::from_server_value("OPENAI"),
             Some(ProviderKind::OpenAi)
         );
+        assert_eq!(
+            ProviderKind::from_server_value("mistral"),
+            Some(ProviderKind::Mistral)
+        );
+        assert_eq!(
+            ProviderKind::from_server_value("XAI"),
+            Some(ProviderKind::Xai)
+        );
         assert_eq!(ProviderKind::from_server_value("wat"), None);
     }
 
@@ -446,7 +546,15 @@ mod tests {
         );
         assert_eq!(
             ProviderKind::Ollama.transport(),
-            super::ProviderTransport::OllamaOpenAiCompatible
+            super::ProviderTransport::OpenAiCompatibleChat
+        );
+        assert_eq!(
+            ProviderKind::Mistral.transport(),
+            super::ProviderTransport::OpenAiCompatibleChat
+        );
+        assert_eq!(
+            ProviderKind::Xai.transport(),
+            super::ProviderTransport::XaiResponses
         );
         assert_eq!(
             ProviderKind::Gemini.transport(),
@@ -462,6 +570,15 @@ mod tests {
         assert!(ProviderKind::Gemini.capabilities().supports_image_input);
         assert!(!ProviderKind::Gemini.capabilities().supports_file_input);
         assert!(!ProviderKind::Gemini.capabilities().supports_generate_image);
+        assert_eq!(
+            ProviderKind::Mistral.capabilities().authentication,
+            super::AuthenticationPolicy::RequiredApiKey
+        );
+        assert_eq!(
+            ProviderKind::Ollama.capabilities().authentication,
+            super::AuthenticationPolicy::OptionalApiKey
+        );
+        assert!(!ProviderKind::Xai.capabilities().supports_image_input);
     }
 
     #[test]
@@ -558,6 +675,30 @@ mod tests {
         assert!(issues
             .iter()
             .any(|line| line.contains("File inputs are not supported")));
+    }
+
+    #[test]
+    fn validates_hosted_provider_tokens_and_sanitizes_error_envelopes() {
+        for provider in [ProviderKind::Mistral, ProviderKind::Xai] {
+            let issues = validate_provider_request(
+                provider,
+                "operator-selected-model",
+                provider.default_url(),
+                "",
+            )
+            .expect_err("hosted provider should require an API key");
+            assert!(issues.iter().any(|line| line.contains("API key")));
+        }
+
+        let body = br#"{"error":{"message":"schema rejected"},"debug":"do-not-print"}"#;
+        assert_eq!(
+            sanitized_http_error_body(ProviderKind::Xai, body),
+            "schema rejected"
+        );
+        assert_eq!(
+            sanitized_http_error_body(ProviderKind::Mistral, b"not-json"),
+            "Mistral API returned an HTTP error response."
+        );
     }
 
     #[test]

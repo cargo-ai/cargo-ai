@@ -17,7 +17,7 @@ pub(crate) fn runtime_command(name: &'static str, about: &'static str) -> Comman
                 .long("server")
                 .short('s')
                 .value_name("CLIENT")
-                .help("Provider - Anthropic, Gemini, Ollama, or OpenAI"),
+                .help("Provider - Anthropic, Gemini, Mistral, Ollama, OpenAI, or xAI"),
         )
         .arg(
             Arg::new("model")

@@ -338,7 +338,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         super::hatch_pipeline::HatchProgressStep::PreparingDefinition,
     );
 
-    let file_contents = match load_definition_contents(&resolution.source) {
+    let file_contents = match load_definition_contents(&resolution.source).await {
         Ok(contents) => contents,
         Err(error) => {
             println!("x {error}");
