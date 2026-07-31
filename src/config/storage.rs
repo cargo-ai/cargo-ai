@@ -649,6 +649,7 @@ fn backup_is_provably_secret_free(document: &toml::Value) -> bool {
         "model",
         "url",
         "timeout_in_sec",
+        "max_output_tokens",
         "description",
         "auth_mode",
     ];

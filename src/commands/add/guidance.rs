@@ -6,9 +6,17 @@ use std::path::{Path, PathBuf};
 
 use crate::ui;
 
-const CODEX_GUIDANCE_TEMPLATE: &str = include_str!(concat!(
+const CANONICAL_GUIDANCE_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/cargo-ai.md.tmpl"
+));
+const CODEX_ENTRY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/codex-agents.md.tmpl"
+));
+const CLAUDE_ENTRY_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/claude.md.tmpl"
 ));
 const ACTION_RULES_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -96,7 +104,8 @@ const EXAMPLE_RUNTIME_VARS_IMAGE_GATING: &str = include_str!(concat!(
 ));
 
 const ROOT_AGENTS_PATH: &str = "AGENTS.md";
-const BUNDLE_ENTRY_PATH: &str = ".cargo-ai/guidance/codex-agents.md";
+const ROOT_CLAUDE_PATH: &str = "CLAUDE.md";
+const BUNDLE_ENTRY_PATH: &str = ".cargo-ai/guidance/cargo-ai.md";
 
 #[derive(Clone, Copy)]
 struct GuidanceArtifact {
@@ -104,10 +113,10 @@ struct GuidanceArtifact {
     contents: &'static str,
 }
 
-const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 22] = [
+const GUIDANCE_ARTIFACTS: [GuidanceArtifact; 22] = [
     GuidanceArtifact {
         relative_path: BUNDLE_ENTRY_PATH,
-        contents: CODEX_GUIDANCE_TEMPLATE,
+        contents: CANONICAL_GUIDANCE_TEMPLATE,
     },
     GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/agent-definition-contract.md",
@@ -195,13 +204,27 @@ const CODEX_GUIDANCE_ARTIFACTS: [GuidanceArtifact; 22] = [
     },
 ];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EntrypointStatus {
+    Written,
+    Reused,
+    Preserved,
+}
+
+#[derive(Debug)]
+struct GuidanceEntrypointReport {
+    style: GuidanceStyle,
+    root_output_path: PathBuf,
+    status: EntrypointStatus,
+}
+
 #[derive(Debug)]
 struct GuidanceBundleReport {
-    root_output_path: PathBuf,
+    entrypoints: Vec<GuidanceEntrypointReport>,
     guidance_entry_path: PathBuf,
     guidance_root: PathBuf,
-    artifact_paths: Vec<PathBuf>,
-    root_output_written: bool,
+    written_paths: Vec<PathBuf>,
+    reused_paths: Vec<PathBuf>,
 }
 
 fn display_path(path: &Path) -> String {
@@ -220,6 +243,12 @@ fn display_path(path: &Path) -> String {
 }
 
 fn guidance_success_ui_response(report: &GuidanceBundleReport) -> serde_json::Value {
+    let entry_files = report
+        .entrypoints
+        .iter()
+        .map(|entrypoint| format!("`{}`", display_path(&entrypoint.root_output_path)))
+        .collect::<Vec<_>>()
+        .join(", ");
     let mut sections = vec![json!({
         "type": "kv",
         "title": "Output",
@@ -227,17 +256,8 @@ fn guidance_success_ui_response(report: &GuidanceBundleReport) -> serde_json::Va
         "layout": "aligned",
         "items": [
             {
-                "label": "Entry file",
-                "value": format!(
-                    "`{}`",
-                    display_path(
-                        if report.root_output_written {
-                            report.root_output_path.as_path()
-                        } else {
-                            report.guidance_entry_path.as_path()
-                        }
-                    )
-                )
+                "label": "Entry files",
+                "value": entry_files
             },
             {
                 "label": "Bundle",
@@ -245,23 +265,51 @@ fn guidance_success_ui_response(report: &GuidanceBundleReport) -> serde_json::Va
             },
             {
                 "label": "Files written",
-                "value": report.artifact_paths.len()
+                "value": report.written_paths.len()
+            },
+            {
+                "label": "Files reused",
+                "value": report.reused_paths.len()
             }
         ]
     })];
 
-    if !report.root_output_written {
+    for entrypoint in report
+        .entrypoints
+        .iter()
+        .filter(|entrypoint| entrypoint.status == EntrypointStatus::Preserved)
+    {
         sections.push(json!({
             "type": "notice",
-            "title": "Existing AGENTS.md",
+            "title": format!("Existing {}", entrypoint.style.root_filename()),
             "title_style": "plain",
             "message": format!(
-                "Existing `{}` was left unchanged. Add this section to it when you want Codex to load Cargo AI guidance:\n\n## Cargo AI Guidance\n\nWhen creating or editing Cargo AI agents in this repo, read `{}` first.\n\nValidate agent definitions with:\n\n`cargo ai hatch <agent-name> --config <config.json> --check`",
-                display_path(report.root_output_path.as_path()),
-                display_path(report.guidance_entry_path.as_path())
+                "Existing `{}` was left unchanged. Add this section when you want {} to load Cargo AI guidance:\n\n{}",
+                display_path(&entrypoint.root_output_path),
+                entrypoint.style.display_name(),
+                entrypoint.style.merge_snippet(display_path(&report.guidance_entry_path).as_str())
             )
         }));
     }
+
+    let style_names = report
+        .entrypoints
+        .iter()
+        .map(|entrypoint| entrypoint.style.display_name())
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let preserved_count = report
+        .entrypoints
+        .iter()
+        .filter(|entrypoint| entrypoint.status == EntrypointStatus::Preserved)
+        .count();
+    let summary = if preserved_count == 0 {
+        format!("Installed Cargo AI guidance for {style_names}.")
+    } else {
+        format!(
+            "Installed Cargo AI guidance for {style_names} and left {preserved_count} existing entry file(s) unchanged."
+        )
+    };
 
     json!({
         "ui": {
@@ -269,11 +317,7 @@ fn guidance_success_ui_response(report: &GuidanceBundleReport) -> serde_json::Va
             "kind": "success",
             "icon": "✓",
             "title": "Guidance added",
-            "summary": if report.root_output_written {
-                "Installed the Codex guidance bundle in this workspace."
-            } else {
-                "Installed the Codex guidance bundle and left the existing AGENTS.md unchanged."
-            },
+            "summary": summary,
             "sections": sections
         }
     })
@@ -282,19 +326,18 @@ fn guidance_success_ui_response(report: &GuidanceBundleReport) -> serde_json::Va
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GuidanceStyle {
     Codex,
+    Claude,
 }
 
 impl GuidanceStyle {
-    fn from_cli(value: Option<&str>) -> Result<Self, String> {
+    fn from_cli(value: &str) -> Result<Self, String> {
         match value {
-            Some("codex") => Ok(Self::Codex),
-            Some(other) => Err(format!(
-                "Unsupported guidance style '{}'. Use `--style codex`.",
+            "codex" => Ok(Self::Codex),
+            "claude" => Ok(Self::Claude),
+            other => Err(format!(
+                "Unsupported guidance style '{}'. Use `--style codex` or `--style claude`.",
                 other
             )),
-            None => Err(
-                "Missing guidance style. Use `cargo ai add guidance --style codex`.".to_string(),
-            ),
         }
     }
 
@@ -302,71 +345,120 @@ impl GuidanceStyle {
         match self {
             Self::Codex => GuidanceArtifact {
                 relative_path: ROOT_AGENTS_PATH,
-                contents: CODEX_GUIDANCE_TEMPLATE,
+                contents: CODEX_ENTRY_TEMPLATE,
+            },
+            Self::Claude => GuidanceArtifact {
+                relative_path: ROOT_CLAUDE_PATH,
+                contents: CLAUDE_ENTRY_TEMPLATE,
             },
         }
     }
 
-    fn artifacts(self) -> &'static [GuidanceArtifact] {
+    fn display_name(self) -> &'static str {
         match self {
-            Self::Codex => &CODEX_GUIDANCE_ARTIFACTS,
-        }
-    }
-}
-
-fn ensure_no_conflicts(paths: &[PathBuf]) -> Result<(), String> {
-    let mut conflicts = Vec::new();
-
-    for path in paths {
-        if path.exists() {
-            conflicts.push(path.display().to_string());
+            Self::Codex => "Codex",
+            Self::Claude => "Claude Code",
         }
     }
 
-    if conflicts.is_empty() {
-        return Ok(());
+    fn root_filename(self) -> &'static str {
+        self.root_artifact().relative_path
     }
 
-    Err(format!(
-        "Guidance conflicts detected. The following managed file(s) already exist: {}. Remove conflicting files or choose another directory before retrying.",
-        conflicts.join(", ")
-    ))
+    fn merge_snippet(self, bundle_entry: &str) -> String {
+        match self {
+            Self::Codex => format!(
+                "## Cargo AI Guidance\n\nWhen creating or editing Cargo AI agents in this repository, read `{bundle_entry}` first and follow its linked local guidance.\n\nValidate agent definitions with:\n\n`cargo ai hatch <agent-name> --config <config.json> --check`"
+            ),
+            Self::Claude => format!(
+                "## Cargo AI Guidance\n\n@{bundle_entry}\n\nValidate agent definitions with:\n\n`cargo ai hatch <agent-name> --config <config.json> --check`"
+            ),
+        }
+    }
 }
 
 fn write_guidance_bundle(
     target_dir: &Path,
-    style: GuidanceStyle,
+    styles: &[GuidanceStyle],
 ) -> Result<GuidanceBundleReport, String> {
-    let root_artifact = style.root_artifact();
-    let root_output_path = target_dir.join(root_artifact.relative_path);
-    let root_output_written = !root_output_path.exists();
+    if styles.is_empty() {
+        return Err(
+            "Missing guidance style. Use `cargo ai add guidance --style codex` or `--style claude`."
+                .to_string(),
+        );
+    }
 
-    let bundle_artifact_paths = style
-        .artifacts()
+    let bundle_artifact_paths = GUIDANCE_ARTIFACTS
         .iter()
         .map(|artifact| target_dir.join(artifact.relative_path))
         .collect::<Vec<_>>();
 
-    ensure_no_conflicts(&bundle_artifact_paths)?;
-
-    let mut artifact_paths = Vec::new();
-
-    if root_output_written {
-        write_guidance_artifact(root_artifact, &root_output_path)?;
-        artifact_paths.push(root_output_path.clone());
+    let mut conflicts = Vec::new();
+    let mut bundle_reused = Vec::new();
+    for (artifact, output_path) in GUIDANCE_ARTIFACTS.iter().zip(&bundle_artifact_paths) {
+        if !output_path.exists() {
+            continue;
+        }
+        match fs::read(output_path) {
+            Ok(contents) if contents == artifact.contents.as_bytes() => {
+                bundle_reused.push(output_path.clone());
+            }
+            _ => conflicts.push(output_path.display().to_string()),
+        }
+    }
+    if !conflicts.is_empty() {
+        return Err(format!(
+            "Guidance conflicts detected. The following managed file(s) differ from the installed bundle: {}. Restore, remove, or relocate the conflicting files before retrying.",
+            conflicts.join(", ")
+        ));
     }
 
-    for (artifact, output_path) in style.artifacts().iter().zip(bundle_artifact_paths.iter()) {
+    let mut entrypoints = Vec::new();
+    let mut written_paths = Vec::new();
+    let mut reused_paths = bundle_reused;
+    for style in styles.iter().copied() {
+        if entrypoints
+            .iter()
+            .any(|entrypoint: &GuidanceEntrypointReport| entrypoint.style == style)
+        {
+            continue;
+        }
+        let artifact = style.root_artifact();
+        let output_path = target_dir.join(artifact.relative_path);
+        let status = if !output_path.exists() {
+            write_guidance_artifact(artifact, &output_path)?;
+            written_paths.push(output_path.clone());
+            EntrypointStatus::Written
+        } else if fs::read(&output_path)
+            .map(|contents| contents == artifact.contents.as_bytes())
+            .unwrap_or(false)
+        {
+            reused_paths.push(output_path.clone());
+            EntrypointStatus::Reused
+        } else {
+            EntrypointStatus::Preserved
+        };
+        entrypoints.push(GuidanceEntrypointReport {
+            style,
+            root_output_path: output_path,
+            status,
+        });
+    }
+
+    for (artifact, output_path) in GUIDANCE_ARTIFACTS.iter().zip(&bundle_artifact_paths) {
+        if output_path.exists() {
+            continue;
+        }
         write_guidance_artifact(*artifact, output_path)?;
-        artifact_paths.push(output_path.clone());
+        written_paths.push(output_path.clone());
     }
 
     Ok(GuidanceBundleReport {
-        root_output_path,
+        entrypoints,
         guidance_entry_path: target_dir.join(BUNDLE_ENTRY_PATH),
         guidance_root: target_dir.join(".cargo-ai").join("guidance"),
-        artifact_paths,
-        root_output_written,
+        written_paths,
+        reused_paths,
     })
 }
 
@@ -402,10 +494,19 @@ pub fn run(sub_m: &ArgMatches) -> bool {
 }
 
 fn run_impl(sub_m: &ArgMatches) -> Result<(), String> {
-    let style = GuidanceStyle::from_cli(sub_m.get_one::<String>("style").map(String::as_str))?;
+    let mut styles = Vec::new();
+    for value in sub_m.get_many::<String>("style").ok_or_else(|| {
+        "Missing guidance style. Use `cargo ai add guidance --style codex` or `--style claude`."
+            .to_string()
+    })? {
+        let style = GuidanceStyle::from_cli(value)?;
+        if !styles.contains(&style) {
+            styles.push(style);
+        }
+    }
     let current_dir = std::env::current_dir()
         .map_err(|error| format!("Failed to resolve current directory: {error}"))?;
-    let report = write_guidance_bundle(&current_dir, style)?;
+    let report = write_guidance_bundle(&current_dir, &styles)?;
     ui::account_status::render_backend_ui(&guidance_success_ui_response(&report));
 
     Ok(())
@@ -414,8 +515,8 @@ fn run_impl(sub_m: &ArgMatches) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        guidance_success_ui_response, write_guidance_bundle, GuidanceBundleReport, GuidanceStyle,
-        PACKAGE_WORKFLOW_TEMPLATE,
+        guidance_success_ui_response, write_guidance_bundle, EntrypointStatus,
+        GuidanceBundleReport, GuidanceEntrypointReport, GuidanceStyle, PACKAGE_WORKFLOW_TEMPLATE,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -434,19 +535,19 @@ mod tests {
         let dir = temp_dir_path("codex");
         fs::create_dir_all(&dir).expect("test dir should be created");
 
-        let report =
-            write_guidance_bundle(&dir, GuidanceStyle::Codex).expect("guidance write should work");
+        let report = write_guidance_bundle(&dir, &[GuidanceStyle::Codex])
+            .expect("guidance write should work");
         assert_eq!(
-            report
+            report.entrypoints[0]
                 .root_output_path
                 .file_name()
                 .and_then(|name| name.to_str()),
             Some("AGENTS.md")
         );
-        assert!(report.root_output_written);
-        assert_eq!(report.artifact_paths.len(), 23);
+        assert_eq!(report.entrypoints[0].status, EntrypointStatus::Written);
+        assert_eq!(report.written_paths.len(), 23);
         assert!(dir.join("AGENTS.md").exists());
-        assert!(dir.join(".cargo-ai/guidance/codex-agents.md").exists());
+        assert!(dir.join(".cargo-ai/guidance/cargo-ai.md").exists());
         assert!(dir
             .join(".cargo-ai/guidance/agent-definition-contract.md")
             .exists());
@@ -489,27 +590,15 @@ mod tests {
             .join(".cargo-ai/guidance/examples/runtime-vars-image-gating.json")
             .exists());
 
-        let guidance = fs::read_to_string(&report.root_output_path)
+        let guidance = fs::read_to_string(&report.entrypoints[0].root_output_path)
             .expect("guidance output should be readable");
-        assert!(guidance.contains("Cargo AI Agent Authoring (Codex)"));
-        assert!(guidance.contains(".cargo-ai/guidance/start-here.md"));
-        assert!(guidance.contains(".cargo-ai/guidance/package-workflow.md"));
-        assert!(guidance.contains(".cargo-ai/guidance/usage-ledger.md"));
-        assert!(guidance.contains(".cargo-ai/guidance/tool-authoring.md"));
-        assert!(guidance.contains(".cargo-ai/guidance/tool-contract.md"));
-        assert!(guidance.contains(".cargo-ai/guidance/tool-child-agents.md"));
-        assert!(guidance.contains(".cargo-ai/guidance/tool-hardening.md"));
-        assert!(guidance.contains(".cargo-ai/guidance/pattern-selection.md"));
-        assert!(guidance.contains(".cargo-ai/guidance/agent-definition-contract.md"));
-        assert!(guidance.contains(".cargo-ai/guidance/examples/schema-features.json"));
-        assert!(guidance.contains(".cargo-ai/guidance/examples/runtime-file-local-exec.json"));
-        assert!(guidance.contains(".cargo-ai/guidance/examples/runtime-vars-image-gating.json"));
+        assert!(guidance.contains(".cargo-ai/guidance/cargo-ai.md"));
         assert!(guidance.contains("cargo ai hatch <agent-name> --config <config.json> --check"));
-        assert!(guidance.contains("portable across macOS, Windows, and Linux"));
 
         let bundle_entry = fs::read_to_string(&report.guidance_entry_path)
             .expect("bundle entry guidance should be readable");
-        assert!(bundle_entry.contains("Cargo AI Agent Authoring (Codex)"));
+        assert!(bundle_entry.contains("Cargo AI Agent Authoring"));
+        assert!(!bundle_entry.contains("Codex"));
         assert!(bundle_entry.contains(".cargo-ai/guidance/start-here.md"));
         assert!(bundle_entry.contains(".cargo-ai/guidance/package-workflow.md"));
 
@@ -595,15 +684,15 @@ mod tests {
         fs::write(dir.join("AGENTS.md"), "existing guidance\n")
             .expect("existing guidance file should be written");
 
-        let report =
-            write_guidance_bundle(&dir, GuidanceStyle::Codex).expect("guidance write should work");
-        assert!(!report.root_output_written);
-        assert_eq!(report.artifact_paths.len(), 22);
+        let report = write_guidance_bundle(&dir, &[GuidanceStyle::Codex])
+            .expect("guidance write should work");
+        assert_eq!(report.entrypoints[0].status, EntrypointStatus::Preserved);
+        assert_eq!(report.written_paths.len(), 22);
         assert_eq!(
             fs::read_to_string(dir.join("AGENTS.md")).expect("existing AGENTS should be readable"),
             "existing guidance\n"
         );
-        assert!(dir.join(".cargo-ai/guidance/codex-agents.md").exists());
+        assert!(dir.join(".cargo-ai/guidance/cargo-ai.md").exists());
         assert!(dir.join(".cargo-ai/guidance/action-rules.md").exists());
         assert!(dir.join(".cargo-ai/guidance/package-workflow.md").exists());
         assert_eq!(
@@ -615,20 +704,20 @@ mod tests {
         let response = guidance_success_ui_response(&report);
         assert_eq!(
             response["ui"]["summary"].as_str(),
-            Some("Installed the Codex guidance bundle and left the existing AGENTS.md unchanged.")
+            Some("Installed Cargo AI guidance for Codex and left 1 existing entry file(s) unchanged.")
         );
         assert_eq!(
             response["ui"]["sections"][0]["items"][0]["label"].as_str(),
-            Some("Entry file")
+            Some("Entry files")
         );
         assert!(response["ui"]["sections"][0]["items"][0]["value"]
             .as_str()
             .expect("entry file value should be rendered")
-            .contains(".cargo-ai/guidance/codex-agents.md"));
+            .contains("AGENTS.md"));
         assert!(response["ui"]["sections"][1]["message"]
             .as_str()
             .expect("merge guidance should be present")
-            .contains(".cargo-ai/guidance/codex-agents.md"));
+            .contains(".cargo-ai/guidance/cargo-ai.md"));
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -646,10 +735,10 @@ mod tests {
         fs::write(&conflict_path, "existing guidance rules\n")
             .expect("existing companion file should be written");
 
-        let error = write_guidance_bundle(&dir, GuidanceStyle::Codex)
+        let error = write_guidance_bundle(&dir, &[GuidanceStyle::Codex])
             .expect_err("existing companion file should fail");
         assert!(error.contains(".cargo-ai/guidance/action-rules.md"));
-        assert!(error.contains("already exist"));
+        assert!(error.contains("differ from the installed bundle"));
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -657,14 +746,18 @@ mod tests {
     #[test]
     fn guidance_success_ui_uses_compact_output_section() {
         let report = GuidanceBundleReport {
-            root_output_path: PathBuf::from("./AGENTS.md"),
-            guidance_entry_path: PathBuf::from("./.cargo-ai/guidance/codex-agents.md"),
+            entrypoints: vec![GuidanceEntrypointReport {
+                style: GuidanceStyle::Codex,
+                root_output_path: PathBuf::from("./AGENTS.md"),
+                status: EntrypointStatus::Written,
+            }],
+            guidance_entry_path: PathBuf::from("./.cargo-ai/guidance/cargo-ai.md"),
             guidance_root: PathBuf::from("./.cargo-ai/guidance"),
-            artifact_paths: vec![
+            written_paths: vec![
                 PathBuf::from("./AGENTS.md"),
                 PathBuf::from("./.cargo-ai/guidance/start-here.md"),
             ],
-            root_output_written: true,
+            reused_paths: vec![],
         };
 
         let response = guidance_success_ui_response(&report);
@@ -684,18 +777,22 @@ mod tests {
     #[test]
     fn guidance_success_ui_includes_merge_snippet_when_agents_md_is_preserved() {
         let report = GuidanceBundleReport {
-            root_output_path: PathBuf::from("./AGENTS.md"),
-            guidance_entry_path: PathBuf::from("./.cargo-ai/guidance/codex-agents.md"),
+            entrypoints: vec![GuidanceEntrypointReport {
+                style: GuidanceStyle::Codex,
+                root_output_path: PathBuf::from("./AGENTS.md"),
+                status: EntrypointStatus::Preserved,
+            }],
+            guidance_entry_path: PathBuf::from("./.cargo-ai/guidance/cargo-ai.md"),
             guidance_root: PathBuf::from("./.cargo-ai/guidance"),
-            artifact_paths: vec![PathBuf::from("./.cargo-ai/guidance/codex-agents.md")],
-            root_output_written: false,
+            written_paths: vec![PathBuf::from("./.cargo-ai/guidance/cargo-ai.md")],
+            reused_paths: vec![],
         };
 
         let response = guidance_success_ui_response(&report);
 
         assert_eq!(
             response["ui"]["sections"][0]["items"][0]["value"].as_str(),
-            Some("`./.cargo-ai/guidance/codex-agents.md`")
+            Some("`./AGENTS.md`")
         );
         assert_eq!(response["ui"]["sections"][0]["items"][2]["value"], 1);
         let message = response["ui"]["sections"][1]["message"]
@@ -704,5 +801,60 @@ mod tests {
         assert!(message.contains("Existing `./AGENTS.md` was left unchanged"));
         assert!(message.contains("## Cargo AI Guidance"));
         assert!(message.contains("cargo ai hatch <agent-name> --config <config.json> --check"));
+    }
+
+    #[test]
+    fn write_guidance_bundle_installs_codex_and_claude_with_one_shared_bundle() {
+        let dir = temp_dir_path("combined");
+        fs::create_dir_all(&dir).expect("test dir should be created");
+
+        let report = write_guidance_bundle(&dir, &[GuidanceStyle::Codex, GuidanceStyle::Claude])
+            .expect("combined guidance write should work");
+
+        assert_eq!(report.entrypoints.len(), 2);
+        assert_eq!(report.written_paths.len(), 24);
+        assert!(dir.join("AGENTS.md").exists());
+        assert!(dir.join("CLAUDE.md").exists());
+        assert!(dir.join(".cargo-ai/guidance/cargo-ai.md").exists());
+        assert!(!dir.join(".cargo-ai/guidance/codex-agents.md").exists());
+        let claude = fs::read_to_string(dir.join("CLAUDE.md"))
+            .expect("Claude entrypoint should be readable");
+        assert!(claude.contains("@.cargo-ai/guidance/cargo-ai.md"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_guidance_bundle_reuses_identical_bundle_for_later_style() {
+        let dir = temp_dir_path("later-style");
+        fs::create_dir_all(&dir).expect("test dir should be created");
+        write_guidance_bundle(&dir, &[GuidanceStyle::Codex])
+            .expect("first guidance write should work");
+
+        let report = write_guidance_bundle(&dir, &[GuidanceStyle::Claude])
+            .expect("later style should reuse the shared bundle");
+
+        assert_eq!(report.written_paths, vec![dir.join("CLAUDE.md")]);
+        assert_eq!(report.reused_paths.len(), 22);
+        assert_eq!(report.entrypoints[0].status, EntrypointStatus::Written);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_guidance_bundle_reuses_identical_entrypoint_without_rewriting() {
+        let dir = temp_dir_path("repeat-style");
+        fs::create_dir_all(&dir).expect("test dir should be created");
+        write_guidance_bundle(&dir, &[GuidanceStyle::Codex])
+            .expect("first guidance write should work");
+
+        let report = write_guidance_bundle(&dir, &[GuidanceStyle::Codex])
+            .expect("repeated style should be idempotent");
+
+        assert!(report.written_paths.is_empty());
+        assert_eq!(report.reused_paths.len(), 23);
+        assert_eq!(report.entrypoints[0].status, EntrypointStatus::Reused);
+
+        let _ = fs::remove_dir_all(dir);
     }
 }

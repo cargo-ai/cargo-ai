@@ -294,6 +294,8 @@ Required fields:
 - If `profile` is present, Cargo AI resolves that profile at step runtime and uses it for the image step's provider/url/token context.
 - With `generate_image.profile`, explicit `model` still wins, then the step-profile model, then the parent invocation model.
 - `generate_image.profile` may point to a different provider from the parent invocation; for example, a parent may stay on OpenAI while one image step switches to an Ollama profile.
+- Anthropic profiles support text, URL-text, image input, and structured text output, but not direct file input or `generate_image` in the current release. An Anthropic parent may select an OpenAI or Ollama step profile for image generation.
+- Gemini profiles use the native Interactions API with `store = false` and support text, URL-text, image input, and structured text output, but not direct file input or `generate_image` in the current release. A Gemini parent may select an OpenAI or Ollama step profile for image generation.
 - If neither the step nor the invocation provides a model, the step fails clearly at runtime.
 - `model` may be:
   - a literal non-empty string

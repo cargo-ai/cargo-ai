@@ -272,20 +272,22 @@ mod tests {
     #[test]
     fn add_guidance_style_parses() {
         let matches = cli_command("cargo-ai")
-            .try_get_matches_from(["cargo-ai", "add", "guidance", "--style", "codex"])
-            .expect("add guidance --style codex should parse");
+            .try_get_matches_from([
+                "cargo-ai", "add", "guidance", "--style", "codex", "--style", "claude",
+            ])
+            .expect("repeated guidance styles should parse");
 
         let guidance_matches = matches
             .subcommand_matches("add")
             .and_then(|m| m.subcommand_matches("guidance"))
             .expect("guidance subcommand should be available");
 
-        assert_eq!(
-            guidance_matches
-                .get_one::<String>("style")
-                .map(String::as_str),
-            Some("codex")
-        );
+        let styles = guidance_matches
+            .get_many::<String>("style")
+            .expect("guidance styles should be available")
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(styles, vec!["codex", "claude"]);
     }
 
     #[test]
@@ -1487,6 +1489,46 @@ mod tests {
             profile_add.get_one::<String>("auth").map(String::as_str),
             Some("openai_account")
         );
+    }
+
+    #[test]
+    fn anthropic_profile_output_token_limit_parses_for_add_and_set() {
+        let add_matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "profile",
+                "add",
+                "anthropic-prod",
+                "--server",
+                "anthropic",
+                "--model",
+                "claude-sonnet-5",
+                "--auth",
+                "api_key",
+                "--max-output-tokens",
+                "2048",
+            ])
+            .expect("Anthropic profile output-token limit should parse");
+        let add = add_matches
+            .subcommand_matches("profile")
+            .and_then(|matches| matches.subcommand_matches("add"))
+            .expect("profile add should be available");
+        assert_eq!(add.get_one::<u32>("max_output_tokens").copied(), Some(2048));
+
+        let set_matches = cli_command("cargo-ai")
+            .try_get_matches_from([
+                "cargo-ai",
+                "profile",
+                "set",
+                "anthropic-prod",
+                "--clear-max-output-tokens",
+            ])
+            .expect("clearing a profile output-token limit should parse");
+        let set = set_matches
+            .subcommand_matches("profile")
+            .and_then(|matches| matches.subcommand_matches("set"))
+            .expect("profile set should be available");
+        assert!(set.get_flag("clear_max_output_tokens"));
     }
 
     #[test]

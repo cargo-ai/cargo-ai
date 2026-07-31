@@ -86,6 +86,9 @@ pub struct Profile {
     pub timeout_in_sec: u64,
 
     #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+
+    #[serde(default)]
     pub description: Option<String>,
 
     #[serde(default = "default_profile_auth_mode")]

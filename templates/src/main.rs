@@ -23,7 +23,7 @@ use config::loader::{config_path, find_profile, load_config};
 use config::schema::{Profile, ProfileAuthMode, SecretStoreMode};
 use providers::{
     provider_error_messages, validate_provider_content_parts, validate_provider_request,
-    ProviderKind,
+    ProviderError, ProviderKind,
 };
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
@@ -761,7 +761,7 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
 
     vec![
         format!("❌ Unknown AI server '{}'.", display_server),
-        "Use `--server ollama` or `--server openai`.".to_string(),
+        "Use `--server anthropic`, `--server gemini`, `--server ollama`, or `--server openai`.".to_string(),
         "Hint: Set `--server` explicitly or configure a default profile with a supported server."
             .to_string(),
         "Example: cargo ai run --server ollama --model mistral --input-text \"What is 2 + 2?\""
@@ -1586,6 +1586,8 @@ fn validate_tool_identifier(name: &str) -> Result<(), String> {
 
 fn provider_server_name(provider: ProviderKind) -> &'static str {
     match provider {
+        ProviderKind::Anthropic => "anthropic",
+        ProviderKind::Gemini => "gemini",
         ProviderKind::Ollama => "ollama",
         ProviderKind::OpenAi => "openai",
     }
@@ -1826,6 +1828,10 @@ fn cli_override_descriptions(
         overrides.push(format!("inference_timeout_in_sec={timeout}"));
     }
 
+    if let Some(max_output_tokens) = matches.get_one::<u32>("max_output_tokens") {
+        overrides.push(format!("max_output_tokens={max_output_tokens}"));
+    }
+
     if let Some(max_depth) = matches.get_one::<u32>("max_agent_depth") {
         overrides.push(format!("max_agent_depth={max_depth}"));
     }
@@ -1878,6 +1884,15 @@ fn resolved_invocation_auth_mode(
     use_openai_account_transport: bool,
 ) -> &'static str {
     match provider {
+        ProviderKind::Anthropic | ProviderKind::Gemini => {
+            if explicit_token_override {
+                "api_key"
+            } else {
+                selected_profile
+                    .map(|profile| profile.auth_mode.as_str())
+                    .unwrap_or("none")
+            }
+        }
         ProviderKind::Ollama => "none",
         ProviderKind::OpenAi => {
             if explicit_token_override {
@@ -2481,10 +2496,41 @@ async fn resolve_openai_token_for_request(
     }
 }
 
-fn apply_profile(profile: &Profile, server: &mut String, model: &mut String, timeout_in_sec: &mut u64, url: &mut String) -> SelectedProfile {
+fn resolve_api_key_provider_token(
+    provider: ProviderKind,
+    selected_profile: Option<&SelectedProfile>,
+) -> Result<String, String> {
+    let provider_name = provider.display_name();
+    match selected_profile {
+        Some(profile) if profile.auth_mode == ProfileAuthMode::ApiKey => {
+            resolve_profile_api_token(profile)
+        }
+        Some(profile) => Err(format!(
+            "Profile '{}' auth mode is '{}'. Set it to '{}' before using {}.",
+            profile.name,
+            profile.auth_mode.as_str(),
+            ProfileAuthMode::ApiKey.as_str(),
+            provider_name
+        )),
+        None => Err(format!(
+            "{} requires an API key. Provide `--token <TOKEN>` or select an `api_key` profile.",
+            provider_name
+        )),
+    }
+}
+
+fn apply_profile(
+    profile: &Profile,
+    server: &mut String,
+    model: &mut String,
+    timeout_in_sec: &mut u64,
+    max_output_tokens: &mut Option<u32>,
+    url: &mut String,
+) -> SelectedProfile {
     *server = profile.server.clone().to_lowercase();
     *model = profile.model.clone();
     *timeout_in_sec = profile.timeout_in_sec;
+    *max_output_tokens = profile.max_output_tokens;
     *url = profile.url.clone().unwrap_or_default();
 
     SelectedProfile {
@@ -2961,6 +3007,7 @@ async fn main() {
     let mut model = String::new();
     let mut url = String::new();
     let mut token = String::new();
+    let mut max_output_tokens: Option<u32> = None;
     let mut inference_timeout_in_sec: u64 = DEFAULT_INFERENCE_TIMEOUT_IN_SEC;
     let mut selected_profile: Option<SelectedProfile> = None;
     let mut loaded_profile_message: Option<(LoadedProfileKind, String)> = None;
@@ -2974,6 +3021,7 @@ async fn main() {
                 &mut server,
                 &mut model,
                 &mut inference_timeout_in_sec,
+                &mut max_output_tokens,
                 &mut url,
             ));
             loaded_profile_message = Some((kind, profile.name.clone()));
@@ -3008,6 +3056,10 @@ async fn main() {
         inference_timeout_in_sec = timeout_arg;
     }
 
+    if let Some(max_output_tokens_arg) = cmd_args.get_one::<u32>("max_output_tokens").copied() {
+        max_output_tokens = Some(max_output_tokens_arg);
+    }
+
     let max_agent_depth = configured_agent_action_max_depth_with_project_default(
         cmd_args.get_one::<u32>("max_agent_depth").copied(),
         project_runtime_defaults
@@ -3040,7 +3092,7 @@ async fn main() {
             profile_name,
             &cli_override_descriptions(
                 &cmd_args,
-                has_explicit_token_override && provider == ProviderKind::OpenAi,
+                has_explicit_token_override,
             ),
         ) {
             println!("{line}");
@@ -3048,21 +3100,38 @@ async fn main() {
     }
 
     if let Some(cmd_token) = explicit_token_override {
-        if provider == ProviderKind::OpenAi {
-            println!("Using explicit --token override; bypassing profile auth-mode resolution.");
-        }
+        println!("Using explicit --token override; bypassing profile auth-mode resolution.");
         token = cmd_token;
-    } else if provider == ProviderKind::OpenAi {
-        token = match resolve_openai_token_for_request(selected_profile.as_ref(), config.as_ref()).await {
-            Ok(resolved) => {
-                use_openai_account_transport = resolved.uses_account_session;
-                resolved.token
+    } else {
+        match provider {
+            ProviderKind::Anthropic | ProviderKind::Gemini => {
+                token = match resolve_api_key_provider_token(provider, selected_profile.as_ref()) {
+                    Ok(token) => token,
+                    Err(error) => {
+                        eprintln!("❌ {error}");
+                        exit_failure!();
+                    }
+                };
             }
-            Err(error) => {
-                eprintln!("❌ {error}");
-                exit_failure!();
+            ProviderKind::Ollama => {}
+            ProviderKind::OpenAi => {
+                token = match resolve_openai_token_for_request(
+                    selected_profile.as_ref(),
+                    config.as_ref(),
+                )
+                .await
+                {
+                    Ok(resolved) => {
+                        use_openai_account_transport = resolved.uses_account_session;
+                        resolved.token
+                    }
+                    Err(error) => {
+                        eprintln!("❌ {error}");
+                        exit_failure!();
+                    }
+                };
             }
-        };
+        }
     }
 
     if url.is_empty() {
@@ -3262,215 +3331,106 @@ async fn main() {
     let content_parts = ai_cargo.content_parts();
     let mut response = String::new();
 
-    if provider == ProviderKind::Ollama {
-        let remaining = match remaining_runtime_duration(runtime_budget, "before starting inference") {
-            Ok(remaining) => remaining,
-            Err(error) => {
-                eprintln!(
-                    "❌ {}",
-                    current_agent_runtime_timeout_message(runtime_budget, error.as_str())
-                );
-                exit_failure!();
-            }
-        };
-
-        let provider_started_at = Instant::now();
-        match tokio::time::timeout(
-            remaining,
-            crate::providers::send_ollama_request(
-                &url,
-                &model,
-                &content_parts,
-                inference_timeout_in_sec,
-                json_schema_value(),
-            ),
-        )
-        .await
-        {
-            Ok(Ok(r)) => {
-                if let Some(usage_log) = usage_log_context.as_ref() {
-                    usage_log.record_provider_request(usage_log::UsageProviderRequest {
-                        provider,
-                        profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
-                        auth_mode: action_provider_context.auth_mode.as_str(),
-                        model: model.as_str(),
-                        step: usage_log::UsageStep {
-                            kind: "agent_inference",
-                            action: None,
-                            step_index: None,
-                        },
-                        usage: r.usage.as_ref(),
-                        duration: provider_started_at.elapsed(),
-                        status: usage_log::UsageStatus::Success,
-                        error: None,
-                    });
-                }
-                response.push_str(&r.text)
-            }
-            Ok(Err(error)) => {
-                if let Some(usage_log) = usage_log_context.as_ref() {
-                    usage_log.record_provider_request(usage_log::UsageProviderRequest {
-                        provider,
-                        profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
-                        auth_mode: action_provider_context.auth_mode.as_str(),
-                        model: model.as_str(),
-                        step: usage_log::UsageStep {
-                            kind: "agent_inference",
-                            action: None,
-                            step_index: None,
-                        },
-                        usage: None,
-                        duration: provider_started_at.elapsed(),
-                        status: usage_log::UsageStatus::Failed,
-                        error: Some(usage_provider_error(&error)),
-                    });
-                }
-                for line in provider_error_messages(&error) {
-                    eprintln!("{line}");
-                }
-                exit_failure!();
-            }
-            Err(_) => {
-                if let Some(usage_log) = usage_log_context.as_ref() {
-                    usage_log.record_provider_request(usage_log::UsageProviderRequest {
-                        provider,
-                        profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
-                        auth_mode: action_provider_context.auth_mode.as_str(),
-                        model: model.as_str(),
-                        step: usage_log::UsageStep {
-                            kind: "agent_inference",
-                            action: None,
-                            step_index: None,
-                        },
-                        usage: None,
-                        duration: provider_started_at.elapsed(),
-                        status: usage_log::UsageStatus::Failed,
-                        error: Some(usage_timeout_error()),
-                    });
-                }
-                eprintln!(
-                    "❌ {}",
-                    current_agent_runtime_timeout_message(
-                        runtime_budget,
-                        "while waiting for the model response"
-                    )
-                );
-                exit_failure!();
-            }
+    let response_schema = json_schema_value();
+    let remaining = match remaining_runtime_duration(runtime_budget, "before starting inference") {
+        Ok(remaining) => remaining,
+        Err(error) => {
+            eprintln!(
+                "❌ {}",
+                current_agent_runtime_timeout_message(runtime_budget, error.as_str())
+            );
+            exit_failure!();
         }
-    } else if provider == ProviderKind::OpenAi {
-        let mut schema = json_schema_value();
-        if let Some(obj) = schema.as_object_mut() {
-            obj.insert("additionalProperties".into(), serde_json::Value::Bool(false));
+    };
+    let provider_started_at = Instant::now();
+    let provider_result = tokio::time::timeout(
+        remaining,
+        crate::providers::send_text_request(
+            provider,
+            &url,
+            crate::providers::ProviderTextRequest {
+                model: &model,
+                content_parts: &content_parts,
+                timeout_in_sec: inference_timeout_in_sec,
+                token: &token,
+                response_schema: &response_schema,
+                max_output_tokens,
+            },
+        ),
+    )
+    .await;
+    let response = match provider_result {
+        Ok(Ok(response)) => {
+            if let Some(usage_log) = usage_log_context.as_ref() {
+                usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                    provider,
+                    profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
+                    auth_mode: action_provider_context.auth_mode.as_str(),
+                    model: model.as_str(),
+                    step: usage_log::UsageStep {
+                        kind: "agent_inference",
+                        action: None,
+                        step_index: None,
+                    },
+                    usage: response.usage.as_ref(),
+                    duration: provider_started_at.elapsed(),
+                    status: usage_log::UsageStatus::Success,
+                    error: None,
+                });
+            }
+            response.text
         }
-
-        let fmt = serde_json::json!({
-            "type": "json_schema",
-            "json_schema": {
-                "name": "Output",
-                "schema": schema,
-                "strict": true
+        Ok(Err(error)) => {
+            if let Some(usage_log) = usage_log_context.as_ref() {
+                usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                    provider,
+                    profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
+                    auth_mode: action_provider_context.auth_mode.as_str(),
+                    model: model.as_str(),
+                    step: usage_log::UsageStep {
+                        kind: "agent_inference",
+                        action: None,
+                        step_index: None,
+                    },
+                    usage: None,
+                    duration: provider_started_at.elapsed(),
+                    status: usage_log::UsageStatus::Failed,
+                    error: Some(usage_provider_error(&error)),
+                });
             }
-        });
-
-        let remaining = match remaining_runtime_duration(runtime_budget, "before starting inference") {
-            Ok(remaining) => remaining,
-            Err(error) => {
-                eprintln!(
-                    "❌ {}",
-                    current_agent_runtime_timeout_message(runtime_budget, error.as_str())
-                );
-                exit_failure!();
+            for line in provider_error_messages(&error) {
+                eprintln!("{line}");
             }
-        };
-
-        let provider_started_at = Instant::now();
-        match tokio::time::timeout(
-            remaining,
-            crate::providers::send_openai_request(
-                &url,
-                &model,
-                &content_parts,
-                inference_timeout_in_sec,
-                &token,
-                fmt,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(r)) => {
-                if let Some(usage_log) = usage_log_context.as_ref() {
-                    usage_log.record_provider_request(usage_log::UsageProviderRequest {
-                        provider,
-                        profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
-                        auth_mode: action_provider_context.auth_mode.as_str(),
-                        model: model.as_str(),
-                        step: usage_log::UsageStep {
-                            kind: "agent_inference",
-                            action: None,
-                            step_index: None,
-                        },
-                        usage: r.usage.as_ref(),
-                        duration: provider_started_at.elapsed(),
-                        status: usage_log::UsageStatus::Success,
-                        error: None,
-                    });
-                }
-                response.push_str(&r.text)
+            exit_failure!();
+        }
+        Err(_) => {
+            if let Some(usage_log) = usage_log_context.as_ref() {
+                usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                    provider,
+                    profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
+                    auth_mode: action_provider_context.auth_mode.as_str(),
+                    model: model.as_str(),
+                    step: usage_log::UsageStep {
+                        kind: "agent_inference",
+                        action: None,
+                        step_index: None,
+                    },
+                    usage: None,
+                    duration: provider_started_at.elapsed(),
+                    status: usage_log::UsageStatus::Failed,
+                    error: Some(usage_timeout_error()),
+                });
             }
-            Ok(Err(error)) => {
-                if let Some(usage_log) = usage_log_context.as_ref() {
-                    usage_log.record_provider_request(usage_log::UsageProviderRequest {
-                        provider,
-                        profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
-                        auth_mode: action_provider_context.auth_mode.as_str(),
-                        model: model.as_str(),
-                        step: usage_log::UsageStep {
-                            kind: "agent_inference",
-                            action: None,
-                            step_index: None,
-                        },
-                        usage: None,
-                        duration: provider_started_at.elapsed(),
-                        status: usage_log::UsageStatus::Failed,
-                        error: Some(usage_provider_error(&error)),
-                    });
-                }
-                for line in provider_error_messages(&error) {
-                    eprintln!("{line}");
-                }
-                exit_failure!();
-            }
-            Err(_) => {
-                if let Some(usage_log) = usage_log_context.as_ref() {
-                    usage_log.record_provider_request(usage_log::UsageProviderRequest {
-                        provider,
-                        profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
-                        auth_mode: action_provider_context.auth_mode.as_str(),
-                        model: model.as_str(),
-                        step: usage_log::UsageStep {
-                            kind: "agent_inference",
-                            action: None,
-                            step_index: None,
-                        },
-                        usage: None,
-                        duration: provider_started_at.elapsed(),
-                        status: usage_log::UsageStatus::Failed,
-                        error: Some(usage_timeout_error()),
-                    });
-                }
-                eprintln!(
-                    "❌ {}",
-                    current_agent_runtime_timeout_message(
-                        runtime_budget,
-                        "while waiting for the model response"
-                    )
-                );
-                exit_failure!();
-            }
-        };
-    }
-
+            eprintln!(
+                "❌ {}",
+                current_agent_runtime_timeout_message(
+                    runtime_budget,
+                    "while waiting for the model response"
+                )
+            );
+            exit_failure!();
+        }
+    };
     if !ai_cargo.set_response(response.clone()) {
         eprintln!("❌ LLM output did NOT conform to the required JSON schema.");
         eprintln!("Raw output received from server:\n{}\n", response);
@@ -3531,6 +3491,7 @@ mod tests {
             url: None,
             token: None,
             timeout_in_sec: 60,
+            max_output_tokens: None,
             description: None,
             auth_mode: ProfileAuthMode::OpenaiAccount,
         }
@@ -4708,6 +4669,17 @@ async fn run_generate_image_step(
     let output_path = resolve_string_parts(path_parts, data, action_name, "path")
         .map_err(|error| format!("Action '{}': {error}", action_name))?;
     let output_format = generated_image_output_format(output_path.as_str(), action_name)?;
+    if !effective_provider_context
+        .provider
+        .capabilities()
+        .supports_generate_image
+    {
+        return Err(format!(
+            "Action '{}' generate_image is not supported by the {} adapter. Select an OpenAI or Ollama step profile.",
+            action_name,
+            effective_provider_context.provider.display_name()
+        ));
+    }
     validate_generate_image_output_format_for_provider(
         effective_provider_context.provider,
         output_format,
@@ -4742,6 +4714,14 @@ async fn run_generate_image_step(
         remaining,
         async {
             match effective_provider_context.provider {
+                ProviderKind::Anthropic => Err(ProviderError::invalid_request(
+                    ProviderKind::Anthropic,
+                    "Anthropic image generation is not supported.",
+                )),
+                ProviderKind::Gemini => Err(ProviderError::invalid_request(
+                    ProviderKind::Gemini,
+                    "Gemini image generation is not supported.",
+                )),
                 ProviderKind::OpenAi => {
                     crate::providers::send_openai_image_request(
                         &effective_provider_context.url,
@@ -4976,16 +4956,26 @@ async fn resolve_generate_image_step_profile_context(
     let mut server = String::new();
     let mut model = String::new();
     let mut profile_timeout_in_sec = 60;
+    let mut profile_max_output_tokens = None;
     let mut url = String::new();
     let selected_profile = apply_profile(
         profile,
         &mut server,
         &mut model,
         &mut profile_timeout_in_sec,
+        &mut profile_max_output_tokens,
         &mut url,
     );
 
     let resolved_token = match provider {
+        ProviderKind::Anthropic => ResolvedOpenAiToken {
+            token: resolve_api_key_provider_token(provider, Some(&selected_profile))?,
+            uses_account_session: false,
+        },
+        ProviderKind::Gemini => ResolvedOpenAiToken {
+            token: resolve_api_key_provider_token(provider, Some(&selected_profile))?,
+            uses_account_session: false,
+        },
         ProviderKind::OpenAi => {
             resolve_openai_token_for_request(Some(&selected_profile), Some(&config)).await?
         }

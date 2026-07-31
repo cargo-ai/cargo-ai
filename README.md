@@ -23,7 +23,7 @@ Cargo AI keeps agent behavior readable, auditable, and understandable through a 
 - **Handles Real Inputs**: work with text, images, URLs, and common files.
 - **Supports Advanced Logic**: add conditions and follow-up behavior without hand-building a custom app.
 - **Real Actions, Not Just Prompts**: run local commands, call child agents, pass command-line arguments, and send email follow-ups.
-- **Choose Your Own AI**: use OpenAI models today or open-source models through Ollama, with room for more providers over time.
+- **Choose Your Own AI**: use Anthropic, Google Gemini, or OpenAI directly, reuse an OpenAI account when it fits, or run open-source models through Ollama.
 - **You Own the Output**: hatch a local executable and generated code that you can keep, modify, and run wherever you want.
 - **Portable Across macOS, Linux, and Windows**: keep one readable agent definition and hatch it for the systems you care about.
 - **Easy to Share Through `cargo-ai.org`**: create a free account to publish definitions in minutes so other people can hatch them locally on their own machines.
@@ -89,7 +89,62 @@ cargo ai profile add openai \
 cargo ai profile set openai --token sk-*** --auth api_key
 ```
 
-**Option C: open-source models with Ollama**
+**Option C: Anthropic API**
+
+Use this path for Claude through Anthropic's native Messages API. A paid Claude.ai plan does not include Anthropic Console API usage; create a Console organization, add prepaid API credits, and create a dedicated API key before the first live run. See Anthropic's [account separation explanation](https://support.anthropic.com/en/articles/9876003-i-subscribe-to-a-paid-claude-ai-plan-why-do-i-have-to-pay-separately-for-api-usage-on-console) and [API credit guidance](https://support.anthropic.com/en/articles/8977456-how-do-i-pay-for-my-api-usage).
+
+```bash
+cargo ai profile add anthropic \
+  --server anthropic \
+  --model claude-sonnet-5 \
+  --auth api_key \
+  --max-output-tokens 4096
+
+printf '%s' "$ANTHROPIC_API_KEY" | cargo ai profile set anthropic --stdin
+cargo ai run adder_test --profile anthropic
+```
+
+The example model ID was confirmed against Anthropic's [current model table](https://platform.claude.com/docs/en/about-claude/models/overview) (Verified: 2026-07-29). Model availability varies by Console organization, so select a current model your organization can access instead of treating this example as a built-in catalog. Cargo AI defaults Anthropic profiles to `https://api.anthropic.com/v1/messages` and a `4096` output-token cap when `max_output_tokens` is omitted. Use `--url` for a custom Messages endpoint and `--max-output-tokens` for a one-run override. Claude Sonnet 5 enables adaptive thinking by default, and its output cap covers both thinking and final text; an unusually small override can therefore finish without a text block on multimodal work. Raise the cap if that occurs. See Anthropic's [Sonnet 5 behavior changes](https://platform.claude.com/docs/en/about-claude/models/whats-new-sonnet-5) (Verified: 2026-07-30).
+
+Anthropic supports text, client-fetched URL text, local image input, JSON-schema-directed output, usage accounting, and interpreted or hatched execution in this release. Direct file input and Anthropic `generate_image` are intentionally unsupported and fail explicitly. An Anthropic parent agent may still select an OpenAI or Ollama step-level profile for a supported `generate_image` action.
+
+Maintainers can reuse the isolated deterministic provider lane without an API key:
+
+```bash
+cargo test --test provider_smoke
+cargo test --test provider_smoke generated_anthropic_smoke_isolated_and_deterministic -- --ignored --exact
+```
+
+The first command covers interpreted success and failure paths; the second hatches and runs a standalone agent against the same native-protocol assertions. Both use a temporary `CARGO_AI_HOME`, a loopback mock, and fake credentials. The separately ignored `live_anthropic_smoke_uses_isolated_stdin_credentials` case requires `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL`; it writes the key to a temporary profile through stdin and never passes it as a process argument. It is intended for an explicit manual checkpoint, not default CI.
+
+**Option D: Google Gemini API**
+
+Use this path for Gemini through Google's native GA Interactions API. Create or select an API key in [Google AI Studio](https://aistudio.google.com/app/apikey), then store it through a Cargo AI profile rather than placing it in agent JSON or shell history.
+
+```bash
+cargo ai profile add gemini \
+  --server gemini \
+  --model gemini-3.6-flash \
+  --auth api_key
+
+printf '%s' "$GEMINI_API_KEY" | cargo ai profile set gemini --stdin
+cargo ai run adder_test --profile gemini
+```
+
+The example model ID and the Interactions endpoint were confirmed against Google's [Interactions API quickstart](https://ai.google.dev/gemini-api/docs/get-started) (Verified: 2026-07-30). Model availability varies by Google AI project, so select a current model your project can access rather than treating this example as a built-in catalog. Cargo AI defaults Gemini profiles to `https://generativelanguage.googleapis.com/v1beta/interactions`, sends `store = false`, and uses `--max-output-tokens` only when you explicitly configure a cap.
+
+Gemini supports text, client-fetched URL text, local image input, JSON-schema-directed output, usage accounting, and interpreted or hatched execution in this release. Direct file input and Gemini `generate_image` are intentionally unsupported and fail explicitly. A Gemini parent may still select an OpenAI or Ollama step-level profile for a supported image-generation action.
+
+Maintainers can run the deterministic Gemini lane without an API key:
+
+```bash
+cargo test --test provider_smoke interpreted_gemini_smoke_isolated_and_deterministic -- --exact
+cargo test --test provider_smoke generated_gemini_smoke_isolated_and_deterministic -- --ignored --exact
+```
+
+Both cases use a temporary `CARGO_AI_HOME`, a loopback Interactions fixture, and fake credentials. The separately ignored `live_gemini_smoke_uses_isolated_stdin_credentials` case requires `GEMINI_API_KEY` and `GEMINI_MODEL`; it stores the key in a temporary profile through stdin and is intended only for the explicit live checkpoint.
+
+**Option E: open-source models with Ollama**
 
 Use this path if you want to run `cargo-ai` without ChatGPT or OpenAI at all.
 
@@ -155,7 +210,7 @@ cargo ai hatch adder_test --from-account
 ## The Core Mental Model
 
 > [!TIP]
-> You do not need to author this by hand. The fastest path is to tell Codex exactly what kind of agent you want and let it update the file for you. Read this section so the structure is easy to recognize, then review the result and verify exactly what the agent does. When you're ready for that loop, jump to [Best First Workflow in Codex](#best-first-workflow-in-codex).
+> You do not need to author this by hand. The fastest path is to tell your AI coding assistant exactly what kind of agent you want and let it update the file for you. Read this section so the structure is easy to recognize, then review the result and verify exactly what the agent does. When you're ready for that loop, jump to [Best First Workflow with an AI Coding Assistant](#best-first-workflow-with-an-ai-coding-assistant).
 
 Cargo AI keeps the authoring model intentionally small:
 
@@ -651,7 +706,7 @@ CARGO_AI_USAGE_LOG=./usage.jsonl cargo ai run ./my_agent.json --profile local-ol
 ./my_agent --usage-log ./usage.ndjson
 ```
 
-The file is newline-delimited JSON, also called JSON Lines: one complete JSON object per line. Cargo AI writes metadata-only events such as `usage_log_started`, `agent_run_started`, `provider_request_completed`, `tool_run_completed`, `agent_run_completed`, and `root_run_completed`. Provider usage is normalized to `input_tokens`, `output_tokens`, and `total_tokens` when OpenAI or Ollama reports counters; when a provider does not report usage, Cargo AI records timing/status and leaves usage null instead of estimating. The same `root_run_id` is propagated to direct child agents and tool-bridge-launched child agents, while each execution gets its own `agent_run_id` and `parent_agent_run_id` so repeated or recursive agents remain reconstructable.
+The file is newline-delimited JSON, also called JSON Lines: one complete JSON object per line. Cargo AI writes metadata-only events such as `usage_log_started`, `agent_run_started`, `provider_request_completed`, `tool_run_completed`, `agent_run_completed`, and `root_run_completed`. Provider usage is normalized to `input_tokens`, `output_tokens`, and `total_tokens` when Anthropic, Gemini, OpenAI, or Ollama reports counters; when a provider does not report usage, Cargo AI records timing/status and leaves usage null instead of estimating. The same `root_run_id` is propagated to direct child agents and tool-bridge-launched child agents, while each execution gets its own `agent_run_id` and `parent_agent_run_id` so repeated or recursive agents remain reconstructable.
 
 Agent metadata identifies the best-known source for each event. Interpreted local JSON runs include `agent.source: "local_path"`, the JSON `artifact` path, a derived `name`, and a canonical `definition_sha256` when available. Registry, inline JSON, and stdin runs use matching source labels, and hatched agents report `agent.source: "hatched_agent"`, `generated: true`, and the executable artifact/name. Use `agent_run_id` for one execution, `definition_sha256` for exact interpreted-definition provenance, and `parent_agent_run_id` plus `depth` to render the run tree.
 
@@ -892,11 +947,11 @@ If your config file already matches the agent name, the shorthand works too:
 cargo ai hatch my_agent.json --check
 ```
 
-When the file checks cleanly, use the Codex workflow below for the fastest iteration loop.
+When the file checks cleanly, use the assistant workflow below for the fastest iteration loop.
 
-## Best First Workflow in Codex
+## Best First Workflow with an AI Coding Assistant
 
-If you want the fastest authoring loop, start in a new folder and let Codex build the agent definition with you.
+If you want the fastest authoring loop, start in a new folder and let Codex or Claude Code build the agent definition with you.
 
 ```bash
 cargo ai new my-agent
@@ -905,13 +960,28 @@ cargo ai add guidance --style codex
 codex
 ```
 
-This creates the Cargo AI project boundary first, then installs `AGENTS.md` plus the helper files under `.cargo-ai/guidance/` so Codex knows the Cargo AI contract.
+For Claude Code, install its discovery entrypoint instead:
 
-If you already have a folder, use `cargo ai init` first, then `cargo ai add guidance --style codex`.
+```bash
+cargo ai new my-agent
+cd my-agent
+cargo ai add guidance --style claude
+claude
+```
 
-Then tell Codex: `I want to build a Cargo AI agent.` Describe what the agent should do, what inputs it should accept, what structured output it should return, and any follow-up actions you want.
+To support both assistants in one workspace, repeat the option in one command:
 
-Ask Codex to:
+```bash
+cargo ai add guidance --style codex --style claude
+```
+
+Each style adds a thin assistant-specific entry file (`AGENTS.md` or `CLAUDE.md`) that points to the same canonical, assistant-neutral bundle at `.cargo-ai/guidance/cargo-ai.md`. If that managed bundle already exists byte-for-byte, Cargo AI safely reuses it when a later style is added. A divergent managed bundle file stops the command rather than overwriting local changes. Existing root entry files remain unchanged and the command prints the small section you can merge manually.
+
+If you already have a folder, use `cargo ai init` first, then add the style or styles you use.
+
+Then tell your assistant: `I want to build a Cargo AI agent.` Describe what the agent should do, what inputs it should accept, what structured output it should return, and any follow-up actions you want.
+
+Ask the assistant to:
 
 - build the JSON definition
 - run `cargo ai hatch my_agent --config ./my_agent.json --check`
@@ -938,7 +1008,7 @@ cargo ai add guidance --style codex
 cargo ai add tool hello_tool
 ```
 
-If you are already inside an existing folder, run `cargo ai init` first. Add `cargo ai add guidance --style codex` when you want the Codex guidance bundle.
+If you are already inside an existing folder, run `cargo ai init` first. Add guidance with `--style codex`, `--style claude`, or both when you want an assistant to discover the shared Cargo AI bundle.
 
 If you want a project to refuse machine/global tool fallback, set this in `.cargo-ai/project.toml`:
 
@@ -1005,8 +1075,9 @@ That creates:
   - `cargo ai new/init` writes `[tools] allow_global_fallback = true` by default
 - `.gitignore`
   - generated artifact ignore rules when VCS is enabled
-- `AGENTS.md` plus `.cargo-ai/guidance/`
-  - Codex guidance when you run `cargo ai add guidance --style codex`
+- `AGENTS.md` and/or `CLAUDE.md` plus `.cargo-ai/guidance/`
+  - assistant discovery entrypoints when you run `cargo ai add guidance --style codex`, `--style claude`, or both
+  - the canonical authoring contract lives at `.cargo-ai/guidance/cargo-ai.md`
   - `tool-authoring.md` stays the workflow overview, while detailed contract, child-agent, and hardening rules live in adjacent guidance files
 - `tools/hello_tool/`
   - normal Rust source for the tool crate, with custom behavior isolated in `src/tool.rs`
@@ -1273,6 +1344,8 @@ When you want deeper details, use these files:
 - Standalone recipients do not need Cargo AI installed when the binary has no `alias::entrypoint` package-child references and they run it with explicit runtime flags such as `--server`, `--model`, optional `--url`, optional `--token`, and optional `--render-mode`. Package-child references require `cargo ai` or `cargo-ai` on `PATH` so the installed alias policy can be enforced.
 - `--profile <name>` is strict for generated binaries: if the named profile is missing, the run fails closed instead of falling back to another profile or to profileless auth.
 - For the standalone OpenAI account path, run the generated binary with `--server openai --model <model>` and no `--token`; if a local Codex session is available, the binary reuses it automatically.
+- For standalone Anthropic execution, pass `--server anthropic --model <model> --token <token>` or use an `api_key` profile. Prefer a stored profile for real credentials so the API key does not enter shell history.
+- For standalone Gemini execution, pass `--server gemini --model <model> --token <token>` or use an `api_key` profile. Native requests use the Interactions API with provider-side storage disabled.
 - On machines without Cargo AI installed/configured, `./my_agent version` treats local sync comparison as not checked and points users to `./my_agent inspect` for embedded provenance.
 - Scheduling is not built into Cargo AI today. To run an agent on a schedule, use your operating system scheduler such as `cron` on macOS/Linux or Task Scheduler on Windows. We know scheduling matters and expect this area to expand over time.
 - Cargo AI recommends manual upgrade via:

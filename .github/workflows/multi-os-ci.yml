@@ -15,6 +15,26 @@ on:
         required: false
         type: boolean
         default: false
+      run_live_anthropic_smoke:
+        description: "Run the isolated live Anthropic smoke after deterministic provider checks"
+        required: false
+        type: boolean
+        default: false
+      anthropic_model:
+        description: "Anthropic model ID for the opt-in live smoke"
+        required: false
+        type: string
+        default: "claude-sonnet-5"
+      run_live_gemini_smoke:
+        description: "Run the isolated live Gemini smoke after deterministic provider checks"
+        required: false
+        type: boolean
+        default: false
+      gemini_model:
+        description: "Gemini model ID for the opt-in live smoke"
+        required: false
+        type: string
+        default: "gemini-3.6-flash"
 
 jobs:
   test:
@@ -22,6 +42,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_MODEL: ${{ inputs.anthropic_model }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_MODEL: ${{ inputs.gemini_model }}
 
     strategy:
       # Prevents one OS job failure (e.g., Ubuntu) from canceling all matrix jobs
@@ -45,6 +69,12 @@ jobs:
       - name: Run test suite
         run: cargo test --all-targets
 
+      - name: Run generated Anthropic provider smoke
+        run: cargo test --test provider_smoke generated_anthropic_smoke_isolated_and_deterministic -- --ignored --exact
+
+      - name: Run generated Gemini provider smoke
+        run: cargo test --test provider_smoke generated_gemini_smoke_isolated_and_deterministic -- --ignored --exact
+
       - name: Build project
         run: cargo build --verbose
 
@@ -66,6 +96,40 @@ jobs:
             echo "Skipping live OpenAI smoke on the default push matrix; build, install, and hatch smoke remain required."
           fi
         shell: bash
+
+      - name: Note live Anthropic smoke policy
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.run_live_anthropic_smoke }}" == "true" ]]; then
+            if [[ -n "$ANTHROPIC_API_KEY" && -n "$ANTHROPIC_MODEL" ]]; then
+              echo "Live Anthropic smoke is enabled for this manual run."
+            else
+              echo "Live Anthropic smoke was requested, but ANTHROPIC_API_KEY or the model input is missing; skipping it."
+            fi
+          else
+            echo "Skipping live Anthropic smoke; deterministic interpreted and generated provider checks remain required."
+          fi
+        shell: bash
+
+      - name: Run isolated live Anthropic smoke
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_anthropic_smoke == true && env.ANTHROPIC_API_KEY != '' && env.ANTHROPIC_MODEL != '' }}
+        run: cargo test --test provider_smoke live_anthropic_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+
+      - name: Note live Gemini smoke policy
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.run_live_gemini_smoke }}" == "true" ]]; then
+            if [[ -n "$GEMINI_API_KEY" && -n "$GEMINI_MODEL" ]]; then
+              echo "Live Gemini smoke is enabled for this manual run."
+            else
+              echo "Live Gemini smoke was requested, but GEMINI_API_KEY or the model input is missing; skipping it."
+            fi
+          else
+            echo "Skipping live Gemini smoke; deterministic interpreted and generated provider checks remain required."
+          fi
+        shell: bash
+
+      - name: Run isolated live Gemini smoke
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_gemini_smoke == true && env.GEMINI_API_KEY != '' && env.GEMINI_MODEL != '' }}
+        run: cargo test --test provider_smoke live_gemini_smoke_uses_isolated_stdin_credentials -- --ignored --exact
 
       - name: Run agent_adder with OpenAI token
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_openai_smoke == true && env.OPENAI_API_KEY != '' }}

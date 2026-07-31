@@ -49,7 +49,7 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
 
     vec![
         format!("x Unknown AI server '{}'.", display_server),
-        "Use `--server ollama` or `--server openai`.".to_string(),
+        "Use `--server anthropic`, `--server gemini`, `--server ollama`, or `--server openai`.".to_string(),
         "Hint: Set `--server` explicitly or configure a default profile with a supported server."
             .to_string(),
         "Example: cargo ai run --config ./agent.json --server ollama --model mistral --input-text \"What is 2 + 2?\""
@@ -115,6 +115,8 @@ fn profile_selection_messages(
 
 fn provider_display_name(provider: ProviderKind) -> &'static str {
     match provider {
+        ProviderKind::Anthropic => "anthropic",
+        ProviderKind::Gemini => "gemini",
         ProviderKind::Ollama => "ollama",
         ProviderKind::OpenAi => "openai",
     }
@@ -293,6 +295,10 @@ fn cli_override_descriptions(sub_m: &ArgMatches, include_token_override: bool) -
         overrides.push(format!("inference_timeout_in_sec={timeout}"));
     }
 
+    if let Some(max_output_tokens) = sub_m.get_one::<u32>("max_output_tokens") {
+        overrides.push(format!("max_output_tokens={max_output_tokens}"));
+    }
+
     if let Some(max_depth) = sub_m.get_one::<u32>("max_agent_depth") {
         overrides.push(format!("max_agent_depth={max_depth}"));
     }
@@ -409,6 +415,29 @@ async fn resolve_openai_token_for_request(
     }
 }
 
+fn resolve_api_key_provider_token(
+    provider: ProviderKind,
+    selected_profile: Option<&SelectedProfile>,
+) -> Result<String, String> {
+    let provider_name = provider.display_name();
+    match selected_profile {
+        Some(profile) if profile.auth_mode == ProfileAuthMode::ApiKey => {
+            resolve_profile_api_token(profile)
+        }
+        Some(profile) => Err(format!(
+            "Profile '{}' auth mode is '{}'. Set it to '{}' before using {}.",
+            profile.name,
+            profile.auth_mode.as_str(),
+            ProfileAuthMode::ApiKey.as_str(),
+            provider_name
+        )),
+        None => Err(format!(
+            "{} requires an API key. Provide `--token <TOKEN>` or select an `api_key` profile.",
+            provider_name
+        )),
+    }
+}
+
 fn resolved_invocation_auth_mode(
     provider: ProviderKind,
     selected_profile: Option<&SelectedProfile>,
@@ -416,6 +445,15 @@ fn resolved_invocation_auth_mode(
     use_openai_account_transport: bool,
 ) -> &'static str {
     match provider {
+        ProviderKind::Anthropic | ProviderKind::Gemini => {
+            if explicit_token_override {
+                "api_key"
+            } else {
+                selected_profile
+                    .map(|profile| profile.auth_mode.as_str())
+                    .unwrap_or("none")
+            }
+        }
         ProviderKind::Ollama => "none",
         ProviderKind::OpenAi => {
             if explicit_token_override {
@@ -1033,6 +1071,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     let mut model = String::new();
     let mut url = String::new();
     let mut token = String::new();
+    let mut max_output_tokens: Option<u32> = None;
     let project_runtime_defaults = match load_project_runtime_defaults(project_root.as_deref()) {
         Ok(defaults) => defaults,
         Err(error) => {
@@ -1052,6 +1091,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                 server = profile.server.clone().to_lowercase();
                 model = profile.model.clone();
                 inference_timeout_in_sec = profile.timeout_in_sec;
+                max_output_tokens = profile.max_output_tokens;
                 // Updated URL assignment logic:
                 url = profile.url.clone().unwrap_or_default();
                 selected_profile = Some(SelectedProfile {
@@ -1082,6 +1122,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                     server = profile.server.clone().to_lowercase();
                     model = profile.model.clone();
                     inference_timeout_in_sec = profile.timeout_in_sec;
+                    max_output_tokens = profile.max_output_tokens;
                     url = profile.url.clone().unwrap_or_default();
                     selected_profile = Some(SelectedProfile {
                         name: profile.name.clone(),
@@ -1119,6 +1160,10 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         .get_one::<String>("token")
         .map(|token| token.to_string());
 
+    if let Some(max_output_tokens_arg) = sub_m.get_one::<u32>("max_output_tokens").copied() {
+        max_output_tokens = Some(max_output_tokens_arg);
+    }
+
     if let Some(timeout_arg) = sub_m.get_one::<u64>("inference_timeout_in_sec").copied() {
         inference_timeout_in_sec = timeout_arg;
     }
@@ -1152,19 +1197,14 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         for line in profile_selection_messages(
             *kind,
             profile_name,
-            &cli_override_descriptions(
-                sub_m,
-                has_explicit_token_override && provider == ProviderKind::OpenAi,
-            ),
+            &cli_override_descriptions(sub_m, has_explicit_token_override),
         ) {
             println!("{line}");
         }
     }
 
     if let Some(cmd_token) = explicit_token_override {
-        if provider == ProviderKind::OpenAi {
-            println!("Using explicit --token override; bypassing profile auth-mode resolution.");
-        }
+        println!("Using explicit --token override; bypassing profile auth-mode resolution.");
         token = cmd_token;
     } else if provider == ProviderKind::OpenAi {
         token = match resolve_openai_token_for_request(selected_profile.as_ref()).await {
@@ -1172,6 +1212,14 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                 use_openai_account_transport = resolved_token.uses_account_session;
                 resolved_token.token
             }
+            Err(error) => {
+                eprintln!("x {error}");
+                return false;
+            }
+        };
+    } else if provider.capabilities().requires_token {
+        token = match resolve_api_key_provider_token(provider, selected_profile.as_ref()) {
+            Ok(token) => token,
             Err(error) => {
                 eprintln!("x {error}");
                 return false;
@@ -1424,279 +1472,138 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
 
     let content_parts = ai_cargo.content_parts();
 
-    let mut response = String::new(); // Holds the LLM response
-
-    if provider == ProviderKind::Ollama {
-        let remaining =
-            match remaining_runtime_duration(runtime_budget, "before starting inference") {
-                Ok(remaining) => remaining,
-                Err(error) => {
-                    eprintln!(
-                        "x {}",
-                        current_agent_runtime_timeout_message(runtime_budget, error.as_str())
-                    );
-                    return false;
-                }
-            };
-
-        let provider_started_at = std::time::Instant::now();
-        match tokio::time::timeout(
-            remaining,
-            crate::providers::send_ollama_request(
-                &url,
-                &model,
-                &content_parts,
-                inference_timeout_in_sec,
-                definition.json_schema_value(),
-            ),
-        )
-        .await
-        {
-            Ok(Ok(r)) => {
-                if let Some(usage_log) = usage_log_context.as_ref() {
-                    usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
-                        provider,
-                        profile_name: selected_profile
-                            .as_ref()
-                            .map(|profile| profile.name.as_str()),
-                        auth_mode: action_provider_context.auth_mode.as_str(),
-                        model: model.as_str(),
-                        step: crate::usage_log::UsageStep {
-                            kind: "agent_inference",
-                            action: None,
-                            step_index: None,
-                        },
-                        usage: r.usage.as_ref(),
-                        duration: provider_started_at.elapsed(),
-                        status: crate::usage_log::UsageStatus::Success,
-                        error: None,
-                    });
-                }
-                response.push_str(&r.text)
-            }
-            Ok(Err(error)) => {
-                if let Some(usage_log) = usage_log_context.as_ref() {
-                    usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
-                        provider,
-                        profile_name: selected_profile
-                            .as_ref()
-                            .map(|profile| profile.name.as_str()),
-                        auth_mode: action_provider_context.auth_mode.as_str(),
-                        model: model.as_str(),
-                        step: crate::usage_log::UsageStep {
-                            kind: "agent_inference",
-                            action: None,
-                            step_index: None,
-                        },
-                        usage: None,
-                        duration: provider_started_at.elapsed(),
-                        status: crate::usage_log::UsageStatus::Failed,
-                        error: Some(crate::usage_log::UsageError::redacted(
-                            format!("{:?}", error.kind()).to_ascii_lowercase(),
-                            "Provider request failed.",
-                        )),
-                    });
-                }
-                let details = provider_error_messages(&error);
-                let summary = details
-                    .first()
-                    .map(|line| normalize_cli_issue(line))
-                    .unwrap_or_else(|| "Issue communicating with the AI server.".to_string());
-                print_runtime_failure(
-                    summary.as_str(),
-                    Some(&action_provider_context),
-                    &[],
-                    Some("Details"),
-                    &details[1..],
-                    &[(
-                        "Retry request",
-                        "Check connectivity or credentials, then retry the run.".to_string(),
-                    )],
-                );
-                return false;
-            }
-            Err(_) => {
-                if let Some(usage_log) = usage_log_context.as_ref() {
-                    usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
-                        provider,
-                        profile_name: selected_profile
-                            .as_ref()
-                            .map(|profile| profile.name.as_str()),
-                        auth_mode: action_provider_context.auth_mode.as_str(),
-                        model: model.as_str(),
-                        step: crate::usage_log::UsageStep {
-                            kind: "agent_inference",
-                            action: None,
-                            step_index: None,
-                        },
-                        usage: None,
-                        duration: provider_started_at.elapsed(),
-                        status: crate::usage_log::UsageStatus::Failed,
-                        error: Some(crate::usage_log::UsageError::redacted(
-                            "timeout",
-                            "Provider request timed out.",
-                        )),
-                    });
-                }
-                print_runtime_failure(
-                    "The provider did not return a response before the runtime budget expired.",
-                    Some(&action_provider_context),
-                    &[current_agent_runtime_timeout_message(
-                        runtime_budget,
-                        "while waiting for the model response",
-                    )],
-                    None,
-                    &[],
-                    &[(
-                        "Reduce runtime",
-                        "Shorten the request or increase the allowed runtime budget.".to_string(),
-                    )],
-                );
-                return false;
-            }
+    let response_schema = definition.json_schema_value();
+    let remaining = match remaining_runtime_duration(runtime_budget, "before starting inference") {
+        Ok(remaining) => remaining,
+        Err(error) => {
+            eprintln!(
+                "x {}",
+                current_agent_runtime_timeout_message(runtime_budget, error.as_str())
+            );
+            return false;
         }
-    } else if provider == ProviderKind::OpenAi {
-        let schema = definition.json_schema_value();
-        let fmt = serde_json::json!({
-        "type": "json_schema",
-        "json_schema": {
-            "name": "Output",
-            "schema": schema,
-            "strict": true
+    };
+    let provider_started_at = std::time::Instant::now();
+    let provider_result = tokio::time::timeout(
+        remaining,
+        crate::providers::send_text_request(
+            provider,
+            &url,
+            crate::providers::ProviderTextRequest {
+                model: &model,
+                content_parts: &content_parts,
+                timeout_in_sec: inference_timeout_in_sec,
+                token: &token,
+                response_schema: &response_schema,
+                max_output_tokens,
+            },
+        ),
+    )
+    .await;
+    let response = match provider_result {
+        Ok(Ok(response)) => {
+            if let Some(usage_log) = usage_log_context.as_ref() {
+                usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                    provider,
+                    profile_name: selected_profile
+                        .as_ref()
+                        .map(|profile| profile.name.as_str()),
+                    auth_mode: action_provider_context.auth_mode.as_str(),
+                    model: model.as_str(),
+                    step: crate::usage_log::UsageStep {
+                        kind: "agent_inference",
+                        action: None,
+                        step_index: None,
+                    },
+                    usage: response.usage.as_ref(),
+                    duration: provider_started_at.elapsed(),
+                    status: crate::usage_log::UsageStatus::Success,
+                    error: None,
+                });
+            }
+            response.text
         }
-        });
-
-        // Send request to OpenAI and `await` the LLM response
-        let remaining =
-            match remaining_runtime_duration(runtime_budget, "before starting inference") {
-                Ok(remaining) => remaining,
-                Err(error) => {
-                    eprintln!(
-                        "x {}",
-                        current_agent_runtime_timeout_message(runtime_budget, error.as_str())
-                    );
-                    return false;
-                }
-            };
-
-        let provider_started_at = std::time::Instant::now();
-        match tokio::time::timeout(
-            remaining,
-            crate::providers::send_openai_request(
-                &url,
-                &model,
-                &content_parts,
-                inference_timeout_in_sec,
-                &token,
-                fmt,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(r)) => {
-                if let Some(usage_log) = usage_log_context.as_ref() {
-                    usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
-                        provider,
-                        profile_name: selected_profile
-                            .as_ref()
-                            .map(|profile| profile.name.as_str()),
-                        auth_mode: action_provider_context.auth_mode.as_str(),
-                        model: model.as_str(),
-                        step: crate::usage_log::UsageStep {
-                            kind: "agent_inference",
-                            action: None,
-                            step_index: None,
-                        },
-                        usage: r.usage.as_ref(),
-                        duration: provider_started_at.elapsed(),
-                        status: crate::usage_log::UsageStatus::Success,
-                        error: None,
-                    });
-                }
-                response.push_str(&r.text)
+        Ok(Err(error)) => {
+            if let Some(usage_log) = usage_log_context.as_ref() {
+                usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                    provider,
+                    profile_name: selected_profile
+                        .as_ref()
+                        .map(|profile| profile.name.as_str()),
+                    auth_mode: action_provider_context.auth_mode.as_str(),
+                    model: model.as_str(),
+                    step: crate::usage_log::UsageStep {
+                        kind: "agent_inference",
+                        action: None,
+                        step_index: None,
+                    },
+                    usage: None,
+                    duration: provider_started_at.elapsed(),
+                    status: crate::usage_log::UsageStatus::Failed,
+                    error: Some(crate::usage_log::UsageError::redacted(
+                        format!("{:?}", error.kind()).to_ascii_lowercase(),
+                        "Provider request failed.",
+                    )),
+                });
             }
-            Ok(Err(error)) => {
-                if let Some(usage_log) = usage_log_context.as_ref() {
-                    usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
-                        provider,
-                        profile_name: selected_profile
-                            .as_ref()
-                            .map(|profile| profile.name.as_str()),
-                        auth_mode: action_provider_context.auth_mode.as_str(),
-                        model: model.as_str(),
-                        step: crate::usage_log::UsageStep {
-                            kind: "agent_inference",
-                            action: None,
-                            step_index: None,
-                        },
-                        usage: None,
-                        duration: provider_started_at.elapsed(),
-                        status: crate::usage_log::UsageStatus::Failed,
-                        error: Some(crate::usage_log::UsageError::redacted(
-                            format!("{:?}", error.kind()).to_ascii_lowercase(),
-                            "Provider request failed.",
-                        )),
-                    });
-                }
-                let details = provider_error_messages(&error);
-                let summary = details
-                    .first()
-                    .map(|line| normalize_cli_issue(line))
-                    .unwrap_or_else(|| "Issue communicating with the AI server.".to_string());
-                print_runtime_failure(
-                    summary.as_str(),
-                    Some(&action_provider_context),
-                    &[],
-                    Some("Details"),
-                    &details[1..],
-                    &[(
-                        "Retry request",
-                        "Check connectivity or credentials, then retry the run.".to_string(),
-                    )],
-                );
-                return false;
+            let details = provider_error_messages(&error);
+            let summary = details
+                .first()
+                .map(|line| normalize_cli_issue(line))
+                .unwrap_or_else(|| "Issue communicating with the AI server.".to_string());
+            print_runtime_failure(
+                summary.as_str(),
+                Some(&action_provider_context),
+                &[],
+                Some("Details"),
+                &details[1..],
+                &[(
+                    "Retry request",
+                    "Check connectivity or credentials, then retry the run.".to_string(),
+                )],
+            );
+            return false;
+        }
+        Err(_) => {
+            if let Some(usage_log) = usage_log_context.as_ref() {
+                usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                    provider,
+                    profile_name: selected_profile
+                        .as_ref()
+                        .map(|profile| profile.name.as_str()),
+                    auth_mode: action_provider_context.auth_mode.as_str(),
+                    model: model.as_str(),
+                    step: crate::usage_log::UsageStep {
+                        kind: "agent_inference",
+                        action: None,
+                        step_index: None,
+                    },
+                    usage: None,
+                    duration: provider_started_at.elapsed(),
+                    status: crate::usage_log::UsageStatus::Failed,
+                    error: Some(crate::usage_log::UsageError::redacted(
+                        "timeout",
+                        "Provider request timed out.",
+                    )),
+                });
             }
-            Err(_) => {
-                if let Some(usage_log) = usage_log_context.as_ref() {
-                    usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
-                        provider,
-                        profile_name: selected_profile
-                            .as_ref()
-                            .map(|profile| profile.name.as_str()),
-                        auth_mode: action_provider_context.auth_mode.as_str(),
-                        model: model.as_str(),
-                        step: crate::usage_log::UsageStep {
-                            kind: "agent_inference",
-                            action: None,
-                            step_index: None,
-                        },
-                        usage: None,
-                        duration: provider_started_at.elapsed(),
-                        status: crate::usage_log::UsageStatus::Failed,
-                        error: Some(crate::usage_log::UsageError::redacted(
-                            "timeout",
-                            "Provider request timed out.",
-                        )),
-                    });
-                }
-                print_runtime_failure(
-                    "The provider did not return a response before the runtime budget expired.",
-                    Some(&action_provider_context),
-                    &[current_agent_runtime_timeout_message(
-                        runtime_budget,
-                        "while waiting for the model response",
-                    )],
-                    None,
-                    &[],
-                    &[(
-                        "Reduce runtime",
-                        "Shorten the request or increase the allowed runtime budget.".to_string(),
-                    )],
-                );
-                return false;
-            }
-        };
-    }
+            print_runtime_failure(
+                "The provider did not return a response before the runtime budget expired.",
+                Some(&action_provider_context),
+                &[current_agent_runtime_timeout_message(
+                    runtime_budget,
+                    "while waiting for the model response",
+                )],
+                None,
+                &[],
+                &[(
+                    "Reduce runtime",
+                    "Shorten the request or increase the allowed runtime budget.".to_string(),
+                )],
+            );
+            return false;
+        }
+    };
 
     let output = match definition.validate_provider_output(response.as_str()) {
         Ok(output) => output,
@@ -2444,6 +2351,26 @@ mod tests {
         assert_eq!(
             runtime_m.get_one::<u32>("max_agent_depth").copied(),
             Some(4)
+        );
+    }
+
+    #[test]
+    fn runtime_command_accepts_max_output_tokens_override() {
+        let cmd = matches(&[
+            "cargo-ai",
+            "run",
+            "--max-output-tokens",
+            "1024",
+            "--input-text",
+            "Return 4",
+        ]);
+        let runtime_m = cmd
+            .subcommand_matches("run")
+            .expect("run subcommand should parse");
+
+        assert_eq!(
+            runtime_m.get_one::<u32>("max_output_tokens").copied(),
+            Some(1024)
         );
     }
 

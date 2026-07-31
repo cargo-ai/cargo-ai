@@ -17,7 +17,7 @@ pub(crate) fn runtime_command(name: &'static str, about: &'static str) -> Comman
                 .long("server")
                 .short('s')
                 .value_name("CLIENT")
-                .help("Client Type - Ollama or OpenAI"),
+                .help("Provider - Anthropic, Gemini, Ollama, or OpenAI"),
         )
         .arg(
             Arg::new("model")
@@ -38,6 +38,13 @@ pub(crate) fn runtime_command(name: &'static str, about: &'static str) -> Comman
                 .long("token")
                 .value_name("TOKEN")
                 .help("API token"),
+        )
+        .arg(
+            Arg::new("max_output_tokens")
+                .long("max-output-tokens")
+                .value_name("TOKENS")
+                .help("Maximum provider output tokens for this invocation")
+                .value_parser(clap::value_parser!(u32).range(1..)),
         )
         .arg(
             Arg::new("inference_timeout_in_sec")
