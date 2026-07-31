@@ -761,7 +761,7 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
 
     vec![
         format!("❌ Unknown AI server '{}'.", display_server),
-        "Use `--server anthropic`, `--server ollama`, or `--server openai`.".to_string(),
+        "Use `--server anthropic`, `--server gemini`, `--server ollama`, or `--server openai`.".to_string(),
         "Hint: Set `--server` explicitly or configure a default profile with a supported server."
             .to_string(),
         "Example: cargo ai run --server ollama --model mistral --input-text \"What is 2 + 2?\""
@@ -1587,6 +1587,7 @@ fn validate_tool_identifier(name: &str) -> Result<(), String> {
 fn provider_server_name(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Anthropic => "anthropic",
+        ProviderKind::Gemini => "gemini",
         ProviderKind::Ollama => "ollama",
         ProviderKind::OpenAi => "openai",
     }
@@ -1883,7 +1884,7 @@ fn resolved_invocation_auth_mode(
     use_openai_account_transport: bool,
 ) -> &'static str {
     match provider {
-        ProviderKind::Anthropic => {
+        ProviderKind::Anthropic | ProviderKind::Gemini => {
             if explicit_token_override {
                 "api_key"
             } else {
@@ -3103,7 +3104,7 @@ async fn main() {
         token = cmd_token;
     } else {
         match provider {
-            ProviderKind::Anthropic => {
+            ProviderKind::Anthropic | ProviderKind::Gemini => {
                 token = match resolve_api_key_provider_token(provider, selected_profile.as_ref()) {
                     Ok(token) => token,
                     Err(error) => {
@@ -4717,6 +4718,10 @@ async fn run_generate_image_step(
                     ProviderKind::Anthropic,
                     "Anthropic image generation is not supported.",
                 )),
+                ProviderKind::Gemini => Err(ProviderError::invalid_request(
+                    ProviderKind::Gemini,
+                    "Gemini image generation is not supported.",
+                )),
                 ProviderKind::OpenAi => {
                     crate::providers::send_openai_image_request(
                         &effective_provider_context.url,
@@ -4964,6 +4969,10 @@ async fn resolve_generate_image_step_profile_context(
 
     let resolved_token = match provider {
         ProviderKind::Anthropic => ResolvedOpenAiToken {
+            token: resolve_api_key_provider_token(provider, Some(&selected_profile))?,
+            uses_account_session: false,
+        },
+        ProviderKind::Gemini => ResolvedOpenAiToken {
             token: resolve_api_key_provider_token(provider, Some(&selected_profile))?,
             uses_account_session: false,
         },

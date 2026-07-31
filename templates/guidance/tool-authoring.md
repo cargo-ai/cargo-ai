@@ -32,8 +32,10 @@ If the project boundary is missing, bootstrap it first:
    - `cargo ai new <path>`
 2. Existing folder:
    - `cargo ai init`
-3. If the user wants Codex guidance too:
+3. If the user wants assistant guidance too:
    - `cargo ai add guidance --style codex`
+   - `cargo ai add guidance --style claude`
+   - repeat `--style` to install both discovery entrypoints
 
 Current minimum project metadata:
 
@@ -149,9 +151,9 @@ For the current MVP, assume:
 - one Cargo crate
 - one primary binary target
 
-## What To Tell Codex To Do
+## What To Tell The Authoring Assistant To Do
 
-If the user wants a local tool, ask Codex to:
+If the user wants a local tool, ask the authoring assistant to:
 - scaffold or inspect the local tool crate
 - implement tool metadata and behavior in `src/tool.rs`
 - keep `src/main.rs` thin

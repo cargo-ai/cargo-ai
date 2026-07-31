@@ -35,10 +35,13 @@ When the user wants token usage, runtime timing, provider timing, or embedding-f
 
 When selecting a model provider:
 - `anthropic` uses Anthropic's native Messages API and requires an `api_key` profile or explicit token
+- `gemini` uses Google's native Interactions API and requires an `api_key` profile or explicit token
 - `openai` supports direct API-key profiles and the OpenAI-only account-session flow
 - `ollama` supports local no-token operation and optional API-key-compatible endpoints
 - Anthropic supports text, URL-text, image input, structured output, and normalized usage; it does not support direct file input or `generate_image` in the current release
+- Gemini supports text, URL-text, image input, structured output, and normalized usage; it sends `store = false` and does not support direct file input or `generate_image` in the current release
 - for real Anthropic credentials, create the profile first and pipe the key to `cargo ai profile set <name> --stdin`; never put a key in agent JSON or guidance
+- for real Gemini credentials, create the profile first and pipe a Google AI Studio key to `cargo ai profile set <name> --stdin`; never put a key in agent JSON or guidance
 - a Claude.ai paid plan and Anthropic Console API billing are separate; do not imply that the consumer subscription supplies an API key or credits
 - choose a current model available to the user's provider account instead of inventing a model ID or treating examples as a built-in allowlist
 - a parent may use one provider while a `generate_image` or child-agent step selects another saved profile explicitly

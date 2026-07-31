@@ -49,7 +49,7 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
 
     vec![
         format!("x Unknown AI server '{}'.", display_server),
-        "Use `--server anthropic`, `--server ollama`, or `--server openai`.".to_string(),
+        "Use `--server anthropic`, `--server gemini`, `--server ollama`, or `--server openai`.".to_string(),
         "Hint: Set `--server` explicitly or configure a default profile with a supported server."
             .to_string(),
         "Example: cargo ai run --config ./agent.json --server ollama --model mistral --input-text \"What is 2 + 2?\""
@@ -116,6 +116,7 @@ fn profile_selection_messages(
 fn provider_display_name(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Anthropic => "anthropic",
+        ProviderKind::Gemini => "gemini",
         ProviderKind::Ollama => "ollama",
         ProviderKind::OpenAi => "openai",
     }
@@ -444,7 +445,7 @@ fn resolved_invocation_auth_mode(
     use_openai_account_transport: bool,
 ) -> &'static str {
     match provider {
-        ProviderKind::Anthropic => {
+        ProviderKind::Anthropic | ProviderKind::Gemini => {
             if explicit_token_override {
                 "api_key"
             } else {
@@ -1216,7 +1217,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                 return false;
             }
         };
-    } else if provider == ProviderKind::Anthropic {
+    } else if provider.capabilities().requires_token {
         token = match resolve_api_key_provider_token(provider, selected_profile.as_ref()) {
             Ok(token) => token,
             Err(error) => {

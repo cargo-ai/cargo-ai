@@ -1,6 +1,4 @@
-# AGENTS.md
-
-## Cargo AI Agent Authoring (Codex)
+# Cargo AI Agent Authoring
 
 Use this workspace to create and maintain Cargo AI agent definition JSON files. Assume you do not have direct access to Cargo AI source code. The local guidance bundle in `.cargo-ai/guidance/` is the source of truth for authoring behavior, examples, and validation workflow.
 Each JSON definition is meant to hatch into a CLI tool, so keep the behavior explicit and readable.
@@ -156,7 +154,7 @@ For published packages, keep the contract narrow:
 - Prefer boxed ASCII diagrams for flow explanations.
 - If Mermaid rendering is clearly supported, offer Mermaid as an option and ask whether the user wants it.
 - Use `cargo ai new` or `cargo ai init` when the workspace needs a Cargo AI project boundary before local tool authoring.
-- Use `cargo ai add guidance --style codex` after bootstrap when the workspace needs the Codex guidance bundle.
+- Use `cargo ai add guidance --style <assistant>` after bootstrap when the workspace needs an assistant discovery entrypoint for this guidance bundle.
 - Treat `.cargo-ai/project.toml` as the source of truth for project identity and build profiles. Keep top-level `[project]` metadata (`name`, `version`) intact, and when a user wants `cargo ai build`, keep the profile explicit with:
   - `agent_definitions`
   - `hatched_agents`

@@ -300,7 +300,7 @@ fn run_add(add_m: &ArgMatches) -> bool {
         return false;
     };
     let Some(server) = add_m.get_one::<String>("server") else {
-        eprintln!("Please provide --server (for example: openai or ollama).");
+        eprintln!("Please provide --server (for example: anthropic, gemini, openai, or ollama).");
         return false;
     };
     let Some(model) = add_m.get_one::<String>("model") else {

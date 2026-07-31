@@ -81,7 +81,7 @@ Check for:
 
 Check for:
 - expecting `cargo ai add guidance` or `cargo ai add tool` to create `.cargo-ai/project.toml`; use `cargo ai init` or `cargo ai new <path>` first
-- expecting `cargo ai init/new` to install the Codex guidance bundle automatically; run `cargo ai add guidance --style codex` after bootstrap when you want `AGENTS.md` plus `.cargo-ai/guidance/`
+- expecting `cargo ai init/new` to install assistant guidance automatically; run `cargo ai add guidance --style codex`, `--style claude`, or both after bootstrap when you want a discovery entrypoint plus `.cargo-ai/guidance/`
 - forgetting that `cargo ai init/new` defaults to `--vcs git`
 - seeing a Git setup failure and missing the suggestion to either install Git or rerun with `--vcs none`
 
@@ -116,6 +116,17 @@ Check for:
 - setting `max_output_tokens` unusually low for a model with adaptive thinking; the cap includes thinking plus final text, so raise it if the provider returns no text block
 - pointing a custom URL at an OpenAI-compatible facade; Cargo AI's `anthropic` adapter expects the native Messages request and response contract
 - sending direct file input or selecting an Anthropic profile for `generate_image`; use text, URL-text, or image input, or select an OpenAI/Ollama step profile for image generation
+- assuming Cargo AI silently simplifies an unsupported JSON Schema; provider schema errors are surfaced so the authored contract remains visible
+
+### Gemini provider confusion
+
+Check for:
+- selecting `server = "gemini"` with `auth = "none"` or `auth = "openai_account"`; use `auth = "api_key"`
+- placing a Google AI Studio key in agent JSON or a command argument; store it with `cargo ai profile set <name> --stdin`
+- using a model ID that the selected Google AI project cannot access
+- pointing a custom URL at `generateContent` or an OpenAI-compatible facade; Cargo AI's `gemini` adapter expects the native Interactions request and response contract
+- expecting provider-side conversation storage; Cargo AI sends `store = false` for each Gemini request
+- sending direct file input or selecting a Gemini profile for `generate_image`; use text, URL-text, or image input, or select an OpenAI/Ollama step profile for image generation
 - assuming Cargo AI silently simplifies an unsupported JSON Schema; provider schema errors are surfaced so the authored contract remains visible
 
 ### Portability drift

@@ -30,6 +30,9 @@ const PROVIDERS_RUNTIME_RS_TEMPLATE: &str = include_str!("src/providers/runtime.
 const PROVIDERS_ANTHROPIC_RS_NAME: &str = "src/providers/anthropic.rs";
 const PROVIDERS_ANTHROPIC_RS_TEMPLATE: &str = include_str!("src/providers/anthropic.rs");
 
+const PROVIDERS_GEMINI_RS_NAME: &str = "src/providers/gemini.rs";
+const PROVIDERS_GEMINI_RS_TEMPLATE: &str = include_str!("src/providers/gemini.rs");
+
 const PROVIDERS_OPENAI_RS_NAME: &str = "src/providers/openai.rs";
 const PROVIDERS_OPENAI_RS_TEMPLATE: &str = include_str!("src/providers/openai.rs");
 
@@ -55,7 +58,7 @@ const CREDENTIALS_STORE_RS_NAME: &str = "src/credentials/store.rs";
 const CREDENTIALS_STORE_RS_TEMPLATE: &str = include_str!("src/credentials/store.rs");
 
 /// Template files emitted into a newly scaffolded agent workspace.
-pub const TEMPLATES: [(&str, &str); 18] = [
+pub const TEMPLATES: [(&str, &str); 19] = [
     (BUILD_RS_NAME, BUILD_RS_TEMPLATE),
     (BUILD_SUPPORT_RS_NAME, BUILD_SUPPORT_RS_TEMPLATE),
     (AGENTCFG_NAME, AGENTCFG_TEMPLATE),
@@ -66,6 +69,7 @@ pub const TEMPLATES: [(&str, &str); 18] = [
     (PROVIDERS_MOD_RS_NAME, PROVIDERS_MOD_RS_TEMPLATE),
     (PROVIDERS_RUNTIME_RS_NAME, PROVIDERS_RUNTIME_RS_TEMPLATE),
     (PROVIDERS_ANTHROPIC_RS_NAME, PROVIDERS_ANTHROPIC_RS_TEMPLATE),
+    (PROVIDERS_GEMINI_RS_NAME, PROVIDERS_GEMINI_RS_TEMPLATE),
     (PROVIDERS_OPENAI_RS_NAME, PROVIDERS_OPENAI_RS_TEMPLATE),
     (PROVIDERS_OLLAMA_RS_NAME, PROVIDERS_OLLAMA_RS_TEMPLATE),
     (PROVIDERS_ERROR_RS_NAME, PROVIDERS_ERROR_RS_TEMPLATE),

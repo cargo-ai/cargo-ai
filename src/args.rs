@@ -272,20 +272,22 @@ mod tests {
     #[test]
     fn add_guidance_style_parses() {
         let matches = cli_command("cargo-ai")
-            .try_get_matches_from(["cargo-ai", "add", "guidance", "--style", "codex"])
-            .expect("add guidance --style codex should parse");
+            .try_get_matches_from([
+                "cargo-ai", "add", "guidance", "--style", "codex", "--style", "claude",
+            ])
+            .expect("repeated guidance styles should parse");
 
         let guidance_matches = matches
             .subcommand_matches("add")
             .and_then(|m| m.subcommand_matches("guidance"))
             .expect("guidance subcommand should be available");
 
-        assert_eq!(
-            guidance_matches
-                .get_one::<String>("style")
-                .map(String::as_str),
-            Some("codex")
-        );
+        let styles = guidance_matches
+            .get_many::<String>("style")
+            .expect("guidance styles should be available")
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(styles, vec!["codex", "claude"]);
     }
 
     #[test]

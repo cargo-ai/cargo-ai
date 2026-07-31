@@ -41,7 +41,7 @@ pub fn build_cli() -> ArgMatches {
             Arg::new("server")
                 .long("server")
                 .short('s')
-                .help("Provider - Anthropic, Ollama, or OpenAI")
+                .help("Provider - Anthropic, Gemini, Ollama, or OpenAI")
                 .global(true)
         )
         .arg(

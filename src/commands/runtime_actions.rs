@@ -806,6 +806,7 @@ impl ActionProviderContext {
 fn provider_server_name(provider: crate::providers::ProviderKind) -> &'static str {
     match provider {
         crate::providers::ProviderKind::Anthropic => "anthropic",
+        crate::providers::ProviderKind::Gemini => "gemini",
         crate::providers::ProviderKind::Ollama => "ollama",
         crate::providers::ProviderKind::OpenAi => "openai",
     }
@@ -2128,6 +2129,12 @@ async fn run_generate_image_step(
                     "Anthropic image generation is not supported.",
                 ))
             }
+            crate::providers::ProviderKind::Gemini => {
+                Err(crate::providers::ProviderError::invalid_request(
+                    crate::providers::ProviderKind::Gemini,
+                    "Gemini image generation is not supported.",
+                ))
+            }
             crate::providers::ProviderKind::OpenAi => {
                 crate::providers::send_openai_image_request(
                     &effective_provider_context.url,
@@ -2412,6 +2419,15 @@ async fn resolve_generate_image_step_profile_context(
             crate::providers::ProviderKind::Anthropic => {
                 return Err(format!(
                     "Action '{}' generate_image step profile '{}' auth mode is '{}'. Anthropic requires '{}'.",
+                    action_name,
+                    profile.name,
+                    ProfileAuthMode::None.as_str(),
+                    ProfileAuthMode::ApiKey.as_str()
+                ));
+            }
+            crate::providers::ProviderKind::Gemini => {
+                return Err(format!(
+                    "Action '{}' generate_image step profile '{}' auth mode is '{}'. Gemini requires '{}'.",
                     action_name,
                     profile.name,
                     ProfileAuthMode::None.as_str(),

@@ -4,6 +4,7 @@
 //! They are intentionally kept out of a public SDK contract.
 mod anthropic;
 mod error;
+mod gemini;
 mod ollama;
 mod openai;
 mod runtime;
@@ -30,6 +31,18 @@ pub(crate) async fn send_text_request(
     match provider.transport() {
         error::ProviderTransport::AnthropicMessages => {
             anthropic::send_request(
+                url,
+                request.model,
+                request.content_parts,
+                request.timeout_in_sec,
+                request.token,
+                request.response_schema,
+                request.max_output_tokens,
+            )
+            .await
+        }
+        error::ProviderTransport::GeminiInteractions => {
+            gemini::send_request(
                 url,
                 request.model,
                 request.content_parts,

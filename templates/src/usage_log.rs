@@ -452,6 +452,7 @@ fn provider_json(
     json!({
         "server": match provider {
             ProviderKind::Anthropic => "anthropic",
+            ProviderKind::Gemini => "gemini",
             ProviderKind::Ollama => "ollama",
             ProviderKind::OpenAi => "openai",
         },
