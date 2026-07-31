@@ -71,7 +71,7 @@ fn is_account_run_invocation(sub_m: &ArgMatches) -> bool {
         || sub_m.get_one::<String>("definition_path").is_some()
 }
 
-fn load_run_definition_from_source(
+async fn load_run_definition_from_source(
     source: &AgentDefinitionSource,
 ) -> Result<(crate::runtime_definition::RuntimeAgentDefinition, String), String> {
     let contents = match source {
@@ -79,7 +79,7 @@ fn load_run_definition_from_source(
             .map_err(|error| format!("failed to read '{}': {error}", Path::new(path).display()))?,
         AgentDefinitionSource::RegistryName(_)
         | AgentDefinitionSource::InlineJson(_)
-        | AgentDefinitionSource::StdinJson(_) => load_definition_contents(source)?,
+        | AgentDefinitionSource::StdinJson(_) => load_definition_contents(source).await?,
     };
     let definition =
         crate::runtime_definition::RuntimeAgentDefinition::from_str(contents.as_str())?;
@@ -260,7 +260,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                         resolved.definition_path.display().to_string(),
                     );
                     let (definition, definition_json) =
-                        match load_run_definition_from_source(&source) {
+                        match load_run_definition_from_source(&source).await {
                             Ok(loaded) => loaded,
                             Err(error) => {
                                 eprintln!("x {error}");
@@ -383,13 +383,14 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         },
     };
 
-    let (definition, definition_json) = match load_run_definition_from_source(&definition_source) {
-        Ok(loaded) => loaded,
-        Err(error) => {
-            eprintln!("x {error}");
-            return false;
-        }
-    };
+    let (definition, definition_json) =
+        match load_run_definition_from_source(&definition_source).await {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                eprintln!("x {error}");
+                return false;
+            }
+        };
     let usage_agent_info = usage_agent_info_for_definition_source(
         &definition_source,
         definition_json.as_str(),

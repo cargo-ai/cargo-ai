@@ -345,4 +345,3 @@ mod tests {
         assert!(error.message().contains("no output_text"));
     }
 }
-

@@ -573,9 +573,12 @@ pub(crate) fn read_local_config(path: &str) -> Result<String, std::io::Error> {
 }
 
 /// Fetches a named agent config template from the Cargo-AI public registry.
-pub(crate) fn fetch_from_registry(name: &str) -> Result<String, Error> {
-    let url = "https://api.cargo-ai.org/public";
-    let client = reqwest::blocking::Client::new();
+pub(crate) async fn fetch_from_registry(name: &str) -> Result<String, Error> {
+    fetch_from_registry_at_url(name, "https://api.cargo-ai.org/public").await
+}
+
+async fn fetch_from_registry_at_url(name: &str, url: &str) -> Result<String, Error> {
+    let client = reqwest::Client::new();
 
     let body = serde_json::json!({ "request": name });
 
@@ -584,6 +587,7 @@ pub(crate) fn fetch_from_registry(name: &str) -> Result<String, Error> {
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
+        .await
         .map_err(|e| Error::new(ErrorKind::Other, format!("network error: {e}")))?;
 
     if !resp.status().is_success() {
@@ -595,6 +599,7 @@ pub(crate) fn fetch_from_registry(name: &str) -> Result<String, Error> {
 
     let text = resp
         .text()
+        .await
         .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?;
 
     // If the registry returns a JSON object with an `error` field,
@@ -616,14 +621,64 @@ pub(crate) fn fetch_from_registry(name: &str) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_path, prepare_workspace_for_hatch, render_hatch_success_lines, resolve_output_dir,
-        run_hatch_pipeline_with_lock, HatchMode, HatchPresentation, HatchRequest, HatchRunSummary,
-        HatchSource, TemplateSummaryStatus, WorkspaceSummaryStatus,
+        display_path, fetch_from_registry_at_url, prepare_workspace_for_hatch,
+        render_hatch_success_lines, resolve_output_dir, run_hatch_pipeline_with_lock, HatchMode,
+        HatchPresentation, HatchRequest, HatchRunSummary, HatchSource, TemplateSummaryStatus,
+        WorkspaceSummaryStatus,
     };
     use crate::agent_builder::build_target::BuildTarget;
+    use mockito::Matcher;
     use std::cell::Cell;
     use std::io;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn registry_fetch_completes_inside_async_runtime() {
+        let mut server = mockito::Server::new_async().await;
+        let registry = server
+            .mock("POST", "/public")
+            .match_header("content-type", "application/json")
+            .match_body(Matcher::PartialJson(serde_json::json!({
+                "request": "adder_test"
+            })))
+            .with_status(200)
+            .with_body(r#"{"response":"{\"agent_definition_schema_version\":\"2026-03-03.r1\"}"}"#)
+            .create_async()
+            .await;
+
+        let registry_url = format!("{}/public", server.url());
+        let definition = fetch_from_registry_at_url("adder_test", registry_url.as_str())
+            .await
+            .expect("async registry fetch should succeed");
+
+        registry.assert_async().await;
+        assert_eq!(
+            definition,
+            r#"{"agent_definition_schema_version":"2026-03-03.r1"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_fetch_returns_http_failure_without_runtime_panic() {
+        let mut server = mockito::Server::new_async().await;
+        let registry = server
+            .mock("POST", "/public")
+            .match_body(Matcher::PartialJson(serde_json::json!({
+                "request": "missing_agent"
+            })))
+            .with_status(404)
+            .create_async()
+            .await;
+
+        let registry_url = format!("{}/public", server.url());
+        let error = fetch_from_registry_at_url("missing_agent", registry_url.as_str())
+            .await
+            .expect_err("HTTP failures should remain errors");
+
+        registry.assert_async().await;
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(error.to_string().contains("HTTP 404"));
+    }
 
     #[test]
     fn lock_conflict_fails_fast_before_project_mutation() {
