@@ -1,0 +1,22 @@
+{
+  "agent_definition_schema_version": "2026-03-03.r1",
+  "inputs": [
+    {
+      "type": "text",
+      "text": "Return status ready."
+    }
+  ],
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "status": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "status"
+    ],
+    "additionalProperties": false
+  },
+  "actions": []
+}

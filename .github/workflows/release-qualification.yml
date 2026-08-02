@@ -1,0 +1,118 @@
+name: Release Qualification
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      cargo_ai_sha:
+        description: Exact Cargo AI commit to qualify (defaults to the triggering commit)
+        required: false
+        type: string
+      baseline_cargo_ai_sha:
+        description: Optional exact last release-qualified Cargo AI commit
+        required: false
+        type: string
+      openai_model:
+        required: false
+        type: string
+      anthropic_model:
+        required: false
+        type: string
+      gemini_model:
+        required: false
+        type: string
+      xai_model:
+        required: false
+        type: string
+      mistral_model:
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      cargo_ai_sha:
+        required: true
+        type: string
+      baseline_cargo_ai_sha:
+        required: false
+        type: string
+      openai_model:
+        required: false
+        type: string
+      anthropic_model:
+        required: false
+        type: string
+      gemini_model:
+        required: false
+        type: string
+      xai_model:
+        required: false
+        type: string
+      mistral_model:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deterministic:
+    name: Deterministic family
+    uses: ./.github/workflows/multi-os-ci.yml
+    with:
+      cargo_ai_sha: ${{ inputs.cargo_ai_sha || github.sha }}
+      emit_summary: false
+
+  packages:
+    name: Source-package family
+    uses: ./.github/workflows/package-qualification.yml
+    with:
+      cargo_ai_sha: ${{ inputs.cargo_ai_sha || github.sha }}
+      baseline_cargo_ai_sha: ${{ inputs.baseline_cargo_ai_sha }}
+      emit_summary: false
+
+  live_providers:
+    name: Hosted-provider family
+    uses: ./.github/workflows/live-provider-conformance.yml
+    with:
+      cargo_ai_sha: ${{ inputs.cargo_ai_sha || github.sha }}
+      openai_model: ${{ inputs.openai_model }}
+      anthropic_model: ${{ inputs.anthropic_model }}
+      gemini_model: ${{ inputs.gemini_model }}
+      xai_model: ${{ inputs.xai_model }}
+      mistral_model: ${{ inputs.mistral_model }}
+
+  summary:
+    name: Release qualification summary
+    if: ${{ always() }}
+    needs: [deterministic, packages, live_providers]
+    runs-on: ubuntu-latest
+    environment: release-qualification
+    timeout-minutes: 5
+    steps:
+      - name: Enforce every qualification family
+        env:
+          DETERMINISTIC_RESULT: ${{ needs.deterministic.result }}
+          PACKAGE_RESULT: ${{ needs.packages.result }}
+          LIVE_RESULT: ${{ needs.live_providers.result }}
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Release qualification"
+            echo ""
+            echo "Candidate: \`$CARGO_AI_SHA\`"
+            echo ""
+            echo "| Family | Result |"
+            echo "| --- | --- |"
+            echo "| Deterministic product/provider/content | $DETERMINISTIC_RESULT |"
+            echo "| Qualification canary and official packages | $PACKAGE_RESULT |"
+            echo "| Five hosted providers | $LIVE_RESULT |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$DETERMINISTIC_RESULT" = "success"
+          test "$PACKAGE_RESULT" = "success"
+          test "$LIVE_RESULT" = "success"

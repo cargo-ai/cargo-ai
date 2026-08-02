@@ -1,0 +1,161 @@
+name: Live Provider Conformance
+
+on:
+  workflow_dispatch:
+    inputs:
+      cargo_ai_sha:
+        description: Exact Cargo AI commit to qualify (defaults to the triggering commit)
+        required: false
+        type: string
+      openai_model:
+        required: false
+        type: string
+      anthropic_model:
+        required: false
+        type: string
+      gemini_model:
+        required: false
+        type: string
+      xai_model:
+        required: false
+        type: string
+      mistral_model:
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      cargo_ai_sha:
+        required: true
+        type: string
+      openai_model:
+        required: false
+        type: string
+      anthropic_model:
+        required: false
+        type: string
+      gemini_model:
+        required: false
+        type: string
+      xai_model:
+        required: false
+        type: string
+      mistral_model:
+        required: false
+        type: string
+permissions:
+  contents: read
+
+concurrency:
+  group: live-provider-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_AI_DISABLE_KEYCHAIN: "1"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  openai:
+    name: Live OpenAI conformance
+    runs-on: ubuntu-latest
+    environment: live-provider-ci
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.cargo_ai_sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, resolved 2026-08-02
+      - name: Configure isolated Cargo AI Home
+        shell: bash
+        run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Run one representative OpenAI check
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ inputs.openai_model || vars.OPENAI_MODEL }}
+        run: cargo test --locked --test provider_smoke live_openai_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+
+  anthropic:
+    name: Live Anthropic conformance
+    runs-on: ubuntu-latest
+    environment: live-provider-ci
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.cargo_ai_sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, resolved 2026-08-02
+      - name: Configure isolated Cargo AI Home
+        shell: bash
+        run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Run one representative Anthropic check
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ inputs.anthropic_model || vars.ANTHROPIC_MODEL }}
+        run: cargo test --locked --test provider_smoke live_anthropic_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+
+  gemini:
+    name: Live Gemini conformance
+    if: ${{ always() }}
+    needs: [openai]
+    runs-on: ubuntu-latest
+    environment: live-provider-ci
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.cargo_ai_sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, resolved 2026-08-02
+      - name: Configure isolated Cargo AI Home
+        shell: bash
+        run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Run one representative Gemini check
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ inputs.gemini_model || vars.GEMINI_MODEL }}
+        run: cargo test --locked --test provider_smoke live_gemini_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+
+  xai:
+    name: Live xAI conformance
+    if: ${{ always() }}
+    needs: [anthropic]
+    runs-on: ubuntu-latest
+    environment: live-provider-ci
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.cargo_ai_sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, resolved 2026-08-02
+      - name: Configure isolated Cargo AI Home
+        shell: bash
+        run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Run one representative xAI check
+        env:
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          XAI_MODEL: ${{ inputs.xai_model || vars.XAI_MODEL }}
+        run: cargo test --locked --test provider_smoke live_xai_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+
+  mistral:
+    name: Live Mistral conformance
+    if: ${{ always() }}
+    needs: [gemini, xai]
+    runs-on: ubuntu-latest
+    environment: live-provider-ci
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.cargo_ai_sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, resolved 2026-08-02
+      - name: Configure isolated Cargo AI Home
+        shell: bash
+        run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Run one representative Mistral check
+        env:
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          MISTRAL_MODEL: ${{ inputs.mistral_model || vars.MISTRAL_MODEL }}
+        run: cargo test --locked --test provider_smoke live_mistral_smoke_uses_isolated_stdin_credentials -- --ignored --exact

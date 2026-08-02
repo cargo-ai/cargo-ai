@@ -1,8 +1,8 @@
 # cargo-ai™
 
-[![Audit Status](https://github.com/analyzer1/cargo-ai/actions/workflows/security-audit.yml/badge.svg)](https://github.com/analyzer1/cargo-ai/actions/workflows/security-audit.yml)
-[![Multi-OS CI](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml/badge.svg)](https://github.com/analyzer1/cargo-ai/actions/workflows/multi-os-ci.yml)
-[![Status: Stable – Ongoing Development](https://img.shields.io/badge/Status-Stable_–_Ongoing_Development-blue)](https://github.com/analyzer1/cargo-ai)
+[![Audit Status](https://github.com/cargo-ai/cargo-ai/actions/workflows/security-audit.yml/badge.svg)](https://github.com/cargo-ai/cargo-ai/actions/workflows/security-audit.yml)
+[![Multi-OS CI](https://github.com/cargo-ai/cargo-ai/actions/workflows/multi-os-ci.yml/badge.svg)](https://github.com/cargo-ai/cargo-ai/actions/workflows/multi-os-ci.yml)
+[![Status: Stable – Ongoing Development](https://img.shields.io/badge/Status-Stable_–_Ongoing_Development-blue)](https://github.com/cargo-ai/cargo-ai)
 
 Build declarative AI agents. Ship them as local CLI apps.
 
@@ -116,6 +116,8 @@ cargo test --test provider_smoke generated_anthropic_smoke_isolated_and_determin
 ```
 
 The first command covers interpreted success and failure paths; the second hatches and runs a standalone agent against the same native-protocol assertions. Both use a temporary `CARGO_AI_HOME`, a loopback mock, and fake credentials. The separately ignored `live_anthropic_smoke_uses_isolated_stdin_credentials` case requires `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL`; it writes the key to a temporary profile through stdin and never passes it as a process argument. It is intended for an explicit manual checkpoint, not default CI.
+
+The complete maintainer qualification design keeps four lanes separate: credential-free product/provider checks, bounded public source-package qualification, protected one-model-per-provider live checks, and a release aggregator. Package repositories own their broad native tests; Cargo AI supplies the shared compatibility lifecycle and tests only allowlisted exact revisions. See [Testing and release qualification](./docs/testing-and-release-qualification.md) for local commands, matrix limits, package enrollment, evidence, and secret handling.
 
 **Option D: Google Gemini API**
 
@@ -1370,6 +1372,7 @@ When you want deeper details, use these files:
 
 - Versioning and releases:
   - [VERSIONING.md](./VERSIONING.md)
+  - [docs/testing-and-release-qualification.md](./docs/testing-and-release-qualification.md)
   - [releases/0.3.1.md](./releases/0.3.1.md)
   - [releases/0.3.0.md](./releases/0.3.0.md)
   - [releases/0.2.0.md](./releases/0.2.0.md)

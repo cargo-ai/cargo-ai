@@ -1,0 +1,14 @@
+format_version = 1
+
+[project]
+name = "qualification_fixture"
+version = "0.1.0"
+
+[tools]
+allow_global_fallback = false
+
+[build.default]
+agent_definitions = ["qualification_smoke.json"]
+hatched_agents = ["qualification_smoke.json"]
+tools = []
+assets = []

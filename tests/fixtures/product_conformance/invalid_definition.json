@@ -1,0 +1,14 @@
+{
+  "agent_definition_schema_version": "not-a-schema-version",
+  "inputs": [
+    {
+      "type": "text",
+      "text": "This definition must fail before inference."
+    }
+  ],
+  "agent_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "actions": []
+}
