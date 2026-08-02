@@ -8,7 +8,8 @@ declaration_path = "cargo-ai-qualification.toml"
 platforms = ["ubuntu-latest", "macos-latest", "windows-latest"]
 pr_canary = true
 release_required = true
-enabled = false
+enabled = true
+revision = "b803c21e692bc249c23a3f50fdf18e0cf7ae460e"
 
 # Official packages are added only after their repositories own a bounded
 # qualification declaration and an exact reviewed enrollment revision.
