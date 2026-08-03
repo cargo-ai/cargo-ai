@@ -17,25 +17,17 @@ pub struct Fixture {
 }
 
 impl Fixture {
-    pub fn new(label: &str) -> Self {
+    pub fn new(_label: &str) -> Self {
         let base = std::env::var_os("RUNNER_TEMP")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
         fs::create_dir_all(&base).expect("fixture base should be created");
         let sequence = NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
-        let compact_label = label
-            .chars()
-            .filter(|character| character.is_ascii_alphanumeric())
-            .take(8)
-            .collect::<String>();
-        let root = base.join(format!(
-            "caiq-{compact_label}-{:x}-{sequence:x}",
-            std::process::id()
-        ));
+        let root = base.join(format!("q-{:x}-{sequence:x}", std::process::id()));
         fs::create_dir(&root).expect("fixture root should be unique");
-        let cargo_ai_home = root.join("cargo-ai-home");
-        let fallback_home = root.join("user-home");
+        let cargo_ai_home = root.join("h");
+        let fallback_home = root.join("u");
         fs::create_dir_all(&cargo_ai_home).expect("isolated Cargo AI Home should be created");
         fs::create_dir_all(&fallback_home).expect("fallback user home should be created");
         Self {
