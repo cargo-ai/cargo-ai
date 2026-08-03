@@ -9699,7 +9699,7 @@ auth_mode = "{auth_mode}"
                     when: None,
                     args: vec![
                         crate::RunArg::Literal("-lc".to_string()),
-                        crate::RunArg::Literal("sleep 0.2".to_string()),
+                        crate::RunArg::Literal("sleep 1".to_string()),
                     ],
                     prompt: None,
                     path: None,
