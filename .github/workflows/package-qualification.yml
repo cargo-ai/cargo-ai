@@ -156,13 +156,18 @@ jobs:
           PY
 
       - name: Check out exact public package source anonymously
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          repository: ${{ steps.package.outputs.repository }}
-          ref: ${{ steps.package.outputs.sha }}
-          path: package
-          persist-credentials: false
-          token: ''
+        shell: bash
+        env:
+          PACKAGE_REPOSITORY: ${{ steps.package.outputs.repository }}
+          PACKAGE_SHA: ${{ steps.package.outputs.sha }}
+        run: |
+          set -euo pipefail
+          mkdir package
+          git -C package init
+          git -C package remote add origin "https://github.com/${PACKAGE_REPOSITORY}.git"
+          git -C package fetch --depth=1 origin "$PACKAGE_SHA"
+          [[ "$(git -C package rev-parse FETCH_HEAD)" == "$PACKAGE_SHA" ]]
+          git -C package checkout --detach FETCH_HEAD
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, resolved 2026-08-02
