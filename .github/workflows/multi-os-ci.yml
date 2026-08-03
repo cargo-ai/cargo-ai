@@ -65,6 +65,7 @@ jobs:
           {
             echo "HOME=$RUNNER_TEMP/test-user-home"
             echo "CARGO_HOME=$RUNNER_TEMP/cargo-home"
+            echo "RUSTUP_HOME=${RUSTUP_HOME:-${USERPROFILE:-$HOME}/.rustup}"
             echo "RUST_TEST_THREADS=1"
           } >> "$GITHUB_ENV"
 
