@@ -72,6 +72,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: package-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_AI_DISABLE_KEYCHAIN: "1"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
