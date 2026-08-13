@@ -15,6 +15,11 @@ on:
         required: false
         default: true
         type: boolean
+      collect_all:
+        description: Keep every operating-system job running after a failure
+        required: false
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       cargo_ai_sha:
@@ -25,6 +30,11 @@ on:
         description: Emit the standalone deterministic summary job
         required: false
         default: true
+        type: boolean
+      collect_all:
+        description: Keep every operating-system job running after a failure
+        required: false
+        default: false
         type: boolean
 
 permissions:
@@ -44,10 +54,18 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
-      fail-fast: true
+      fail-fast: ${{ ! inputs.collect_all }}
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
+      - name: Validate exact Cargo AI candidate
+        shell: bash
+        env:
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
+
       - name: Check out exact Cargo AI candidate
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:

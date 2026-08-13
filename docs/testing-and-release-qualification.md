@@ -7,7 +7,7 @@ Cargo AI separates fast product confidence from paid live integration and from i
 1. `multi-os-ci.yml` runs credential-free product, provider, maintained-content, package-lifecycle, build, and install checks on Ubuntu, macOS, and Windows. Provider requests use loopback fixtures. Ollama coverage tests its OpenAI-compatible transport without provisioning a model server.
 2. `package-qualification.yml` checks one allowlisted public package revision on each declared platform. It runs the package's bounded declaration checks and the mandatory Cargo AI build/package/install/inspect/run/hatch/uninstall lifecycle.
 3. `live-provider-conformance.yml` runs one representative model for OpenAI, Anthropic, Gemini, xAI, and Mistral. Each key exists only in its provider test step, and no more than two paid-provider jobs run concurrently.
-4. `release-qualification.yml` combines those three results and fails unless every required family passes. It does not duplicate their assertions.
+4. `release-qualification.yml` combines those three results, renders a GitHub-native qualification dashboard, and fails unless every required result passes. It does not duplicate their assertions.
 
 The initial full qualification uses 12 runner jobs: three deterministic operating systems, three canary-package operating systems, five hosted providers, and one protected summary. Provider fixtures, models, package entrypoints, and package checks are not matrix dimensions.
 
@@ -71,12 +71,22 @@ Create a GitHub Environment named `live-provider-ci`. Store dedicated least-priv
 
 Set matching non-secret Environment variables: `OPENAI_MODEL`, `ANTHROPIC_MODEL`, `GEMINI_MODEL`, `XAI_MODEL`, and `MISTRAL_MODEL`. Select one representative hosted model for each provider. Do not add an Ollama secret or model variable; real local-server provisioning is outside this workflow.
 
-Restrict `live-provider-ci` to the trusted default branch and approved release tags. It is intended to run unattended, so human release approval belongs to a separate `release-qualification` Environment attached only to the final aggregate summary.
+Restrict `live-provider-ci` to the trusted default branch and approved release tags. Before any provider key is injected, each live job requires an exact lowercase Cargo AI commit and verifies that it is the trusted triggering commit or one of its ancestors. It is intended to run unattended, so human release approval belongs to a separate `release-qualification` Environment attached only to the final aggregate summary.
 
 The live tests write each key to a temporary isolated profile through stdin. Keys are not command arguments, logs, artifacts, caches, deterministic jobs, or source-package jobs. Missing requested configuration fails rather than silently skipping a provider.
 
 ## Evidence and release interpretation
 
 Required checks should include the stable deterministic summary on ordinary pull requests and the protected release summary before promotion. Package evidence records Cargo AI commit, optional baseline commit, package repository/commit, logical OS, runner image/version, architecture, declaration digest, workflow ref, classification, and result. It must never contain prompts, model output, tokens, raw provider bodies, Cargo AI Home state, or package runtime data.
+
+The protected release job writes the canonical human-readable dashboard directly to the GitHub Actions run summary. Open the Cargo AI repository, select **Actions**, select **Release Qualification**, and open a run's **Summary** page. The table reports product conformance, deterministic providers, maintained content, the public package canary, registered official packages, each hosted provider, and the aggregate release decision. Each completed test area links to its producing GitHub job and includes its completion time.
+
+Dashboard states are explicit: `pass`, `fail`, `cancelled`, `skipped`, and `missing`. A missing, skipped, cancelled, or failed required result blocks qualification. The official-package row is `skipped` only while the validated catalog count is zero; enrolling an official package without aggregate results changes that row to `missing` and blocks release. JUnit and provenance artifacts remain the durable evidence behind the summary.
+
+When GitHub reruns only failed jobs, the dashboard safely selects the newest completed attempt for each expected job from the same workflow run and exact candidate commit. A duplicate or mismatched result is treated as missing rather than guessed.
+
+If a developer rejects the protected summary Environment or cancels the workflow before that job starts, GitHub's run status remains authoritative because no summary job ran to publish a dashboard.
+
+This view is run-scoped and entirely GitHub-hosted. It requires no Cargo-AI.org page, GitHub Pages deployment, application server, database, custom API, or cross-system synchronization. The repository maintains only the workflow/reporting logic and normal GitHub Environment configuration.
 
 The package catalog starts fail-closed until the public canary caller and its immutable commit are reviewed and pinned. Official-package count begins at zero. Adding packages increases only package shards; it does not multiply providers, models, or entrypoints.

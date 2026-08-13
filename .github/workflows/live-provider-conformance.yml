@@ -60,6 +60,20 @@ jobs:
     environment: live-provider-ci
     timeout-minutes: 15
     steps:
+      - name: Validate exact trusted Cargo AI candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+          TRUSTED_TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$CARGO_AI_SHA" != "$TRUSTED_TRIGGER_SHA" ]]; then
+            comparison=$(gh api "/repos/$GITHUB_REPOSITORY/compare/$CARGO_AI_SHA...$TRUSTED_TRIGGER_SHA" --jq .status)
+            [[ "$comparison" == "ahead" ]]
+          fi
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ inputs.cargo_ai_sha || github.sha }}
@@ -80,6 +94,20 @@ jobs:
     environment: live-provider-ci
     timeout-minutes: 15
     steps:
+      - name: Validate exact trusted Cargo AI candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+          TRUSTED_TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$CARGO_AI_SHA" != "$TRUSTED_TRIGGER_SHA" ]]; then
+            comparison=$(gh api "/repos/$GITHUB_REPOSITORY/compare/$CARGO_AI_SHA...$TRUSTED_TRIGGER_SHA" --jq .status)
+            [[ "$comparison" == "ahead" ]]
+          fi
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ inputs.cargo_ai_sha || github.sha }}
@@ -102,6 +130,20 @@ jobs:
     environment: live-provider-ci
     timeout-minutes: 15
     steps:
+      - name: Validate exact trusted Cargo AI candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+          TRUSTED_TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$CARGO_AI_SHA" != "$TRUSTED_TRIGGER_SHA" ]]; then
+            comparison=$(gh api "/repos/$GITHUB_REPOSITORY/compare/$CARGO_AI_SHA...$TRUSTED_TRIGGER_SHA" --jq .status)
+            [[ "$comparison" == "ahead" ]]
+          fi
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ inputs.cargo_ai_sha || github.sha }}
@@ -124,6 +166,20 @@ jobs:
     environment: live-provider-ci
     timeout-minutes: 15
     steps:
+      - name: Validate exact trusted Cargo AI candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+          TRUSTED_TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$CARGO_AI_SHA" != "$TRUSTED_TRIGGER_SHA" ]]; then
+            comparison=$(gh api "/repos/$GITHUB_REPOSITORY/compare/$CARGO_AI_SHA...$TRUSTED_TRIGGER_SHA" --jq .status)
+            [[ "$comparison" == "ahead" ]]
+          fi
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ inputs.cargo_ai_sha || github.sha }}
@@ -146,6 +202,20 @@ jobs:
     environment: live-provider-ci
     timeout-minutes: 15
     steps:
+      - name: Validate exact trusted Cargo AI candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+          TRUSTED_TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$CARGO_AI_SHA" != "$TRUSTED_TRIGGER_SHA" ]]; then
+            comparison=$(gh api "/repos/$GITHUB_REPOSITORY/compare/$CARGO_AI_SHA...$TRUSTED_TRIGGER_SHA" --jq .status)
+            [[ "$comparison" == "ahead" ]]
+          fi
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ inputs.cargo_ai_sha || github.sha }}
