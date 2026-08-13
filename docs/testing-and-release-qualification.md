@@ -6,7 +6,7 @@ Cargo AI separates fast product confidence from paid live integration and from i
 
 1. `multi-os-ci.yml` runs credential-free product, provider, maintained-content, package-lifecycle, build, and install checks on Ubuntu, macOS, and Windows. Provider requests use loopback fixtures. Ollama coverage tests its OpenAI-compatible transport without provisioning a model server.
 2. `package-qualification.yml` checks one allowlisted public package revision on each declared platform. It runs the package's bounded declaration checks and the mandatory Cargo AI build/package/install/inspect/run/hatch/uninstall lifecycle.
-3. `live-provider-conformance.yml` runs one representative model for OpenAI, Anthropic, Gemini, xAI, and Mistral. Each key exists only in its provider test step, and no more than two paid-provider jobs run concurrently.
+3. `live-provider-conformance.yml` runs one representative model for OpenAI, Anthropic, Gemini, xAI, and Mistral. Manual dispatch selects one provider or `all` and defaults to OpenAI. Each key exists only in its provider test step, and no more than two paid-provider jobs run concurrently.
 4. `release-qualification.yml` combines those three results, renders a GitHub-native qualification dashboard, and fails unless every required result passes. It does not duplicate their assertions.
 
 The initial full qualification uses 12 runner jobs: three deterministic operating systems, three canary-package operating systems, five hosted providers, and one protected summary. Provider fixtures, models, package entrypoints, and package checks are not matrix dimensions.
@@ -61,6 +61,8 @@ Candidate failure always blocks. When an exact last release-qualified Cargo AI c
 
 ## Hosted provider configuration
 
+Commission qualification progressively against one exact Cargo AI commit. Run **Multi-OS CI**, then **Package Qualification**, then **Live Provider Conformance** with its default `openai` choice. Add and validate the other hosted providers one at a time. A single-provider run starts only the selected provider job and is integration evidence, not a Version 1 qualification decision. **Release Qualification** always selects `all` and remains the only complete aggregate gate.
+
 Create a GitHub Environment named `live-provider-ci`. Store dedicated least-privilege secrets there:
 
 - `OPENAI_API_KEY`
@@ -69,7 +71,7 @@ Create a GitHub Environment named `live-provider-ci`. Store dedicated least-priv
 - `XAI_API_KEY`
 - `MISTRAL_API_KEY`
 
-Set matching non-secret Environment variables: `OPENAI_MODEL`, `ANTHROPIC_MODEL`, `GEMINI_MODEL`, `XAI_MODEL`, and `MISTRAL_MODEL`. Select one representative hosted model for each provider. Do not add an Ollama secret or model variable; real local-server provisioning is outside this workflow.
+Set matching non-secret Environment variables: `OPENAI_MODEL`, `ANTHROPIC_MODEL`, `GEMINI_MODEL`, `XAI_MODEL`, and `MISTRAL_MODEL`. Select one representative hosted model for each provider. Initial commissioning can begin with only the OpenAI secret/model pair; add each remaining pair before selecting that provider, and configure all five before the full release aggregate. Do not add an Ollama secret or model variable; real local-server provisioning is outside this workflow.
 
 Restrict `live-provider-ci` to the trusted default branch and approved release tags. Before any provider key is injected, each live job requires an exact lowercase Cargo AI commit and verifies that it is the trusted triggering commit or one of its ancestors. It is intended to run unattended, so human release approval belongs to a separate `release-qualification` Environment attached only to the final aggregate summary.
 

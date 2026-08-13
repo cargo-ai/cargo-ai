@@ -3,6 +3,18 @@ name: Live Provider Conformance
 on:
   workflow_dispatch:
     inputs:
+      provider:
+        description: Hosted provider to validate
+        required: true
+        default: openai
+        type: choice
+        options:
+          - openai
+          - anthropic
+          - gemini
+          - xai
+          - mistral
+          - all
       cargo_ai_sha:
         description: Exact Cargo AI commit to qualify (defaults to the triggering commit)
         required: false
@@ -24,6 +36,10 @@ on:
         type: string
   workflow_call:
     inputs:
+      provider:
+        description: Hosted provider to validate
+        required: true
+        type: string
       cargo_ai_sha:
         required: true
         type: string
@@ -56,10 +72,21 @@ env:
 jobs:
   openai:
     name: Live OpenAI conformance
+    if: ${{ inputs.provider == 'openai' || inputs.provider == 'all' || !contains(fromJSON('["openai","anthropic","gemini","xai","mistral","all"]'), inputs.provider) }}
     runs-on: ubuntu-latest
     environment: live-provider-ci
     timeout-minutes: 15
     steps:
+      - name: Validate provider selection
+        shell: bash
+        env:
+          PROVIDER: ${{ inputs.provider }}
+        run: |
+          set -euo pipefail
+          case "$PROVIDER" in
+            openai|anthropic|gemini|xai|mistral|all) ;;
+            *) echo "provider must be openai, anthropic, gemini, xai, mistral, or all" >&2; exit 1 ;;
+          esac
       - name: Validate exact trusted Cargo AI candidate
         shell: bash
         env:
@@ -90,10 +117,21 @@ jobs:
 
   anthropic:
     name: Live Anthropic conformance
+    if: ${{ inputs.provider == 'anthropic' || inputs.provider == 'all' }}
     runs-on: ubuntu-latest
     environment: live-provider-ci
     timeout-minutes: 15
     steps:
+      - name: Validate provider selection
+        shell: bash
+        env:
+          PROVIDER: ${{ inputs.provider }}
+        run: |
+          set -euo pipefail
+          case "$PROVIDER" in
+            openai|anthropic|gemini|xai|mistral|all) ;;
+            *) echo "provider must be openai, anthropic, gemini, xai, mistral, or all" >&2; exit 1 ;;
+          esac
       - name: Validate exact trusted Cargo AI candidate
         shell: bash
         env:
@@ -124,12 +162,22 @@ jobs:
 
   gemini:
     name: Live Gemini conformance
-    if: ${{ always() }}
+    if: ${{ always() && (inputs.provider == 'gemini' || inputs.provider == 'all') }}
     needs: [openai]
     runs-on: ubuntu-latest
     environment: live-provider-ci
     timeout-minutes: 15
     steps:
+      - name: Validate provider selection
+        shell: bash
+        env:
+          PROVIDER: ${{ inputs.provider }}
+        run: |
+          set -euo pipefail
+          case "$PROVIDER" in
+            openai|anthropic|gemini|xai|mistral|all) ;;
+            *) echo "provider must be openai, anthropic, gemini, xai, mistral, or all" >&2; exit 1 ;;
+          esac
       - name: Validate exact trusted Cargo AI candidate
         shell: bash
         env:
@@ -160,12 +208,22 @@ jobs:
 
   xai:
     name: Live xAI conformance
-    if: ${{ always() }}
+    if: ${{ always() && (inputs.provider == 'xai' || inputs.provider == 'all') }}
     needs: [anthropic]
     runs-on: ubuntu-latest
     environment: live-provider-ci
     timeout-minutes: 15
     steps:
+      - name: Validate provider selection
+        shell: bash
+        env:
+          PROVIDER: ${{ inputs.provider }}
+        run: |
+          set -euo pipefail
+          case "$PROVIDER" in
+            openai|anthropic|gemini|xai|mistral|all) ;;
+            *) echo "provider must be openai, anthropic, gemini, xai, mistral, or all" >&2; exit 1 ;;
+          esac
       - name: Validate exact trusted Cargo AI candidate
         shell: bash
         env:
@@ -196,12 +254,22 @@ jobs:
 
   mistral:
     name: Live Mistral conformance
-    if: ${{ always() }}
+    if: ${{ always() && (inputs.provider == 'mistral' || inputs.provider == 'all') }}
     needs: [gemini, xai]
     runs-on: ubuntu-latest
     environment: live-provider-ci
     timeout-minutes: 15
     steps:
+      - name: Validate provider selection
+        shell: bash
+        env:
+          PROVIDER: ${{ inputs.provider }}
+        run: |
+          set -euo pipefail
+          case "$PROVIDER" in
+            openai|anthropic|gemini|xai|mistral|all) ;;
+            *) echo "provider must be openai, anthropic, gemini, xai, mistral, or all" >&2; exit 1 ;;
+          esac
       - name: Validate exact trusted Cargo AI candidate
         shell: bash
         env:

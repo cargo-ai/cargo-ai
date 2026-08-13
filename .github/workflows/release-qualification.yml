@@ -81,6 +81,7 @@ jobs:
     name: Hosted-provider family
     uses: ./.github/workflows/live-provider-conformance.yml
     with:
+      provider: all
       cargo_ai_sha: ${{ inputs.cargo_ai_sha || github.sha }}
       openai_model: ${{ inputs.openai_model }}
       anthropic_model: ${{ inputs.anthropic_model }}
