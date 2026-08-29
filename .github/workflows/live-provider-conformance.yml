@@ -113,15 +113,26 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ inputs.openai_model || vars.OPENAI_MODEL }}
-        run: cargo test --locked --test provider_smoke live_openai_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+        run: |
+          set -euo pipefail
+          [[ -n "${OPENAI_API_KEY:-}" ]] || { echo "OPENAI_API_KEY is required" >&2; exit 1; }
+          [[ -n "${OPENAI_MODEL:-}" ]] || { echo "OPENAI_MODEL is required" >&2; exit 1; }
+          cargo test --locked --test provider_smoke live_openai_smoke_uses_isolated_stdin_credentials -- --ignored --exact
 
   anthropic:
     name: Live Anthropic conformance
-    if: ${{ inputs.provider == 'anthropic' || inputs.provider == 'all' }}
+    if: ${{ inputs.provider == 'anthropic' || (inputs.provider == 'all' && vars.LIVE_ANTHROPIC_ENABLED != '' && vars.LIVE_ANTHROPIC_ENABLED != 'false') }}
     runs-on: ubuntu-latest
     environment: live-provider-ci
     timeout-minutes: 15
     steps:
+      - name: Validate Anthropic enrollment
+        shell: bash
+        env:
+          PROVIDER_ENABLED: ${{ vars.LIVE_ANTHROPIC_ENABLED }}
+        run: |
+          set -euo pipefail
+          [[ "$PROVIDER_ENABLED" == "true" ]] || { echo "LIVE_ANTHROPIC_ENABLED must equal true" >&2; exit 1; }
       - name: Validate provider selection
         shell: bash
         env:
@@ -158,16 +169,26 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_MODEL: ${{ inputs.anthropic_model || vars.ANTHROPIC_MODEL }}
-        run: cargo test --locked --test provider_smoke live_anthropic_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+        run: |
+          set -euo pipefail
+          [[ -n "${ANTHROPIC_API_KEY:-}" ]] || { echo "ANTHROPIC_API_KEY is required for enrolled Anthropic" >&2; exit 1; }
+          [[ -n "${ANTHROPIC_MODEL:-}" ]] || { echo "ANTHROPIC_MODEL is required for enrolled Anthropic" >&2; exit 1; }
+          cargo test --locked --test provider_smoke live_anthropic_smoke_uses_isolated_stdin_credentials -- --ignored --exact
 
   gemini:
     name: Live Gemini conformance
-    if: ${{ always() && (inputs.provider == 'gemini' || inputs.provider == 'all') }}
-    needs: [openai]
+    if: ${{ inputs.provider == 'gemini' || (inputs.provider == 'all' && vars.LIVE_GEMINI_ENABLED != '' && vars.LIVE_GEMINI_ENABLED != 'false') }}
     runs-on: ubuntu-latest
     environment: live-provider-ci
     timeout-minutes: 15
     steps:
+      - name: Validate Gemini enrollment
+        shell: bash
+        env:
+          PROVIDER_ENABLED: ${{ vars.LIVE_GEMINI_ENABLED }}
+        run: |
+          set -euo pipefail
+          [[ "$PROVIDER_ENABLED" == "true" ]] || { echo "LIVE_GEMINI_ENABLED must equal true" >&2; exit 1; }
       - name: Validate provider selection
         shell: bash
         env:
@@ -204,16 +225,26 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ inputs.gemini_model || vars.GEMINI_MODEL }}
-        run: cargo test --locked --test provider_smoke live_gemini_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+        run: |
+          set -euo pipefail
+          [[ -n "${GEMINI_API_KEY:-}" ]] || { echo "GEMINI_API_KEY is required for enrolled Gemini" >&2; exit 1; }
+          [[ -n "${GEMINI_MODEL:-}" ]] || { echo "GEMINI_MODEL is required for enrolled Gemini" >&2; exit 1; }
+          cargo test --locked --test provider_smoke live_gemini_smoke_uses_isolated_stdin_credentials -- --ignored --exact
 
   xai:
     name: Live xAI conformance
-    if: ${{ always() && (inputs.provider == 'xai' || inputs.provider == 'all') }}
-    needs: [anthropic]
+    if: ${{ inputs.provider == 'xai' || (inputs.provider == 'all' && vars.LIVE_XAI_ENABLED != '' && vars.LIVE_XAI_ENABLED != 'false') }}
     runs-on: ubuntu-latest
     environment: live-provider-ci
     timeout-minutes: 15
     steps:
+      - name: Validate xAI enrollment
+        shell: bash
+        env:
+          PROVIDER_ENABLED: ${{ vars.LIVE_XAI_ENABLED }}
+        run: |
+          set -euo pipefail
+          [[ "$PROVIDER_ENABLED" == "true" ]] || { echo "LIVE_XAI_ENABLED must equal true" >&2; exit 1; }
       - name: Validate provider selection
         shell: bash
         env:
@@ -250,16 +281,26 @@ jobs:
         env:
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           XAI_MODEL: ${{ inputs.xai_model || vars.XAI_MODEL }}
-        run: cargo test --locked --test provider_smoke live_xai_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+        run: |
+          set -euo pipefail
+          [[ -n "${XAI_API_KEY:-}" ]] || { echo "XAI_API_KEY is required for enrolled xAI" >&2; exit 1; }
+          [[ -n "${XAI_MODEL:-}" ]] || { echo "XAI_MODEL is required for enrolled xAI" >&2; exit 1; }
+          cargo test --locked --test provider_smoke live_xai_smoke_uses_isolated_stdin_credentials -- --ignored --exact
 
   mistral:
     name: Live Mistral conformance
-    if: ${{ always() && (inputs.provider == 'mistral' || inputs.provider == 'all') }}
-    needs: [gemini, xai]
+    if: ${{ inputs.provider == 'mistral' || (inputs.provider == 'all' && vars.LIVE_MISTRAL_ENABLED != '' && vars.LIVE_MISTRAL_ENABLED != 'false') }}
     runs-on: ubuntu-latest
     environment: live-provider-ci
     timeout-minutes: 15
     steps:
+      - name: Validate Mistral enrollment
+        shell: bash
+        env:
+          PROVIDER_ENABLED: ${{ vars.LIVE_MISTRAL_ENABLED }}
+        run: |
+          set -euo pipefail
+          [[ "$PROVIDER_ENABLED" == "true" ]] || { echo "LIVE_MISTRAL_ENABLED must equal true" >&2; exit 1; }
       - name: Validate provider selection
         shell: bash
         env:
@@ -296,4 +337,8 @@ jobs:
         env:
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
           MISTRAL_MODEL: ${{ inputs.mistral_model || vars.MISTRAL_MODEL }}
-        run: cargo test --locked --test provider_smoke live_mistral_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+        run: |
+          set -euo pipefail
+          [[ -n "${MISTRAL_API_KEY:-}" ]] || { echo "MISTRAL_API_KEY is required for enrolled Mistral" >&2; exit 1; }
+          [[ -n "${MISTRAL_MODEL:-}" ]] || { echo "MISTRAL_MODEL is required for enrolled Mistral" >&2; exit 1; }
+          cargo test --locked --test provider_smoke live_mistral_smoke_uses_isolated_stdin_credentials -- --ignored --exact
