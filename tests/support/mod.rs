@@ -171,15 +171,25 @@ impl OneShotHttpServer {
 
 fn read_http_request(stream: &mut TcpStream) -> String {
     stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
+        .set_read_timeout(Some(Duration::from_secs(1)))
         .expect("request timeout should configure");
+    let started = Instant::now();
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 4096];
     let mut expected_length = None;
     loop {
-        let count = stream
-            .read(&mut buffer)
-            .expect("request should be readable");
+        let count = match stream.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && started.elapsed() < Duration::from_secs(30) =>
+            {
+                continue;
+            }
+            Err(error) => panic!("request should be readable: {error}"),
+        };
         if count == 0 {
             break;
         }

@@ -58,6 +58,19 @@ on:
       mistral_model:
         required: false
         type: string
+    # Declare the reusable-workflow secret interface while each job continues
+    # to source its value from the protected live-provider-ci Environment.
+    secrets:
+      OPENAI_API_KEY:
+        required: false
+      ANTHROPIC_API_KEY:
+        required: false
+      GEMINI_API_KEY:
+        required: false
+      XAI_API_KEY:
+        required: false
+      MISTRAL_API_KEY:
+        required: false
 permissions:
   contents: read
 
