@@ -6,8 +6,8 @@ Cargo AI separates fast product confidence from paid live integration and from i
 
 1. `multi-os-ci.yml` runs credential-free product, provider, maintained-content, package-lifecycle, build, and install checks on Ubuntu, macOS, and Windows. Provider requests use loopback fixtures. Ollama coverage tests its OpenAI-compatible transport without provisioning a model server.
 2. `package-qualification.yml` checks one allowlisted public package revision on each declared platform. It runs the package's bounded declaration checks and the mandatory Cargo AI build/package/install/inspect/run/hatch/uninstall lifecycle.
-3. `live-provider-conformance.yml` runs one representative model for required OpenAI and any explicitly enrolled optional provider. Manual dispatch selects one provider or `all` and defaults to OpenAI. Each selected job receives only its own key; selected jobs are independent and run concurrently without provider-to-provider dependencies.
-4. `release-qualification.yml` combines those three results, renders a GitHub-native qualification dashboard, and fails unless every required result passes. It does not duplicate their assertions.
+3. `live-provider-conformance.yml` runs one representative model for required OpenAI and any explicitly enrolled optional provider. Manual dispatch selects one provider or `all` and defaults to OpenAI. Each selected job directly targets the protected `live-provider-ci` Environment, receives only its own key, and runs independently without provider-to-provider dependencies.
+4. `release-qualification.yml` combines the credential-free families with fresh direct `live-provider-ci` provider jobs, renders a GitHub-native qualification dashboard, and fails unless every required result passes. It invokes the same Rust provider tests without reusing an earlier focused result or passing Environment secrets through a reusable workflow.
 
 The initial OpenAI-only full qualification uses eight runner jobs: three deterministic operating systems, three canary-package operating systems, one hosted provider, and one protected summary. Each optional provider enrollment adds one independent hosted job, up to 12 jobs before official packages and the unchanged 21-job global ceiling. Provider fixtures, models, package entrypoints, and package checks are not matrix dimensions.
 
@@ -61,7 +61,7 @@ Candidate failure always blocks. When an exact last release-qualified Cargo AI c
 
 ## Hosted provider configuration
 
-Commission qualification progressively against one exact Cargo AI commit. Run **Multi-OS CI**, then **Package Qualification**, then **Live Provider Conformance** with its default `openai` choice. OpenAI is the initial required live provider. Add and validate other hosted providers one at a time when their coverage is wanted. A single-provider run starts only the selected provider job and is integration evidence, not a Version 1 qualification decision. **Release Qualification** selects `all`, meaning required OpenAI plus every explicitly enrolled optional provider, and remains the only complete aggregate gate.
+Commission qualification progressively against one exact Cargo AI commit. Run **Multi-OS CI**, then **Package Qualification**, then **Live Provider Conformance** with its default `openai` choice. OpenAI is the initial required live provider. Add and validate other hosted providers one at a time when their coverage is wanted. A single-provider run starts only the selected provider job and is integration evidence, not a Version 1 qualification decision. **Release Qualification** starts new direct jobs for required OpenAI plus every explicitly enrolled optional provider and remains the only complete aggregate gate.
 
 The live workflow has no semantic dependency between providers:
 
@@ -91,9 +91,9 @@ Create a GitHub Environment named `live-provider-ci`. Store required OpenAI conf
 
 For each optional provider being enrolled, add only its matching Environment secret and non-secret model variable: `ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL`, `GEMINI_API_KEY`/`GEMINI_MODEL`, `XAI_API_KEY`/`XAI_MODEL`, or `MISTRAL_API_KEY`/`MISTRAL_MODEL`. Select one representative hosted model per enrolled provider. Do not add an Ollama secret or model variable; real local-server provisioning is outside this workflow.
 
-Restrict `live-provider-ci` to the trusted default branch and approved release tags. Before any provider key is injected, each live job requires an exact lowercase Cargo AI commit and verifies that it is the trusted triggering commit or one of its ancestors. It is intended to run unattended, so human release approval belongs to a separate `release-qualification` Environment attached only to the final aggregate summary.
+Restrict `live-provider-ci` to the trusted default branch and approved release tags. Before any provider key is injected, each focused or aggregate live job directly targets that Environment, requires an exact lowercase Cargo AI commit, and verifies that it is the trusted triggering commit or one of its ancestors. It is intended to run unattended, so human release approval belongs to a separate `release-qualification` Environment attached only to the final aggregate summary.
 
-The live tests write each selected key to a temporary isolated profile through stdin. Keys are not command arguments, logs, artifacts, caches, deterministic jobs, source-package jobs, or other provider jobs. Missing OpenAI configuration and missing configuration for an explicitly selected or enrolled provider fail rather than silently skipping. Unenrolled optional providers are intentionally reported as not configured and do not block qualification.
+The live tests write each selected key to a temporary isolated profile through stdin. Keep every key only as a `live-provider-ci` Environment secret; do not duplicate it into `release-qualification`, repository/organization secrets, workflow YAML, or inherited secret sets. Keys are not command arguments, logs, artifacts, caches, deterministic jobs, source-package jobs, other provider jobs, or the final summary. Missing OpenAI configuration and missing configuration for an explicitly selected or enrolled provider fail rather than silently skipping. Unenrolled optional providers are intentionally reported as not configured and do not block qualification.
 
 ## Evidence and release interpretation
 

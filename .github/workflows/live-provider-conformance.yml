@@ -34,43 +34,6 @@ on:
       mistral_model:
         required: false
         type: string
-  workflow_call:
-    inputs:
-      provider:
-        description: Hosted provider to validate
-        required: true
-        type: string
-      cargo_ai_sha:
-        required: true
-        type: string
-      openai_model:
-        required: false
-        type: string
-      anthropic_model:
-        required: false
-        type: string
-      gemini_model:
-        required: false
-        type: string
-      xai_model:
-        required: false
-        type: string
-      mistral_model:
-        required: false
-        type: string
-    # Declare the reusable-workflow secret interface while each job continues
-    # to source its value from the protected live-provider-ci Environment.
-    secrets:
-      OPENAI_API_KEY:
-        required: false
-      ANTHROPIC_API_KEY:
-        required: false
-      GEMINI_API_KEY:
-        required: false
-      XAI_API_KEY:
-        required: false
-      MISTRAL_API_KEY:
-        required: false
 permissions:
   contents: read
 
