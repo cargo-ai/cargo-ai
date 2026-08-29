@@ -28,30 +28,6 @@ on:
       mistral_model:
         required: false
         type: string
-  workflow_call:
-    inputs:
-      cargo_ai_sha:
-        required: true
-        type: string
-      baseline_cargo_ai_sha:
-        required: false
-        type: string
-      openai_model:
-        required: false
-        type: string
-      anthropic_model:
-        required: false
-        type: string
-      gemini_model:
-        required: false
-        type: string
-      xai_model:
-        required: false
-        type: string
-      mistral_model:
-        required: false
-        type: string
-
 permissions:
   actions: read
   contents: read
@@ -77,22 +53,232 @@ jobs:
       baseline_cargo_ai_sha: ${{ inputs.baseline_cargo_ai_sha }}
       emit_summary: false
 
-  live_providers:
-    name: Hosted-provider family
-    uses: ./.github/workflows/live-provider-conformance.yml
-    with:
-      provider: all
-      cargo_ai_sha: ${{ inputs.cargo_ai_sha || github.sha }}
-      openai_model: ${{ inputs.openai_model }}
-      anthropic_model: ${{ inputs.anthropic_model }}
-      gemini_model: ${{ inputs.gemini_model }}
-      xai_model: ${{ inputs.xai_model }}
-      mistral_model: ${{ inputs.mistral_model }}
+  live_openai:
+    name: Live OpenAI conformance
+    runs-on: ubuntu-latest
+    environment: live-provider-ci
+    timeout-minutes: 15
+    steps:
+      - name: Validate exact trusted Cargo AI candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+          TRUSTED_TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$CARGO_AI_SHA" != "$TRUSTED_TRIGGER_SHA" ]]; then
+            comparison=$(gh api "/repos/$GITHUB_REPOSITORY/compare/$CARGO_AI_SHA...$TRUSTED_TRIGGER_SHA" --jq .status)
+            [[ "$comparison" == "ahead" ]]
+          fi
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.cargo_ai_sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, resolved 2026-08-02
+      - name: Configure isolated Cargo AI Home
+        shell: bash
+        run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Run one representative OpenAI check
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ inputs.openai_model || vars.OPENAI_MODEL }}
+        run: |
+          set -euo pipefail
+          [[ -n "${OPENAI_API_KEY:-}" ]] || { echo "OPENAI_API_KEY is required" >&2; exit 1; }
+          [[ -n "${OPENAI_MODEL:-}" ]] || { echo "OPENAI_MODEL is required" >&2; exit 1; }
+          cargo test --locked --test provider_smoke live_openai_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+
+  live_anthropic:
+    name: Live Anthropic conformance
+    if: ${{ vars.LIVE_ANTHROPIC_ENABLED != '' && vars.LIVE_ANTHROPIC_ENABLED != 'false' }}
+    runs-on: ubuntu-latest
+    environment: live-provider-ci
+    timeout-minutes: 15
+    steps:
+      - name: Validate Anthropic enrollment
+        shell: bash
+        env:
+          PROVIDER_ENABLED: ${{ vars.LIVE_ANTHROPIC_ENABLED }}
+        run: |
+          set -euo pipefail
+          [[ "$PROVIDER_ENABLED" == "true" ]] || { echo "LIVE_ANTHROPIC_ENABLED must equal true" >&2; exit 1; }
+      - name: Validate exact trusted Cargo AI candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+          TRUSTED_TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$CARGO_AI_SHA" != "$TRUSTED_TRIGGER_SHA" ]]; then
+            comparison=$(gh api "/repos/$GITHUB_REPOSITORY/compare/$CARGO_AI_SHA...$TRUSTED_TRIGGER_SHA" --jq .status)
+            [[ "$comparison" == "ahead" ]]
+          fi
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.cargo_ai_sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, resolved 2026-08-02
+      - name: Configure isolated Cargo AI Home
+        shell: bash
+        run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Run one representative Anthropic check
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ inputs.anthropic_model || vars.ANTHROPIC_MODEL }}
+        run: |
+          set -euo pipefail
+          [[ -n "${ANTHROPIC_API_KEY:-}" ]] || { echo "ANTHROPIC_API_KEY is required for enrolled Anthropic" >&2; exit 1; }
+          [[ -n "${ANTHROPIC_MODEL:-}" ]] || { echo "ANTHROPIC_MODEL is required for enrolled Anthropic" >&2; exit 1; }
+          cargo test --locked --test provider_smoke live_anthropic_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+
+  live_gemini:
+    name: Live Gemini conformance
+    if: ${{ vars.LIVE_GEMINI_ENABLED != '' && vars.LIVE_GEMINI_ENABLED != 'false' }}
+    runs-on: ubuntu-latest
+    environment: live-provider-ci
+    timeout-minutes: 15
+    steps:
+      - name: Validate Gemini enrollment
+        shell: bash
+        env:
+          PROVIDER_ENABLED: ${{ vars.LIVE_GEMINI_ENABLED }}
+        run: |
+          set -euo pipefail
+          [[ "$PROVIDER_ENABLED" == "true" ]] || { echo "LIVE_GEMINI_ENABLED must equal true" >&2; exit 1; }
+      - name: Validate exact trusted Cargo AI candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+          TRUSTED_TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$CARGO_AI_SHA" != "$TRUSTED_TRIGGER_SHA" ]]; then
+            comparison=$(gh api "/repos/$GITHUB_REPOSITORY/compare/$CARGO_AI_SHA...$TRUSTED_TRIGGER_SHA" --jq .status)
+            [[ "$comparison" == "ahead" ]]
+          fi
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.cargo_ai_sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, resolved 2026-08-02
+      - name: Configure isolated Cargo AI Home
+        shell: bash
+        run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Run one representative Gemini check
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ inputs.gemini_model || vars.GEMINI_MODEL }}
+        run: |
+          set -euo pipefail
+          [[ -n "${GEMINI_API_KEY:-}" ]] || { echo "GEMINI_API_KEY is required for enrolled Gemini" >&2; exit 1; }
+          [[ -n "${GEMINI_MODEL:-}" ]] || { echo "GEMINI_MODEL is required for enrolled Gemini" >&2; exit 1; }
+          cargo test --locked --test provider_smoke live_gemini_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+
+  live_xai:
+    name: Live xAI conformance
+    if: ${{ vars.LIVE_XAI_ENABLED != '' && vars.LIVE_XAI_ENABLED != 'false' }}
+    runs-on: ubuntu-latest
+    environment: live-provider-ci
+    timeout-minutes: 15
+    steps:
+      - name: Validate xAI enrollment
+        shell: bash
+        env:
+          PROVIDER_ENABLED: ${{ vars.LIVE_XAI_ENABLED }}
+        run: |
+          set -euo pipefail
+          [[ "$PROVIDER_ENABLED" == "true" ]] || { echo "LIVE_XAI_ENABLED must equal true" >&2; exit 1; }
+      - name: Validate exact trusted Cargo AI candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+          TRUSTED_TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$CARGO_AI_SHA" != "$TRUSTED_TRIGGER_SHA" ]]; then
+            comparison=$(gh api "/repos/$GITHUB_REPOSITORY/compare/$CARGO_AI_SHA...$TRUSTED_TRIGGER_SHA" --jq .status)
+            [[ "$comparison" == "ahead" ]]
+          fi
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.cargo_ai_sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, resolved 2026-08-02
+      - name: Configure isolated Cargo AI Home
+        shell: bash
+        run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Run one representative xAI check
+        env:
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          XAI_MODEL: ${{ inputs.xai_model || vars.XAI_MODEL }}
+        run: |
+          set -euo pipefail
+          [[ -n "${XAI_API_KEY:-}" ]] || { echo "XAI_API_KEY is required for enrolled xAI" >&2; exit 1; }
+          [[ -n "${XAI_MODEL:-}" ]] || { echo "XAI_MODEL is required for enrolled xAI" >&2; exit 1; }
+          cargo test --locked --test provider_smoke live_xai_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+
+  live_mistral:
+    name: Live Mistral conformance
+    if: ${{ vars.LIVE_MISTRAL_ENABLED != '' && vars.LIVE_MISTRAL_ENABLED != 'false' }}
+    runs-on: ubuntu-latest
+    environment: live-provider-ci
+    timeout-minutes: 15
+    steps:
+      - name: Validate Mistral enrollment
+        shell: bash
+        env:
+          PROVIDER_ENABLED: ${{ vars.LIVE_MISTRAL_ENABLED }}
+        run: |
+          set -euo pipefail
+          [[ "$PROVIDER_ENABLED" == "true" ]] || { echo "LIVE_MISTRAL_ENABLED must equal true" >&2; exit 1; }
+      - name: Validate exact trusted Cargo AI candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+          TRUSTED_TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$CARGO_AI_SHA" != "$TRUSTED_TRIGGER_SHA" ]]; then
+            comparison=$(gh api "/repos/$GITHUB_REPOSITORY/compare/$CARGO_AI_SHA...$TRUSTED_TRIGGER_SHA" --jq .status)
+            [[ "$comparison" == "ahead" ]]
+          fi
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.cargo_ai_sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, resolved 2026-08-02
+      - name: Configure isolated Cargo AI Home
+        shell: bash
+        run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Run one representative Mistral check
+        env:
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          MISTRAL_MODEL: ${{ inputs.mistral_model || vars.MISTRAL_MODEL }}
+        run: |
+          set -euo pipefail
+          [[ -n "${MISTRAL_API_KEY:-}" ]] || { echo "MISTRAL_API_KEY is required for enrolled Mistral" >&2; exit 1; }
+          [[ -n "${MISTRAL_MODEL:-}" ]] || { echo "MISTRAL_MODEL is required for enrolled Mistral" >&2; exit 1; }
+          cargo test --locked --test provider_smoke live_mistral_smoke_uses_isolated_stdin_credentials -- --ignored --exact
 
   summary:
     name: Release qualification summary
     if: ${{ always() }}
-    needs: [deterministic, packages, live_providers]
+    needs: [deterministic, packages, live_openai, live_anthropic, live_gemini, live_xai, live_mistral]
     runs-on: ubuntu-latest
     environment: release-qualification
     timeout-minutes: 5
@@ -113,7 +299,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DETERMINISTIC_RESULT: ${{ needs.deterministic.result }}
           PACKAGE_RESULT: ${{ needs.packages.result }}
-          LIVE_RESULT: ${{ needs.live_providers.result }}
           CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
           TRUSTED_TRIGGER_SHA: ${{ github.sha }}
           CATALOG_CHECKOUT_OUTCOME: ${{ steps.candidate_metadata.outcome }}
@@ -442,7 +627,7 @@ jobs:
           ]
           family_results_ok = all(
               os.environ.get(name) == "success"
-              for name in ("DETERMINISTIC_RESULT", "PACKAGE_RESULT", "LIVE_RESULT")
+              for name in ("DETERMINISTIC_RESULT", "PACKAGE_RESULT")
           )
           official_results_ok = official["status"] in {"pass", "skipped"}
           qualified = (
