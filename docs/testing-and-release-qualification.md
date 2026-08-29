@@ -6,10 +6,10 @@ Cargo AI separates fast product confidence from paid live integration and from i
 
 1. `multi-os-ci.yml` runs credential-free product, provider, maintained-content, package-lifecycle, build, and install checks on Ubuntu, macOS, and Windows. Provider requests use loopback fixtures. Ollama coverage tests its OpenAI-compatible transport without provisioning a model server.
 2. `package-qualification.yml` checks one allowlisted public package revision on each declared platform. It runs the package's bounded declaration checks and the mandatory Cargo AI build/package/install/inspect/run/hatch/uninstall lifecycle.
-3. `live-provider-conformance.yml` runs one representative model for OpenAI, Anthropic, Gemini, xAI, and Mistral. Manual dispatch selects one provider or `all` and defaults to OpenAI. Each key exists only in its provider test step, and no more than two paid-provider jobs run concurrently.
+3. `live-provider-conformance.yml` runs one representative model for required OpenAI and any explicitly enrolled optional provider. Manual dispatch selects one provider or `all` and defaults to OpenAI. Each selected job receives only its own key; selected jobs are independent and run concurrently without provider-to-provider dependencies.
 4. `release-qualification.yml` combines those three results, renders a GitHub-native qualification dashboard, and fails unless every required result passes. It does not duplicate their assertions.
 
-The initial full qualification uses 12 runner jobs: three deterministic operating systems, three canary-package operating systems, five hosted providers, and one protected summary. Provider fixtures, models, package entrypoints, and package checks are not matrix dimensions.
+The initial OpenAI-only full qualification uses eight runner jobs: three deterministic operating systems, three canary-package operating systems, one hosted provider, and one protected summary. Each optional provider enrollment adds one independent hosted job, up to 12 jobs before official packages and the unchanged 21-job global ceiling. Provider fixtures, models, package entrypoints, and package checks are not matrix dimensions.
 
 ## Local credential-free checks
 
@@ -61,21 +61,39 @@ Candidate failure always blocks. When an exact last release-qualified Cargo AI c
 
 ## Hosted provider configuration
 
-Commission qualification progressively against one exact Cargo AI commit. Run **Multi-OS CI**, then **Package Qualification**, then **Live Provider Conformance** with its default `openai` choice. Add and validate the other hosted providers one at a time. A single-provider run starts only the selected provider job and is integration evidence, not a Version 1 qualification decision. **Release Qualification** always selects `all` and remains the only complete aggregate gate.
+Commission qualification progressively against one exact Cargo AI commit. Run **Multi-OS CI**, then **Package Qualification**, then **Live Provider Conformance** with its default `openai` choice. OpenAI is the initial required live provider. Add and validate other hosted providers one at a time when their coverage is wanted. A single-provider run starts only the selected provider job and is integration evidence, not a Version 1 qualification decision. **Release Qualification** selects `all`, meaning required OpenAI plus every explicitly enrolled optional provider, and remains the only complete aggregate gate.
 
-Create a GitHub Environment named `live-provider-ci`. Store dedicated least-privilege secrets there:
+The live workflow has no semantic dependency between providers:
+
+```text
+workflow dispatch
+  +-- OpenAI (required)
+  +-- Anthropic (when enrolled)
+  +-- Gemini (when enrolled)
+  +-- xAI (when enrolled)
+  +-- Mistral (when enrolled)
+  `-- complete after every selected job finishes
+```
+
+Store these non-secret repository variables under **Settings → Secrets and variables → Actions → Variables**. Set a value to the exact lowercase string `true` to enroll that optional provider; leave it unset or set it to `false` to keep the provider non-blocking:
+
+- `LIVE_ANTHROPIC_ENABLED`
+- `LIVE_GEMINI_ENABLED`
+- `LIVE_XAI_ENABLED`
+- `LIVE_MISTRAL_ENABLED`
+
+The workflow never probes secret presence to infer enrollment. An invalid enrollment value fails visibly. Explicitly dispatching an optional provider also requires its enrollment variable to equal `true`.
+
+Create a GitHub Environment named `live-provider-ci`. Store required OpenAI configuration there first:
 
 - `OPENAI_API_KEY`
-- `ANTHROPIC_API_KEY`
-- `GEMINI_API_KEY`
-- `XAI_API_KEY`
-- `MISTRAL_API_KEY`
+- `OPENAI_MODEL` as a non-secret Environment variable
 
-Set matching non-secret Environment variables: `OPENAI_MODEL`, `ANTHROPIC_MODEL`, `GEMINI_MODEL`, `XAI_MODEL`, and `MISTRAL_MODEL`. Select one representative hosted model for each provider. Initial commissioning can begin with only the OpenAI secret/model pair; add each remaining pair before selecting that provider, and configure all five before the full release aggregate. Do not add an Ollama secret or model variable; real local-server provisioning is outside this workflow.
+For each optional provider being enrolled, add only its matching Environment secret and non-secret model variable: `ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL`, `GEMINI_API_KEY`/`GEMINI_MODEL`, `XAI_API_KEY`/`XAI_MODEL`, or `MISTRAL_API_KEY`/`MISTRAL_MODEL`. Select one representative hosted model per enrolled provider. Do not add an Ollama secret or model variable; real local-server provisioning is outside this workflow.
 
 Restrict `live-provider-ci` to the trusted default branch and approved release tags. Before any provider key is injected, each live job requires an exact lowercase Cargo AI commit and verifies that it is the trusted triggering commit or one of its ancestors. It is intended to run unattended, so human release approval belongs to a separate `release-qualification` Environment attached only to the final aggregate summary.
 
-The live tests write each key to a temporary isolated profile through stdin. Keys are not command arguments, logs, artifacts, caches, deterministic jobs, or source-package jobs. Missing requested configuration fails rather than silently skipping a provider.
+The live tests write each selected key to a temporary isolated profile through stdin. Keys are not command arguments, logs, artifacts, caches, deterministic jobs, source-package jobs, or other provider jobs. Missing OpenAI configuration and missing configuration for an explicitly selected or enrolled provider fail rather than silently skipping. Unenrolled optional providers are intentionally reported as not configured and do not block qualification.
 
 ## Evidence and release interpretation
 
@@ -83,7 +101,7 @@ Required checks should include the stable deterministic summary on ordinary pull
 
 The protected release job writes the canonical human-readable dashboard directly to the GitHub Actions run summary. Open the Cargo AI repository, select **Actions**, select **Release Qualification**, and open a run's **Summary** page. The table reports product conformance, deterministic providers, maintained content, the public package canary, registered official packages, each hosted provider, and the aggregate release decision. Each completed test area links to its producing GitHub job and includes its completion time.
 
-Dashboard states are explicit: `pass`, `fail`, `cancelled`, `skipped`, and `missing`. A missing, skipped, cancelled, or failed required result blocks qualification. The official-package row is `skipped` only while the validated catalog count is zero; enrolling an official package without aggregate results changes that row to `missing` and blocks release. JUnit and provenance artifacts remain the durable evidence behind the summary.
+Dashboard states are explicit: `pass`, `fail`, `cancelled`, `skipped`, `not configured`, and `missing`. A missing, skipped, cancelled, or failed required/enrolled result blocks qualification. An unenrolled optional provider is `not configured`, never passed. The official-package row is `skipped` only while the validated catalog count is zero; enrolling an official package without aggregate results changes that row to `missing` and blocks release. JUnit and provenance artifacts remain the durable evidence behind the summary.
 
 When GitHub reruns only failed jobs, the dashboard safely selects the newest completed attempt for each expected job from the same workflow run and exact candidate commit. A duplicate or mismatched result is treated as missing rather than guessed.
 

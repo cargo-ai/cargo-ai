@@ -118,6 +118,10 @@ jobs:
           TRUSTED_TRIGGER_SHA: ${{ github.sha }}
           CATALOG_CHECKOUT_OUTCOME: ${{ steps.candidate_metadata.outcome }}
           CATALOG_PATH: qualification-dashboard-source/.github/package-qualification-catalog.toml
+          LIVE_ANTHROPIC_ENABLED: ${{ vars.LIVE_ANTHROPIC_ENABLED }}
+          LIVE_GEMINI_ENABLED: ${{ vars.LIVE_GEMINI_ENABLED }}
+          LIVE_XAI_ENABLED: ${{ vars.LIVE_XAI_ENABLED }}
+          LIVE_MISTRAL_ENABLED: ${{ vars.LIVE_MISTRAL_ENABLED }}
         run: |
           set -uo pipefail
           jobs_json="$RUNNER_TEMP/release-qualification-jobs.json"
@@ -187,7 +191,15 @@ jobs:
               "fail": "❌ fail",
               "cancelled": "🚫 cancelled",
               "skipped": "⏭️ skipped",
+              "not_configured": "⚪ not configured",
               "missing": "❓ missing",
+          }
+
+          OPTIONAL_PROVIDER_FLAGS = {
+              "Anthropic": "LIVE_ANTHROPIC_ENABLED",
+              "Gemini": "LIVE_GEMINI_ENABLED",
+              "xAI": "LIVE_XAI_ENABLED",
+              "Mistral": "LIVE_MISTRAL_ENABLED",
           }
 
           def table_cell(value):
@@ -196,6 +208,14 @@ jobs:
           def trusted_job_url(value):
               prefix = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}/job/"
               return value if isinstance(value, str) and value.startswith(prefix) else run_url
+
+          def optional_provider_enrollment(provider):
+              value = os.environ.get(OPTIONAL_PROVIDER_FLAGS[provider], "").strip()
+              if value == "true":
+                  return True
+              if value in {"", "false"}:
+                  return False
+              return None
 
           def aggregate_jobs(expected):
               selected = []
@@ -322,13 +342,38 @@ jobs:
                   ("Windows", "Source package qualification (windows-latest)"),
               ]
           )
-          providers = {
+          provider_jobs = {
               "OpenAI": aggregate_jobs([("OpenAI job", "Live OpenAI conformance")]),
               "Anthropic": aggregate_jobs([("Anthropic job", "Live Anthropic conformance")]),
               "Gemini": aggregate_jobs([("Gemini job", "Live Gemini conformance")]),
               "xAI": aggregate_jobs([("xAI job", "Live xAI conformance")]),
               "Mistral": aggregate_jobs([("Mistral job", "Live Mistral conformance")]),
           }
+          provider_rows = []
+          provider_configuration_ok = True
+          for provider, result in provider_jobs.items():
+              if provider == "OpenAI":
+                  policy = "required"
+                  scope = "Required protected representative hosted check"
+              else:
+                  enrollment = optional_provider_enrollment(provider)
+                  if enrollment is True:
+                      policy = "required (enrolled)"
+                      scope = "Enrolled protected representative hosted check"
+                  elif enrollment is False:
+                      policy = "optional"
+                      scope = "Optional provider is not configured"
+                      if result["status"] == "skipped":
+                          result = {**result, "status": "not_configured"}
+                      else:
+                          provider_configuration_ok = False
+                          result = {**result, "status": "fail"}
+                  else:
+                      policy = "invalid configuration"
+                      scope = f"{OPTIONAL_PROVIDER_FLAGS[provider]} must be true, false, or unset"
+                      provider_configuration_ok = False
+                      result = {**result, "status": "fail"}
+              provider_rows.append(("Live provider", provider, policy, result, scope))
 
           catalog_ok = True
           try:
@@ -388,12 +433,13 @@ jobs:
               ("Package", "Public qualification canary lifecycle", "required", package, canary_scope),
               ("Package", "Registered official packages", "conditional", official, official_scope),
           ]
-          rows.extend(
-              ("Live provider", provider, "required", result, "One protected representative hosted check")
-              for provider, result in providers.items()
-          )
+          rows.extend(provider_rows)
 
-          required_results = [result["status"] for _, _, policy, result, _ in rows if policy == "required"]
+          required_results = [
+              result["status"]
+              for _, _, policy, result, _ in rows
+              if policy.startswith("required")
+          ]
           family_results_ok = all(
               os.environ.get(name) == "success"
               for name in ("DETERMINISTIC_RESULT", "PACKAGE_RESULT", "LIVE_RESULT")
@@ -405,6 +451,7 @@ jobs:
               and jobs_api_ok
               and catalog_ok
               and family_results_ok
+              and provider_configuration_ok
               and official_results_ok
               and all(status == "pass" for status in required_results)
           )
