@@ -11,6 +11,29 @@ Cargo AI separates fast product confidence from paid live integration and from i
 
 The initial OpenAI-only full qualification uses eight runner jobs: three deterministic operating systems, three canary-package operating systems, one hosted provider, and one protected summary. Each optional provider enrollment adds one independent hosted job, up to 12 jobs before official packages and the unchanged 21-job global ceiling. Provider fixtures, models, package entrypoints, and package checks are not matrix dimensions.
 
+## How one release run fits together
+
+`Release Qualification` is the GitHub Actions orchestration workflow. It starts the credential-free operating-system families and fresh protected provider jobs against one exact Cargo AI commit, then reduces their sanitized results to one release decision:
+
+```text
+exact Cargo AI candidate commit
+  +-- deterministic family
+  |     +-- Ubuntu
+  |     +-- macOS
+  |     `-- Windows
+  +-- source-package family
+  |     +-- Ubuntu
+  |     +-- macOS
+  |     `-- Windows
+  +-- live providers
+  |     +-- OpenAI (required)
+  |     `-- enrolled optional providers (independent jobs)
+  `-- release qualification summary
+        `-- one fail-closed pass/fail decision
+```
+
+The operating-system families prove portable CLI and package behavior without provider credentials. Hosted-provider jobs are separate because the provider protocol boundary is not multiplied across operating systems. Package repositories retain their broad native tests; this workflow checks Cargo AI's bounded compatibility lifecycle for allowlisted exact package revisions.
+
 ## Local credential-free checks
 
 Run tests through the development wrapper from the parent infrastructure checkout so Cargo AI Home and environment-mutating tests remain isolated:
