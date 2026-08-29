@@ -1,0 +1,16 @@
+format_version = 1
+package_id = "invalid_path"
+profile = "default"
+platforms = ["macos"]
+
+[[entrypoints]]
+name = "qualification_smoke"
+run = true
+hatch = false
+
+[[checks]]
+name = "escape"
+program = "cargo"
+args = ["test"]
+working_directory = "../outside"
+timeout_seconds = 60

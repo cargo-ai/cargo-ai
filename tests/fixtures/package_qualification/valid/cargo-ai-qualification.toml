@@ -1,0 +1,16 @@
+format_version = 1
+package_id = "qualification_fixture"
+profile = "default"
+platforms = ["ubuntu", "macos", "windows"]
+
+[[entrypoints]]
+name = "qualification_smoke"
+run = true
+hatch = true
+
+[[checks]]
+name = "candidate-version"
+program = "cargo-ai"
+args = ["--no-update-check", "version"]
+working_directory = "."
+timeout_seconds = 60

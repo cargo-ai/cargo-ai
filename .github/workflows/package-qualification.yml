@@ -1,0 +1,288 @@
+name: Package Qualification
+
+on:
+  pull_request:
+    branches: [develop]
+    paths:
+      - .github/package-qualification-catalog.toml
+      - .github/workflows/package-qualification.yml
+      - tests/content_package_qualification.rs
+      - tests/fixtures/package_lifecycle/**
+      - tests/fixtures/package_qualification/**
+  workflow_dispatch:
+    inputs:
+      package_repository:
+        description: Allowlisted owner/repository (empty resolves the enabled catalog canary)
+        required: false
+        type: string
+      package_sha:
+        description: Exact package commit (empty resolves the catalog revision)
+        required: false
+        type: string
+      cargo_ai_sha:
+        description: Exact Cargo AI candidate commit
+        required: true
+        type: string
+      baseline_cargo_ai_sha:
+        description: Optional exact last release-qualified Cargo AI commit for failure diagnosis
+        required: false
+        type: string
+      declaration_path:
+        description: Package-relative declaration path
+        required: false
+        default: cargo-ai-qualification.toml
+        type: string
+      platforms_json:
+        description: JSON array of up to three declared GitHub runner labels
+        required: false
+        default: '["ubuntu-latest","macos-latest","windows-latest"]'
+        type: string
+      emit_summary:
+        description: Emit a standalone package summary job
+        required: false
+        default: true
+        type: boolean
+  workflow_call:
+    inputs:
+      package_repository:
+        required: false
+        type: string
+      package_sha:
+        required: false
+        type: string
+      cargo_ai_sha:
+        required: true
+        type: string
+      baseline_cargo_ai_sha:
+        required: false
+        type: string
+      declaration_path:
+        required: false
+        default: cargo-ai-qualification.toml
+        type: string
+      platforms_json:
+        required: false
+        default: '["ubuntu-latest","macos-latest","windows-latest"]'
+        type: string
+      emit_summary:
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_AI_DISABLE_KEYCHAIN: "1"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  qualify:
+    name: Source package qualification (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        os: ${{ fromJSON(inputs.platforms_json || '["ubuntu-latest","macos-latest","windows-latest"]') }}
+    env:
+      REQUESTED_PACKAGE_REPOSITORY: ${{ inputs.package_repository }}
+      REQUESTED_PACKAGE_SHA: ${{ inputs.package_sha }}
+      REQUESTED_DECLARATION_PATH: ${{ inputs.declaration_path }}
+    steps:
+      - name: Validate exact Cargo AI candidate
+        shell: bash
+        env:
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.event.pull_request.head.sha || github.sha }}
+          BASELINE_CARGO_AI_SHA: ${{ inputs.baseline_cargo_ai_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ -n "$BASELINE_CARGO_AI_SHA" ]]; then
+            [[ "$BASELINE_CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          fi
+
+      - name: Check out exact Cargo AI candidate
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: cargo-ai/cargo-ai
+          ref: ${{ inputs.cargo_ai_sha || github.event.pull_request.head.sha || github.sha }}
+          path: cargo-ai
+          persist-credentials: false
+
+      - name: Resolve allowlisted package identity
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, tomllib
+          from pathlib import Path
+
+          catalog = tomllib.loads(Path("cargo-ai/.github/package-qualification-catalog.toml").read_text())
+          rows = catalog.get("qualification_canaries", []) + catalog.get("official_packages", [])
+          requested_repo = os.environ.get("REQUESTED_PACKAGE_REPOSITORY", "").strip()
+          requested_sha = os.environ.get("REQUESTED_PACKAGE_SHA", "").strip()
+          requested_declaration = os.environ.get("REQUESTED_DECLARATION_PATH", "").strip()
+
+          if requested_repo:
+              matches = [row for row in rows if row.get("repository") == requested_repo]
+              if len(matches) != 1:
+                  raise SystemExit("requested package repository is not uniquely allowlisted")
+              row = matches[0]
+              package_sha = requested_sha
+          else:
+              matches = [row for row in catalog.get("qualification_canaries", []) if row.get("enabled") and row.get("release_required")]
+              if len(matches) != 1:
+                  raise SystemExit("catalog must contain exactly one enabled release-required qualification canary")
+              row = matches[0]
+              requested_repo = row["repository"]
+              package_sha = row.get("revision", "")
+
+          if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", requested_repo):
+              raise SystemExit("package repository is not portable")
+          if not re.fullmatch(r"[0-9a-f]{40}", package_sha):
+              raise SystemExit("package revision must be an exact lowercase 40-character commit")
+          declaration = requested_declaration or row.get("declaration_path", "")
+          if not declaration or declaration.startswith(("/", "\\")) or ".." in Path(declaration).parts:
+              raise SystemExit("declaration path must remain package-relative")
+
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a") as stream:
+              stream.write(f"repository={requested_repo}\n")
+              stream.write(f"sha={package_sha}\n")
+              stream.write(f"declaration={declaration}\n")
+          PY
+
+      - name: Check out exact public package source anonymously
+        shell: bash
+        env:
+          PACKAGE_REPOSITORY: ${{ steps.package.outputs.repository }}
+          PACKAGE_SHA: ${{ steps.package.outputs.sha }}
+        run: |
+          set -euo pipefail
+          mkdir package
+          git -C package init
+          git -C package remote add origin "https://github.com/${PACKAGE_REPOSITORY}.git"
+          git -C package fetch --depth=1 origin "$PACKAGE_SHA"
+          [[ "$(git -C package rev-parse FETCH_HEAD)" == "$PACKAGE_SHA" ]]
+          git -C package checkout --detach FETCH_HEAD
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, resolved 2026-08-02
+
+      - name: Remove checkout authority before package code
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --unset-all http.https://github.com/.extraheader || true
+          git -C cargo-ai config --local --unset-all http.https://github.com/.extraheader || true
+          git -C package config --local --unset-all http.https://github.com/.extraheader || true
+
+      - name: Run candidate lifecycle
+        id: candidate
+        continue-on-error: true
+        timeout-minutes: 10
+        shell: bash
+        env:
+          CARGO_AI_HOME: ${{ runner.temp }}/cargo-ai-home
+          CARGO_AI_QUALIFICATION_PACKAGE_ROOT: ${{ github.workspace }}/package
+        run: |
+          set -euo pipefail
+          cd cargo-ai
+          cargo test --locked --test content_package_qualification external_package_qualification_runs_mandatory_lifecycle -- --ignored --exact
+
+      - name: Check out diagnostic baseline
+        if: ${{ steps.candidate.outcome == 'failure' && inputs.baseline_cargo_ai_sha != '' }}
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: cargo-ai/cargo-ai
+          ref: ${{ inputs.baseline_cargo_ai_sha }}
+          path: cargo-ai-baseline
+          persist-credentials: false
+
+      - name: Run failure-only baseline diagnosis
+        id: baseline
+        if: ${{ steps.candidate.outcome == 'failure' && inputs.baseline_cargo_ai_sha != '' }}
+        continue-on-error: true
+        timeout-minutes: 10
+        shell: bash
+        env:
+          CARGO_AI_HOME: ${{ runner.temp }}/cargo-ai-baseline-home
+          CARGO_AI_QUALIFICATION_PACKAGE_ROOT: ${{ github.workspace }}/package
+        run: |
+          set -euo pipefail
+          cd cargo-ai-baseline
+          cargo test --locked --test content_package_qualification external_package_qualification_runs_mandatory_lifecycle -- --ignored --exact
+
+      - name: Emit sanitized evidence and enforce candidate result
+        if: ${{ always() }}
+        shell: bash
+        env:
+          CANDIDATE_OUTCOME: ${{ steps.candidate.outcome }}
+          BASELINE_OUTCOME: ${{ steps.baseline.outcome }}
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.event.pull_request.head.sha || github.sha }}
+          BASELINE_CARGO_AI_SHA: ${{ inputs.baseline_cargo_ai_sha }}
+          PACKAGE_REPOSITORY: ${{ steps.package.outputs.repository }}
+          PACKAGE_SHA: ${{ steps.package.outputs.sha }}
+          DECLARATION_PATH: ${{ steps.package.outputs.declaration }}
+          LOGICAL_OS: ${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          declaration_digest=$(git -C package hash-object "$DECLARATION_PATH")
+          classification="candidate passed"
+          if [[ "$CANDIDATE_OUTCOME" != "success" && "$BASELINE_OUTCOME" == "success" ]]; then
+            classification="probable Cargo AI regression"
+          elif [[ "$CANDIDATE_OUTCOME" != "success" && "$BASELINE_OUTCOME" == "failure" ]]; then
+            classification="pre-existing package or infrastructure suspect"
+          elif [[ "$CANDIDATE_OUTCOME" != "success" ]]; then
+            classification="unclassified candidate failure"
+          fi
+          result="failure"
+          failures=1
+          if [[ "$CANDIDATE_OUTCOME" == "success" ]]; then result="success"; failures=0; fi
+          {
+            printf '%s\n' \
+              "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" \
+              "<testsuite name=\"cargo-ai-package-qualification\" tests=\"1\" failures=\"$failures\">" \
+              "  <testcase classname=\"$PACKAGE_REPOSITORY\" name=\"$LOGICAL_OS\">"
+            if [[ "$failures" == "1" ]]; then
+              printf '    <failure message="candidate qualification failed">%s</failure>\n' "$classification"
+            fi
+            printf '%s\n' "  </testcase>" "</testsuite>"
+          } > qualification.xml
+          runner_image="${ImageOS:-unknown}-${ImageVersion:-unknown}"
+          printf '{"result":"%s","classification":"%s","cargo_ai_sha":"%s","baseline_cargo_ai_sha":"%s","package_repository":"%s","package_sha":"%s","logical_os":"%s","runner_image":"%s","architecture":"%s","declaration_digest":"%s","workflow_ref":"%s"}\n' \
+            "$result" "$classification" "$CARGO_AI_SHA" "$BASELINE_CARGO_AI_SHA" "$PACKAGE_REPOSITORY" "$PACKAGE_SHA" "$LOGICAL_OS" "$runner_image" "$RUNNER_ARCH" "$declaration_digest" "$GITHUB_WORKFLOW_REF" > provenance.json
+          echo "Package result: $classification" >> "$GITHUB_STEP_SUMMARY"
+          [[ "$CANDIDATE_OUTCOME" == "success" ]]
+
+      - name: Upload qualification evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: package-qualification-${{ matrix.os }}
+          path: |
+            qualification.xml
+            provenance.json
+          if-no-files-found: error
+          retention-days: 14
+
+  summary:
+    name: Package qualification summary
+    if: ${{ always() && github.event_name != 'pull_request' && inputs.emit_summary }}
+    needs: [qualify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every declared package platform
+        env:
+          MATRIX_RESULT: ${{ needs.qualify.result }}
+        run: |
+          test "$MATRIX_RESULT" = "success"
+          echo "The required qualification canary passed on every declared platform." >> "$GITHUB_STEP_SUMMARY"

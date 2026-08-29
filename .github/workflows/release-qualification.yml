@@ -1,0 +1,457 @@
+name: Release Qualification
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      cargo_ai_sha:
+        description: Exact Cargo AI commit to qualify (defaults to the triggering commit)
+        required: false
+        type: string
+      baseline_cargo_ai_sha:
+        description: Optional exact last release-qualified Cargo AI commit
+        required: false
+        type: string
+      openai_model:
+        required: false
+        type: string
+      anthropic_model:
+        required: false
+        type: string
+      gemini_model:
+        required: false
+        type: string
+      xai_model:
+        required: false
+        type: string
+      mistral_model:
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      cargo_ai_sha:
+        required: true
+        type: string
+      baseline_cargo_ai_sha:
+        required: false
+        type: string
+      openai_model:
+        required: false
+        type: string
+      anthropic_model:
+        required: false
+        type: string
+      gemini_model:
+        required: false
+        type: string
+      xai_model:
+        required: false
+        type: string
+      mistral_model:
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deterministic:
+    name: Deterministic family
+    uses: ./.github/workflows/multi-os-ci.yml
+    with:
+      cargo_ai_sha: ${{ inputs.cargo_ai_sha || github.sha }}
+      emit_summary: false
+      collect_all: true
+
+  packages:
+    name: Source-package family
+    uses: ./.github/workflows/package-qualification.yml
+    with:
+      cargo_ai_sha: ${{ inputs.cargo_ai_sha || github.sha }}
+      baseline_cargo_ai_sha: ${{ inputs.baseline_cargo_ai_sha }}
+      emit_summary: false
+
+  live_providers:
+    name: Hosted-provider family
+    uses: ./.github/workflows/live-provider-conformance.yml
+    with:
+      provider: all
+      cargo_ai_sha: ${{ inputs.cargo_ai_sha || github.sha }}
+      openai_model: ${{ inputs.openai_model }}
+      anthropic_model: ${{ inputs.anthropic_model }}
+      gemini_model: ${{ inputs.gemini_model }}
+      xai_model: ${{ inputs.xai_model }}
+      mistral_model: ${{ inputs.mistral_model }}
+
+  summary:
+    name: Release qualification summary
+    if: ${{ always() }}
+    needs: [deterministic, packages, live_providers]
+    runs-on: ubuntu-latest
+    environment: release-qualification
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact candidate qualification metadata
+        id: candidate_metadata
+        continue-on-error: true
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.cargo_ai_sha || github.sha }}
+          path: qualification-dashboard-source
+          persist-credentials: false
+
+      - name: Render and enforce qualification dashboard
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DETERMINISTIC_RESULT: ${{ needs.deterministic.result }}
+          PACKAGE_RESULT: ${{ needs.packages.result }}
+          LIVE_RESULT: ${{ needs.live_providers.result }}
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+          TRUSTED_TRIGGER_SHA: ${{ github.sha }}
+          CATALOG_CHECKOUT_OUTCOME: ${{ steps.candidate_metadata.outcome }}
+          CATALOG_PATH: qualification-dashboard-source/.github/package-qualification-catalog.toml
+        run: |
+          set -uo pipefail
+          jobs_json="$RUNNER_TEMP/release-qualification-jobs.json"
+          jobs_api_status=1
+          for attempt in 1 2 3 4 5; do
+            if gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=all&per_page=100" \
+              > "$jobs_json"
+            then
+              jobs_api_status=0
+              expected_jobs=(
+                "Deterministic qualification (ubuntu-latest)"
+                "Deterministic qualification (macos-latest)"
+                "Deterministic qualification (windows-latest)"
+                "Source package qualification (ubuntu-latest)"
+                "Source package qualification (macos-latest)"
+                "Source package qualification (windows-latest)"
+                "Live OpenAI conformance"
+                "Live Anthropic conformance"
+                "Live Gemini conformance"
+                "Live xAI conformance"
+                "Live Mistral conformance"
+              )
+              jobs_ready=true
+              for expected_job in "${expected_jobs[@]}"; do
+                if ! jq -e --arg suffix "$expected_job" \
+                  '[.jobs[] | select(.name | endswith($suffix))] | length >= 1' \
+                  "$jobs_json" > /dev/null
+                then
+                  jobs_ready=false
+                  break
+                fi
+              done
+              if [[ "$jobs_ready" == "true" ]]; then
+                break
+              fi
+            else
+              jobs_api_status=$?
+            fi
+            if [[ "$attempt" != "5" ]]; then sleep 2; fi
+          done
+          export JOBS_JSON="$jobs_json"
+          export JOBS_API_STATUS="$jobs_api_status"
+
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+          import re
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
+          REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+          FAILING_CONCLUSIONS = {
+              "action_required",
+              "failure",
+              "neutral",
+              "stale",
+              "startup_failure",
+              "timed_out",
+          }
+          STATUS_LABELS = {
+              "pass": "✅ pass",
+              "fail": "❌ fail",
+              "cancelled": "🚫 cancelled",
+              "skipped": "⏭️ skipped",
+              "missing": "❓ missing",
+          }
+
+          def table_cell(value):
+              return str(value).replace("|", r"\|").replace("\r", " ").replace("\n", "<br>")
+
+          def trusted_job_url(value):
+              prefix = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}/job/"
+              return value if isinstance(value, str) and value.startswith(prefix) else run_url
+
+          def aggregate_jobs(expected):
+              selected = []
+              for label, suffix in expected:
+                  matches = [
+                      job
+                      for job in jobs
+                      if str(job.get("name", "")).endswith(suffix)
+                      and job.get("head_sha") == trigger_sha
+                      and isinstance(job.get("run_attempt"), int)
+                      and 1 <= job["run_attempt"] <= current_attempt
+                  ]
+                  if not matches:
+                      return {
+                          "status": "missing",
+                          "completed": "—",
+                          "evidence": f"[Workflow run]({run_url})",
+                      }
+                  latest_attempt = max(job["run_attempt"] for job in matches)
+                  latest_matches = [job for job in matches if job["run_attempt"] == latest_attempt]
+                  if len(latest_matches) != 1:
+                      return {
+                          "status": "missing",
+                          "completed": "—",
+                          "evidence": f"[Workflow run]({run_url})",
+                      }
+                  selected.append((label, latest_matches[0]))
+
+              conclusions = []
+              for _, job in selected:
+                  if job.get("status") != "completed" or not job.get("conclusion"):
+                      return {
+                          "status": "missing",
+                          "completed": "—",
+                          "evidence": f"[Workflow run]({run_url})",
+                      }
+                  conclusions.append(job["conclusion"])
+
+              known_conclusions = FAILING_CONCLUSIONS | {"cancelled", "skipped", "success"}
+              if any(conclusion not in known_conclusions for conclusion in conclusions):
+                  status = "missing"
+              elif any(conclusion in FAILING_CONCLUSIONS for conclusion in conclusions):
+                  status = "fail"
+              elif any(conclusion == "cancelled" for conclusion in conclusions):
+                  status = "cancelled"
+              elif any(conclusion == "skipped" for conclusion in conclusions):
+                  status = "skipped"
+              elif all(conclusion == "success" for conclusion in conclusions):
+                  status = "pass"
+              else:
+                  status = "missing"
+
+              completed_values = [job.get("completed_at") for _, job in selected if job.get("completed_at")]
+              completed = max(completed_values) if completed_values else "—"
+              evidence = " · ".join(
+                  f"[{label}]({trusted_job_url(job.get('html_url'))})" for label, job in selected
+              )
+              return {"status": status, "completed": completed, "evidence": evidence}
+
+          def read_catalog():
+              if os.environ.get("CATALOG_CHECKOUT_OUTCOME") != "success":
+                  raise ValueError("candidate metadata checkout did not succeed")
+              catalog = tomllib.loads(Path(os.environ["CATALOG_PATH"]).read_text(encoding="utf-8"))
+              if catalog.get("schema_version") != 1:
+                  raise ValueError("unsupported catalog schema")
+              official_packages = catalog.get("official_packages", [])
+              official_count = catalog.get("official_package_count")
+              if not isinstance(official_count, int) or official_count < 0:
+                  raise ValueError("invalid official package count")
+              if official_count != len(official_packages):
+                  raise ValueError("official package count mismatch")
+              canaries = [
+                  row
+                  for row in catalog.get("qualification_canaries", [])
+                  if row.get("enabled") and row.get("release_required")
+              ]
+              if len(canaries) != 1:
+                  raise ValueError("expected one release-required qualification canary")
+              canary = canaries[0]
+              repository = canary.get("repository", "")
+              revision = canary.get("revision", "")
+              platforms = canary.get("platforms", [])
+              if not REPOSITORY_PATTERN.fullmatch(repository):
+                  raise ValueError("invalid canary repository")
+              if not SHA_PATTERN.fullmatch(revision):
+                  raise ValueError("invalid canary revision")
+              if not isinstance(platforms, list) or not 1 <= len(platforms) <= 3:
+                  raise ValueError("invalid canary platforms")
+              return repository, revision, len(platforms), official_count
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          run_url = f"https://github.com/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          current_attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+          candidate = os.environ.get("CARGO_AI_SHA", "").strip()
+          candidate_valid = bool(SHA_PATTERN.fullmatch(candidate))
+          trigger_sha = os.environ.get("TRUSTED_TRIGGER_SHA", "").strip()
+          trigger_valid = bool(SHA_PATTERN.fullmatch(trigger_sha))
+          candidate_display = f"`{candidate}`" if candidate_valid else "invalid or missing exact commit"
+          candidate_url = f"https://github.com/{repository}/commit/{candidate}" if candidate_valid else run_url
+          generated_at = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+          jobs = []
+          jobs_api_ok = os.environ.get("JOBS_API_STATUS") == "0"
+          if jobs_api_ok:
+              try:
+                  payload = json.loads(Path(os.environ["JOBS_JSON"]).read_text(encoding="utf-8"))
+                  jobs = payload.get("jobs", [])
+                  jobs_api_ok = isinstance(jobs, list)
+              except (OSError, ValueError, TypeError):
+                  jobs_api_ok = False
+                  jobs = []
+
+          deterministic = aggregate_jobs(
+              [
+                  ("Ubuntu", "Deterministic qualification (ubuntu-latest)"),
+                  ("macOS", "Deterministic qualification (macos-latest)"),
+                  ("Windows", "Deterministic qualification (windows-latest)"),
+              ]
+          )
+          package = aggregate_jobs(
+              [
+                  ("Ubuntu", "Source package qualification (ubuntu-latest)"),
+                  ("macOS", "Source package qualification (macos-latest)"),
+                  ("Windows", "Source package qualification (windows-latest)"),
+              ]
+          )
+          providers = {
+              "OpenAI": aggregate_jobs([("OpenAI job", "Live OpenAI conformance")]),
+              "Anthropic": aggregate_jobs([("Anthropic job", "Live Anthropic conformance")]),
+              "Gemini": aggregate_jobs([("Gemini job", "Live Gemini conformance")]),
+              "xAI": aggregate_jobs([("xAI job", "Live xAI conformance")]),
+              "Mistral": aggregate_jobs([("Mistral job", "Live Mistral conformance")]),
+          }
+
+          catalog_ok = True
+          try:
+              canary_repository, canary_revision, canary_platform_count, official_count = read_catalog()
+          except (OSError, ValueError, TypeError, tomllib.TOMLDecodeError):
+              catalog_ok = False
+              canary_repository = "unavailable"
+              canary_revision = ""
+              canary_platform_count = 0
+              official_count = None
+
+          catalog_url = (
+              f"https://github.com/{repository}/blob/{candidate}/.github/package-qualification-catalog.toml"
+              if candidate_valid
+              else run_url
+          )
+          if catalog_ok:
+              canary_url = f"https://github.com/{canary_repository}/tree/{canary_revision}"
+              canary_scope = (
+                  f"[{canary_repository}@{canary_revision[:12]}]({canary_url}); "
+                  f"{canary_platform_count} platforms"
+              )
+          else:
+              canary_scope = "Qualification catalog unavailable or invalid"
+              package = {
+                  "status": "missing",
+                  "completed": package["completed"],
+                  "evidence": package["evidence"],
+              }
+
+          if official_count == 0:
+              official = {
+                  "status": "skipped",
+                  "completed": "—",
+                  "evidence": f"[Catalog: 0 registered]({catalog_url})",
+              }
+              official_scope = "No registered official packages"
+          elif isinstance(official_count, int) and official_count > 0:
+              official = {
+                  "status": "missing",
+                  "completed": "—",
+                  "evidence": f"[Catalog: {official_count} registered]({catalog_url})",
+              }
+              official_scope = f"{official_count} registered; aggregate results required"
+          else:
+              official = {
+                  "status": "missing",
+                  "completed": "—",
+                  "evidence": f"[Qualification catalog]({catalog_url})",
+              }
+              official_scope = "Registered count unavailable"
+
+          rows = [
+              ("Product", "CLI and workflow conformance", "required", deterministic, "Ubuntu, macOS, Windows; shared deterministic family"),
+              ("Product", "Deterministic provider adapters", "required", deterministic, "6 adapters on Ubuntu, macOS, Windows"),
+              ("Product", "Maintained content", "required", deterministic, "Checked-in examples and definitions on the deterministic family"),
+              ("Package", "Public qualification canary lifecycle", "required", package, canary_scope),
+              ("Package", "Registered official packages", "conditional", official, official_scope),
+          ]
+          rows.extend(
+              ("Live provider", provider, "required", result, "One protected representative hosted check")
+              for provider, result in providers.items()
+          )
+
+          required_results = [result["status"] for _, _, policy, result, _ in rows if policy == "required"]
+          family_results_ok = all(
+              os.environ.get(name) == "success"
+              for name in ("DETERMINISTIC_RESULT", "PACKAGE_RESULT", "LIVE_RESULT")
+          )
+          official_results_ok = official["status"] in {"pass", "skipped"}
+          qualified = (
+              candidate_valid
+              and trigger_valid
+              and jobs_api_ok
+              and catalog_ok
+              and family_results_ok
+              and official_results_ok
+              and all(status == "pass" for status in required_results)
+          )
+          decision = "pass" if qualified else "fail"
+
+          lines = [
+              "## Cargo AI Version 1 qualification",
+              "",
+              "> ✅ **QUALIFIED** — every required result passed."
+              if qualified
+              else "> ❌ **BLOCKED** — at least one required result failed, was cancelled, skipped, or is missing.",
+              "",
+              f"- Candidate: [{candidate_display}]({candidate_url})",
+              f"- Workflow run: [#{os.environ['GITHUB_RUN_NUMBER']} (attempt {os.environ['GITHUB_RUN_ATTEMPT']})]({run_url})",
+              f"- Generated: `{generated_at}`",
+              "",
+              "| Direction | Check | Policy | Status | Scope | Completed (UTC) | Evidence |",
+              "| --- | --- | --- | --- | --- | --- | --- |",
+          ]
+          for direction, check, policy, result, scope in rows:
+              lines.append(
+                  "| "
+                  + " | ".join(
+                      table_cell(value)
+                      for value in (
+                          direction,
+                          check,
+                          policy,
+                          STATUS_LABELS[result["status"]],
+                          scope,
+                          result["completed"],
+                          result["evidence"],
+                      )
+                  )
+                  + " |"
+              )
+          lines.extend(
+              [
+                  "| Release | Version 1 qualification decision | required | "
+                  f"{STATUS_LABELS[decision]} | Exact candidate and required evidence | {generated_at} | [Workflow run]({run_url}) |",
+                  "",
+                  "JUnit and provenance artifacts remain the durable evidence. This summary contains no provider credentials or raw provider responses.",
+              ]
+          )
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
+              summary.write("\n".join(lines) + "\n")
+
+          if not qualified:
+              sys.exit("release qualification is blocked")
+          PY

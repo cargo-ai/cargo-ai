@@ -15,6 +15,7 @@ const TEST_TOKEN: &str = "anthropic-provider-smoke-token";
 const GEMINI_TEST_TOKEN: &str = "gemini-provider-smoke-token";
 const MISTRAL_TEST_TOKEN: &str = "mistral-provider-smoke-token";
 const XAI_TEST_TOKEN: &str = "xai-provider-smoke-token";
+const OPENAI_TEST_TOKEN: &str = "openai-provider-smoke-token";
 
 fn fixture_base_dir(runner_temp: Option<std::ffi::OsString>) -> PathBuf {
     runner_temp
@@ -167,6 +168,31 @@ fn xai_success_response(output: &str) -> String {
     .to_string()
 }
 
+fn openai_success_response(output: &str) -> String {
+    serde_json::json!({
+        "id": "chatcmpl-provider-smoke",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "openai-smoke",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": output},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 16, "completion_tokens": 6, "total_tokens": 22}
+    })
+    .to_string()
+}
+
+fn ollama_success_response(output: &str) -> String {
+    serde_json::json!({
+        "choices": [{"message": {"role": "assistant", "content": output}}],
+        "prompt_eval_count": 8,
+        "eval_count": 3
+    })
+    .to_string()
+}
+
 struct MockServer {
     url: String,
     request: thread::JoinHandle<String>,
@@ -201,6 +227,24 @@ impl MockServer {
             Duration::ZERO,
             200,
             xai_success_response(r#"{"status":"ok"}"#),
+        )
+    }
+
+    fn openai_success() -> Self {
+        Self::respond_after_at(
+            "/v1/chat/completions",
+            Duration::ZERO,
+            200,
+            openai_success_response(r#"{"status":"ok"}"#),
+        )
+    }
+
+    fn ollama_success() -> Self {
+        Self::respond_after_at(
+            "/v1/chat/completions",
+            Duration::ZERO,
+            200,
+            ollama_success_response(r#"{"status":"ok"}"#),
         )
     }
 
@@ -539,6 +583,149 @@ fn run_generated_hosted_smoke(
     assert_hosted_success(provider, model, token, &output, &request, &fixture.usage);
 }
 
+fn openai_compatible_run_args(
+    provider: &str,
+    model: &str,
+    token: Option<&str>,
+    fixture: &Fixture,
+    url: &str,
+) -> Vec<String> {
+    let mut args = vec![
+        "--server".into(),
+        provider.into(),
+        "--model".into(),
+        model.into(),
+        "--url".into(),
+        url.into(),
+        "--max-output-tokens".into(),
+        "128".into(),
+        "--usage-log".into(),
+        fixture.usage.display().to_string(),
+        "--render-mode".into(),
+        "append-only".into(),
+    ];
+    if let Some(token) = token {
+        args.extend(["--token".into(), token.into()]);
+    }
+    args
+}
+
+fn assert_openai_compatible_success(
+    provider: &str,
+    model: &str,
+    token: Option<&str>,
+    output: &Output,
+    request: &str,
+    usage_path: &Path,
+) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "{provider} smoke failed\n{stdout}\n{stderr}"
+    );
+    let normalized_request = request.to_ascii_lowercase();
+    assert!(normalized_request.contains("post /v1/chat/completions http/1.1"));
+    match token {
+        Some(token) => {
+            assert!(normalized_request.contains(&format!("authorization: bearer {token}")))
+        }
+        None => assert!(!normalized_request.contains("authorization:")),
+    }
+    let body = request
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .expect("request should contain a body");
+    let body: Value = serde_json::from_str(body).expect("request body should be JSON");
+    assert_eq!(body["model"], model);
+    assert_eq!(body["response_format"]["type"], "json_schema");
+    assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+    assert_eq!(
+        body["response_format"]["json_schema"]["schema"]["additionalProperties"],
+        false
+    );
+
+    let events = fs::read_to_string(usage_path).expect("usage log should exist");
+    let provider_event = events
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event["event_type"] == "provider_request_completed")
+        .expect("provider usage event should be recorded");
+    assert_eq!(provider_event["provider"]["server"], provider);
+    if provider == "ollama" {
+        assert_eq!(provider_event["usage"]["input_tokens"], 8);
+        assert_eq!(provider_event["usage"]["output_tokens"], 3);
+        assert_eq!(provider_event["usage"]["total_tokens"], 11);
+    } else {
+        assert_eq!(provider_event["usage"]["input_tokens"], 16);
+        assert_eq!(provider_event["usage"]["output_tokens"], 6);
+        assert_eq!(provider_event["usage"]["total_tokens"], 22);
+    }
+    if let Some(token) = token {
+        assert!(!events.contains(token));
+    }
+}
+
+fn run_interpreted_openai_compatible_smoke(
+    fixture: &Fixture,
+    provider: &str,
+    model: &str,
+    token: Option<&str>,
+    mock: MockServer,
+) {
+    let output = fixture
+        .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
+        .args(["--no-update-check", "run", "--config"])
+        .arg(&fixture.definition)
+        .args(openai_compatible_run_args(
+            provider, model, token, fixture, &mock.url,
+        ))
+        .output()
+        .expect("interpreted OpenAI-compatible CLI should start");
+    let request = mock.finish();
+    assert_openai_compatible_success(provider, model, token, &output, &request, &fixture.usage);
+}
+
+fn run_generated_openai_compatible_smoke(
+    fixture: &Fixture,
+    binary_name: &str,
+    provider: &str,
+    model: &str,
+    token: Option<&str>,
+    mock: MockServer,
+) {
+    let output_dir = fixture.root.join("dist");
+    let hatch = fixture
+        .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
+        .args(["--no-update-check", "hatch", binary_name, "--config"])
+        .arg(&fixture.definition)
+        .args(["--output-dir"])
+        .arg(&output_dir)
+        .arg("--force")
+        .output()
+        .expect("OpenAI-compatible hatch should start");
+    assert!(
+        hatch.status.success(),
+        "{provider} hatch failed\n{}\n{}",
+        String::from_utf8_lossy(&hatch.stdout),
+        String::from_utf8_lossy(&hatch.stderr)
+    );
+    let executable = output_dir.join(if cfg!(windows) {
+        format!("{binary_name}.exe")
+    } else {
+        binary_name.to_string()
+    });
+    let output = fixture
+        .isolated_command(&executable)
+        .args(openai_compatible_run_args(
+            provider, model, token, fixture, &mock.url,
+        ))
+        .output()
+        .expect("generated OpenAI-compatible agent should start");
+    let request = mock.finish();
+    assert_openai_compatible_success(provider, model, token, &output, &request, &fixture.usage);
+}
+
 #[test]
 fn interpreted_anthropic_smoke_isolated_and_deterministic() {
     let fixture = Fixture::new();
@@ -700,6 +887,58 @@ fn generated_xai_smoke_isolated_and_deterministic() {
         "grok-smoke",
         XAI_TEST_TOKEN,
         MockServer::xai_success(),
+    );
+}
+
+#[test]
+fn interpreted_openai_smoke_isolated_and_deterministic() {
+    let fixture = Fixture::new();
+    run_interpreted_openai_compatible_smoke(
+        &fixture,
+        "openai",
+        "openai-smoke",
+        Some(OPENAI_TEST_TOKEN),
+        MockServer::openai_success(),
+    );
+}
+
+#[test]
+#[ignore = "run explicitly in the provider smoke CI lane"]
+fn generated_openai_smoke_isolated_and_deterministic() {
+    let fixture = Fixture::new();
+    run_generated_openai_compatible_smoke(
+        &fixture,
+        "openai_provider_smoke",
+        "openai",
+        "openai-smoke",
+        Some(OPENAI_TEST_TOKEN),
+        MockServer::openai_success(),
+    );
+}
+
+#[test]
+fn interpreted_ollama_smoke_isolated_and_deterministic() {
+    let fixture = Fixture::new();
+    run_interpreted_openai_compatible_smoke(
+        &fixture,
+        "ollama",
+        "ollama-smoke",
+        None,
+        MockServer::ollama_success(),
+    );
+}
+
+#[test]
+#[ignore = "run explicitly in the provider smoke CI lane"]
+fn generated_ollama_smoke_isolated_and_deterministic() {
+    let fixture = Fixture::new();
+    run_generated_openai_compatible_smoke(
+        &fixture,
+        "ollama_provider_smoke",
+        "ollama",
+        "ollama-smoke",
+        None,
+        MockServer::ollama_success(),
     );
 }
 
@@ -1443,4 +1682,10 @@ fn live_mistral_smoke_uses_isolated_stdin_credentials() {
 #[ignore = "requires XAI_API_KEY and XAI_MODEL"]
 fn live_xai_smoke_uses_isolated_stdin_credentials() {
     run_live_hosted_smoke("xai", "XAI_API_KEY", "XAI_MODEL");
+}
+
+#[test]
+#[ignore = "requires OPENAI_API_KEY and OPENAI_MODEL"]
+fn live_openai_smoke_uses_isolated_stdin_credentials() {
+    run_live_hosted_smoke("openai", "OPENAI_API_KEY", "OPENAI_MODEL");
 }

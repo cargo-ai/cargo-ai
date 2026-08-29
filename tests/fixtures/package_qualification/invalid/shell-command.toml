@@ -1,0 +1,16 @@
+format_version = 1
+package_id = "invalid_shell"
+profile = "default"
+platforms = ["ubuntu"]
+
+[[entrypoints]]
+name = "qualification_smoke"
+run = true
+hatch = false
+
+[[checks]]
+name = "unsafe-shell"
+program = "bash"
+args = ["-c", "echo unsafe"]
+working_directory = "."
+timeout_seconds = 60
