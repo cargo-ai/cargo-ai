@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 const TEST_TOKEN: &str = "anthropic-provider-smoke-token";
@@ -280,15 +280,25 @@ impl MockServer {
 
 fn read_http_request(stream: &mut TcpStream) -> String {
     stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
+        .set_read_timeout(Some(Duration::from_secs(1)))
         .expect("read timeout should configure");
+    let started = Instant::now();
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 4096];
     let mut expected_len = None;
     loop {
-        let count = stream
-            .read(&mut buffer)
-            .expect("request should be readable");
+        let count = match stream.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && started.elapsed() < Duration::from_secs(30) =>
+            {
+                continue;
+            }
+            Err(error) => panic!("request should be readable: {error}"),
+        };
         if count == 0 {
             break;
         }
