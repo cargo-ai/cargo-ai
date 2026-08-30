@@ -1,7 +1,8 @@
 # cargo-ai™
 
-[![Audit Status](https://github.com/cargo-ai/cargo-ai/actions/workflows/security-audit.yml/badge.svg)](https://github.com/cargo-ai/cargo-ai/actions/workflows/security-audit.yml)
-[![Multi-OS CI](https://github.com/cargo-ai/cargo-ai/actions/workflows/multi-os-ci.yml/badge.svg)](https://github.com/cargo-ai/cargo-ai/actions/workflows/multi-os-ci.yml)
+[![Security Audit](https://github.com/cargo-ai/cargo-ai/actions/workflows/security-audit.yml/badge.svg)](https://github.com/cargo-ai/cargo-ai/actions/workflows/security-audit.yml)
+[![Core CI](https://github.com/cargo-ai/cargo-ai/actions/workflows/multi-os-ci.yml/badge.svg)](https://github.com/cargo-ai/cargo-ai/actions/workflows/multi-os-ci.yml)
+[![Product Qualification](https://github.com/cargo-ai/cargo-ai/actions/workflows/release-qualification.yml/badge.svg)](https://github.com/cargo-ai/cargo-ai/actions/workflows/release-qualification.yml)
 [![Status: Stable – Ongoing Development](https://img.shields.io/badge/Status-Stable_–_Ongoing_Development-blue)](https://github.com/cargo-ai/cargo-ai)
 
 Build declarative AI agents. Ship them as local CLI apps.
@@ -117,7 +118,7 @@ cargo test --test provider_smoke generated_anthropic_smoke_isolated_and_determin
 
 The first command covers interpreted success and failure paths; the second hatches and runs a standalone agent against the same native-protocol assertions. Both use a temporary `CARGO_AI_HOME`, a loopback mock, and fake credentials. The separately ignored `live_anthropic_smoke_uses_isolated_stdin_credentials` case requires `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL`; it writes the key to a temporary profile through stdin and never passes it as a process argument. It is intended for an explicit manual checkpoint, not default CI.
 
-`Release Qualification` is the GitHub Actions orchestration workflow: it fans out credential-free three-OS product/provider/content checks, bounded source-package checks, and fresh protected jobs for required OpenAI plus any enrolled optional providers, then publishes one fail-closed summary. Package repositories keep their broad native suites while Cargo AI checks the shared compatibility lifecycle for allowlisted exact revisions. See [Testing and release qualification](./docs/testing-and-release-qualification.md) for the architecture diagram, dashboard navigation, staged commissioning, matrix limits, enrollment, evidence, and secret handling.
+`Product Qualification` is the GitHub Actions orchestration workflow: it reuses Core CI, fans out bounded source-package checks and fresh protected jobs for required OpenAI plus any enrolled optional providers, then publishes one fail-closed summary. Package repositories keep their broad native suites while Cargo AI checks the shared compatibility lifecycle for allowlisted exact revisions. See [Testing and product qualification](./docs/testing-and-release-qualification.md) for the architecture diagram, dashboard navigation, staged commissioning, matrix limits, enrollment, evidence, and secret handling.
 
 **Option D: Google Gemini API**
 

@@ -1,19 +1,19 @@
-# Testing and release qualification
+# Testing and product qualification
 
 Cargo AI separates fast product confidence from paid live integration and from independently maintained package suites. This keeps ordinary pull requests deterministic while still producing a bounded release signal.
 
 ## Qualification areas
 
-1. `multi-os-ci.yml` runs credential-free product, provider, maintained-content, package-lifecycle, build, and install checks on Ubuntu, macOS, and Windows. Provider requests use loopback fixtures. Ollama coverage tests its OpenAI-compatible transport without provisioning a model server.
+1. **Core CI** (`multi-os-ci.yml`) runs credential-free product, provider, maintained-content, package-lifecycle, build, and install checks on Ubuntu, macOS, and Windows. Provider requests use loopback fixtures. Ollama coverage tests its OpenAI-compatible transport without provisioning a model server.
 2. `package-qualification.yml` checks one allowlisted public package revision on each declared platform. It runs the package's bounded declaration checks and the mandatory Cargo AI build/package/install/inspect/run/hatch/uninstall lifecycle.
 3. `live-provider-conformance.yml` runs one representative model for required OpenAI and any explicitly enrolled optional provider. Manual dispatch selects one provider or `all` and defaults to OpenAI. Each selected job directly targets the protected `live-provider-ci` Environment, receives only its own key, and runs independently without provider-to-provider dependencies.
-4. `release-qualification.yml` combines the credential-free families with fresh direct `live-provider-ci` provider jobs, renders a GitHub-native qualification dashboard, and fails unless every required result passes. It invokes the same Rust provider tests without reusing an earlier focused result or passing Environment secrets through a reusable workflow.
+4. **Product Qualification** (`release-qualification.yml`) reuses Core CI and combines the credential-free families with fresh direct `live-provider-ci` provider jobs, renders a GitHub-native qualification dashboard, and fails unless every required result passes. It invokes the same Rust provider tests without reusing an earlier focused result or passing Environment secrets through a reusable workflow.
 
 The initial OpenAI-only full qualification uses eight runner jobs: three deterministic operating systems, three canary-package operating systems, one hosted provider, and one protected summary. Each optional provider enrollment adds one independent hosted job, up to 12 jobs before official packages and the unchanged 21-job global ceiling. Provider fixtures, models, package entrypoints, and package checks are not matrix dimensions.
 
-## How one release run fits together
+## How one product qualification run fits together
 
-`Release Qualification` is the GitHub Actions orchestration workflow. It starts the credential-free operating-system families and fresh protected provider jobs against one exact Cargo AI commit, then reduces their sanitized results to one release decision:
+`Product Qualification` is the GitHub Actions orchestration workflow. It reuses Core CI, starts the source-package family and fresh protected provider jobs against one exact Cargo AI commit, then reduces their sanitized results to one qualification decision:
 
 ```text
 exact Cargo AI candidate commit
@@ -28,7 +28,7 @@ exact Cargo AI candidate commit
   +-- live providers
   |     +-- OpenAI (required)
   |     `-- enrolled optional providers (independent jobs)
-  `-- release qualification summary
+  `-- product qualification summary
         `-- one fail-closed pass/fail decision
 ```
 
@@ -80,11 +80,11 @@ CARGO_AI_QUALIFICATION_PACKAGE_ROOT=../cargo-ai-qualification-canary \
 
 The reusable workflow implementation commit, tested Cargo AI candidate commit, and package commit are separate provenance values. Callers pin the reusable workflow to a reviewed full commit and pass exact lowercase 40-character candidate/package commits.
 
-Candidate failure always blocks. When an exact last release-qualified Cargo AI commit is supplied, only a failing package/OS cell runs one fresh inline baseline attempt. Candidate failure plus baseline success indicates a probable Cargo AI regression; both failing indicates a package or infrastructure suspect; no usable baseline remains unclassified. The diagnostic result never converts candidate failure into success.
+Candidate failure always blocks. When an exact last product-qualified Cargo AI commit is supplied, only a failing package/OS cell runs one fresh inline baseline attempt. Candidate failure plus baseline success indicates a probable Cargo AI regression; both failing indicates a package or infrastructure suspect; no usable baseline remains unclassified. The diagnostic result never converts candidate failure into success.
 
 ## Hosted provider configuration
 
-Commission qualification progressively against one exact Cargo AI commit. Run **Multi-OS CI**, then **Package Qualification**, then **Live Provider Conformance** with its default `openai` choice. OpenAI is the initial required live provider. Add and validate other hosted providers one at a time when their coverage is wanted. A single-provider run starts only the selected provider job and is integration evidence, not a Version 1 qualification decision. **Release Qualification** starts new direct jobs for required OpenAI plus every explicitly enrolled optional provider and remains the only complete aggregate gate.
+Commission qualification progressively against one exact Cargo AI commit. Run **Core CI**, then **Package Qualification**, then **Live Provider Conformance** with its default `openai` choice. OpenAI is the initial required live provider. Add and validate other hosted providers one at a time when their coverage is wanted. A single-provider run starts only the selected provider job and is integration evidence, not a Product Qualification decision. **Product Qualification** starts new direct jobs for required OpenAI plus every explicitly enrolled optional provider and remains the only complete aggregate gate.
 
 The live workflow has no semantic dependency between providers:
 
@@ -122,7 +122,7 @@ The live tests write each selected key to a temporary isolated profile through s
 
 Required checks should include the stable deterministic summary on ordinary pull requests and the protected release summary before promotion. Package evidence records Cargo AI commit, optional baseline commit, package repository/commit, logical OS, runner image/version, architecture, declaration digest, workflow ref, classification, and result. It must never contain prompts, model output, tokens, raw provider bodies, Cargo AI Home state, or package runtime data.
 
-The protected release job writes the canonical human-readable dashboard directly to the GitHub Actions run summary. Open the Cargo AI repository, select **Actions**, select **Release Qualification**, and open a run's **Summary** page. The table reports product conformance, deterministic providers, maintained content, the public package canary, registered official packages, each hosted provider, and the aggregate release decision. Each completed test area links to its producing GitHub job and includes its completion time.
+The protected aggregate job writes the canonical human-readable dashboard directly to the GitHub Actions run summary. Open the Cargo AI repository, select **Actions**, select **Product Qualification**, and open a run's **Summary** page. The table reports product conformance, deterministic providers, maintained content, the public package canary, registered official packages, each hosted provider, and the aggregate qualification decision. Each completed test area links to its producing GitHub job and includes its completion time.
 
 Dashboard states are explicit: `pass`, `fail`, `cancelled`, `skipped`, `not configured`, and `missing`. A missing, skipped, cancelled, or failed required/enrolled result blocks qualification. An unenrolled optional provider is `not configured`, never passed. The official-package row is `skipped` only while the validated catalog count is zero; enrolling an official package without aggregate results changes that row to `missing` and blocks release. JUnit and provenance artifacts remain the durable evidence behind the summary.
 
