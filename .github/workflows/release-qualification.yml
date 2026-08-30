@@ -1,4 +1,4 @@
-name: Release Qualification
+name: Product Qualification
 
 on:
   schedule:
@@ -10,7 +10,7 @@ on:
         required: false
         type: string
       baseline_cargo_ai_sha:
-        description: Optional exact last release-qualified Cargo AI commit
+        description: Optional exact last product-qualified Cargo AI commit
         required: false
         type: string
       openai_model:
@@ -276,7 +276,7 @@ jobs:
           cargo test --locked --test provider_smoke live_mistral_smoke_uses_isolated_stdin_credentials -- --ignored --exact
 
   summary:
-    name: Release qualification summary
+    name: Product qualification summary
     if: ${{ always() }}
     needs: [deterministic, packages, live_openai, live_anthropic, live_gemini, live_xai, live_mistral]
     runs-on: ubuntu-latest
@@ -643,7 +643,7 @@ jobs:
           decision = "pass" if qualified else "fail"
 
           lines = [
-              "## Cargo AI Version 1 qualification",
+              "## Cargo AI Product Qualification",
               "",
               "> ✅ **QUALIFIED** — every required result passed."
               if qualified
@@ -675,7 +675,7 @@ jobs:
               )
           lines.extend(
               [
-                  "| Release | Version 1 qualification decision | required | "
+                  "| Product | Product qualification decision | required | "
                   f"{STATUS_LABELS[decision]} | Exact candidate and required evidence | {generated_at} | [Workflow run]({run_url}) |",
                   "",
                   "JUnit and provenance artifacts remain the durable evidence. This summary contains no provider credentials or raw provider responses.",
@@ -685,5 +685,5 @@ jobs:
               summary.write("\n".join(lines) + "\n")
 
           if not qualified:
-              sys.exit("release qualification is blocked")
+              sys.exit("product qualification is blocked")
           PY

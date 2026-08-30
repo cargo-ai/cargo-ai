@@ -24,7 +24,7 @@ on:
         required: true
         type: string
       baseline_cargo_ai_sha:
-        description: Optional exact last release-qualified Cargo AI commit for failure diagnosis
+        description: Optional exact last product-qualified Cargo AI commit for failure diagnosis
         required: false
         type: string
       declaration_path:
