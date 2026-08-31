@@ -266,7 +266,7 @@ Then reference an exported entrypoint:
 ```json
 {
   "kind": "agent",
-  "agent": "data_integration::lookup_account"
+  "artifact": "data_integration::lookup_account"
 }
 ```
 

@@ -38,12 +38,18 @@ The operating-system families prove portable CLI and package behavior without pr
 
 ## Local credential-free checks
 
-Run tests through the development wrapper from the parent infrastructure checkout so Cargo AI Home and environment-mutating tests remain isolated:
+Run these commands from the root of a public Cargo AI checkout. Keep local state away from your normal Cargo AI Home, disable keychain access, and serialize environment-mutating tests. On macOS or Linux, establish a disposable test environment first; use equivalent temporary environment settings on Windows:
 
 ```bash
-./dev-cargo-ai.sh test -- --test product_conformance
-./dev-cargo-ai.sh test -- --test provider_smoke
-./dev-cargo-ai.sh test -- --test content_package_qualification
+export CARGO_AI_HOME="$(mktemp -d)/cargo-ai-home"
+export CARGO_AI_DISABLE_KEYCHAIN=1
+export RUST_TEST_THREADS=1
+```
+
+```bash
+cargo test --locked --test product_conformance
+cargo test --locked --test provider_smoke
+cargo test --locked --test content_package_qualification
 ```
 
 No command above needs a provider key or Cargo AI account credential, and each process test uses a temporary `CARGO_AI_HOME`.
@@ -57,18 +63,18 @@ This section is for Cargo AI maintainers validating provider adapters. It is not
 The ordinary provider suite uses loopback fixtures, fake credentials, and a temporary Cargo AI Home. It covers interpreted success for OpenAI, Anthropic, Gemini, xAI, Mistral, and the Ollama-compatible transport, plus focused failure and capability boundaries where applicable:
 
 ```bash
-./dev-cargo-ai.sh test -- --test provider_smoke
+cargo test --locked --test provider_smoke
 ```
 
 To isolate one interpreted adapter, use its exact test name:
 
 ```bash
-./dev-cargo-ai.sh test -- --test provider_smoke interpreted_openai_smoke_isolated_and_deterministic -- --exact
-./dev-cargo-ai.sh test -- --test provider_smoke interpreted_anthropic_smoke_isolated_and_deterministic -- --exact
-./dev-cargo-ai.sh test -- --test provider_smoke interpreted_gemini_smoke_isolated_and_deterministic -- --exact
-./dev-cargo-ai.sh test -- --test provider_smoke interpreted_xai_smoke_isolated_and_deterministic -- --exact
-./dev-cargo-ai.sh test -- --test provider_smoke interpreted_mistral_smoke_isolated_and_deterministic -- --exact
-./dev-cargo-ai.sh test -- --test provider_smoke interpreted_ollama_smoke_isolated_and_deterministic -- --exact
+cargo test --locked --test provider_smoke interpreted_openai_smoke_isolated_and_deterministic -- --exact
+cargo test --locked --test provider_smoke interpreted_anthropic_smoke_isolated_and_deterministic -- --exact
+cargo test --locked --test provider_smoke interpreted_gemini_smoke_isolated_and_deterministic -- --exact
+cargo test --locked --test provider_smoke interpreted_xai_smoke_isolated_and_deterministic -- --exact
+cargo test --locked --test provider_smoke interpreted_mistral_smoke_isolated_and_deterministic -- --exact
+cargo test --locked --test provider_smoke interpreted_ollama_smoke_isolated_and_deterministic -- --exact
 ```
 
 ### Deterministic generated adapters
@@ -76,12 +82,12 @@ To isolate one interpreted adapter, use its exact test name:
 Generated-provider parity cases hatch and run complete standalone executables against the same loopback assertions. They are ignored by the ordinary Rust invocation because they compile full binaries. **Core CI** runs all six explicitly on Ubuntu, macOS, and Windows. Reproduce a specific case with:
 
 ```bash
-./dev-cargo-ai.sh test -- --test provider_smoke generated_openai_smoke_isolated_and_deterministic -- --ignored --exact
-./dev-cargo-ai.sh test -- --test provider_smoke generated_anthropic_smoke_isolated_and_deterministic -- --ignored --exact
-./dev-cargo-ai.sh test -- --test provider_smoke generated_gemini_smoke_isolated_and_deterministic -- --ignored --exact
-./dev-cargo-ai.sh test -- --test provider_smoke generated_xai_smoke_isolated_and_deterministic -- --ignored --exact
-./dev-cargo-ai.sh test -- --test provider_smoke generated_mistral_smoke_isolated_and_deterministic -- --ignored --exact
-./dev-cargo-ai.sh test -- --test provider_smoke generated_ollama_smoke_isolated_and_deterministic -- --ignored --exact
+cargo test --locked --test provider_smoke generated_openai_smoke_isolated_and_deterministic -- --ignored --exact
+cargo test --locked --test provider_smoke generated_anthropic_smoke_isolated_and_deterministic -- --ignored --exact
+cargo test --locked --test provider_smoke generated_gemini_smoke_isolated_and_deterministic -- --ignored --exact
+cargo test --locked --test provider_smoke generated_xai_smoke_isolated_and_deterministic -- --ignored --exact
+cargo test --locked --test provider_smoke generated_mistral_smoke_isolated_and_deterministic -- --ignored --exact
+cargo test --locked --test provider_smoke generated_ollama_smoke_isolated_and_deterministic -- --ignored --exact
 ```
 
 These checks prove interpreted/generated parity for representative fixtures. They do not contact a provider, validate an account, or certify every model.
@@ -101,11 +107,11 @@ Live cases are separately ignored and must be intentional. Load the matching key
 After the selected provider's variables are already present, run its exact checkpoint:
 
 ```bash
-./dev-cargo-ai.sh test -- --test provider_smoke live_openai_smoke_uses_isolated_stdin_credentials -- --ignored --exact
-./dev-cargo-ai.sh test -- --test provider_smoke live_anthropic_smoke_uses_isolated_stdin_credentials -- --ignored --exact
-./dev-cargo-ai.sh test -- --test provider_smoke live_gemini_smoke_uses_isolated_stdin_credentials -- --ignored --exact
-./dev-cargo-ai.sh test -- --test provider_smoke live_xai_smoke_uses_isolated_stdin_credentials -- --ignored --exact
-./dev-cargo-ai.sh test -- --test provider_smoke live_mistral_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+cargo test --locked --test provider_smoke live_openai_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+cargo test --locked --test provider_smoke live_anthropic_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+cargo test --locked --test provider_smoke live_gemini_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+cargo test --locked --test provider_smoke live_xai_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+cargo test --locked --test provider_smoke live_mistral_smoke_uses_isolated_stdin_credentials -- --ignored --exact
 ```
 
 Each live test writes its key into a temporary isolated profile through stdin. The key is not a process argument. Never place real credentials in source, agent JSON, command arguments, logs, artifacts, or a normal Cargo AI Home. Use an operator-selected model; a live pass is representative provider-wiring evidence, not a provider model catalog or per-model certification.
@@ -131,7 +137,7 @@ To run the external canary lifecycle locally after checking out both repositorie
 
 ```bash
 CARGO_AI_QUALIFICATION_PACKAGE_ROOT=../cargo-ai-qualification-canary \
-  ./dev-cargo-ai.sh test -- --test content_package_qualification \
+  cargo test --locked --test content_package_qualification \
   external_package_qualification_runs_mandatory_lifecycle -- --ignored --exact
 ```
 

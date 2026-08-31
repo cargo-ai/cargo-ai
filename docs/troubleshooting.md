@@ -57,24 +57,22 @@ For provider credentials, capability limits, supported input types, and setup co
 Standalone provider notes:
 
 - OpenAI account authentication can reuse an available local Codex session with `--server openai --model <model>` and no token.
-- Anthropic requires `--server anthropic --model <model> --token <token>` or, preferably, a stored `api_key` profile.
-- Gemini requires `--server gemini --model <model> --token <token>` or, preferably, a stored `api_key` profile.
+- Anthropic requires an `api_key` profile with its key stored through `cargo ai profile set --stdin` or `--env`.
+- Gemini requires an `api_key` profile with its key stored through `cargo ai profile set --stdin` or `--env`.
 
 Provider pages remain the authority for current endpoint and feature differences. Cargo AI surfaces unsupported input, image-generation, or schema behavior instead of silently changing providers or weakening the authored contract.
 
 ## A Standalone Agent Works Only On The Author's Machine
 
-A standalone recipient does not need Cargo AI installed when the binary has no package-child (`alias::entrypoint`) references and the recipient supplies the required runtime context, such as:
+A standalone recipient does not need Cargo AI installed when the binary has no package-child (`alias::entrypoint`) references and the recipient supplies the required runtime context through a configured profile, such as:
 
 ```bash
 ./my_agent \
-  --server <provider> \
-  --model <model> \
-  --token <token> \
+  --profile <profile> \
   --render-mode append-only
 ```
 
-The optional URL and token flags depend on the provider/authentication mode. Prefer a profile on machines you control so secrets do not enter shell history.
+Profileless server, model, URL, and token flags depend on the provider and authentication mode. The runtime accepts a token flag for compatible profileless use, but placing a real secret in a command exposes it to shell history and potentially process inspection. Use a stored profile on machines you control.
 
 Package-child references are different: the hatched binary requires `cargo ai` or `cargo-ai` on `PATH` so Cargo AI can enforce installed package identity, version, and permission policy. It also fails closed outside a Cargo AI project when that project context is required. Read [Packages](./packages.md) for the full boundary.
 
