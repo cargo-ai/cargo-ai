@@ -132,3 +132,11 @@ This behavior is the same whether you:
 - run a standalone `cargo-ai` binary directly
 
 The difference is only how the executable is installed and discovered on `PATH`. The local state root resolution stays the same unless you override it with `CARGO_AI_HOME`.
+
+## Related Docs
+
+- [Install Cargo AI](./install/README.md)
+- [Build and run your first agent](./getting-started.md)
+- [Packages and installed data](./packages.md)
+- [Documentation home](./README.md)
+- [Public README](../README.md)

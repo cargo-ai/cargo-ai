@@ -1,96 +1,13 @@
-# Cargo-AI Agent Schema Quick Reference
+# Cargo AI Agent Schema Reference
 
-Use this as a concise reference while authoring agent configs.
+This legacy public path is kept as a compatibility pointer. It is not a separate schema source of truth.
 
-## Required top-level fields
-- `agent_definition_schema_version`
-  - format: `YYYY-MM-DD.rN` (example: `2026-03-03.r1`)
-  - identifies the Cargo AI contract used to interpret the definition, not the agent or package version
-  - package version is `.cargo-ai/project.toml` `[project].version`
-  - copy this value from the current Cargo AI template or guidance; do not invent it from the current date, a package/project version, or the Cargo AI product version
-- `inputs`
-- `agent_schema`
-- `actions`
+- Human guide: [Agent definitions](../../../docs/agent-definitions.md)
+- Complete version-matched authoring contract: [Agent definition contract](../../guidance/agent-definition-contract.md)
+- Human documentation home: [Cargo AI documentation](../../../docs/README.md)
 
-## `inputs` expectations
-- `inputs` is an ordered array with at least one entry
-- supported input `type` values:
-  - `text`
-  - `url`
-  - `image`
-- `text` entries require `text`
-- `url` entries require `url`
-- `image` entries require `path`
-- runtime overrides use:
-  - `--input-mode` with `replace`, `append`, or `prepend`
-  - `--input-text`
-  - `--input-url`
-  - `--input-image`
-- if runtime input flags are provided without `--input-mode`, they replace config-defined `inputs`
-- `--input-mode append` keeps baked inputs first; `--input-mode prepend` keeps runtime inputs first
+For an installed offline guidance bundle, use `.cargo-ai/guidance/agent-definition-contract.md` and validate with:
 
-## Runtime usage logging
-- use `--usage-log <path>` or `CARGO_AI_USAGE_LOG=<path>` to write an opt-in usage ledger
-- prefer `.ndjson` or `.jsonl`; each line is one complete JSON object
-- usage events are metadata-only and may include run ids, parent agent ids, provider/model/profile, normalized token counters, status, and duration
-- interpreted local JSON runs include source-aware agent metadata such as `agent.source`, `agent.artifact`, `agent.name`, and `agent.definition_sha256` when available
-- usage events do not include prompts, model output text, generated image bytes, tool arguments, tool stdout/stderr, credentials, or raw provider response bodies
-- child agents and tool-bridge-launched child agents inherit the same root run id when launched through Cargo AI
-
-## `agent_schema` expectations
-- `agent_schema.type` must be `"object"`
-- `agent_schema.properties` must be an object
-
-Supported property `type` values:
-- `string`
-- `number`
-- `integer`
-- `boolean`
- - `array`
- - `object`
-
-Optional top-level property metadata and constraints:
-- `description` on any supported field
-- `enum` on `string` fields only
-- `minimum`, `maximum`, `exclusiveMinimum`, and `exclusiveMaximum` on `number` and `integer` fields
-- `enum` values are exact and case-sensitive
-- lower bounds may use `minimum` or `exclusiveMinimum`, but not both
-- upper bounds may use `maximum` or `exclusiveMaximum`, but not both
-- `array` fields must be homogeneous
-- `object` fields must declare their shape explicitly
-- arrays may contain supported scalar item types or declared-shape object items
-- object properties inside structured tool-bound fields may be scalar or `scalar | null`
-
-## Current unsupported schema shapes
-These should fail fast during `hatch --check`:
-- nested arrays
-- deeper nested objects
-- union types other than `scalar | null` on object properties inside structured tool-bound fields
-
-## `actions` expectations
-- `actions` is an array
-- each action includes `name`, `logic`, and `run`
-- run steps may use `kind: "exec"`, `kind: "agent"`, `kind: "tool"`, `kind: "email_me"`, or `kind: "generate_image"`
-- `run[*].args` must be an array of literal strings and/or `{ "var": "field_name" }` objects
-- `run[*].args[*].var` must reference a top-level field declared in `agent_schema.properties`
-- `generate_image.reference_images` is optional and may contain `{ "input": "<named image input>" }` or `{ "path": "./assets/reference.png" }`
-- `generate_image.reference_images[*].path` must stay at the current level or below; absolute paths and `..` traversal are rejected
-- structured top-level fields may flow only into tool params
-- scalar-first surfaces such as `logic`, `when`, `run[*].args`, string-part interpolation, and child `run_vars` reject structured field references
-- `run[*].platform` is optional
-- `run[*].platform` may be a single string or an array of strings
-- supported platform values are `macos`, `linux`, and `windows`
-- platform values are normalized case-insensitively and should be authored in lowercase in configs/docs
-- omitted `platform` means the step runs on every runtime OS
-
-## Logic validation expectations
-- every `{ "var": "..." }` must match a key in `agent_schema.properties`
-- comparison operators (`==`, `!=`, `>`, `>=`, `<`, `<=`) are validated for operand compatibility
-
-## Canonical validation/build commands
-- Validate only:
-  - `cargo ai hatch <agent-name> --config <config.json> --check`
-- Build and export:
-  - `cargo ai hatch <agent-name> --config <config.json>`
-- Overwrite existing exported binary if needed:
-  - `cargo ai hatch <agent-name> --config <config.json> --force`
+```bash
+cargo ai hatch <agent-name> --config <config.json> --check
+```
