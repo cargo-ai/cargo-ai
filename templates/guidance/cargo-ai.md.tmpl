@@ -105,16 +105,13 @@ For published packages, keep the contract narrow:
 - `agent_definition_schema_version` identifies the Cargo AI contract used to interpret the definition. It is not the agent or package version; package version is `[project].version`.
 - Copy `agent_definition_schema_version` from the current local template or contract guidance. Never invent it from the current date, an agent/package/project version, or the Cargo AI product version, and never use the legacy top-level `version` key.
 - Within named input objects, prefer `name`, then `type`, then the value-bearing field. Keep unnamed literal inputs as `type` then value.
-- The current supported output schema is flat and top-level only:
-  - `string`
-  - `number`
-  - `integer`
-  - `boolean`
+- Use `.cargo-ai/guidance/agent-definition-contract.md` as the complete output-schema contract.
+- Top-level output fields support `string`, `number`, `integer`, and `boolean`, plus the bounded `array` / `object` lane documented there for structured tool consumption.
 - Current supported top-level schema metadata/constraints:
   - `description`
   - string-only `enum`
   - `minimum`, `maximum`, `exclusiveMinimum`, and `exclusiveMaximum` on `number` and `integer`
-- Treat top-level arrays, nested objects, and union types as unsupported unless the local contract docs say otherwise.
+- Treat nested arrays, deeper nested objects, and union types outside the contract's narrow nullable structured-field case as unsupported.
 - Treat the local contract and action helper docs as authoritative for step fields such as `platform`, runtime input override behavior, and child-agent data-flow limits.
 - If the user needs a reusable project-local capability behind `kind: "tool"`, read `.cargo-ai/guidance/tool-authoring.md` before inventing a custom tool workflow.
 - Use `.cargo-ai/guidance/tool-contract.md` for detailed scaffold, `tool.json`, `describe`, `invoke`, lint, and tool-step wiring rules.
@@ -176,7 +173,7 @@ For published packages, keep the contract narrow:
 - Avoid casual mutation of machine-global Cargo AI Home content for project-scoped work unless the user explicitly intends a machine-level install or change.
 - After `cargo ai packages pull`, keep `.cargo-ai/project.toml` as the operative config and treat `.cargo-ai/origin/cargo-ai-package.toml` as provenance metadata rather than a second working manifest.
 - If a pulled project fails at runtime because a source-backed tool has not been materialized yet, first try `cargo ai tools build <tool-name>` for the needed tool or `cargo ai build` for the full runnable project root.
-- Keep published assets minimal. The current project-publish path works best when the final packaged output stays at or below about `5.5 MiB`.
+- Keep published assets minimal. The current hosted path accepts an estimated serialized publish request of at most `5,500,000` bytes; because base64 and JSON add overhead, the archive itself must be materially smaller.
 - When editing `[build.<profile>].assets`, default to the smallest publishable set. Do not add large sample files, raw media, or demo inputs unless the user explicitly wants them shipped in the package.
 - If added assets are more than trivial in size, run `cargo ai package` and inspect the reported package, archive, and request sizes before treating the project as publish-ready.
 - If the package is approaching the current publish ceiling, call that out and recommend excluding non-essential assets before publishing.

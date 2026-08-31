@@ -6,7 +6,7 @@ The preferred install path today is the Cargo-based workflow:
 2. run `cargo install cargo-ai --locked`
 3. verify with `cargo ai --help`
 
-This path keeps the full CLI available, including `hatch`, and avoids platform-specific standalone packaging differences while Cargo AI's broader distribution story is still being built out.
+This path provides the full CLI, including `hatch`, consistently across macOS, Linux, and Windows.
 
 ## Recommended Today
 
@@ -18,9 +18,11 @@ Use the Cargo install guide here:
 
 - macOS: Cargo-first is the preferred install path today.
 - Linux: Cargo-first is the preferred install path today.
-- Windows: Cargo-first works today; standalone Windows distribution is a later install/distribution phase.
+- Windows: Cargo-first is the supported full-CLI install path today.
 
 ## Related Docs
 
+- [Build and run your first agent](../getting-started.md)
 - [Cargo AI Home](../cargo-ai-home.md)
+- [Documentation home](../README.md)
 - [Versioning](../../VERSIONING.md)

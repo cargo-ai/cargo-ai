@@ -7,7 +7,7 @@ It gives you:
 - the full Cargo AI CLI
 - the normal `cargo ai ...` workflow
 - direct `cargo-ai ...` invocation when Cargo's bin directory is on `PATH`
-- access to developer-oriented commands such as `hatch`
+- access to native-export commands such as `hatch`
 
 ## 1. Install Rust and Cargo
 
@@ -73,3 +73,10 @@ See [Cargo AI Home](../cargo-ai-home.md) for:
 - stored files and directories
 - first-run initialization behavior
 - `CARGO_AI_HOME` overrides
+
+## Next
+
+- [Build and run your first agent](../getting-started.md)
+- [Choose a model provider](../providers/README.md)
+- [Documentation home](../README.md)
+- [Public README](../../README.md)

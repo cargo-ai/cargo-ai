@@ -1,5 +1,7 @@
 # Testing and product qualification
 
+[Documentation hub](./README.md) · [Cargo AI README](../README.md)
+
 Cargo AI separates fast product confidence from paid live integration and from independently maintained package suites. This keeps ordinary pull requests deterministic while still producing a bounded release signal.
 
 ## Qualification areas
@@ -44,14 +46,71 @@ Run tests through the development wrapper from the parent infrastructure checkou
 ./dev-cargo-ai.sh test -- --test content_package_qualification
 ```
 
-Generated-provider parity cases are intentionally ignored by the ordinary Rust test invocation because each one hatches a complete executable. The multi-OS workflow runs all six explicitly. To reproduce one locally:
+No command above needs a provider key or Cargo AI account credential, and each process test uses a temporary `CARGO_AI_HOME`.
+
+## Maintainer provider testing
+
+This section is for Cargo AI maintainers validating provider adapters. It is not part of end-user provider setup. Keep deterministic, generated, and live testing separate so a credential-free contract result is never confused with paid integration evidence.
+
+### Deterministic interpreted adapters
+
+The ordinary provider suite uses loopback fixtures, fake credentials, and a temporary Cargo AI Home. It covers interpreted success for OpenAI, Anthropic, Gemini, xAI, Mistral, and the Ollama-compatible transport, plus focused failure and capability boundaries where applicable:
 
 ```bash
-./dev-cargo-ai.sh test -- --test provider_smoke \
-  generated_openai_smoke_isolated_and_deterministic -- --ignored --exact
+./dev-cargo-ai.sh test -- --test provider_smoke
 ```
 
-No command above needs a provider key or Cargo AI account credential, and each process test uses a temporary `CARGO_AI_HOME`.
+To isolate one interpreted adapter, use its exact test name:
+
+```bash
+./dev-cargo-ai.sh test -- --test provider_smoke interpreted_openai_smoke_isolated_and_deterministic -- --exact
+./dev-cargo-ai.sh test -- --test provider_smoke interpreted_anthropic_smoke_isolated_and_deterministic -- --exact
+./dev-cargo-ai.sh test -- --test provider_smoke interpreted_gemini_smoke_isolated_and_deterministic -- --exact
+./dev-cargo-ai.sh test -- --test provider_smoke interpreted_xai_smoke_isolated_and_deterministic -- --exact
+./dev-cargo-ai.sh test -- --test provider_smoke interpreted_mistral_smoke_isolated_and_deterministic -- --exact
+./dev-cargo-ai.sh test -- --test provider_smoke interpreted_ollama_smoke_isolated_and_deterministic -- --exact
+```
+
+### Deterministic generated adapters
+
+Generated-provider parity cases hatch and run complete standalone executables against the same loopback assertions. They are ignored by the ordinary Rust invocation because they compile full binaries. **Core CI** runs all six explicitly on Ubuntu, macOS, and Windows. Reproduce a specific case with:
+
+```bash
+./dev-cargo-ai.sh test -- --test provider_smoke generated_openai_smoke_isolated_and_deterministic -- --ignored --exact
+./dev-cargo-ai.sh test -- --test provider_smoke generated_anthropic_smoke_isolated_and_deterministic -- --ignored --exact
+./dev-cargo-ai.sh test -- --test provider_smoke generated_gemini_smoke_isolated_and_deterministic -- --ignored --exact
+./dev-cargo-ai.sh test -- --test provider_smoke generated_xai_smoke_isolated_and_deterministic -- --ignored --exact
+./dev-cargo-ai.sh test -- --test provider_smoke generated_mistral_smoke_isolated_and_deterministic -- --ignored --exact
+./dev-cargo-ai.sh test -- --test provider_smoke generated_ollama_smoke_isolated_and_deterministic -- --ignored --exact
+```
+
+These checks prove interpreted/generated parity for representative fixtures. They do not contact a provider, validate an account, or certify every model.
+
+### Explicit live provider checkpoints
+
+Live cases are separately ignored and must be intentional. Load the matching key and model into the shell environment through an approved secret mechanism, then run only the selected test:
+
+| Provider | Required environment | Exact test |
+| --- | --- | --- |
+| OpenAI | `OPENAI_API_KEY`, `OPENAI_MODEL` | `live_openai_smoke_uses_isolated_stdin_credentials` |
+| Anthropic | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | `live_anthropic_smoke_uses_isolated_stdin_credentials` |
+| Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL` | `live_gemini_smoke_uses_isolated_stdin_credentials` |
+| xAI | `XAI_API_KEY`, `XAI_MODEL` | `live_xai_smoke_uses_isolated_stdin_credentials` |
+| Mistral | `MISTRAL_API_KEY`, `MISTRAL_MODEL` | `live_mistral_smoke_uses_isolated_stdin_credentials` |
+
+After the selected provider's variables are already present, run its exact checkpoint:
+
+```bash
+./dev-cargo-ai.sh test -- --test provider_smoke live_openai_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+./dev-cargo-ai.sh test -- --test provider_smoke live_anthropic_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+./dev-cargo-ai.sh test -- --test provider_smoke live_gemini_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+./dev-cargo-ai.sh test -- --test provider_smoke live_xai_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+./dev-cargo-ai.sh test -- --test provider_smoke live_mistral_smoke_uses_isolated_stdin_credentials -- --ignored --exact
+```
+
+Each live test writes its key into a temporary isolated profile through stdin. The key is not a process argument. Never place real credentials in source, agent JSON, command arguments, logs, artifacts, or a normal Cargo AI Home. Use an operator-selected model; a live pass is representative provider-wiring evidence, not a provider model catalog or per-model certification.
+
+Ollama has no live-provider qualification job. The credential-free adapter checks its compatible transport; provisioning and managing a real local model server is outside the current qualification workflow.
 
 ## Public source-package qualification
 
@@ -133,3 +192,7 @@ If a developer rejects the protected summary Environment or cancels the workflow
 This view is run-scoped and entirely GitHub-hosted. It requires no Cargo-AI.org page, GitHub Pages deployment, application server, database, custom API, or cross-system synchronization. The repository maintains only the workflow/reporting logic and normal GitHub Environment configuration.
 
 The package catalog starts fail-closed until the public canary caller and its immutable commit are reviewed and pinned. Official-package count begins at zero. Adding packages increases only package shards; it does not multiply providers, models, or entrypoints.
+
+---
+
+[Documentation hub](./README.md) · [Cargo AI README](../README.md)
