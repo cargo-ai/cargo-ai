@@ -666,6 +666,10 @@ fn assert_openai_compatible_success(
         .expect("request should contain a body");
     let body: Value = serde_json::from_str(body).expect("request body should be JSON");
     assert_eq!(body["model"], model);
+    assert!(
+        body.get("temperature").is_none(),
+        "unset profiles must use the provider default temperature"
+    );
     assert_eq!(body["response_format"]["type"], "json_schema");
     assert_eq!(body["response_format"]["json_schema"]["strict"], true);
     assert_eq!(

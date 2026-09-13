@@ -13,7 +13,8 @@ use std::time::Duration;
 struct Request {
     model: String,
     messages: Vec<RequestMessage>,
-    temperature: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
     response_format: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
@@ -170,6 +171,7 @@ pub(crate) async fn send_request(
     token: &str,
     response_schema: &serde_json::Value,
     max_output_tokens: Option<u32>,
+    temperature: Option<f64>,
 ) -> Result<ProviderTextResponse, ProviderError> {
     let request = Request {
         model: model.to_string(),
@@ -177,7 +179,7 @@ pub(crate) async fn send_request(
             role: "user".to_string(),
             content: request_content_parts(content_parts),
         }],
-        temperature: super::DEFAULT_TEMPERATURE,
+        temperature,
         response_format: response_format(response_schema),
         max_tokens: max_output_tokens,
     };
@@ -273,7 +275,6 @@ mod tests {
                     "role": "user",
                     "content": [{"type": "text", "text": "Return two."}]
                 }],
-                "temperature": 0.0,
                 "response_format": {
                     "type": "json_schema",
                     "json_schema": {
@@ -314,6 +315,7 @@ mod tests {
             "mistral-test-token",
             &schema(),
             Some(128),
+            None,
         )
         .await
         .expect("Mistral request should succeed");
@@ -359,6 +361,7 @@ mod tests {
             "",
             &schema(),
             None,
+            None,
         )
         .await
         .expect("Ollama request should succeed");
@@ -390,6 +393,7 @@ mod tests {
             "mistral-test-token",
             &schema(),
             None,
+            None,
         )
         .await
         .expect_err("Mistral request should fail");
@@ -398,5 +402,26 @@ mod tests {
         assert_eq!(error.provider(), ProviderKind::Mistral);
         assert!(error.message().contains("selected model rejected json_schema"));
         assert!(!error.message().contains("do-not-print"));
+    }
+}
+
+#[cfg(test)]
+mod temperature_tests {
+    #[test]
+    fn temperature_request_omission_and_explicit_values() {
+        for temperature in [None, Some(0.0), Some(0.7)] {
+            let request = super::Request {
+                model: "gpt-5-example".into(),
+                messages: vec![],
+                temperature,
+                response_format: serde_json::json!({}),
+                max_tokens: None,
+            };
+            let value = serde_json::to_value(request).unwrap();
+            match temperature {
+                None => assert!(value.get("temperature").is_none()),
+                Some(expected) => assert_eq!(value["temperature"], expected),
+            }
+        }
     }
 }

@@ -22,14 +22,25 @@ pub(crate) use runtime::{
     ImageReference, ProviderTextRequest, ProviderUsage, ValidatedResponse,
 };
 
-/// Default temperature used for model requests when not explicitly overridden.
-pub(crate) const DEFAULT_TEMPERATURE: f64 = 0.0;
-
 pub(crate) async fn send_text_request(
     provider: ProviderKind,
     url: &str,
     request: ProviderTextRequest<'_>,
 ) -> Result<runtime::ProviderTextResponse, ProviderError> {
+    if let Some(temperature) = request.temperature {
+        if !temperature.is_finite() || temperature < 0.0 {
+            return Err(ProviderError::invalid_request(
+                provider,
+                "temperature must be finite and nonnegative",
+            ));
+        }
+        if !matches!(
+            provider.transport(),
+            error::ProviderTransport::OpenAiNative | error::ProviderTransport::OpenAiCompatibleChat
+        ) {
+            return Err(ProviderError::invalid_request(provider, "Explicit profile temperature is unsupported by this transport; clear it with `profile set <name> --clear-temperature`."));
+        }
+    }
     match provider.transport() {
         error::ProviderTransport::AnthropicMessages => {
             anthropic::send_request(
@@ -65,6 +76,7 @@ pub(crate) async fn send_text_request(
                 request.token,
                 request.response_schema,
                 request.max_output_tokens,
+                request.temperature,
             )
             .await
         }
@@ -91,6 +103,7 @@ pub(crate) async fn send_text_request(
                 request.timeout_in_sec,
                 &request.token.to_string(),
                 response_format,
+                request.temperature,
             )
             .await
         }
@@ -105,6 +118,40 @@ pub(crate) async fn send_text_request(
                 request.max_output_tokens,
             )
             .await
+        }
+    }
+}
+
+#[cfg(test)]
+mod temperature_tests {
+    use super::*;
+    #[tokio::test]
+    async fn temperature_unsupported_transports_fail_before_network() {
+        for (provider, url) in [
+            (ProviderKind::Anthropic, "http://unused.invalid"),
+            (ProviderKind::Gemini, "http://unused.invalid"),
+            (ProviderKind::Xai, "http://unused.invalid"),
+            (
+                ProviderKind::OpenAi,
+                "https://chatgpt.com/backend-api/codex",
+            ),
+        ] {
+            let error = send_text_request(
+                provider,
+                url,
+                ProviderTextRequest {
+                    model: "example",
+                    content_parts: &[],
+                    timeout_in_sec: 1,
+                    token: "",
+                    response_schema: &serde_json::json!({}),
+                    max_output_tokens: None,
+                    temperature: Some(0.0),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(error.message().contains("temperature is unsupported"));
         }
     }
 }

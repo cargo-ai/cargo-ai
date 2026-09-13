@@ -267,6 +267,13 @@ fn run_show(show_m: &ArgMatches) -> bool {
                 );
                 println!("Timeout: {}", profile.timeout_in_sec);
                 println!(
+                    "Temperature: {}",
+                    profile
+                        .temperature
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "provider default".to_string())
+                );
+                println!(
                     "Max output tokens: {}",
                     profile
                         .max_output_tokens
@@ -321,6 +328,7 @@ fn run_add(add_m: &ArgMatches) -> bool {
         token: None,
         timeout_in_sec: 60,
         max_output_tokens: add_m.get_one::<u32>("max_output_tokens").copied(),
+        temperature: add_m.get_one::<f64>("temperature").copied(),
         description: add_m.get_one::<String>("description").cloned(),
         auth_mode,
     };
@@ -387,6 +395,13 @@ fn run_set(set_m: &ArgMatches) -> bool {
         metadata_changes.push("url");
     }
 
+    if let Some(temperature) = set_m.get_one::<f64>("temperature") {
+        profile.temperature = Some(*temperature);
+        metadata_changes.push("temperature");
+    } else if set_m.get_flag("clear_temperature") {
+        profile.temperature = None;
+        metadata_changes.push("temperature");
+    }
     if let Some(max_output_tokens) = set_m.get_one::<u32>("max_output_tokens") {
         profile.max_output_tokens = Some(*max_output_tokens);
         metadata_changes.push("max_output_tokens");

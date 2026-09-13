@@ -67,6 +67,31 @@ keys in agent JSON, examples, shell history, or source control. Cargo AI stores
 profile credentials through its credential backend; see
 [Cargo AI Home](../cargo-ai-home.md) for the local-state boundary.
 
+## Profile Temperature
+
+Temperature is an optional profile setting for text and image-analysis requests:
+
+```bash
+cargo ai profile set PROFILE_NAME --temperature 0
+cargo ai profile show PROFILE_NAME
+cargo ai profile set PROFILE_NAME --clear-temperature
+```
+
+You can also pass `--temperature` to `profile add`. An unset temperature sends no
+sampling override and uses the provider/model default. This also applies to
+existing profiles without this setting: earlier versions forced zero for some
+models and one for others. Explicit zero is different from unset.
+
+Explicit temperature is supported by the OpenAI API-key Chat Completions path
+and OpenAI-compatible transports (Mistral and Ollama). Values must be finite and
+nonnegative; the selected provider/model determines its supported range. Cargo AI
+reports unsupported settings rather than silently dropping them or changing the
+model. Other text transports, including OpenAI account sessions, currently require
+temperature to remain unset. This setting does not configure image generation.
+
+For models that do not accept sampling overrides, leave temperature unset.
+Temperature does not select reasoning effort or guarantee identical output.
+
 ## Strict Output And Failure Behavior
 
 Cargo AI sends the complete authored return schema to the selected provider and

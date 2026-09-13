@@ -1106,6 +1106,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     let mut url = String::new();
     let token: String;
     let mut max_output_tokens: Option<u32> = None;
+    let mut temperature = None;
     let project_runtime_defaults = match load_project_runtime_defaults(project_root.as_deref()) {
         Ok(defaults) => defaults,
         Err(error) => {
@@ -1126,6 +1127,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                 model = profile.model.clone();
                 inference_timeout_in_sec = profile.timeout_in_sec;
                 max_output_tokens = profile.max_output_tokens;
+                temperature = profile.temperature;
                 // Updated URL assignment logic:
                 url = profile.url.clone().unwrap_or_default();
                 selected_profile = Some(SelectedProfile {
@@ -1157,6 +1159,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                     model = profile.model.clone();
                     inference_timeout_in_sec = profile.timeout_in_sec;
                     max_output_tokens = profile.max_output_tokens;
+                    temperature = profile.temperature;
                     url = profile.url.clone().unwrap_or_default();
                     selected_profile = Some(SelectedProfile {
                         name: profile.name.clone(),
@@ -1556,6 +1559,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                 token: &token,
                 response_schema: &response_schema,
                 max_output_tokens,
+                temperature,
             },
         ),
     )

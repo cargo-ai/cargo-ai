@@ -2573,12 +2573,14 @@ fn apply_profile(
     model: &mut String,
     timeout_in_sec: &mut u64,
     max_output_tokens: &mut Option<u32>,
+    temperature: &mut Option<f64>,
     url: &mut String,
 ) -> SelectedProfile {
     *server = profile.server.clone().to_lowercase();
     *model = profile.model.clone();
     *timeout_in_sec = profile.timeout_in_sec;
     *max_output_tokens = profile.max_output_tokens;
+    *temperature = profile.temperature;
     *url = profile.url.clone().unwrap_or_default();
 
     SelectedProfile {
@@ -3056,6 +3058,7 @@ async fn main() {
     let mut url = String::new();
     let token: String;
     let mut max_output_tokens: Option<u32> = None;
+    let mut temperature = None;
     let mut inference_timeout_in_sec: u64 = DEFAULT_INFERENCE_TIMEOUT_IN_SEC;
     let mut selected_profile: Option<SelectedProfile> = None;
     let mut loaded_profile_message: Option<(LoadedProfileKind, String)> = None;
@@ -3070,6 +3073,7 @@ async fn main() {
                 &mut model,
                 &mut inference_timeout_in_sec,
                 &mut max_output_tokens,
+                &mut temperature,
                 &mut url,
             ));
             loaded_profile_message = Some((kind, profile.name.clone()));
@@ -3413,6 +3417,7 @@ async fn main() {
                 token: &token,
                 response_schema: &response_schema,
                 max_output_tokens,
+                temperature,
             },
         ),
     )
@@ -3598,6 +3603,7 @@ mod tests {
             token: None,
             timeout_in_sec: 60,
             max_output_tokens: None,
+            temperature: None,
             description: None,
             auth_mode: ProfileAuthMode::OpenaiAccount,
         }
@@ -5096,6 +5102,7 @@ async fn resolve_generate_image_step_profile_context(
     let mut model = String::new();
     let mut profile_timeout_in_sec = 60;
     let mut profile_max_output_tokens = None;
+    let mut profile_temperature = None;
     let mut url = String::new();
     let selected_profile = apply_profile(
         profile,
@@ -5103,6 +5110,7 @@ async fn resolve_generate_image_step_profile_context(
         &mut model,
         &mut profile_timeout_in_sec,
         &mut profile_max_output_tokens,
+        &mut profile_temperature,
         &mut url,
     );
 
