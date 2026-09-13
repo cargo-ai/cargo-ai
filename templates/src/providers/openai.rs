@@ -14,7 +14,8 @@ const CHATGPT_CODEX_ENDPOINT_MARKER: &str = "chatgpt.com/backend-api/codex";
 pub struct ChatCompletionsRequest {
     pub model: String,
     pub messages: Vec<ChatRequestMessage>,
-    pub temperature: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
     pub response_format: serde_json::Value,
 }
 
@@ -289,17 +290,12 @@ async fn send_chat_completions_request(
     timeout_in_sec: u64,
     token: &String,
     response_format: serde_json::Value,
+    temperature: Option<f64>,
 ) -> Result<ProviderTextResponse, ProviderError> {
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()
         .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
-
-    let temperature = if model.starts_with("gpt-5") {
-        1.0
-    } else {
-        super::DEFAULT_TEMPERATURE
-    };
 
     let message = ChatRequestMessage {
         role: "user".to_string(),
@@ -795,8 +791,12 @@ pub async fn send_request(
     timeout_in_sec: u64,
     token: &String,
     response_format: serde_json::Value,
+    temperature: Option<f64>,
 ) -> Result<ProviderTextResponse, ProviderError> {
     if is_chatgpt_codex_responses_endpoint(url) {
+        if temperature.is_some() {
+            return Err(ProviderError::invalid_request(ProviderKind::OpenAi, "Explicit profile temperature is unsupported by the OpenAI account transport; clear it with `profile set <name> --clear-temperature`."));
+        }
         send_chatgpt_codex_responses_request(
             url,
             model,
@@ -814,6 +814,7 @@ pub async fn send_request(
             timeout_in_sec,
             token,
             response_format,
+            temperature,
         )
         .await
     }
@@ -1008,9 +1009,17 @@ mod tests {
             }
         });
 
-        let response = send_request(&url, &model, &content_parts, 10, &token, response_format)
-            .await
-            .expect("stream response should parse");
+        let response = send_request(
+            &url,
+            &model,
+            &content_parts,
+            10,
+            &token,
+            response_format,
+            None,
+        )
+        .await
+        .expect("stream response should parse");
         assert_eq!(response.text, "{\"answer\":\"hi\"}");
     }
 
@@ -1171,5 +1180,25 @@ data: [DONE]\n",
         .expect("chatgpt account transport should include image references");
 
         assert_eq!(image.bytes, expected_bytes);
+    }
+}
+
+#[cfg(test)]
+mod temperature_tests {
+    #[test]
+    fn temperature_request_omission_and_explicit_values() {
+        for temperature in [None, Some(0.0), Some(0.7)] {
+            let request = super::ChatCompletionsRequest {
+                model: "gpt-5-example".into(),
+                messages: vec![],
+                temperature,
+                response_format: serde_json::json!({}),
+            };
+            let value = serde_json::to_value(request).unwrap();
+            match temperature {
+                None => assert!(value.get("temperature").is_none()),
+                Some(expected) => assert_eq!(value["temperature"], expected),
+            }
+        }
     }
 }

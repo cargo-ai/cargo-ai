@@ -56,6 +56,7 @@ pub fn command() -> Command {
                         .required(false)
                         .value_name("URL"),
                 )
+                .arg(temperature_arg())
                 .arg(
                     Arg::new("max_output_tokens")
                         .long("max-output-tokens")
@@ -92,6 +93,8 @@ pub fn command() -> Command {
                             "clear_url",
                             "max_output_tokens",
                             "clear_max_output_tokens",
+                            "temperature",
+                            "clear_temperature",
                             "description",
                             "clear_description",
                             "token",
@@ -111,6 +114,17 @@ pub fn command() -> Command {
                     ArgGroup::new("max_output_tokens_update")
                         .args(["max_output_tokens", "clear_max_output_tokens"])
                         .multiple(false),
+                )
+                .group(
+                    ArgGroup::new("temperature_update")
+                        .args(["temperature", "clear_temperature"])
+                        .multiple(false),
+                )
+                .arg(
+                    Arg::new("clear_temperature")
+                        .long("clear-temperature")
+                        .help("Use the provider default temperature")
+                        .action(ArgAction::SetTrue),
                 )
                 .group(
                     ArgGroup::new("description_update")
@@ -166,6 +180,7 @@ pub fn command() -> Command {
                         .required(false)
                         .action(ArgAction::SetTrue),
                 )
+                .arg(temperature_arg())
                 .arg(
                     Arg::new("max_output_tokens")
                         .long("max-output-tokens")
@@ -244,4 +259,63 @@ pub fn command() -> Command {
                         .value_name("NAME"),
                 ),
         )
+}
+
+fn temperature_arg() -> Arg {
+    Arg::new("temperature")
+        .long("temperature")
+        .help("Set a finite nonnegative temperature; unset uses the provider default")
+        .value_name("NUMBER")
+        .value_parser(|value: &str| -> Result<f64, String> {
+            let value = value
+                .parse::<f64>()
+                .map_err(|_| "temperature must be a number".to_string())?;
+            if !value.is_finite() || value < 0.0 {
+                return Err("temperature must be finite and nonnegative".to_string());
+            }
+            Ok(value)
+        })
+}
+
+#[cfg(test)]
+mod temperature_tests {
+    #[test]
+    fn temperature_arguments_validate_and_clear() {
+        for value in ["0", "0.7", "12"] {
+            assert!(super::command()
+                .try_get_matches_from([
+                    "profile",
+                    "add",
+                    "example",
+                    "--server",
+                    "openai",
+                    "--model",
+                    "example",
+                    "--temperature",
+                    value
+                ])
+                .is_ok());
+            assert!(super::command()
+                .try_get_matches_from(["profile", "set", "example", "--temperature", value])
+                .is_ok());
+        }
+        for value in ["-0.1", "NaN", "inf", "invalid"] {
+            assert!(super::command()
+                .try_get_matches_from(["profile", "set", "example", "--temperature", value])
+                .is_err());
+        }
+        assert!(super::command()
+            .try_get_matches_from(["profile", "set", "example", "--clear-temperature"])
+            .is_ok());
+        assert!(super::command()
+            .try_get_matches_from([
+                "profile",
+                "set",
+                "example",
+                "--temperature",
+                "0",
+                "--clear-temperature"
+            ])
+            .is_err());
+    }
 }

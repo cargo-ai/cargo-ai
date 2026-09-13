@@ -88,6 +88,13 @@ pub struct Profile {
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
 
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_temperature"
+    )]
+    pub temperature: Option<f64>,
+
     #[serde(default)]
     pub description: Option<String>,
 
@@ -121,4 +128,44 @@ pub struct WebResources {
 
 fn default_timeout() -> u64 {
     60
+}
+
+fn deserialize_temperature<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error> {
+    let value = Option::<f64>::deserialize(deserializer)?;
+    if value.is_some_and(|value| !value.is_finite() || value < 0.0) {
+        return Err(serde::de::Error::custom(
+            "temperature must be finite and nonnegative",
+        ));
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod temperature_tests {
+    use super::Profile;
+    #[test]
+    fn temperature_profile_roundtrip_and_validation() {
+        let base = serde_json::json!({"name":"local", "server":"openai", "model":"example"});
+        let profile: Profile = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(profile.temperature, None);
+        assert!(serde_json::to_value(profile)
+            .unwrap()
+            .get("temperature")
+            .is_none());
+        for temperature in [0.0, 0.7, 12.0] {
+            let mut value = base.clone();
+            value["temperature"] = temperature.into();
+            let profile: Profile = serde_json::from_value(value).unwrap();
+            assert_eq!(profile.temperature, Some(temperature));
+            assert_eq!(
+                serde_json::to_value(profile).unwrap()["temperature"],
+                temperature
+            );
+        }
+        let mut value = base;
+        value["temperature"] = (-0.1).into();
+        assert!(serde_json::from_value::<Profile>(value).is_err());
+    }
 }
