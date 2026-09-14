@@ -387,6 +387,13 @@ fn actual_dashboard_requires_complete_correlated_evidence_and_collapses_suppleme
     old["run_attempt"] = json!("1");
     reused.needs["live_mistral"]["outputs"]["evidence"] = json!(old.to_string());
     assert!(reused.run().0.status.success());
+    // GitHub also presents carried jobs under the new attempt number.
+    reused.jobs["jobs"][10]["run_attempt"] = json!(2);
+    let (result, summary) = reused.run();
+    assert!(result.status.success());
+    assert!(summary.contains("evidence attempt 1"));
+    reused.needs["live_mistral"]["result"] = json!("failure");
+    assert!(!reused.run().0.status.success());
     let mut injected = Dashboard::new();
     injected.jobs["jobs"][0]["completed_at"] = json!("<script>alert('x')</script>|\nline");
     injected.jobs["jobs"][0]["html_url"] =
@@ -499,8 +506,11 @@ fn main() {
  if mode=="missing" {return;}
  let path=env::var("CARGO_AI_QUALIFICATION_REPORT").unwrap();
  let nonce=if mode=="stale" {"b".repeat(32)} else {env::var("CARGO_AI_QUALIFICATION_PROBE").unwrap()};
- let outcome=if mode=="rate_limited" {"rate_limited"} else if mode=="failure" {"failure"} else {"pass"};
+ let retrying=mode=="retry_pass" || mode=="retry_exhausted";
+ let transient=retrying && (mode=="retry_exhausted" || path.ends_with("result-1.json"));
+ let outcome=if transient {"failure"} else if mode=="rate_limited" {"rate_limited"} else if mode=="failure" {"failure"} else {"pass"};
  let raw=format!(r##"{{"schema_version":1,"candidate":"{}","provider":"{}","run_id":"123","run_attempt":"2","probe_id":"{}","outcome":"{}"}}"##,env::var("CARGO_AI_SHA").unwrap(),provider,nonce,outcome);
+ let raw=if retrying {raw.trim_end_matches('}').to_string()+&format!(",\"diagnostic\":\"{}\"}}",if transient {"server_error"} else {"none"})} else {raw};
  fs::write(path,if mode=="malformed" {"secret-marker".into()} else {raw}).unwrap();
  if mode=="harness_failure" {std::process::exit(3);}
 }
@@ -553,7 +563,12 @@ fn main() {
             "stale",
             "malformed",
             "harness_failure",
+            "retry_pass",
+            "retry_exhausted",
         ] {
+            if mode.starts_with("retry_") && provider != "mistral" {
+                continue;
+            }
             let _ = fs::remove_file(fixture.path("output"));
             let result = fixture
                 .command("probe")
@@ -565,17 +580,31 @@ fn main() {
                 .env("FIXTURE_MODE", mode)
                 .output()
                 .unwrap();
-            let accepted = mode == "pass" || (mode == "rate_limited" && provider == "mistral");
+            let accepted = matches!(mode, "pass" | "retry_pass")
+                || (mode == "rate_limited" && provider == "mistral");
             assert_eq!(
                 result.status.success(),
                 accepted,
                 "{provider}/{mode}: {}",
                 String::from_utf8_lossy(&result.stderr)
             );
-            if accepted {
+            if accepted || mode == "failure" || mode == "rate_limited" || mode == "retry_exhausted"
+            {
                 let raw = fs::read_to_string(fixture.path("output")).unwrap();
                 assert_eq!(raw.lines().count(), 1);
-                Record::parse(raw.trim().strip_prefix("evidence=").unwrap().as_bytes()).unwrap();
+                let record =
+                    Record::parse(raw.trim().strip_prefix("evidence=").unwrap().as_bytes())
+                        .unwrap();
+                if mode.starts_with("retry_") {
+                    assert_eq!(
+                        record.attempts.len(),
+                        if mode == "retry_pass" { 2 } else { 3 }
+                    );
+                    assert_eq!(
+                        record.attempts[0].diagnostic,
+                        qualification_policy::Diagnostic::ServerError
+                    );
+                }
             } else {
                 assert!(!fixture.path("output").exists());
             }
@@ -660,4 +689,38 @@ fn official_package_requires_its_own_complete_platform_evidence() {
     let output = fs::read_to_string(fixture.path("output")).unwrap();
     assert!(output.contains(&format!("sha={}\n", "b".repeat(40))));
     assert!(output.contains("declaration=examples/animal-patrol/cargo-ai-qualification.toml\n"));
+}
+
+#[test]
+fn transient_retry_classification_and_history_are_bounded() {
+    use qualification_policy::Diagnostic as D;
+    for diagnostic in [D::RateLimited, D::ServerError, D::Connectivity, D::Timeout] {
+        assert!(diagnostic.retryable());
+    }
+    for diagnostic in [
+        D::None,
+        D::Unspecified,
+        D::Unauthorized,
+        D::ModelNotFound,
+        D::InvalidRequest,
+        D::InvalidResponse,
+        D::ExecutionFailure,
+        D::Unknown,
+    ] {
+        assert!(!diagnostic.retryable());
+    }
+    let mut value = record("xai", "pass");
+    value["diagnostic"] = json!("none");
+    value["attempts"] = json!([
+        {"outcome":"failure","diagnostic":"server_error"},
+        {"outcome":"pass","diagnostic":"none"}
+    ]);
+    assert!(Record::parse(value.to_string().as_bytes()).is_ok());
+    value["attempts"][0]["diagnostic"] = json!("unauthorized");
+    assert!(Record::parse(value.to_string().as_bytes()).is_err());
+    value["attempts"] = json!(vec![
+        json!({"outcome":"failure","diagnostic":"server_error"});
+        4
+    ]);
+    assert!(Record::parse(value.to_string().as_bytes()).is_err());
 }

@@ -222,3 +222,12 @@ The package catalog starts fail-closed until the public canary caller and its im
 [Documentation hub](./README.md) · [Cargo AI README](../README.md)
 
 The official Animal Patrol source is enrolled separately from the source canary at an exact reviewed revision in the package catalog. Its image-to-CSV fixture requires all three native platforms. Catalog enrollment identifies source for qualification; it does not certify a hosted publication or replace the fresh Product Qualification decision.
+
+
+### Retrying a qualification provider
+
+Use GitHub Actions **Re-run jobs** for an individual provider job, or **Re-run failed jobs** to repeat failures and their dependent summary. Successful dependencies retain their results within the same workflow run and candidate. The summary shows the original evidence attempt; it rejects future attempts, another candidate/run, unsuccessful jobs and missing evidence. A new workflow run still starts fresh checks.
+
+The qualification gate makes at most three probe attempts for rate limits, HTTP 5xx, connection errors or timeouts, with 2- and 4-second delays. It does not retry invalid credentials, models, requests, response schemas or harness failures. Retry-After headers are not available in the current usage evidence; delays are fixed and bounded. Normal CLI and generated-agent inference do not gain automatic retries.
+
+Each attempt records only typed outcome and error category in the job log and step summary. Final evidence retains the attempt history, and the aggregate identifies a pass after retry. Exhausted supplemental rate limits remain **unverified**, never a model pass; required provider failures still block qualification. Request bodies, raw provider errors and credentials are not published.

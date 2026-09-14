@@ -143,6 +143,7 @@ pub(crate) struct ProviderError {
     provider: ProviderKind,
     kind: ProviderErrorKind,
     message: String,
+    http_status: Option<u16>,
 }
 
 impl ProviderError {
@@ -161,6 +162,7 @@ impl ProviderError {
 
         Self {
             provider,
+            http_status: None,
             kind,
             message: format!("Request failed: {error}"),
         }
@@ -169,6 +171,7 @@ impl ProviderError {
     pub(crate) fn from_http_status(provider: ProviderKind, status: StatusCode, body: &str) -> Self {
         Self {
             provider,
+            http_status: Some(status.as_u16()),
             kind: classify_http_status(status, body),
             message: format!("HTTP error {status}: {body}"),
         }
@@ -177,6 +180,7 @@ impl ProviderError {
     pub(crate) fn invalid_response(provider: ProviderKind, message: impl Into<String>) -> Self {
         Self {
             provider,
+            http_status: None,
             kind: ProviderErrorKind::InvalidResponse,
             message: message.into(),
         }
@@ -185,6 +189,7 @@ impl ProviderError {
     pub(crate) fn invalid_request(provider: ProviderKind, message: impl Into<String>) -> Self {
         Self {
             provider,
+            http_status: None,
             kind: ProviderErrorKind::InvalidRequest,
             message: message.into(),
         }
@@ -196,6 +201,10 @@ impl ProviderError {
 
     pub(crate) fn kind(&self) -> ProviderErrorKind {
         self.kind
+    }
+
+    pub(crate) fn http_status(&self) -> Option<u16> {
+        self.http_status
     }
 
     pub(crate) fn message(&self) -> &str {
@@ -240,7 +249,10 @@ pub(crate) fn sanitized_http_error_body(provider: ProviderKind, body: &[u8]) -> 
     });
 
     let Some(message) = message.map(str::trim).filter(|message| !message.is_empty()) else {
-        return format!("{} returned an HTTP error response.", provider.display_name());
+        return format!(
+            "{} returned an HTTP error response.",
+            provider.display_name()
+        );
     };
 
     const MAX_MESSAGE_CHARS: usize = 1_000;

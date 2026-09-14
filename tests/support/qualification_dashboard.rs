@@ -290,8 +290,26 @@ pub fn render(input: &Inputs) -> Result<(String, bool)> {
             if evidence.status.job_result() != need.result {
                 return Err("job and dependency disagree");
             }
-            if !raw.is_empty() && !seen.insert(Record::parse(raw.as_bytes())?.probe_id) {
-                return Err("duplicate probe identity");
+            let mut original_attempt = evidence.attempt;
+            if !raw.is_empty() {
+                let record = Record::parse(raw.as_bytes())?;
+                original_attempt = policy::positive(&record.run_attempt)?;
+                if original_attempt > evidence.attempt || !seen.insert(record.probe_id) {
+                    return Err("future or duplicate probe identity");
+                }
+                // GitHub carries successful dependencies forward with the new job
+                // attempt while retaining their original, trusted step outputs.
+                evidence
+                    .links
+                    .push_str(&format!(" · evidence attempt {original_attempt}"));
+                if !record.attempts.is_empty() {
+                    evidence
+                        .links
+                        .push_str(&format!(" · {} probe attempt(s)", record.attempts.len()));
+                    if record.outcome == policy::Outcome::Pass && record.attempts.len() > 1 {
+                        evidence.links.push_str(" · passed after retry");
+                    }
+                }
             }
             policy::evaluate(
                 provider,
@@ -299,7 +317,7 @@ pub fn render(input: &Inputs) -> Result<(String, bool)> {
                 &Identity {
                     candidate,
                     run_id,
-                    run_attempt: &evidence.attempt.to_string(),
+                    run_attempt: &original_attempt.to_string(),
                     probe_id: None,
                 },
                 &need.result,
@@ -312,7 +330,9 @@ pub fn render(input: &Inputs) -> Result<(String, bool)> {
                 providers_ok &= decision.accepted;
             }
             Err(_) => {
-                evidence.status = Status::Missing;
+                if !matches!(evidence.status, Status::Fail | Status::Cancelled) {
+                    evidence.status = Status::Missing;
+                }
                 providers_ok = false;
             }
         }

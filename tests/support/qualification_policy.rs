@@ -44,6 +44,39 @@ pub enum Outcome {
     Failure,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Diagnostic {
+    #[default]
+    Unspecified,
+    None,
+    RateLimited,
+    ServerError,
+    Connectivity,
+    Timeout,
+    Unauthorized,
+    ModelNotFound,
+    InvalidRequest,
+    InvalidResponse,
+    ExecutionFailure,
+    Unknown,
+}
+impl Diagnostic {
+    pub fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::RateLimited | Self::ServerError | Self::Connectivity | Self::Timeout
+        )
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Attempt {
+    pub outcome: Outcome,
+    pub diagnostic: Diagnostic,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
@@ -54,6 +87,10 @@ pub struct Record {
     pub run_attempt: String,
     pub probe_id: String,
     pub outcome: Outcome,
+    #[serde(default)]
+    pub diagnostic: Diagnostic,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<Attempt>,
 }
 
 impl Record {
@@ -69,6 +106,18 @@ impl Record {
             || !PROVIDERS.contains(&record.provider.as_str())
         {
             return Err("invalid probe identity");
+        }
+        if record.attempts.len() > 3
+            || record.attempts.last().is_some_and(|last| {
+                last.outcome != record.outcome || last.diagnostic != record.diagnostic
+            })
+            || record
+                .attempts
+                .iter()
+                .take(record.attempts.len().saturating_sub(1))
+                .any(|a| a.outcome == Outcome::Pass || !a.diagnostic.retryable())
+        {
+            return Err("invalid probe attempt history");
         }
         positive(&record.run_id)?;
         positive(&record.run_attempt)?;

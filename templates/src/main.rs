@@ -1655,10 +1655,12 @@ fn usage_provider_profile(context: &ActionProviderContext) -> Option<&str> {
 }
 
 fn usage_provider_error(error: &providers::ProviderError) -> usage_log::UsageError {
-    usage_log::UsageError::redacted(
+    let mut usage = usage_log::UsageError::redacted(
         format!("{:?}", error.kind()).to_ascii_lowercase(),
         "Provider request failed.",
-    )
+    );
+    usage.http_status = error.http_status();
+    usage
 }
 
 fn usage_timeout_error() -> usage_log::UsageError {

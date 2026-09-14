@@ -846,11 +846,15 @@ fn usage_provider_profile(context: &ActionProviderContext) -> Option<&str> {
     context.profile_name.as_deref()
 }
 
-fn usage_provider_error(error: &crate::providers::ProviderError) -> crate::usage_log::UsageError {
-    crate::usage_log::UsageError::redacted(
+pub(super) fn usage_provider_error(
+    error: &crate::providers::ProviderError,
+) -> crate::usage_log::UsageError {
+    let mut usage = crate::usage_log::UsageError::redacted(
         format!("{:?}", error.kind()).to_ascii_lowercase(),
         "Provider request failed.",
-    )
+    );
+    usage.http_status = error.http_status();
+    usage
 }
 
 fn usage_timeout_error() -> crate::usage_log::UsageError {

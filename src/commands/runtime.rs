@@ -1604,10 +1604,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                     usage: None,
                     duration: provider_started_at.elapsed(),
                     status: crate::usage_log::UsageStatus::Failed,
-                    error: Some(crate::usage_log::UsageError::redacted(
-                        format!("{:?}", error.kind()).to_ascii_lowercase(),
-                        "Provider request failed.",
-                    )),
+                    error: Some(super::runtime_actions::usage_provider_error(&error)),
                 });
             }
             let details = provider_error_messages(&error);
