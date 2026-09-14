@@ -99,49 +99,78 @@ fn probe(provider: &str) -> Result<()> {
         return Err("checkout does not match candidate");
     }
     let directory = ProbeDirectory::new()?;
-    let report = directory.0.join("result.json");
-    let nonce = uuid::Uuid::new_v4().simple().to_string();
-    let harness = Command::new("cargo")
-        .args([
-            "test",
-            "--locked",
-            "--test",
-            "provider_smoke",
-            &format!("live_{provider}_smoke_uses_isolated_stdin_credentials"),
-            "--",
-            "--ignored",
-            "--exact",
-        ])
-        .env("CARGO_AI_QUALIFICATION_REPORT", &report)
-        .env("CARGO_AI_QUALIFICATION_PROBE", &nonce)
-        .status()
-        .map_err(|_| "cannot execute probe harness")?;
-    if !harness.success() {
-        return Err("probe harness failed; no exemption applies");
+    let mut attempts = Vec::new();
+    for attempt in 1..=3 {
+        let report = directory.0.join(format!("result-{attempt}.json"));
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let harness = Command::new("cargo")
+            .args([
+                "test",
+                "--locked",
+                "--test",
+                "provider_smoke",
+                &format!("live_{provider}_smoke_uses_isolated_stdin_credentials"),
+                "--",
+                "--ignored",
+                "--exact",
+            ])
+            .env("CARGO_AI_QUALIFICATION_REPORT", &report)
+            .env("CARGO_AI_QUALIFICATION_PROBE", &nonce)
+            .status()
+            .map_err(|_| "cannot execute probe harness")?;
+        if !harness.success() {
+            return Err("probe harness failed; no exemption applies");
+        }
+        let raw = read(&report, 2048)?;
+        let decision = qualification_policy::evaluate(
+            provider,
+            raw.as_bytes(),
+            &Identity {
+                candidate: &candidate,
+                run_id: &run_id,
+                run_attempt: &run_attempt,
+                probe_id: Some(&nonce),
+            },
+            "success",
+            "true",
+        )?;
+        let mut record = Record::parse(raw.as_bytes())?;
+        attempts.push(qualification_policy::Attempt {
+            outcome: record.outcome,
+            diagnostic: record.diagnostic,
+        });
+        // Only typed, identity-checked data reaches public diagnostics.
+        println!(
+            "Qualification probe {provider}, attempt {attempt}: {:?} ({:?})",
+            record.outcome, record.diagnostic
+        );
+        append(
+            "GITHUB_STEP_SUMMARY",
+            &format!(
+                "- {provider} probe attempt {attempt}: {:?} ({:?})\n",
+                record.outcome, record.diagnostic
+            ),
+        )?;
+        if record.outcome != qualification_policy::Outcome::Pass
+            && record.diagnostic.retryable()
+            && attempt < 3
+        {
+            std::thread::sleep(std::time::Duration::from_secs(2u64.pow(attempt)));
+            continue;
+        }
+        record.attempts = attempts;
+        let encoded =
+            serde_json::to_string(&record).map_err(|_| "cannot encode sanitized evidence")?;
+        append("GITHUB_OUTPUT", &format!("evidence={encoded}\n"))?;
+        if !decision.accepted {
+            return Err("probe did not satisfy qualification policy");
+        }
+        if decision.status == Status::Unverified {
+            println!("::warning title=Supplemental provider detail::{provider} live verification unavailable: rate limited");
+        }
+        return Ok(());
     }
-    let raw = read(&report, 2048)?;
-    let decision = qualification_policy::evaluate(
-        provider,
-        raw.as_bytes(),
-        &Identity {
-            candidate: &candidate,
-            run_id: &run_id,
-            run_attempt: &run_attempt,
-            probe_id: Some(&nonce),
-        },
-        "success",
-        "true",
-    )?;
-    if !decision.accepted {
-        return Err("probe did not satisfy qualification policy");
-    }
-    let record = Record::parse(raw.as_bytes())?;
-    let encoded = serde_json::to_string(&record).map_err(|_| "cannot encode sanitized evidence")?;
-    append("GITHUB_OUTPUT", &format!("evidence={encoded}\n"))?;
-    if decision.status == Status::Unverified {
-        println!("::warning title=Supplemental provider detail::{provider} live verification unavailable: rate limited");
-    }
-    Ok(())
+    Err("probe attempt budget exhausted")
 }
 
 fn aggregate() -> Result<()> {

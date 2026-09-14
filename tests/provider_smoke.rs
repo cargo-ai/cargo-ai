@@ -1763,13 +1763,13 @@ fn qualification_reports_validate_real_probes_and_keep_strict_diagnostics() {
         ("openai", MockServer::openai_success),
     ];
     for (provider, server) in successes {
-        qualification_probe_case(provider, server(), "pass");
+        qualification_probe_case(provider, server(), "pass", "none");
     }
-    for (status, expected) in [
-        (429, "rate_limited"),
-        (401, "failure"),
-        (400, "failure"),
-        (500, "failure"),
+    for (status, expected, diagnostic) in [
+        (429, "rate_limited", "rate_limited"),
+        (401, "failure", "unauthorized"),
+        (400, "failure", "invalid_request"),
+        (500, "failure", "server_error"),
     ] {
         qualification_probe_case(
             "mistral",
@@ -1780,6 +1780,7 @@ fn qualification_reports_validate_real_probes_and_keep_strict_diagnostics() {
                 r#"{"message":"private-response-sentinel"}"#.into(),
             ),
             expected,
+            diagnostic,
         );
     }
     qualification_probe_case(
@@ -1791,10 +1792,11 @@ fn qualification_reports_validate_real_probes_and_keep_strict_diagnostics() {
             mistral_success_response(r#"{"status":false}"#),
         ),
         "failure",
+        "execution_failure",
     );
 }
 
-fn qualification_probe_case(provider: &str, mock: MockServer, expected: &str) {
+fn qualification_probe_case(provider: &str, mock: MockServer, expected: &str, diagnostic: &str) {
     let fixture = Fixture::new();
     let model = "qualification-mock-model";
     let token = "qualification-fake-secret-sentinel";
@@ -1823,6 +1825,8 @@ fn qualification_probe_case(provider: &str, mock: MockServer, expected: &str) {
         expected
     );
     let saved = fs::read(&report.path).unwrap();
+    let detail: Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(detail["diagnostic"], diagnostic);
     for forbidden in [token, model, "private-response-sentinel", "cps-"] {
         assert!(!String::from_utf8_lossy(&saved).contains(forbidden));
     }

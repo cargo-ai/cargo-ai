@@ -1,5 +1,6 @@
 //! A completed isolated probe reports evidence; policy decides qualification.
 
+use super::qualification_policy::Diagnostic;
 use serde::Deserialize;
 use serde_json::json;
 use std::fs;
@@ -30,6 +31,7 @@ struct Provider {
 #[derive(Deserialize)]
 struct UsageError {
     kind: String,
+    http_status: Option<u16>,
 }
 
 pub(super) struct Context {
@@ -108,6 +110,7 @@ impl Context {
             "schema_version": 1, "candidate": self.candidate, "provider": provider,
             "run_id": self.run_id, "run_attempt": self.run_attempt,
             "probe_id": self.probe_id, "outcome": outcome,
+            "diagnostic": diagnostic(&raw, outcome)?,
         }))
         .map_err(|_| "qualification serialization failed")?;
         let mut file = fs::OpenOptions::new()
@@ -207,4 +210,26 @@ pub(super) fn classify(
         }
         _ => Err("inconsistent request evidence"),
     }
+}
+
+fn diagnostic(raw: &str, outcome: &str) -> Result<Diagnostic, &'static str> {
+    if outcome == "pass" {
+        return Ok(Diagnostic::None);
+    }
+    let request: Event = serde_json::from_str(raw.lines().nth(2).ok_or("missing request")?)
+        .map_err(|_| "invalid request")?;
+    let Some(error) = request.error else {
+        return Ok(Diagnostic::ExecutionFailure);
+    };
+    Ok(match error.kind.as_str() {
+        "ratelimited" => Diagnostic::RateLimited,
+        "connectivity" => Diagnostic::Connectivity,
+        "timeout" => Diagnostic::Timeout,
+        "unauthorized" => Diagnostic::Unauthorized,
+        "modelnotfound" => Diagnostic::ModelNotFound,
+        "invalidrequest" => Diagnostic::InvalidRequest,
+        "invalidresponse" => Diagnostic::InvalidResponse,
+        _ if error.http_status.is_some_and(|s| (500..600).contains(&s)) => Diagnostic::ServerError,
+        _ => Diagnostic::Unknown,
+    })
 }
