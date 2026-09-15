@@ -52,6 +52,16 @@ pub async fn run(conf_m: &ArgMatches) -> bool {
                 .map(|s| s.eq_ignore_ascii_case("success"))
                 .unwrap_or(false)
             {
+                if json.get("reactivated").and_then(|value| value.as_bool()) == Some(true) {
+                    println!("Account reactivated.");
+                }
+                if json
+                    .get("deletion_cancelled")
+                    .and_then(|value| value.as_bool())
+                    == Some(true)
+                {
+                    println!("Your pending deletion request has been canceled.");
+                }
                 let creds = json.get("credentials");
 
                 let access_token = creds

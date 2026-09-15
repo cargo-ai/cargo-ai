@@ -1,7 +1,7 @@
 // src/infra_api/account/register.rs
 //
 // POST /account
-// Body: { "action": "register", "email": "<email>" }
+// Body includes explicit consent to reactivation and pending-deletion cancellation.
 //
 // Notes:
 // - We do NOT send the API Gateway event wrapper. Only the JSON body the Lambda parses.
@@ -44,7 +44,7 @@ impl Error for RegisterError {
     }
 }
 
-/// Registers an account email by calling cargo-ai-infra.
+/// Requests a code after the caller obtains consent to reactivation/cancellation.
 /// Returns the raw JSON payload from the service (success or failure).
 pub async fn register_email(base_url: &str, email: &str) -> Result<Value, RegisterError> {
     let url = format!("{}/account", base_url.trim_end_matches('/'));
@@ -66,7 +66,8 @@ pub async fn register_email(base_url: &str, email: &str) -> Result<Value, Regist
 fn build_register_body(email: &str) -> Value {
     super::with_cargo_ai_metadata(json!({
         "action": "register",
-        "email": email
+        "email": email,
+        "reactivation_consent": true
     }))
 }
 
@@ -75,7 +76,8 @@ fn build_register_body_with_metadata(email: &str, metadata: Option<CargoAiMetada
     super::with_cargo_ai_metadata_override(
         json!({
             "action": "register",
-            "email": email
+            "email": email,
+            "reactivation_consent": true
         }),
         metadata,
     )
@@ -102,6 +104,7 @@ mod tests {
 
         assert_eq!(body["action"], "register");
         assert_eq!(body["email"], "person@example.com");
+        assert_eq!(body["reactivation_consent"], true);
         assert_eq!(
             body["cargo_ai_metadata"]["cargo_ai_version"],
             env!("CARGO_PKG_VERSION")

@@ -25,6 +25,41 @@ cargo ai account handle --set your-handle
 
 A handle is the public owner identity used when other people list, pull, run, or hatch definitions you share. It is not a local filesystem path.
 
+## Deactivate, request deletion, or reactivate
+
+Ordinary deactivation stops hosted access and hides your public packages and agents. It retains your hosted data and sharing settings:
+
+```bash
+cargo ai account deactivate
+```
+
+To also request permanent removal of your account and live hosted data:
+
+```bash
+cargo ai account deactivate --request-deletion
+```
+
+Both commands ask for confirmation; a deletion request requires typing the configured account email. The request records your intention for an administrator to process manually. Removal may take several days. [Retained copies](#retained-copies) follow the policy below; the request does not promise immediate removal from every copy.
+
+Fresh email confirmation reactivates the same account and cancels a pending deletion request, provided the administrator has not begun removal:
+
+```bash
+cargo ai account register you@example.com
+cargo ai account confirm <new-code-from-email>
+```
+
+Registration explains the cancellation consequence before requesting a code. Merely requesting a code does not restore access. Once removal begins, reactivation is unavailable. After completed removal, you can register again as a new account; previous hosted content is not restored.
+
+For noninteractive use, ordinary deactivation requires `--yes`; a deletion request requires `--request-deletion --confirm-email you@example.com`. The email confirms intent and cannot select a different account. Registration accepts `--yes` to acknowledge the reactivation/cancellation consequence. Switching an already configured local account retains its separate confirmation.
+
+Deactivation revokes hosted sessions while preserving local projects, installed applications, provider credentials and local account configuration. A successful fresh confirmation replaces hosted credentials. If a request's result is uncertain or reports an incomplete transition, check account status and contact the administrator if reconciliation is required; an incomplete receipt does not mean access stayed active.
+
+### Retained copies
+
+Completed removal covers your live hosted account and data. Restricted recovery copies and operational records may remain until their retention period verifiably expires or an administrator separately retires them. Some retained copies have no automatic expiry, so there is no universal deadline for removal from every copy.
+
+Before a retained copy returns to service, completed deletions must be excluded and their absence verified. A minimal restricted deletion record is retained until all applicable copies have expired or been retired so that recovery cannot restore a deleted account accidentally.
+
 ## Manage hosted agent definitions
 
 Agent storage and visibility commands live under the top-level `agents` group:

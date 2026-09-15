@@ -9,6 +9,7 @@ use serde_json::Value;
 
 pub mod agents;
 pub mod confirm;
+pub mod deactivate;
 pub mod handle;
 pub mod mail_preferences;
 pub mod projects;
