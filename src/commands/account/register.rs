@@ -88,6 +88,22 @@ pub async fn run(reg_m: &ArgMatches) -> bool {
         }
     }
 
+    println!("Confirming a new email code will reactivate a deactivated account and cancel pending deletion, provided deletion has not begun.");
+    match super::consent::confirm(
+        "Request a new confirmation code? [y/N]: ",
+        reg_m.get_flag("yes"),
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
+            println!("Operation canceled.");
+            return true;
+        }
+        Err(error) => {
+            eprintln!("x {error}");
+            return false;
+        }
+    }
+
     match infra_api::account::register::register_email(INFRA_BASE_URL, email).await {
         Ok(json) => {
             if !ui::account_status::render_backend_ui(&json) {

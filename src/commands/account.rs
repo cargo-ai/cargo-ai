@@ -6,6 +6,8 @@ use clap::ArgMatches;
 
 mod agents;
 mod confirm;
+mod consent;
+mod deactivate;
 mod handle;
 pub(crate) mod helpers;
 mod mail;
@@ -28,11 +30,13 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         confirm::run(conf_m).await
     } else if sub_m.subcommand_matches("status").is_some() {
         status::run().await
+    } else if let Some(deactivate_m) = sub_m.subcommand_matches("deactivate") {
+        deactivate::run(deactivate_m).await
     } else if let Some(handle_m) = sub_m.subcommand_matches("handle") {
         handle::run(handle_m).await
     } else {
         eprintln!(
-            "No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', or 'cargo ai account handle [--set <handle>]'."
+            "No account subcommand found. Try 'cargo ai account register <email>', 'cargo ai account confirm <code>', 'cargo ai account status', 'cargo ai account deactivate', or 'cargo ai account handle [--set <handle>]'."
         );
         false
     }
