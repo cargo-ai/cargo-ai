@@ -20,6 +20,11 @@ on:
         required: false
         default: false
         type: boolean
+      verify_registry_install:
+        description: After publication, verify plain crates.io installation matches this candidate
+        required: false
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       cargo_ai_sha:
@@ -33,6 +38,11 @@ on:
         type: boolean
       collect_all:
         description: Keep every operating-system job running after a failure
+        required: false
+        default: false
+        type: boolean
+      verify_registry_install:
+        description: After publication, verify plain crates.io installation matches this candidate
         required: false
         default: false
         type: boolean
@@ -119,6 +129,160 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then cli="${cli}.exe"; fi
           "$cli" --no-update-check version
           "$cli" --no-update-check hatch adder_test --check
+
+      - name: Install freshly resolved packaged source
+        shell: bash
+        run: |
+          set -euo pipefail
+          lane="$(cd "$RUNNER_TEMP" && pwd -P)/packaged-install"
+          evidence="$lane/evidence"
+          mkdir -p "$evidence" "$lane/source" "$lane/cargo-home" "$lane/home"
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "cargo-ai") | .version')
+          candidate=$(git rev-parse HEAD)
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          [[ -n "$version" && -n "$host" ]]
+          cargo package --locked --no-verify --target-dir "$lane/package-target"
+          archive="$lane/package-target/package/cargo-ai-$version.crate"
+          tar -xzf "$archive" -C "$lane/source"
+          source="$lane/source/cargo-ai-$version"
+          [[ "$(jq -r '.git.sha1' "$source/.cargo_vcs_info.json")" == "$candidate" ]]
+          cp "$source/Cargo.lock" "$evidence/packaged.Cargo.lock"
+          cp "$source/.cargo_vcs_info.json" "$evidence/source.json"
+          rm "$source/Cargo.lock"
+
+          export CARGO_HOME="$lane/cargo-home"
+          export CARGO_TARGET_DIR="$lane/build"
+          export CARGO_AI_HOME="$lane/home"
+          cd "$source"
+          cargo generate-lockfile
+          cp Cargo.lock "$evidence/resolved.Cargo.lock"
+          cargo metadata --locked --format-version 1 --filter-platform "$host" > "$evidence/resolved-metadata.json"
+          cargo tree --locked --edges normal,build --target "$host" > "$evidence/install-dependencies.txt"
+          {
+            echo "candidate=$candidate"
+            echo "version=$version"
+            echo "platform=$RUNNER_OS"
+            echo "observed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            rustc -vV
+            cargo -vV
+          } > "$evidence/identity.txt"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            shasum -a 256 "$archive" "$evidence/packaged.Cargo.lock" "$evidence/resolved.Cargo.lock" > "$evidence/sha256.txt"
+          else
+            sha256sum "$archive" "$evidence/packaged.Cargo.lock" "$evidence/resolved.Cargo.lock" > "$evidence/sha256.txt"
+          fi
+          # Bind the build to the newly resolved graph, never the packaged lock.
+          # This is packaged-source proof; plain registry installation is separate.
+          cargo install --locked --path . --root "$lane/install" --target "$host"
+          cmp Cargo.lock "$evidence/resolved.Cargo.lock"
+          # Generated workspaces need their own target directories during smoke checks.
+          unset CARGO_TARGET_DIR
+          cli="$lane/install/bin/cargo-ai"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then cli="${cli}.exe"; fi
+          export PATH="$lane/install/bin:$PATH"
+          resolved_cli=$(command -v cargo-ai)
+          [[ "${resolved_cli%.exe}" == "${cli%.exe}" ]]
+          [[ "$("$cli" --no-update-check version)" == "$version" ]]
+          [[ "$(cargo ai --no-update-check version)" == "$version" ]]
+          "$cli" --no-update-check hatch adder_test --config "$source/.agentcfg" --check
+          "$cli" --no-update-check new "$lane/project" --vcs none
+          cd "$lane/project"
+          cargo ai --no-update-check add guidance --style codex
+          test -s .cargo-ai/guidance/start-here.md
+          cat > smoke.json <<'JSON'
+          {
+            "agent_definition_schema_version": "2026-09-09.r1",
+            "inputs": [{"name": "job", "type": "text", "text": "local installation check"}],
+            "agent_schema": {"type": "object", "properties": {}},
+            "actions": [{"name": "cargo_version", "logic": {"==": [1, 1]}, "run": [{"kind": "exec", "program": "cargo", "args": ["--version"]}]}]
+          }
+          JSON
+          cargo ai --no-update-check run --config smoke.json --server ollama --model install-smoke --render-mode append-only | tee "$evidence/smoke.txt"
+          grep -q 'cargo [0-9]' "$evidence/smoke.txt"
+          echo "Packaged-source fresh-resolution install, Cargo dispatch, guidance and local action passed." >> "$evidence/identity.txt"
+
+      - name: Preserve packaged installation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: packaged-install-${{ matrix.os }}
+          path: ${{ runner.temp }}/packaged-install/evidence/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Verify plain registry installation after publication
+        if: ${{ inputs.verify_registry_install }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          lane="$(cd "$RUNNER_TEMP" && pwd -P)/registry-install"
+          evidence="$lane/evidence"
+          mkdir -p "$evidence" "$lane/cargo-home" "$lane/home" "$lane/work"
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "cargo-ai") | .version')
+          candidate=$(git rev-parse HEAD)
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          [[ -n "$version" && -n "$host" ]]
+          export CARGO_HOME="$lane/cargo-home"
+          export CARGO_TARGET_DIR="$lane/build"
+          export CARGO_AI_HOME="$lane/home"
+          unset CARGO_ALIAS_AI
+          cd "$lane/work"
+          {
+            echo "candidate=$candidate"
+            echo "expected_version=$version"
+            echo "platform=$RUNNER_OS"
+            echo "observed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            rustc -vV
+            cargo -vV
+          } > "$evidence/identity.txt"
+          # Resolve the registry's latest version normally; do not supply a lock,
+          # version constraint or force flag. Compiler events identify this build.
+          cargo install cargo-ai --registry crates-io --root "$lane/install" --target "$host" --message-format=json > "$evidence/build.jsonl"
+          jq -s '[.[] | select(.reason == "compiler-artifact") | {package_id, features, target: {name: .target.name, kind: .target.kind, crate_types: .target.crate_types}, profile, fresh}] | unique_by([.package_id, .target, .features, .profile])' "$evidence/build.jsonl" > "$evidence/compiled-artifacts.json"
+          jq -e 'length > 1 and any(.[]; .target.name == "cargo-ai" and (.target.kind | index("bin")))' "$evidence/compiled-artifacts.json" > /dev/null
+          jq -s -e 'any(.[]; .reason == "build-finished" and .success == true)' "$evidence/build.jsonl" > /dev/null
+          cp "$lane/install/.crates2.json" "$evidence/install-receipt.json"
+          unset CARGO_TARGET_DIR
+          cli="$lane/install/bin/cargo-ai"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then cli="${cli}.exe"; fi
+          export PATH="$lane/install/bin:$PATH"
+          resolved_cli=$(command -v cargo-ai)
+          [[ "${resolved_cli%.exe}" == "${cli%.exe}" ]]
+          "$cli" --no-update-check version > "$evidence/direct-version.txt"
+          cargo ai --no-update-check version > "$evidence/cargo-dispatch-version.txt"
+          [[ "$(cat "$evidence/direct-version.txt")" == "$version" ]]
+          [[ "$(cat "$evidence/cargo-dispatch-version.txt")" == "$version" ]]
+
+          archives=("$CARGO_HOME"/registry/cache/*/"cargo-ai-$version.crate")
+          [[ "${#archives[@]}" == 1 && -f "${archives[0]}" ]]
+          archive="${archives[0]}"
+          tar -xOf "$archive" "cargo-ai-$version/.cargo_vcs_info.json" > "$evidence/registry-source.json"
+          jq -e --arg candidate "$candidate" '.git.sha1 == $candidate and .git.dirty != true' "$evidence/registry-source.json" > /dev/null
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            shasum -a 256 "$archive" "$cli" "$evidence/compiled-artifacts.json" > "$evidence/sha256.txt"
+          else
+            sha256sum "$archive" "$cli" "$evidence/compiled-artifacts.json" > "$evidence/sha256.txt"
+          fi
+          cat > smoke.json <<'JSON'
+          {
+            "agent_definition_schema_version": "2026-09-09.r1",
+            "inputs": [{"name": "job", "type": "text", "text": "local installation check"}],
+            "agent_schema": {"type": "object", "properties": {}},
+            "actions": [{"name": "cargo_version", "logic": {"==": [1, 1]}, "run": [{"kind": "exec", "program": "cargo", "args": ["--version"]}]}]
+          }
+          JSON
+          cargo ai --no-update-check run --config smoke.json --server ollama --model install-smoke --render-mode append-only | tee "$evidence/smoke.txt"
+          grep -q 'cargo [0-9]' "$evidence/smoke.txt"
+          echo "Plain registry install, exact published source/version, Cargo dispatch and local action passed." >> "$evidence/identity.txt"
+
+      - name: Preserve registry installation evidence
+        if: ${{ always() && inputs.verify_registry_install }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: registry-install-${{ matrix.os }}
+          path: ${{ runner.temp }}/registry-install/evidence/
+          if-no-files-found: warn
+          retention-days: 14
 
   summary:
     name: Deterministic qualification summary

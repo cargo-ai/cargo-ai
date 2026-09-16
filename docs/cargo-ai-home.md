@@ -37,7 +37,7 @@ The default stays Cargo-compatible on purpose.
 That lets users move between:
 
 - standalone `cargo-ai` usage
-- later `cargo install cargo-ai --locked`
+- later `cargo install cargo-ai`
 - later full developer/export workflows
 
 without splitting Cargo AI state across different directories.

@@ -839,7 +839,7 @@ fn using_line_url(provider: crate::providers::ProviderKind, url: &str) -> Option
         return None;
     }
 
-    Some(trimmed.to_string())
+    crate::providers::provider_url_origin(trimmed)
 }
 
 fn usage_provider_profile(context: &ActionProviderContext) -> Option<&str> {
@@ -2519,8 +2519,8 @@ async fn resolve_generate_image_step_profile_context(
     }
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(format!(
-            "Action '{}' generate_image step profile '{}' produced invalid URL '{}'. Use an absolute URL beginning with `http://` or `https://`.",
-            action_name, profile.name, url
+            "Action '{}' generate_image step profile '{}' produced an invalid URL. Use an absolute URL beginning with `http://` or `https://`.",
+            action_name, profile.name
         ));
     }
 
@@ -6131,7 +6131,7 @@ auth_mode = "{auth_mode}"
             profile_name: None,
             auth_mode: "api_key".to_string(),
             model: "gpt-5.2".to_string(),
-            url: "https://custom.example.test/v1/chat/completions".to_string(),
+            url: "https://synthetic-user:synthetic-password@custom.example.test/synthetic-path?key=synthetic-query#synthetic-fragment".to_string(),
             token: "test-token".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
@@ -6141,8 +6141,19 @@ auth_mode = "{auth_mode}"
 
         assert_eq!(
             provider_context.using_line(),
-            "using: profile=none auth=api_key server=openai model=gpt-5.2 url=https://custom.example.test/v1/chat/completions"
+            "using: profile=none auth=api_key server=openai model=gpt-5.2 url=https://custom.example.test"
         );
+    }
+
+    #[test]
+    fn using_line_omits_invalid_urls() {
+        for url in [
+            "synthetic-query",
+            "http://[synthetic-query",
+            "ftp://synthetic-user:synthetic-password@example.test/synthetic-path",
+        ] {
+            assert_eq!(super::using_line_url(ProviderKind::Ollama, url), None);
+        }
     }
 
     #[test]
@@ -6948,6 +6959,27 @@ auth_mode = "{auth_mode}"
         assert!(!snapshot
             .iter()
             .any(|line| line.contains("url=http://127.0.0.1")));
+    }
+
+    #[tokio::test]
+    async fn generate_image_profile_diagnostics_exclude_endpoint_secrets() {
+        let config = ollama_profile_config(
+            "image_profile",
+            "ftp://synthetic-user:synthetic-password@localhost/synthetic-path?key=synthetic-query#synthetic-fragment",
+            "image-model",
+        );
+        let _test_env = TestCargoHome::new(&config);
+        let error = resolve_generate_image_step_profile_context(
+            Some(&crate::RunArg::Literal("image_profile".to_string())),
+            &json!({}),
+            "generate_art",
+            60,
+        )
+        .await
+        .expect_err("invalid profile URL should fail");
+        assert!(error.contains("invalid URL"));
+        assert!(error.contains("image_profile"));
+        assert!(!error.contains("synthetic-"), "endpoint leaked: {error}");
     }
 
     #[tokio::test]

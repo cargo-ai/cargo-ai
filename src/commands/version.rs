@@ -7,7 +7,7 @@ fn print_forced_check_status(status: VersionStatus) {
         VersionStatus::UpdateAvailable { installed, latest } => {
             println!("Installed version: {installed}");
             println!("Latest crates.io version: {latest}");
-            println!("Update available. Run `cargo install cargo-ai --locked` to update.");
+            println!("Update available. Run `cargo install cargo-ai` to update.");
         }
         VersionStatus::UpToDate { installed, latest } => {
             println!("Installed version: {installed}");

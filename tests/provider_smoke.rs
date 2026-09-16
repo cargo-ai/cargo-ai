@@ -766,6 +766,88 @@ fn run_generated_openai_compatible_smoke(
         .expect("generated OpenAI-compatible agent should start");
     let request = mock.finish();
     assert_openai_compatible_success(provider, model, token, &output, &request, &fixture.usage);
+    if provider == "ollama" {
+        assert_endpoint_diagnostics_exclude_secrets(fixture, Some(&executable));
+    }
+}
+
+fn assert_endpoint_diagnostics_exclude_secrets(fixture: &Fixture, executable: Option<&Path>) {
+    let profile = fixture
+        .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
+        .args([
+            "--no-update-check",
+            "profile",
+            "add",
+            "diagnostic-profile",
+            "--server",
+            "ollama",
+            "--model",
+            "synthetic-model",
+        ])
+        .output()
+        .expect("create isolated diagnostic profile");
+    assert!(
+        profile.status.success(),
+        "diagnostic profile should be created"
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local endpoint");
+    let addr = listener.local_addr().expect("read local address");
+    drop(listener);
+    for (url, reason) in [
+        (
+            format!("http://synthetic-user:synthetic-password@{addr}/synthetic-path?key=synthetic-query#synthetic-fragment"),
+            "Issue communicating with the AI server (Ollama)",
+        ),
+        (
+            "ftp://synthetic-user:synthetic-password@localhost/synthetic-path?key=synthetic-query#synthetic-fragment".to_string(),
+            "Invalid URL",
+        ),
+        (
+            "http://[synthetic-user:synthetic-password/synthetic-path?key=synthetic-query#synthetic-fragment".to_string(),
+            "Issue communicating with the AI server (Ollama)",
+        ),
+    ] {
+        let mut command = match executable {
+            Some(executable) => fixture.isolated_command(executable),
+            None => {
+                let mut command = fixture.isolated_command(env!("CARGO_BIN_EXE_cargo-ai"));
+                command
+                    .args(["--no-update-check", "run", "--config"])
+                    .arg(&fixture.definition);
+                command
+            }
+        };
+        let output = command
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost")
+            .args(openai_compatible_run_args(
+                "ollama", "synthetic-model", None, fixture, &url,
+            ))
+            .args(["--profile", "diagnostic-profile", "--inference-timeout-in-sec", "2"])
+            .output()
+            .expect("diagnostic fixture should start");
+        let diagnostics = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.status.success(), "invalid endpoint should fail");
+        assert!(diagnostics.contains(reason), "missing failure reason: {diagnostics}");
+        for secret in [
+            "synthetic-user",
+            "synthetic-password",
+            "synthetic-path",
+            "synthetic-query",
+            "synthetic-fragment",
+        ] {
+            assert!(!diagnostics.contains(secret), "endpoint leaked: {diagnostics}");
+        }
+    }
+}
+
+#[test]
+fn interpreted_endpoint_diagnostics_exclude_secrets() {
+    assert_endpoint_diagnostics_exclude_secrets(&Fixture::new(), None);
 }
 
 #[test]

@@ -1,10 +1,10 @@
 [package]
 name = "cargo-ai"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 description = "Build lightweight AI agents with Cargo. Powered by Rust. Declared in JSON."
-repository = "https://github.com/analyzer1/cargo-ai"
+repository = "https://github.com/cargo-ai/cargo-ai"
 homepage = "https://cargo-ai.org"
 readme = "README.md"
 keywords = ["ai", "agents", "automation", "llm", "cli"]

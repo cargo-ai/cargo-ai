@@ -124,7 +124,7 @@ Check for:
 
 Check for:
 - expecting a repeated `using:` line when the effective `profile`, `auth`, `server`, and `model` did not change from the last printed context
-- expecting `url=...` to appear for the standard OpenAI API or ChatGPT account transports; it only appears when the effective URL is custom or materially different
+- expecting `url=...` to appear for the standard OpenAI API or ChatGPT account transports; custom endpoints show only their origin (scheme, host and optional port), omitting credentials, path, query and fragment
 - assuming a child inherited the same context just because the parent emitted `child: started ...`; if the child changed context, look for a later child `using:` line
 
 ### Anthropic provider confusion

@@ -1631,7 +1631,7 @@ fn using_line_url(provider: ProviderKind, url: &str) -> Option<String> {
         return None;
     }
 
-    Some(trimmed.to_string())
+    providers::provider_url_origin(trimmed)
 }
 
 fn generated_usage_agent_info() -> serde_json::Value {
@@ -1839,7 +1839,9 @@ fn cli_override_descriptions(
     }
 
     if let Some(url) = matches.get_one::<String>("url") {
-        overrides.push(format!("url={url}"));
+        let origin = providers::provider_url_origin(url)
+            .unwrap_or_else(|| "(invalid URL)".to_string());
+        overrides.push(format!("url={origin}"));
     }
 
     if let Some(timeout) = matches.get_one::<u64>("inference_timeout_in_sec") {
@@ -5155,8 +5157,8 @@ async fn resolve_generate_image_step_profile_context(
     }
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(format!(
-            "Action '{}' generate_image step profile '{}' produced invalid URL '{}'. Use an absolute URL beginning with `http://` or `https://`.",
-            action_name, profile.name, url
+            "Action '{}' generate_image step profile '{}' produced an invalid URL. Use an absolute URL beginning with `http://` or `https://`.",
+            action_name, profile.name
         ));
     }
 

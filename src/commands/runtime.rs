@@ -218,7 +218,9 @@ fn runtime_context_items(
 
     let trimmed_url = context.url.trim();
     if !trimmed_url.is_empty() && trimmed_url != context.provider.default_url() {
-        items.push(("URL", trimmed_url.to_string()));
+        if let Some(origin) = crate::providers::provider_url_origin(trimmed_url) {
+            items.push(("URL", origin));
+        }
     }
 
     items
@@ -290,7 +292,9 @@ fn cli_override_descriptions(sub_m: &ArgMatches, include_token_override: bool) -
     }
 
     if let Some(url) = sub_m.get_one::<String>("url") {
-        overrides.push(format!("url={url}"));
+        let origin = crate::providers::provider_url_origin(url)
+            .unwrap_or_else(|| "(invalid URL)".to_string());
+        overrides.push(format!("url={origin}"));
     }
 
     if let Some(timeout) = sub_m.get_one::<u64>("inference_timeout_in_sec") {
@@ -2201,7 +2205,7 @@ mod tests {
             profile_name: Some("my_open_ai".to_string()),
             auth_mode: "chatgpt_account".to_string(),
             model: "gpt-5".to_string(),
-            url: "https://api.openai.com/v1/responses".to_string(),
+            url: "https://synthetic-user:synthetic-password@api.openai.com/synthetic-path?key=synthetic-query#synthetic-fragment".to_string(),
             token: "secret".to_string(),
             inference_timeout_in_sec: 60,
             tool_resolver: None,
@@ -2225,6 +2229,8 @@ mod tests {
         assert!(rendered.contains("x Run failed"));
         assert!(rendered.contains("Profile  my_open_ai"));
         assert!(rendered.contains("Auth     chatgpt_account"));
+        assert!(rendered.contains("URL      https://api.openai.com"));
+        assert!(!rendered.contains("synthetic-"));
         assert!(rendered.contains("- Reason: missing /tmp/demo.pdf"));
         assert!(rendered.contains("\nRecovery\n"));
         assert!(rendered
@@ -2260,6 +2266,8 @@ mod tests {
             "Ollama",
             "--model",
             "mistral",
+            "--url",
+            "http://synthetic-user:synthetic-password@localhost:11434/synthetic-path?key=synthetic-query#synthetic-fragment",
             "--inference-timeout-in-sec",
             "90",
             "--max-agent-depth",
@@ -2282,6 +2290,7 @@ mod tests {
             vec![
                 "server=ollama".to_string(),
                 "model=mistral".to_string(),
+                "url=http://localhost:11434".to_string(),
                 "inference_timeout_in_sec=90".to_string(),
                 "max_agent_depth=3".to_string(),
                 "max_runtime_in_sec=180".to_string(),

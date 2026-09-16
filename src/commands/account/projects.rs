@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{Cursor, Write};
+use std::io::{self, Cursor, Read, Write};
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -154,6 +154,32 @@ const HOSTED_ARCHIVE_LIMITS: ArchiveLimits = ArchiveLimits {
     entries: HOSTED_ARCHIVE_MAX_ENTRIES,
     path_bytes: HOSTED_ARCHIVE_MAX_PATH_BYTES,
 };
+
+struct BoundedArchiveReader<R> {
+    reader: io::Take<R>,
+    limit: u64,
+}
+
+impl<R: Read> Read for BoundedArchiveReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        if self.reader.limit() > 0 {
+            return self.reader.read(buffer);
+        }
+        // A limited reader's synthetic EOF could otherwise look like a valid tar end.
+        let mut extra = [0; 1];
+        if self.reader.get_mut().read(&mut extra)? == 0 {
+            Ok(0)
+        } else {
+            Err(io::Error::other(format!(
+                "Decompressed package archive exceeds the {}-byte client limit including metadata and padding.",
+                self.limit
+            )))
+        }
+    }
+}
 
 pub async fn run(projects_m: &ArgMatches) -> bool {
     let projects_command = if let Some(list_m) = projects_m.subcommand_matches("list") {
@@ -1580,8 +1606,13 @@ fn extract_compressed_package_archive_bytes(
     output_root: &Path,
     limits: ArchiveLimits,
 ) -> Result<(), String> {
+    let limit = archive_decompressed_limit(limits)?;
     let decoder = GzDecoder::new(Cursor::new(archive_bytes));
-    let mut archive = Archive::new(decoder);
+    let reader = BoundedArchiveReader {
+        reader: decoder.take(limit),
+        limit,
+    };
+    let mut archive = Archive::new(reader);
     let entries = archive
         .entries()
         .map_err(|error| format!("Failed to read compressed project archive entries: {error}"))?;
@@ -1650,6 +1681,10 @@ fn extract_compressed_package_archive_bytes(
         }
     }
 
+    // Tar stops at its end marker. Count any remaining gzip output and check its trailer
+    // before accepting the archive, including padding that the tar iterator never reads.
+    io::copy(&mut archive.into_inner(), &mut io::sink())
+        .map_err(|error| format!("Failed to finish compressed project archive: {error}"))?;
     Ok(())
 }
 
@@ -1920,6 +1955,26 @@ fn validate_archive_base64_size(encoded_bytes: usize, limits: ArchiveLimits) -> 
         ));
     }
     Ok(())
+}
+
+fn archive_decompressed_limit(limits: ArchiveLimits) -> Result<u64, String> {
+    const BLOCK_BYTES: u64 = 512;
+    // Per entry: a file header and data padding, plus one GNU/PAX metadata header
+    // and a block-rounded body allowing the longest path and 1 KiB of other metadata.
+    // Also allow a conventional 20-block tar trailer. File-content limits stay separate.
+    let metadata_bytes = u64::try_from(limits.path_bytes)
+        .ok()
+        .and_then(|bytes| bytes.checked_add(1024 + BLOCK_BYTES - 1))
+        .map(|bytes| bytes / BLOCK_BYTES * BLOCK_BYTES);
+    let overhead_bytes = metadata_bytes
+        .and_then(|bytes| bytes.checked_add(3 * BLOCK_BYTES))
+        .and_then(|bytes| bytes.checked_mul(u64::try_from(limits.entries).ok()?))
+        .and_then(|bytes| bytes.checked_add(20 * BLOCK_BYTES));
+    overhead_bytes
+        .and_then(|bytes| bytes.checked_add(limits.expanded_bytes))
+        .ok_or_else(|| {
+            "Decompressed package archive size limit overflowed supported bounds.".into()
+        })
 }
 
 fn update_archive_budget(
@@ -2555,6 +2610,212 @@ mod tests {
         let _ = fs::remove_dir_all(source_root);
         let _ = fs::remove_dir_all(dest_root);
         let _ = fs::remove_dir_all(expanded_dest);
+    }
+
+    #[test]
+    fn compressed_archive_bounds_gnu_longname_before_path_validation() {
+        assert_archive_metadata_is_bounded(tar::EntryType::GNULongName);
+    }
+
+    #[test]
+    fn compressed_archive_bounds_gnu_longlink_before_extraction() {
+        assert_archive_metadata_is_bounded(tar::EntryType::GNULongLink);
+    }
+
+    #[test]
+    fn compressed_archive_bounds_pax_metadata_before_extraction() {
+        assert_archive_metadata_is_bounded(tar::EntryType::XHeader);
+    }
+
+    #[test]
+    fn compressed_archive_bounds_padding_after_tar_end() {
+        use std::io::Write as _;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&[0; 32 * 1024]).unwrap();
+        let archive = encoder.finish().unwrap();
+        let dest = temp_dir("compressed-padding-limit");
+        fs::create_dir_all(&dest).unwrap();
+        let result = extract_compressed_package_archive_bytes(
+            &archive,
+            &dest,
+            ArchiveLimits {
+                compressed_bytes: 1024,
+                expanded_bytes: 0,
+                entries: 0,
+                path_bytes: 1024,
+            },
+        );
+        fs::remove_dir_all(&dest).unwrap();
+        let error = result.expect_err("padding beyond the decompression budget must fail");
+        assert!(
+            error.contains("Decompressed package archive exceeds"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn compressed_archive_accepts_exact_padding_limit_but_rejects_one_more_byte() {
+        use std::io::Write as _;
+        let limits = ArchiveLimits {
+            compressed_bytes: 1024,
+            expanded_bytes: 0,
+            entries: 0,
+            path_bytes: 1024,
+        };
+        let limit = super::archive_decompressed_limit(limits).unwrap();
+        assert_eq!(limit, 10_240);
+        for extra in [0, 1] {
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(&vec![0; limit as usize + extra]).unwrap();
+            let archive = encoder.finish().unwrap();
+            let dest = temp_dir("compressed-padding-boundary");
+            fs::create_dir_all(&dest).unwrap();
+            let result = extract_compressed_package_archive_bytes(&archive, &dest, limits);
+            fs::remove_dir_all(dest).unwrap();
+            if extra == 0 {
+                result.expect("an archive exactly at the limit should succeed");
+            } else {
+                assert!(result
+                    .unwrap_err()
+                    .contains("Decompressed package archive exceeds"));
+            }
+        }
+    }
+
+    #[test]
+    fn compressed_archive_rejects_budget_overflow() {
+        let error = super::archive_decompressed_limit(ArchiveLimits {
+            expanded_bytes: u64::MAX,
+            ..super::HOSTED_ARCHIVE_LIMITS
+        })
+        .unwrap_err();
+        assert!(error.contains("overflowed supported bounds"));
+    }
+
+    #[test]
+    fn compressed_archive_invalid_gzip_trailer_preserves_pull_output_and_cleans_staging() {
+        let root = temp_dir("compressed-invalid-trailer");
+        let source = root.join("source");
+        let output = root.join("output");
+        write_pull_source(&source, "demo");
+        fs::create_dir_all(&output).unwrap();
+        fs::write(output.join("sentinel.txt"), "old").unwrap();
+        let mut archive = create_package_archive_bytes(&source).unwrap();
+        let crc_offset = archive.len() - 8;
+        archive[crc_offset] ^= 1;
+        let response = hosted_pull_response(&archive, "demo", "1.0.0");
+        let result = restore_pulled_project(&response, &output, true);
+        let sentinel = fs::read_to_string(output.join("sentinel.txt"));
+        let retained_staging = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".cargo-ai-pull-")
+            });
+        fs::remove_dir_all(root).unwrap();
+        assert!(result.unwrap_err().contains("compressed project archive"));
+        assert_eq!(sentinel.unwrap(), "old");
+        assert!(
+            !retained_staging,
+            "failed extraction must clean pull staging"
+        );
+    }
+
+    #[test]
+    fn compressed_archive_preserves_gnu_and_pax_long_paths() {
+        let path = format!("{}/file.txt", vec!["segment".repeat(20); 5].join("/"));
+        for pax in [false, true] {
+            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(1);
+            header.set_mode(0o644);
+            if pax {
+                builder
+                    .append_pax_extensions([("path", path.as_bytes())])
+                    .unwrap();
+            }
+            builder
+                .append_data(
+                    &mut header,
+                    if pax { "file.txt" } else { path.as_str() },
+                    &b"x"[..],
+                )
+                .unwrap();
+            let archive = builder.into_inner().unwrap().finish().unwrap();
+            let dest = temp_dir("compressed-long-path");
+            fs::create_dir_all(&dest).unwrap();
+            extract_compressed_package_archive_bytes(
+                &archive,
+                &dest,
+                ArchiveLimits {
+                    compressed_bytes: archive.len(),
+                    expanded_bytes: 1,
+                    entries: 1,
+                    path_bytes: 1024,
+                },
+            )
+            .expect("ordinary long-path metadata should fit the overhead allowance");
+            assert_eq!(fs::read(dest.join(&path)).unwrap(), b"x");
+            fs::remove_dir_all(dest).unwrap();
+        }
+    }
+
+    fn archive_with_metadata(kind: tar::EntryType, metadata: &[u8]) -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        if kind == tar::EntryType::XHeader {
+            builder
+                .append_pax_extensions([("comment", metadata)])
+                .expect("PAX metadata should serialize");
+        } else {
+            let mut header = tar::Header::new_gnu();
+            header.set_path("././@LongLink").unwrap();
+            header.set_entry_type(kind);
+            header.set_mode(0o644);
+            header.set_size(metadata.len() as u64);
+            header.set_cksum();
+            builder.append(&header, metadata).unwrap();
+        }
+        let mut header = tar::Header::new_gnu();
+        header.set_path("file.txt").unwrap();
+        header.set_size(1);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, &b"x"[..]).unwrap();
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    fn assert_archive_metadata_is_bounded(kind: tar::EntryType) {
+        let archive = archive_with_metadata(kind, &vec![b'a'; 32 * 1024]);
+        assert!(archive.len() < 1024, "fixture should be highly compressed");
+        let dest = temp_dir("compressed-metadata-limit");
+        fs::create_dir_all(&dest).unwrap();
+        let result = extract_compressed_package_archive_bytes(
+            &archive,
+            &dest,
+            ArchiveLimits {
+                compressed_bytes: 1024,
+                expanded_bytes: 1,
+                entries: 1,
+                path_bytes: 1024,
+            },
+        );
+        let extracted = dest.join("file.txt").exists();
+        fs::remove_dir_all(&dest).unwrap();
+        let error = result.expect_err("tar metadata must count toward the decompression budget");
+        assert!(
+            error.contains("Decompressed package archive exceeds"),
+            "{error}"
+        );
+        assert!(
+            !extracted,
+            "oversized metadata must fail before file extraction"
+        );
     }
 
     #[test]
