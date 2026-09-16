@@ -769,26 +769,31 @@ mod tests {
         let addr = listener.local_addr().expect("capture local address");
         drop(listener); // no server listening now -> connection refused
 
-        let request_error = reqwest::Client::new()
-            .get(format!("http://{addr}/"))
-            .send()
+        let url = reqwest::Url::parse(&format!(
+            "http://synthetic-user:synthetic-password@{addr}/synthetic-path?key=synthetic-query#synthetic-fragment"
+        ))
+        .expect("valid synthetic endpoint");
+        let request_error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build local client")
+            .execute(reqwest::Request::new(reqwest::Method::GET, url))
             .await
             .expect_err("request should fail with connectivity error");
 
-        let provider_error = ProviderError::from_reqwest(ProviderKind::Ollama, request_error);
-        assert_eq!(
-            provider_error.kind(),
-            super::ProviderErrorKind::Connectivity
+        assert_transport_diagnostics_exclude_endpoint_secrets(
+            ProviderError::from_reqwest(ProviderKind::Ollama, request_error),
+            super::ProviderErrorKind::Connectivity,
+            "configured URL is reachable",
         );
     }
 
     #[tokio::test]
-    async fn transport_diagnostics_exclude_endpoint_secrets() {
+    async fn timeout_diagnostics_exclude_endpoint_secrets() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind ephemeral port");
         let addr = listener.local_addr().expect("capture local address");
-        drop(listener);
 
         let url = reqwest::Url::parse(&format!(
             "http://synthetic-user:synthetic-password@{addr}/synthetic-path?key=synthetic-query#synthetic-fragment"
@@ -801,12 +806,24 @@ mod tests {
             .expect("build local client")
             .execute(reqwest::Request::new(reqwest::Method::GET, url))
             .await
-            .expect_err("closed local port should reject request");
-        let error = ProviderError::from_reqwest(ProviderKind::Ollama, request_error);
-        assert_eq!(error.kind(), super::ProviderErrorKind::Connectivity);
+            .expect_err("nonresponding local listener should time out");
+        drop(listener);
+        assert_transport_diagnostics_exclude_endpoint_secrets(
+            ProviderError::from_reqwest(ProviderKind::Ollama, request_error),
+            super::ProviderErrorKind::Timeout,
+            "Request timed out",
+        );
+    }
+
+    fn assert_transport_diagnostics_exclude_endpoint_secrets(
+        error: ProviderError,
+        expected_kind: super::ProviderErrorKind,
+        expected_hint: &str,
+    ) {
+        assert_eq!(error.kind(), expected_kind);
         let messages = provider_error_messages(&error).join("\n");
         assert!(messages.contains("Ollama"));
-        assert!(messages.contains("configured URL is reachable"));
+        assert!(messages.contains(expected_hint));
         for diagnostic in [messages, error.to_string(), format!("{error:?}")] {
             for secret in [
                 "synthetic-user",
