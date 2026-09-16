@@ -246,7 +246,7 @@ If `logic` evaluates true, the action's `run` steps execute in order.
 - Cargo AI aggregates top-level hard failures after all eligible actions finish.
 - Cargo AI prints one run-level execution header before actions start: `Action execution: sequential` or `Action execution: parallel`.
 - Cargo AI also prints one root `using:` line near run start that shows the effective `profile`, `auth`, `server`, and `model` for that invocation.
-- It adds `url=...` only when the effective URL is custom or materially different from the standard transport.
+- It adds `url=...` only when the effective URL is custom or materially different from the standard transport. Only the origin (scheme, host and optional port) is shown; credentials, path, query and fragment are omitted.
 - In redirected, piped, CI, or simpler terminal output, Cargo AI prefixes parent-visible action output with deterministic labels such as `[Action 1: generate_images]`.
 - In append-only output, long-running steps also emit a step-start liveness line such as `step 2/2 generate_image started; waiting for provider response...`.
 - Terminal lane summaries and the final run footer also include wall-clock durations, for example `completed in 31s.` and `✅ Run complete in 32s.`.

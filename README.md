@@ -32,7 +32,7 @@ This path creates one local agent, runs it, validates it, and hatches it. A Carg
 Install Rust and Cargo using the official [Rust installation guide](https://rust-lang.org/tools/install/), then install Cargo AI:
 
 ```bash
-cargo install cargo-ai --locked
+cargo install cargo-ai
 cargo ai --help
 ```
 

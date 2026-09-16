@@ -12,8 +12,8 @@ mod runtime;
 mod xai;
 
 pub(crate) use error::{
-    provider_error_messages, validate_provider_content_parts, validate_provider_request,
-    AuthenticationPolicy, ProviderError, ProviderKind,
+    provider_error_messages, provider_url_origin, validate_provider_content_parts,
+    validate_provider_request, AuthenticationPolicy, ProviderError, ProviderKind,
 };
 pub(crate) use ollama::send_image_request as send_ollama_image_request;
 pub(crate) use openai::send_image_request as send_openai_image_request;

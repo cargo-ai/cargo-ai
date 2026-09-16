@@ -263,7 +263,7 @@ Installed hosted packages operate within explicit roots:
 - installed JSON child agents must be declared package exports;
 - nested agents cannot reinterpret text or generated values as arbitrary external filesystem paths.
 
-Hosted archives are rejected before extraction when they exceed 10 MiB compressed, 100 MiB expanded, 10,000 entries, or 1,024 bytes in a normalized relative entry path. Absolute paths, parent traversal, drive-relative paths, UNC paths, device roots, symbolic links, and Windows reparse points are rejected.
+Hosted archives are limited to 10 MiB compressed, 100 MiB of file contents, 10,000 entries and 1,024 bytes in a normalized relative entry path. A separate 140,707,840-byte decompressed-stream limit bounds the bytes supplied to the tar parser, including headers, extension metadata, padding and file contents. Compressed size is checked before parsing; entry limits apply during extraction, and failed installation staging is discarded. Absolute paths, parent traversal, drive-relative paths, UNC paths, device roots, symbolic links, and Windows reparse points are rejected.
 
 ## Run, hatch, inspect, and uninstall
 

@@ -7,7 +7,7 @@ This guide takes you from installation to one local JSON agent that runs directl
 Install Rust and Cargo first, then install Cargo AI:
 
 ```bash
-cargo install cargo-ai --locked
+cargo install cargo-ai
 cargo ai --help
 ```
 

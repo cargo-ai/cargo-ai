@@ -182,7 +182,7 @@ Child-agent `usage_log` must be a non-empty relative path without `..`. Omit it 
 
 ## Choose Render Behavior
 
-Cargo AI prints one root `using:` line with the effective profile, authentication mode, server, and model. It includes a URL only when it is custom or materially different from the standard transport. A changed child or image-step context produces an action-prefixed `using:` line in append-only output.
+Cargo AI prints one root `using:` line with the effective profile, authentication mode, server, and model. A custom endpoint is shown as its origin (scheme, host and optional port), with credentials, path, query and fragment omitted. A changed child or image-step context produces an action-prefixed `using:` line in append-only output.
 
 Select rendering with `--render-mode auto|live|append-only`:
 

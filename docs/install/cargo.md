@@ -24,8 +24,10 @@ cargo --version
 ## 2. Install Cargo AI
 
 ```bash
-cargo install cargo-ai --locked
+cargo install cargo-ai
 ```
+
+Use the current stable Rust toolchain for installation. Cargo resolves compatible dependency versions from the package manifest. Cargo AI's release checks exercise both the packaged dependency lockfile and a freshly resolved dependency graph.
 
 Verify the install:
 
@@ -51,7 +53,7 @@ Many `rustup` installations already configure this, but if direct `cargo-ai` inv
 Upgrades remain manual:
 
 ```bash
-cargo install cargo-ai --locked
+cargo install cargo-ai
 ```
 
 Cargo AI uses a product-oriented pre-`1.0.0` release policy:
@@ -61,7 +63,17 @@ Cargo AI uses a product-oriented pre-`1.0.0` release policy:
 
 See [Versioning](../../VERSIONING.md) for the public versioning policy.
 
-After a meaningful pre-`1.0.0` upgrade such as `0.1.0 -> 0.2.0`, generated agents may report that they are out of sync with local Cargo AI metadata until they are re-hatched.
+For `0.3.x → 0.4.0`, review the [release notes](../../releases/0.4.0.md) for definition and command migration. Existing generated agents may report that they are out of sync with local Cargo AI metadata until they are re-hatched.
+
+### Optional dependency reproduction
+
+If an installation fails after dependency updates, preserve the error and toolchain version. To try the dependency versions packaged with a particular release, use:
+
+```bash
+cargo install cargo-ai --version 0.4.0 --locked
+```
+
+This is an optional troubleshooting path. It fixes the dependency selection to that release's lockfile, so later dependency fixes are not selected automatically. It does not replace the normal install or upgrade command above. See [Cargo's lockfile behavior](https://doc.rust-lang.org/cargo/commands/cargo-install.html#dealing-with-the-lockfile).
 
 ## 5. Local State
 

@@ -41,16 +41,18 @@ Cargo installs the executable as `cargo-ai`; `cargo ai ...` works when Cargo can
 Upgrades are manual:
 
 ```bash
-cargo install cargo-ai --locked
+cargo install cargo-ai
 ```
 
 After a meaningful pre-`1.0.0` upgrade, re-hatch generated agents whose embedded metadata is out of sync. See [Install With Cargo](./install/cargo.md) and [Versioning](../VERSIONING.md).
+
+If Cargo fails while compiling a dependency, record the error and `rustc --version`. The [optional locked installation](./install/cargo.md#optional-dependency-reproduction) can help distinguish a newly resolved dependency problem from a packaged-release problem. Keep normal installation as `cargo install cargo-ai`.
 
 ## A Profile Fails Or The Wrong Provider Runs
 
 `--profile <name>` is strict. If that profile is missing or invalid, Cargo AI fails instead of falling back to another profile or profileless authentication.
 
-Generated binaries otherwise use the configured/default profile unless runtime flags override it. Check the root `using:` line for the effective profile, authentication mode, server, and model. A URL appears only when it is custom or materially different from the standard transport.
+Generated binaries otherwise use the configured/default profile unless runtime flags override it. Check the root `using:` line for the effective profile, authentication mode, server, and model. A custom URL is shown only as its origin (scheme, host and optional port); credentials, paths, queries and fragments are omitted.
 
 For provider credentials, capability limits, supported input types, and setup commands, use [Provider Setup](./providers/README.md). Store real API keys in a profile; do not place them in agent JSON or shell arguments.
 

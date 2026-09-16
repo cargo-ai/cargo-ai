@@ -3,7 +3,7 @@
 The preferred install path today is the Cargo-based workflow:
 
 1. install Rust and Cargo
-2. run `cargo install cargo-ai --locked`
+2. run `cargo install cargo-ai`
 3. verify with `cargo ai --help`
 
 This path provides the full CLI, including `hatch`, consistently across macOS, Linux, and Windows.

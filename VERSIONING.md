@@ -31,27 +31,20 @@ Implementation details may change underneath those surfaces. Compatible additive
 
 `1.0.0` should mean Cargo AI is ready to stand behind a stable core public contract across the surfaces above. That does not mean the product stops evolving. It means compatibility changes become rarer, more deliberate, and more tightly managed.
 
+Useful `0.x` releases continue while real use and user feedback inform that decision. There is no fixed `1.0.0` launch date or requirement to align it with another application release. Security and release qualification remain required for the selected release regardless of its version number.
+
 ## Current Release Line
 
-The `0.3.x` line began with the `0.3.0` pre-`1.0.0` contract release. That release introduced meaningful user-visible evolution since `0.2.0`, including:
+The `0.4.x` line begins with [0.4.0](./releases/0.4.0.md). It introduces the package-first command surface, an explicit agent definition schema key, stricter versioned validation, additional provider adapters, and expanded package ownership and sharing behavior.
 
-- direct interpreted execution with `cargo ai run`
-- inline and stdin definition sources for fast scripted authoring flows
-- explicit runtime output rendering controls
-- project-local tool authoring, linting, checking, and build materialization
-- project build and source-portable package assembly
-- account-backed project list, publish, pull, visibility, and archive workflows
-- structured tool parameter support for validated array and object values
-- install, Cargo AI Home, package, and release-facing documentation updates
-
-Compatible additive releases on the `0.3.x` line can build on that baseline without signaling a new compatibility boundary. The next `0.4.0` release is reserved for a larger milestone, a compatibility-boundary release, or a change with meaningful migration risk.
+This is a compatibility boundary from `0.3.x`. Read the migration notes before upgrading existing definitions, scripts or generated agents. A version bump does not automatically migrate user-owned source or rebuild installed packages.
 
 ## Upgrade Guidance
 
 Cargo AI continues to recommend manual upgrades:
 
 ```bash
-cargo install cargo-ai --locked
+cargo install cargo-ai
 ```
 
 After a meaningful pre-`1.0.0` upgrade, re-hatch generated agents if their embedded version/provenance status reports `out_of_sync`.

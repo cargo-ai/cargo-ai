@@ -304,7 +304,7 @@ pub async fn maybe_run_background_check(skip_for_invocation: bool) {
             compare_versions(env!("CARGO_PKG_VERSION"), &latest)
         {
             eprintln!(
-                "⚠️ Update available for cargo-ai: {installed} -> {latest}. Run `cargo install cargo-ai --locked` to update."
+                "⚠️ Update available for cargo-ai: {installed} -> {latest}. Run `cargo install cargo-ai` to update."
             );
         }
     }

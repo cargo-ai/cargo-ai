@@ -164,7 +164,7 @@ impl ProviderError {
             provider,
             http_status: None,
             kind,
-            message: format!("Request failed: {error}"),
+            message: format!("Request failed: {}", error.without_url()),
         }
     }
 
@@ -408,6 +408,15 @@ pub(crate) fn provider_error_messages(error: &ProviderError) -> Vec<String> {
     messages
 }
 
+pub(crate) fn provider_url_origin(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    // Paths, query parameters, fragments and userinfo may all contain credentials.
+    Some(parsed.origin().ascii_serialization())
+}
+
 pub(crate) fn validate_provider_request(
     provider: ProviderKind,
     model: &str,
@@ -426,10 +435,10 @@ pub(crate) fn validate_provider_request(
             provider.display_name()
         ));
     } else if !(url.starts_with("http://") || url.starts_with("https://")) {
-        issues.push(format!(
-            "❌ Invalid URL '{}'. Use an absolute URL beginning with `http://` or `https://`.",
-            url
-        ));
+        issues.push(
+            "❌ Invalid URL. Use an absolute URL beginning with `http://` or `https://`."
+                .to_string(),
+        );
     }
 
     if provider.capabilities().authentication == AuthenticationPolicy::RequiredApiKey
@@ -770,6 +779,65 @@ mod tests {
         assert_eq!(
             provider_error.kind(),
             super::ProviderErrorKind::Connectivity
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_diagnostics_exclude_endpoint_secrets() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("capture local address");
+        drop(listener);
+
+        let url = reqwest::Url::parse(&format!(
+            "http://synthetic-user:synthetic-password@{addr}/synthetic-path?key=synthetic-query#synthetic-fragment"
+        ))
+        .expect("valid synthetic endpoint");
+        let request_error = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .expect("build local client")
+            .execute(reqwest::Request::new(reqwest::Method::GET, url))
+            .await
+            .expect_err("closed local port should reject request");
+        let error = ProviderError::from_reqwest(ProviderKind::Ollama, request_error);
+        assert_eq!(error.kind(), super::ProviderErrorKind::Connectivity);
+        let messages = provider_error_messages(&error).join("\n");
+        assert!(messages.contains("Ollama"));
+        assert!(messages.contains("configured URL is reachable"));
+        for diagnostic in [messages, error.to_string(), format!("{error:?}")] {
+            for secret in [
+                "synthetic-user",
+                "synthetic-password",
+                "synthetic-path",
+                "synthetic-query",
+                "synthetic-fragment",
+            ] {
+                assert!(
+                    !diagnostic.contains(secret),
+                    "endpoint leaked: {diagnostic}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_url_diagnostics_exclude_endpoint_secrets() {
+        let issues = validate_provider_request(
+            ProviderKind::Ollama,
+            "test-model",
+            "ftp://synthetic-user:synthetic-password@localhost/synthetic-path?key=synthetic-query#synthetic-fragment",
+            "",
+        )
+        .expect_err("unsupported URL scheme should be rejected");
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("Invalid URL"));
+        assert!(issues[0].contains("`http://` or `https://`"));
+        assert!(
+            !issues[0].contains("synthetic-"),
+            "endpoint leaked: {issues:?}"
         );
     }
 }

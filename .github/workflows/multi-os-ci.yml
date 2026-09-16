@@ -120,6 +120,84 @@ jobs:
           "$cli" --no-update-check version
           "$cli" --no-update-check hatch adder_test --check
 
+      - name: Install freshly resolved packaged source
+        shell: bash
+        run: |
+          set -euo pipefail
+          lane="$(cd "$RUNNER_TEMP" && pwd -P)/packaged-install"
+          evidence="$lane/evidence"
+          mkdir -p "$evidence" "$lane/source" "$lane/cargo-home" "$lane/home"
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "cargo-ai") | .version')
+          candidate=$(git rev-parse HEAD)
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          [[ -n "$version" && -n "$host" ]]
+          cargo package --locked --no-verify --target-dir "$lane/package-target"
+          archive="$lane/package-target/package/cargo-ai-$version.crate"
+          tar -xzf "$archive" -C "$lane/source"
+          source="$lane/source/cargo-ai-$version"
+          [[ "$(jq -r '.git.sha1' "$source/.cargo_vcs_info.json")" == "$candidate" ]]
+          cp "$source/Cargo.lock" "$evidence/packaged.Cargo.lock"
+          cp "$source/.cargo_vcs_info.json" "$evidence/source.json"
+          rm "$source/Cargo.lock"
+
+          export CARGO_HOME="$lane/cargo-home"
+          export CARGO_TARGET_DIR="$lane/build"
+          export CARGO_AI_HOME="$lane/home"
+          cd "$source"
+          cargo generate-lockfile
+          cp Cargo.lock "$evidence/resolved.Cargo.lock"
+          cargo metadata --locked --format-version 1 --filter-platform "$host" > "$evidence/resolved-metadata.json"
+          cargo tree --locked --edges normal,build --target "$host" > "$evidence/install-dependencies.txt"
+          {
+            echo "candidate=$candidate"
+            echo "version=$version"
+            echo "platform=$RUNNER_OS"
+            echo "observed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            rustc -vV
+            cargo -vV
+          } > "$evidence/identity.txt"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            shasum -a 256 "$archive" "$evidence/packaged.Cargo.lock" "$evidence/resolved.Cargo.lock" > "$evidence/sha256.txt"
+          else
+            sha256sum "$archive" "$evidence/packaged.Cargo.lock" "$evidence/resolved.Cargo.lock" > "$evidence/sha256.txt"
+          fi
+          # Bind the build to the newly resolved graph, never the packaged lock.
+          # This is packaged-source proof; plain registry installation is separate.
+          cargo install --locked --path . --root "$lane/install" --target "$host"
+          cmp Cargo.lock "$evidence/resolved.Cargo.lock"
+          cli="$lane/install/bin/cargo-ai"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then cli="${cli}.exe"; fi
+          export PATH="$lane/install/bin:$PATH"
+          resolved_cli=$(command -v cargo-ai)
+          [[ "${resolved_cli%.exe}" == "${cli%.exe}" ]]
+          [[ "$("$cli" --no-update-check version)" == "$version" ]]
+          [[ "$(cargo ai --no-update-check version)" == "$version" ]]
+          "$cli" --no-update-check hatch adder_test --check
+          "$cli" --no-update-check new "$lane/project" --vcs none
+          cd "$lane/project"
+          cargo ai --no-update-check add guidance --style codex
+          test -s .cargo-ai/guidance/start-here.md
+          cat > smoke.json <<'JSON'
+          {
+            "agent_definition_schema_version": "2026-09-09.r1",
+            "inputs": [{"name": "job", "type": "text", "text": "local installation check"}],
+            "agent_schema": {"type": "object", "properties": {}},
+            "actions": [{"name": "cargo_version", "logic": {"==": [1, 1]}, "run": [{"kind": "exec", "program": "cargo", "args": ["--version"]}]}]
+          }
+          JSON
+          cargo ai --no-update-check run --config smoke.json --render-mode append-only | tee "$evidence/smoke.txt"
+          grep -q 'cargo [0-9]' "$evidence/smoke.txt"
+          echo "Packaged-source fresh-resolution install, Cargo dispatch, guidance and local action passed." >> "$evidence/identity.txt"
+
+      - name: Preserve packaged installation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: packaged-install-${{ matrix.os }}
+          path: ${{ runner.temp }}/packaged-install/evidence/
+          if-no-files-found: warn
+          retention-days: 14
+
   summary:
     name: Deterministic qualification summary
     if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'push' || inputs.emit_summary) }}
