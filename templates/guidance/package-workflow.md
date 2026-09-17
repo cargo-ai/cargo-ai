@@ -145,7 +145,6 @@ Default hosted package runtime boundaries:
 - `package/` is readable verified payload.
 - `runtime/` is disposable local materialization for the active package version and target; it is not publisher data and does not persist through version transitions.
 - `data/` is the default writable package-owned root.
-- project/workspace writes require an explicit grant and are not implied by install.
 - Cargo AI-controlled file writes validate relative paths and reject traversal out of `data/`.
 - unconstrained `exec` and tool subprocess steps are blocked for hosted packages unless the installed package permission profile explicitly allows them.
 - first install or a version transition that newly requests subprocess execution requires `--accept-permissions` after review.

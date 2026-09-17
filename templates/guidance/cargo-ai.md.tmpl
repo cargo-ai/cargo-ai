@@ -92,7 +92,8 @@ For local machine package installs:
 For published packages, keep the contract narrow:
 - `publish` packages the current project first, then uploads that package
 - publish identity comes from `.cargo-ai/project.toml` `[project].name` and `[project].version`
-- public lookup still uses owner handle plus project name until a later stable-link layer exists
+- public lookup supports owner handle plus project name, and stable source/exact-version references open read-only inspection pages
+- `packages inspect`, `install`, and `pull` support source/version selectors; see `package-workflow.md` for identity constraints and acquisition commands. Stable URLs are not direct install inputs
 - pulled packages restore a project folder locally; they are not agent-definition records with a stored definition path
 
 ## Working Defaults

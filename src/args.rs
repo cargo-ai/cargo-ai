@@ -3,6 +3,7 @@
 //! This module composes command parsers from `src/args/*` and normalizes both
 //! invocation forms: `cargo-ai ...` and `cargo ai ...`.
 use clap::{Arg, ArgAction, ArgMatches, Command};
+use std::ffi::OsString;
 
 mod account;
 mod add;
@@ -69,7 +70,7 @@ fn cli_command(bin_name: &'static str) -> Command {
 /// Parses CLI arguments into clap matches.
 pub fn build_cli() -> ArgMatches {
     // Collect raw process args so we can normalize cargo-subcommand mode.
-    let mut args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<OsString> = std::env::args_os().collect();
 
     let mut bin_name = "cargo-ai";
     // Check if running as a cargo subcommand, i.e. cargo ai
@@ -80,13 +81,105 @@ pub fn build_cli() -> ArgMatches {
         }
     }
 
-    cli_command(bin_name).get_matches_from(args)
+    parse_cli(bin_name, args).unwrap_or_else(|error| error.exit())
+}
+
+// clap diagnostics can include supplied values, including misplaced secrets.
+// Keep help/version intact, but use only static diagnostics for these commands.
+pub(crate) fn parse_cli(
+    bin_name: &'static str,
+    args: Vec<OsString>,
+) -> Result<ArgMatches, clap::Error> {
+    let words: Vec<_> = args
+        .iter()
+        .skip(1)
+        .filter(|arg| *arg != "--no-update-check")
+        .collect();
+    let confirmation = words
+        .windows(2)
+        .any(|pair| pair[0] == "account" && pair[1] == "confirm");
+    let profile = words
+        .windows(2)
+        .any(|pair| pair[0] == "profile" && pair[1] == "set");
+    cli_command(bin_name).try_get_matches_from(&args).map_err(|error| {
+        if !error.use_stderr() || !(confirmation || profile) {
+            return error;
+        }
+        let message = if confirmation {
+            "Invalid confirmation arguments. Supply exactly one source: CODE or --stdin. See `cargo ai account confirm --help`."
+        } else {
+            "Invalid profile update arguments. Token sources --token, --stdin, --env and --clear-token are mutually exclusive. See `cargo ai profile set --help`."
+        };
+        clap::Error::raw(error.kind(), message)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{cli_command, developer_tools_enabled};
     use clap::error::ErrorKind;
+
+    #[test]
+    fn secret_input_sources_and_diagnostics() {
+        for args in [
+            vec!["cargo-ai", "account", "confirm", "synthetic-code"],
+            vec!["cargo-ai", "account", "confirm", "--stdin"],
+            vec!["cargo-ai", "profile", "set", "example", "--stdin"],
+        ] {
+            assert!(
+                super::parse_cli("cargo-ai", args.into_iter().map(Into::into).collect()).is_ok()
+            );
+        }
+        for args in [
+            vec!["cargo-ai", "account", "confirm"],
+            vec![
+                "cargo-ai",
+                "account",
+                "confirm",
+                "synthetic-secret",
+                "--stdin",
+            ],
+            vec![
+                "cargo-ai",
+                "account",
+                "--no-update-check",
+                "confirm",
+                "--synthetic-secret",
+            ],
+            vec![
+                "cargo-ai",
+                "profile",
+                "set",
+                "example",
+                "--token",
+                "synthetic-secret",
+                "--stdin",
+            ],
+            vec![
+                "cargo-ai",
+                "profile",
+                "set",
+                "example",
+                "--temperature",
+                "synthetic-secret",
+            ],
+        ] {
+            let error = super::parse_cli("cargo-ai", args.into_iter().map(Into::into).collect())
+                .unwrap_err();
+            assert!(!error.to_string().contains("synthetic-secret"));
+            assert!(error.to_string().contains("--help"));
+        }
+        let help = super::parse_cli(
+            "cargo-ai",
+            ["cargo-ai", "account", "confirm", "--help"]
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        )
+        .unwrap_err();
+        assert_eq!(help.kind(), ErrorKind::DisplayHelp);
+        assert!(help.to_string().contains("1024"));
+    }
 
     #[test]
     fn version_supports_check_flag() {

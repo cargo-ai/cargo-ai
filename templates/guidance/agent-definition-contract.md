@@ -104,6 +104,14 @@ Authoring guidance:
 - `{"type":"file","path":"..."}` is for a definition-owned fixed file path, not for a caller-selected runtime file.
 - If `agent_schema.properties` is empty, runtime `--input-*` flags are invalid because Cargo AI skips the model call in that structural action-only shape.
 
+## Secrets And Runtime Values
+
+Runtime variables are ordinary typed values, not secret fields. `--run-var` values can enter process arguments, and action parameters, results, or errors may disclose them. Model-facing inputs (including files) are not a secret store. Use saved connection profiles for provider authentication.
+
+For another service used by a trusted tool, pass a nonsecret path or reference as a tool parameter and let that tool resolve the secret locally. This keeps the value out of the definition and ordinary invocation arguments only if the tool handles it accordingly. It does not grant exclusive tool access, isolate the file from other processes, or prevent disclosure through tool output, errors, or logs. Permission declarations are not an OS sandbox; review and authorize the tool and its effects.
+
+See [Start Here](start-here.md#access-and-saved-profiles) for profile setup and selection.
+
 ## `runtime_vars`
 
 - Optional.
@@ -475,7 +483,7 @@ Step `when` and string/arg substitutions can read:
 ## Child-Agent Path Rules
 
 For `kind: "agent"`:
-- Use explicit same-level paths such as `./child_reporter`
+- Local targets use explicit same-level paths such as `./child_reporter`; installed package exports may use `alias::entrypoint` (see [package workflow](package-workflow.md))
 - Do not use bare names
 - Do not use absolute paths
 - Do not use `../`

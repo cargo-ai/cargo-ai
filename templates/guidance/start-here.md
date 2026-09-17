@@ -68,6 +68,27 @@ When the user wants to share, install, update, or roll back reusable agents/tool
 - make sure the project has `.cargo-ai/project.toml` `[project]` identity and an explicit `[build.<profile>]`
 - use `cargo ai package` for local package artifacts, `cargo ai packages install` for local machine installs, and `cargo ai packages publish|pull|list --account|update|rollback` for hosted package workflows
 
+## Access And Saved Profiles
+
+Separate authoring-host access, runtime-provider access, and optional Cargo AI hosting. The assistant that authors an agent does not automatically supply credentials for its later CLI runs. Local execution does not require a Cargo AI hosted account. Choose a supported provider/model that the user can access, then inspect existing profiles before creating another:
+
+```bash
+cargo ai profile list
+cargo ai profile show PROFILE_NAME
+cargo ai profile set PROFILE_NAME --default
+cargo ai run ./my_agent.json --profile PROFILE_NAME
+```
+
+Use regular saved profiles for provider authentication. Create the provider profile with its documented auth mode before storing a key. For native setup, launch `cargo-ai` directly with arguments `profile`, `set`, `PROFILE_NAME`, `--stdin`; write the key from a secure entry field to the child's pipe and close it to signal EOF. Never place the secret in shell commands/history, process arguments, JSON, or logs. Keep `CARGO_AI_HOME` and supported credential-storage configuration consistent between setup and runs; stdin uses the existing store.
+
+Profile stdin accepts at most **16,384 raw bytes**, including trailing newline bytes, and rejects terminal stdin without prompting. It reads through EOF (failing once the limit is exceeded), removes trailing CR/LF and trims surrounding spaces/tabs. Empty content, remaining embedded CR/LF, NUL, and invalid UTF-8 fail before storage. No newline, LF, and CRLF are accepted. `--token`, `--stdin`, `--env`, and `--clear-token` remain mutually exclusive; existing non-stdin interfaces remain available, but direct piped stdin is preferred for native secret entry. Successful completion follows credential and metadata persistence; storage/configuration failure exits nonzero, and a partial write is not a rollback.
+
+If hosted features are wanted, registration and email confirmation are separate from provider authentication. Native clients can launch `cargo-ai` with `account`, `confirm`, `--stdin`, write the code to the pipe, and close it. Confirmation uses the same input rules with a **1,024-byte** raw limit; codes need not be numeric. Supply exactly one source: `--stdin` or the compatible positional code (which exposes it in process arguments). Keep registration, confirmation, and `account status` in the same selected environment. Stdin is not lifecycle consent: obtain the existing registration acknowledgment that confirmation can reactivate an account and cancel pending deletion before removal begins.
+
+Confirmation succeeds only after server acceptance and valid required credentials plus local metadata are saved. Known local persistence failure means the account was confirmed but local setup is incomplete: resolve storage and obtain a fresh code through registration when needed; do not assume the original code remains usable. A transport failure can leave the server outcome unknown; reconcile status where possible or contact the administrator before retrying blindly. After success, use `cargo ai account status` in the same environment.
+
+`runtime_vars` and model inputs are not secret fields or a vault. For a trusted tool's separate service credential, pass a nonsecret path/reference and let the tool resolve it. This does not provide exclusive access or prevent disclosure by the tool; see [secret handling boundaries](agent-definition-contract.md#secrets-and-runtime-values).
+
 ## How To Drive The Conversation
 
 - Keep the questions in plain language.

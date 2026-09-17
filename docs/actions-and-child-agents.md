@@ -121,7 +121,7 @@ For `generate_image`, model precedence is:
 
 The image step fails rather than guessing if none is available. Its model can be a literal, a declared runtime string, or a top-level string output field; it cannot read a captured step variable.
 
-Keep local file, image, child, and output paths relative and at the current level or below. Parent traversal (`..`) is rejected. Child targets should use explicit same-level paths such as `./child_reporter` or `./child_reporter.json`. Image output supports `.png`, `.jpg`, `.jpeg`, and `.webp`, subject to the selected provider's narrower limits.
+Keep local file, image, child, and output paths relative and at the current level or below. Parent traversal (`..`) is rejected. Local child targets should use explicit same-level paths such as `./child_reporter` or `./child_reporter.json`. Installed package exports may use `alias::entrypoint`; see [package identity and selection](./packages.md). Image output supports `.png`, `.jpg`, `.jpeg`, and `.webp`, subject to the selected provider's narrower limits.
 
 Reference images may use a declared named image input (`{ "input": "source_photo" }`) or a definition-owned relative path. Their order is preserved; label each role in the prompt. Unsupported providers fail clearly instead of dropping the references or silently switching transports. See [Provider Setup](./providers/README.md) for provider capability boundaries.
 
@@ -178,7 +178,7 @@ By default, a root and its descendants share these safety limits:
 
 A parent may capture whether a child succeeded or failed, but it cannot automatically merge or read the child's structured top-level result. Design an explicit external artifact or tool-mediated handoff if a later parent step needs child-produced data.
 
-Child-agent `usage_log` must be a non-empty relative path without `..`. Omit it to keep the root usage log. For installed package entrypoints, a relative child log resolves under that package alias's persistent `data/` root; for local JSON or standalone binaries, it resolves from the current run directory.
+Child-agent `usage_log` must be a non-empty relative path without `..`. Omit it to keep the root usage log. For installed package entrypoints, a relative child log resolves under that package alias's persistent `data/` root. Otherwise, an opted-in project uses its selected `[runtime] data_root`; without a selected project data root, local JSON and standalone binaries retain the current run directory behavior. This does not redirect an explicit top-level usage-log destination.
 
 ## Choose Render Behavior
 

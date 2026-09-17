@@ -22,6 +22,10 @@ When executable code is needed and Cargo is available, prefer a Rust Cargo AI to
 
 Only use another language or standalone script when the user explicitly asks, Cargo is unavailable, or the task cannot reasonably fit the current `describe` / `invoke` tool contract.
 
+## Secret References
+
+For service credentials, accept a nonsecret path/reference and resolve it inside trusted tool code. Do not place the secret itself in `runtime_vars`, model-facing inputs, definitions, or command arguments. Tool params travel through the tool protocol, but tool outputs, errors, and logs can still disclose their values. Keep those surfaces free of secrets. A reference does not provide exclusive access or isolation; tool permission declarations are not an OS sandbox. Use saved connection profiles for model-provider authentication. See [the definition contract](agent-definition-contract.md#secrets-and-runtime-values).
+
 ## Project Preconditions
 
 Tool authoring assumes the workspace is already a Cargo AI project.

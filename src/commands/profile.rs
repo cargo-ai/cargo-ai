@@ -1,8 +1,9 @@
 //! Runtime behavior for `cargo ai profile`.
+use super::secret_input;
 use clap::ArgMatches;
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 
 use crate::config::adder::add_profile;
 use crate::config::loader::{config_path, find_profile, load_config};
@@ -51,23 +52,15 @@ fn resolve_token_input(set_m: &ArgMatches) -> Result<String, String> {
     }
 
     if set_m.get_flag("stdin") {
-        let mut input = String::new();
-        io::stdin()
-            .read_to_string(&mut input)
-            .map_err(|error| format!("failed reading token from stdin: {error}"))?;
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            return Err("no token content was received from stdin.".to_string());
-        }
-        return Ok(trimmed.to_string());
+        return secret_input::read_stdin(secret_input::PROFILE_TOKEN_LIMIT).map_err(str::to_owned);
     }
 
     if let Some(env_var) = set_m.get_one::<String>("env") {
         let value = std::env::var(env_var)
-            .map_err(|_| format!("environment variable '{env_var}' is not set"))?;
+            .map_err(|_| "The selected token environment variable is unavailable.".to_string())?;
         let trimmed = value.trim();
         if trimmed.is_empty() {
-            return Err(format!("environment variable '{env_var}' is empty"));
+            return Err("The selected token environment variable is empty.".to_string());
         }
         return Ok(trimmed.to_string());
     }
@@ -345,10 +338,36 @@ fn run_add(add_m: &ArgMatches) -> bool {
 }
 
 fn run_set(set_m: &ArgMatches) -> bool {
+    run_set_with_writer(set_m, write_config)
+}
+
+fn run_set_with_writer(
+    set_m: &ArgMatches,
+    persist_config: impl FnOnce(&crate::config::schema::Config) -> Result<(), String>,
+) -> bool {
     let Some(name) = set_m.get_one::<String>("name") else {
         eprintln!("x Missing profile name.");
         return false;
     };
+
+    let token = if set_m.get_one::<String>("token").is_some()
+        || set_m.get_flag("stdin")
+        || set_m.get_one::<String>("env").is_some()
+    {
+        match resolve_token_input(set_m) {
+            Ok(token) => Some(token),
+            Err(error) => {
+                eprintln!("x Failed to read token input: {error}");
+                return false;
+            }
+        }
+    } else {
+        None
+    };
+    if crate::credentials::migration::run_legacy_credential_migration().is_err() {
+        eprintln!("x Could not prepare existing credentials. Check the selected home, config and credential-store access; profile setup is incomplete.");
+        return false;
+    }
 
     let mut cfg = match load_config() {
         Some(cfg) => cfg,
@@ -425,32 +444,22 @@ fn run_set(set_m: &ArgMatches) -> bool {
 
     let mut token_change: Option<&str> = None;
     if set_m.get_flag("clear_token") {
-        if let Err(error) = store::clear_profile_token(name) {
-            eprintln!("x Failed to clear token for profile '{}': {error}", name);
+        if store::clear_profile_token(name).is_err() {
+            eprintln!("x Failed to clear the profile token. Check credential-store access and configuration.");
             return false;
         }
         token_change = Some("cleared");
-    } else if set_m.get_one::<String>("token").is_some()
-        || set_m.get_flag("stdin")
-        || set_m.get_one::<String>("env").is_some()
-    {
-        let token = match resolve_token_input(set_m) {
-            Ok(token) => token,
-            Err(error) => {
-                eprintln!("x Failed to read token input: {error}");
-                return false;
-            }
-        };
-        if let Err(error) = store::store_profile_token(name, token.as_str()) {
-            eprintln!("x Failed to store token for profile '{}': {error}", name);
+    } else if let Some(token) = token {
+        if store::store_profile_token(name, token.as_str()).is_err() {
+            eprintln!("x Failed to store the profile token. Check credential-store access and configuration; setup is incomplete.");
             return false;
         }
         token_change = Some("updated");
     }
 
     if !metadata_changes.is_empty() {
-        if let Err(error) = write_config(&cfg) {
-            eprintln!("x Failed to persist profile updates: {error}");
+        if persist_config(&cfg).is_err() {
+            eprintln!("x Failed to persist profile updates. A requested token change may already be saved; setup is incomplete. Check config write access before retrying.");
             return false;
         }
     }
@@ -535,6 +544,40 @@ mod tests {
         profile_set_success_ui_response,
     };
     use crate::config::schema::ProfileAuthMode;
+
+    #[test]
+    fn secret_input_profile_metadata_failure_preserves_credentials_and_fails() {
+        let home = crate::commands::secret_input::test_support::Home::new();
+        let token = "synthetic-profile-secret";
+        crate::credentials::store::store_profile_token("example", token).unwrap();
+        let before = std::fs::read(home.path.join("config.toml")).unwrap();
+        let args = crate::args::parse_cli(
+            "cargo-ai",
+            ["cargo-ai", "profile", "set", "example", "--default"]
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        )
+        .unwrap();
+        let matches = args
+            .subcommand_matches("profile")
+            .unwrap()
+            .subcommand_matches("set")
+            .unwrap();
+        assert!(!super::run_set_with_writer(matches, |_| Err(
+            token.to_owned()
+        )));
+        assert_eq!(
+            std::fs::read(home.path.join("config.toml")).unwrap(),
+            before
+        );
+        assert!(
+            crate::credentials::store::load_profile_token("example")
+                .unwrap()
+                .as_deref()
+                == Some(token)
+        );
+    }
 
     #[test]
     fn parse_auth_mode_supports_all_modes() {

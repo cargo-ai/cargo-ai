@@ -54,6 +54,28 @@ async fn main() {
         return;
     }
 
+    // Validate secret input before automatic startup writers or credential
+    // migration can change state. These commands require existing setup and
+    // own their explicit persistence and completion reporting.
+    if let Some(account) = cmd_args
+        .subcommand_matches("account")
+        .filter(|account| account.subcommand_matches("confirm").is_some())
+    {
+        if !commands::account::run(account).await {
+            process::exit(1);
+        }
+        return;
+    }
+    if let Some(profile) = cmd_args
+        .subcommand_matches("profile")
+        .filter(|profile| profile.subcommand_matches("set").is_some())
+    {
+        if !commands::profile::run(profile) {
+            process::exit(1);
+        }
+        return;
+    }
+
     let cargo_ai_home = config::paths::cargo_ai_root();
     let cargo_ai_home_preexisting = cargo_ai_home.exists();
     let skip_update_check_for_invocation = cmd_args.get_flag("no_update_check");

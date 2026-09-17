@@ -222,7 +222,8 @@ pub fn command() -> Command {
                 .arg(
                     Arg::new("stdin")
                         .long("stdin")
-                        .help("Set API token from standard input")
+                        .help("Read API token from non-terminal stdin through EOF (maximum 16384 raw bytes; trailing LF/CRLF allowed)")
+                        .long_help("Read an API token from a pipe and close stdin. Maximum 16384 raw bytes including trailing LF/CRLF; surrounding spaces/tabs are trimmed. Empty, multiline, NUL and invalid UTF-8 input is rejected. No prompt. Success requires the requested credential and profile updates to be persisted in the selected home/store.")
                         .required(false)
                         .action(ArgAction::SetTrue),
                 )

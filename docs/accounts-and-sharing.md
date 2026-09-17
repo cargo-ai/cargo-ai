@@ -12,9 +12,21 @@ Register an email address, then confirm the temporary code sent to it:
 
 ```bash
 cargo ai account register you@example.com
-cargo ai account confirm <code-from-email>
+```
+
+For native clients, start `cargo-ai` directly with arguments `account`, `confirm`, `--stdin` and a piped standard input. Write the code collected in a masked field directly to the child pipe, then close the pipe to signal EOF. Wait for the child to exit; do not put the code in shell commands, process arguments, logs, or diagnostics. This mode never prompts and rejects terminal stdin.
+
+The raw input limit is **1,024 bytes**, including trailing newline bytes. Cargo AI reads through EOF, failing as soon as the limit is exceeded. It removes trailing CR/LF and trims surrounding spaces/tabs, then rejects empty content, embedded CR/LF, NUL, and invalid UTF-8. A code may have no newline, LF, or CRLF and need not be numeric. Invalid input fails before a confirmation request or credential write.
+
+The positional form `cargo ai account confirm <CODE>` remains supported for compatibility, but exposes the code in process arguments. Supply exactly one source: the positional code or `--stdin`.
+
+Use the same `CARGO_AI_HOME` and supported credential-storage configuration for registration, confirmation, and status. See [Cargo AI Home](./cargo-ai-home.md). After successful confirmation, verify that selected environment with:
+
+```bash
 cargo ai account status
 ```
+
+Confirmation reports complete success and exits zero only after the server accepts confirmation and valid required credentials and local metadata are saved. Invalid/expired codes, malformed responses, and storage failures exit nonzero with redacted explanations. If confirmation succeeded but local persistence failed, the account is confirmed while local setup remains incomplete; this is not a rollback. Resolve the local storage problem and obtain a fresh code through registration when needed, with the existing lifecycle acknowledgment; do not assume the original code can be reused. A transport failure can leave the server outcome unknown: reconcile account status where possible or contact the administrator before retrying blindly.
 
 Cargo-AI.org assigns a handle automatically. You can inspect it or choose a different available handle:
 
@@ -45,10 +57,9 @@ Fresh email confirmation reactivates the same account and cancels a pending dele
 
 ```bash
 cargo ai account register you@example.com
-cargo ai account confirm <new-code-from-email>
 ```
 
-Registration explains the cancellation consequence before requesting a code. Merely requesting a code does not restore access. Once removal begins, reactivation is unavailable. After completed removal, you can register again as a new account; previous hosted content is not restored.
+Confirm the fresh code through the piped stdin flow above. Stdin input is not consent: a native client must first disclose and obtain the registration acknowledgment. Registration explains the cancellation consequence before requesting a code. Merely requesting a code does not restore access. Once removal begins, reactivation is unavailable. After completed removal, you can register again as a new account; previous hosted content is not restored.
 
 For noninteractive use, ordinary deactivation requires `--yes`; a deletion request requires `--request-deletion --confirm-email you@example.com`. The email confirms intent and cannot select a different account. Registration accepts `--yes` to acknowledge the reactivation/cancellation consequence. Switching an already configured local account retains its separate confirmation.
 

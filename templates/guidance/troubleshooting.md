@@ -54,7 +54,7 @@ Check for:
 Check for:
 - absolute paths
 - `../`
-- child agents that are not written as `./child_name`
+- local child targets that are not written as `./child_name`; installed package exports instead support `alias::entrypoint` (see [package workflow](package-workflow.md))
 
 ### Runtime input confusion
 

@@ -175,7 +175,7 @@ Every step allows its own kind-specific fields and the common controls below; ex
 - Later actions cannot read captured variables from earlier top-level actions.
 
 ## Path Rules
-- Child agents must use explicit same-level paths such as `./child_reporter`.
+- Local child agents use explicit same-level paths such as `./child_reporter`. Installed package exports may use `alias::entrypoint`; see [package workflow](package-workflow.md) for identity/version selection.
 - Local file and image paths should stay relative.
 - Parent-directory traversal such as `../` is invalid.
 - `generate_image` output paths must use one of: `.png`, `.jpg`, `.jpeg`, `.webp`.
@@ -223,7 +223,7 @@ Example child usage log:
 }
 ```
 
-For installed package entrypoints, that relative `usage_log` path resolves under the alias `data/` root. For local JSON and standalone hatched binaries, it remains relative to the current run directory.
+For installed package entrypoints, that relative `usage_log` path resolves under the alias `data/` root. Otherwise, an opted-in project uses its selected `[runtime] data_root`; without a selected project data root, local JSON and standalone hatched binaries retain the current run directory behavior. Explicit top-level usage-log destinations are not redirected. See [usage ledger](usage-ledger.md).
 
 ## Named Input Notes
 

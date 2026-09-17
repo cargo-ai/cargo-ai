@@ -162,6 +162,14 @@ Pass values with repeatable `--run-var name=value` flags and reference them as `
 
 Runtime variable names are flat and must be declared. Undeclared or duplicate flags fail, and a variable without a default must be supplied if an executed path resolves it. Quote values when the shell would otherwise split or interpret them.
 
+## Secrets And Trusted Tools
+
+Runtime variables are ordinary typed values, not secret fields. `--run-var` values can enter process arguments, and action parameters, results, or errors may disclose them. Model-facing inputs (including files) are not a secret store. Use saved connection profiles for provider authentication.
+
+For another service used by a trusted tool, pass a nonsecret path or reference as a tool parameter and let that tool resolve the secret locally. This keeps the value out of the definition and ordinary invocation arguments only if the tool handles it accordingly. It does not grant exclusive tool access, isolate the file from other processes, or prevent disclosure through tool output, errors, or logs. Permission declarations are not an OS sandbox; review and authorize the tool and its effects.
+
+See [provider profiles](./providers/README.md#store-api-keys-safely) for credential input and selection.
+
 ## Design The Output Contract
 
 `agent_schema` must be an object with `properties`. Start with top-level `string`, `integer`, `number`, or `boolean` fields. Add descriptions, string enums, and numeric bounds only when they improve the contract.
