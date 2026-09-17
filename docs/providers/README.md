@@ -50,22 +50,24 @@ workspace, or local Ollama installation can access.
 
 ## Store API Keys Safely
 
-Create the profile first, then pipe the provider key through standard input:
+Create the profile first. A native client should start `cargo-ai` directly with arguments `profile`, `set`, `PROFILE_NAME`, `--stdin`, write the key from its secure entry field to the child's stdin pipe, and close the pipe to signal EOF. Wait for completion. Do not put real keys in shell commands/history, process arguments, agent JSON, logs, examples, or source control. Terminal stdin is rejected; this mode does not prompt.
+
+The raw input limit is **16,384 bytes**, including trailing newline bytes. Cargo AI reads through EOF, failing as soon as the limit is exceeded, removes trailing CR/LF, and trims surrounding spaces/tabs. It rejects empty content, embedded CR/LF, NUL, and invalid UTF-8 before writing credentials. No newline, LF, and CRLF are accepted.
+
+`--token`, `--stdin`, `--env`, and `--clear-token` remain mutually exclusive. The non-stdin interfaces remain available for compatibility; prefer the direct stdin pipe for native secret entry. Successful completion follows credential and metadata persistence; a storage/configuration failure exits nonzero and does not claim completion. A failed metadata write can leave a credential already stored, so resolve the local storage problem before repeating setup.
+
+Use the same `CARGO_AI_HOME` and supported credential-storage configuration for profile creation, token storage, and later runs. Cargo AI uses its existing credential backend; stdin does not select a different store. See [Cargo AI Home](../cargo-ai-home.md) for the local-state boundary.
+
+Inspect and select saved profiles without resupplying provider credentials:
 
 ```bash
-printf '%s' "$PROVIDER_API_KEY" | cargo ai profile set PROFILE_NAME --stdin
+cargo ai profile list
+cargo ai profile show PROFILE_NAME
+cargo ai profile set PROFILE_NAME --default
+cargo ai run ./my_agent.json --profile PROFILE_NAME
 ```
 
-PowerShell:
-
-```powershell
-$env:PROVIDER_API_KEY | cargo ai profile set PROFILE_NAME --stdin
-```
-
-Standard input keeps the secret out of the command arguments. Do not put real
-keys in agent JSON, examples, shell history, or source control. Cargo AI stores
-profile credentials through its credential backend; see
-[Cargo AI Home](../cargo-ai-home.md) for the local-state boundary.
+Authoring-host access, runtime-provider access, and optional Cargo AI hosting are separate. Access to the assistant that authors an agent does not automatically provide provider credentials for the resulting CLI. A Cargo AI hosted account is not required for local execution and does not supply runtime-provider credentials.
 
 ## Profile Temperature
 

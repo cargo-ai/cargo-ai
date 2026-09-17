@@ -1,5 +1,5 @@
 //! CLI parser definitions for `cargo ai account`.
-use clap::{Arg, ArgAction, Command};
+use clap::{Arg, ArgAction, ArgGroup, Command};
 
 /// Builds the `account` command schema and all nested subcommands.
 pub fn command() -> Command {
@@ -24,12 +24,15 @@ pub fn command() -> Command {
         .subcommand(
             Command::new("confirm")
                 .about("Confirm an account using the temporary code")
+                .long_about("Confirm using CODE or --stdin, exactly one. With --stdin, supply a pipe and close it: no prompt, at most 1024 raw bytes including trailing LF/CRLF. Surrounding spaces/tabs are trimmed; empty, multiline, NUL and invalid UTF-8 input is rejected. Exit zero means confirmation and required credential/metadata persistence completed in the selected CARGO_AI_HOME and credential store. A nonzero result can mean confirmation was accepted but local setup is incomplete; follow the redacted recovery message.")
+                .group(ArgGroup::new("code_source").args(["code", "stdin"]).required(true).multiple(false))
                 .arg(
                     Arg::new("code")
                         .help("Temporary confirmation code from email")
-                        .required(true)
                         .value_name("CODE"),
-                ),
+                )
+                .arg(Arg::new("stdin").long("stdin").action(ArgAction::SetTrue)
+                    .help("Read the code from non-terminal stdin through EOF (maximum 1024 bytes)")),
         )
         .subcommand(Command::new("status").about("Show account status"))
         .subcommand(

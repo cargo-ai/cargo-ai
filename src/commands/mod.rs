@@ -32,5 +32,6 @@ pub mod runtime_actions;
 #[path = "../../templates/src/runtime_data.rs"]
 pub(crate) mod runtime_data;
 pub mod scaffold;
+pub(crate) mod secret_input;
 pub mod tools;
 pub mod version;
