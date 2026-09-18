@@ -1,14 +1,6 @@
 name: Package Qualification
 
 on:
-  pull_request:
-    branches: [develop]
-    paths:
-      - .github/package-qualification-catalog.toml
-      - .github/workflows/package-qualification.yml
-      - tests/content_package_qualification.rs
-      - tests/fixtures/package_lifecycle/**
-      - tests/fixtures/package_qualification/**
   workflow_dispatch:
     inputs:
       official_package:
@@ -108,11 +100,14 @@ jobs:
       - name: Validate exact Cargo AI candidate
         shell: bash
         env:
-          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.event.pull_request.head.sha || github.sha }}
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
           BASELINE_CARGO_AI_SHA: ${{ inputs.baseline_cargo_ai_sha }}
         run: |
           set -euo pipefail
           [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$GITHUB_REPOSITORY" == "cargo-ai/cargo-ai" ]]; then
+            [[ "$CARGO_AI_SHA" == "$GITHUB_SHA" ]] || { echo "Expected candidate differs from workflow ref; select its branch or tag." >&2; exit 1; }
+          fi
           if [[ -n "$BASELINE_CARGO_AI_SHA" ]]; then
             [[ "$BASELINE_CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
           fi
@@ -121,7 +116,7 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: cargo-ai/cargo-ai
-          ref: ${{ inputs.cargo_ai_sha || github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ inputs.cargo_ai_sha || github.sha }}
           path: cargo-ai
           persist-credentials: false
 
@@ -219,7 +214,7 @@ jobs:
         env:
           CANDIDATE_OUTCOME: ${{ steps.candidate.outcome }}
           BASELINE_OUTCOME: ${{ steps.baseline.outcome }}
-          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.event.pull_request.head.sha || github.sha }}
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
           BASELINE_CARGO_AI_SHA: ${{ inputs.baseline_cargo_ai_sha }}
           PACKAGE_REPOSITORY: ${{ steps.package.outputs.repository }}
           PACKAGE_SHA: ${{ steps.package.outputs.sha }}
@@ -268,7 +263,7 @@ jobs:
 
   summary:
     name: Package qualification summary
-    if: ${{ always() && (github.event_name == 'pull_request' || inputs.emit_summary) }}
+    if: ${{ always() && inputs.emit_summary }}
     needs: [qualify]
     runs-on: ubuntu-latest
     timeout-minutes: 5

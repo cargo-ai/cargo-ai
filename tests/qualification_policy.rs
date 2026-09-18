@@ -212,6 +212,7 @@ impl Dashboard {
             ("CATALOG_CHECKOUT_OUTCOME", "success"),
             ("DETERMINISTIC_RESULT", "success"),
             ("PACKAGE_RESULT", "success"),
+            ("SECURITY_RESULT", "success"),
             ("LIVE_GEMINI_ENABLED", "true"),
             ("LIVE_XAI_ENABLED", "true"),
             ("LIVE_MISTRAL_ENABLED", "true"),
@@ -237,6 +238,7 @@ impl Dashboard {
             )));
             needs[format!("live_{provider}")] = json!({"result":"success","outputs":{"evidence":record(provider, "pass").to_string()}});
         }
+        jobs.push(Self::job("Security audit"));
         Self {
             env,
             jobs: json!({"jobs":jobs}),
@@ -297,7 +299,7 @@ fn actual_dashboard_requires_complete_correlated_evidence_and_collapses_suppleme
             1 => data.needs["live_mistral"]["result"] = json!("failure"),
             2 => data.jobs["jobs"][10]["conclusion"] = json!("failure"),
             3 => {
-                data.jobs["jobs"].as_array_mut().unwrap().pop();
+                data.jobs["jobs"].as_array_mut().unwrap().remove(10);
             }
             4 => {
                 let duplicate = data.jobs["jobs"][10].clone();
@@ -359,7 +361,7 @@ fn actual_dashboard_requires_complete_correlated_evidence_and_collapses_suppleme
     skipped
         .env
         .insert("LIVE_MISTRAL_ENABLED".into(), "false".into());
-    skipped.jobs["jobs"].as_array_mut().unwrap().pop();
+    skipped.jobs["jobs"].as_array_mut().unwrap().remove(10);
     skipped.needs["live_mistral"] = json!({"result":"skipped","outputs":{}});
     let (output, summary) = skipped.run();
     assert!(output.status.success());
@@ -400,6 +402,79 @@ fn actual_dashboard_requires_complete_correlated_evidence_and_collapses_suppleme
         json!("https://github.com/cargo-ai/cargo-ai/actions/runs/123/job/1)evil");
     let (_, summary) = injected.run();
     assert!(!summary.contains("<script>") && !summary.contains(")evil"));
+}
+
+#[test]
+fn actual_dashboard_requires_correlated_security_job_and_dependency_success() {
+    let happy = Dashboard::new();
+    let (output, summary) = happy.run();
+    assert!(output.status.success());
+    assert!(summary.contains("| Security | Dependency advisory audit | required | ✅ pass |"));
+    assert!(summary.contains(
+        "[Security audit](https://github.com/cargo-ai/cargo-ai/actions/runs/123/job/456)"
+    ));
+
+    for result in ["failure", "skipped", "cancelled", "", "unknown"] {
+        let mut data = Dashboard::new();
+        data.env.insert("SECURITY_RESULT".into(), result.into());
+        let (output, summary) = data.run();
+        assert!(!output.status.success(), "security dependency {result:?}");
+        assert!(summary.contains("BLOCKED"));
+        assert!(!summary.contains("| Security | Dependency advisory audit | required | ✅ pass |"));
+    }
+    let mut missing_result = Dashboard::new();
+    missing_result.env.remove("SECURITY_RESULT");
+    assert!(!missing_result.run().0.status.success());
+
+    for case in 0..12 {
+        let mut data = Dashboard::new();
+        let jobs = data.jobs["jobs"].as_array_mut().unwrap();
+        match case {
+            0 => {
+                jobs.pop();
+            }
+            1 => jobs.last_mut().unwrap()["conclusion"] = json!("failure"),
+            2 => jobs.last_mut().unwrap()["conclusion"] = json!("skipped"),
+            3 => jobs.last_mut().unwrap()["conclusion"] = json!("cancelled"),
+            4 => jobs.last_mut().unwrap()["head_sha"] = json!("d".repeat(40)),
+            5 => {
+                let duplicate = jobs.last().unwrap().clone();
+                jobs.push(duplicate);
+            }
+            6 => jobs.last_mut().unwrap()["status"] = json!("in_progress"),
+            7 => jobs.last_mut().unwrap()["conclusion"] = Value::Null,
+            8 => jobs.last_mut().unwrap()["conclusion"] = json!("unknown"),
+            9 => jobs.last_mut().unwrap()["run_attempt"] = json!(0),
+            10 => jobs.last_mut().unwrap()["run_attempt"] = json!(3),
+            11 => {
+                let mut previous = jobs.last().unwrap().clone();
+                previous["run_attempt"] = json!(1);
+                jobs.last_mut().unwrap()["conclusion"] = json!("failure");
+                jobs.push(previous);
+            }
+            _ => unreachable!(),
+        }
+        let (output, summary) = data.run();
+        assert!(!output.status.success(), "security job case {case}");
+        assert!(summary.contains("BLOCKED"), "security job case {case}");
+        assert!(!summary.contains("Product Qualification: Passed"));
+    }
+
+    // Successful dependencies from an earlier attempt remain valid on reruns.
+    let mut carried = Dashboard::new();
+    carried.jobs["jobs"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap()["run_attempt"] = json!(1);
+    assert!(carried.run().0.status.success());
+    let mut rerun = Dashboard::new();
+    let jobs = rerun.jobs["jobs"].as_array_mut().unwrap();
+    let mut previous = jobs.last().unwrap().clone();
+    previous["run_attempt"] = json!(1);
+    previous["conclusion"] = json!("failure");
+    jobs.push(previous);
+    assert!(rerun.run().0.status.success());
 }
 
 #[test]

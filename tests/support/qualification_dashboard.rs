@@ -199,6 +199,22 @@ pub fn render(input: &Inputs) -> Result<(String, bool)> {
         )
     };
     let deterministic = family("Deterministic qualification");
+    let mut security = aggregate(
+        &jobs,
+        &[("Security audit", "Security audit".into())],
+        trigger,
+        attempt,
+        &url,
+    );
+    if security.status == Status::Pass {
+        security.status = match input.get("SECURITY_RESULT") {
+            "success" => Status::Pass,
+            "failure" => Status::Fail,
+            "cancelled" => Status::Cancelled,
+            "skipped" => Status::Skipped,
+            _ => Status::Missing,
+        };
+    }
     let mut package = family("Source package qualification");
     let catalog = Catalog::parse(&input.catalog);
     let canary = catalog.as_ref().ok().and_then(|c| c.canary().ok());
@@ -342,6 +358,7 @@ pub fn render(input: &Inputs) -> Result<(String, bool)> {
         && catalog_ok
         && official_ok
         && providers_ok
+        && security.status == Status::Pass
         && deterministic.status == Status::Pass
         && package.status == Status::Pass
         && input.get("DETERMINISTIC_RESULT") == "success"
@@ -395,6 +412,18 @@ pub fn render(input: &Inputs) -> Result<(String, bool)> {
             ],
         );
     }
+    row(
+        &mut lines,
+        &[
+            "Security",
+            "Dependency advisory audit",
+            "required",
+            security.status.label(),
+            "Candidate lockfile against the advisory database",
+            &security.completed,
+            &security.links,
+        ],
+    );
     row(
         &mut lines,
         &[
