@@ -1,12 +1,10 @@
 name: Product Qualification
 
 on:
-  schedule:
-    - cron: "17 6 * * 1"
   workflow_dispatch:
     inputs:
       cargo_ai_sha:
-        description: Exact Cargo AI commit to qualify (defaults to the triggering commit)
+        description: Expected commit of the selected workflow ref (defaults to its snapshot)
         required: false
         type: string
       baseline_cargo_ai_sha:
@@ -37,6 +35,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  security:
+    name: Security family
+    uses: ./.github/workflows/security-audit.yml
+    with:
+      cargo_ai_sha: ${{ inputs.cargo_ai_sha || github.sha }}
+
   deterministic:
     name: Deterministic family
     uses: ./.github/workflows/multi-os-ci.yml
@@ -73,17 +77,13 @@ jobs:
       - name: Validate exact trusted Cargo AI candidate
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
           TRUSTED_TRIGGER_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
-          if [[ "$CARGO_AI_SHA" != "$TRUSTED_TRIGGER_SHA" ]]; then
-            comparison=$(gh api "/repos/$GITHUB_REPOSITORY/compare/$CARGO_AI_SHA...$TRUSTED_TRIGGER_SHA" --jq .status)
-            [[ "$comparison" == "ahead" ]]
-          fi
+          [[ "$CARGO_AI_SHA" == "$TRUSTED_TRIGGER_SHA" ]] || { echo "Expected candidate differs from workflow ref; select its branch or tag." >&2; exit 1; }
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ inputs.cargo_ai_sha || github.sha }}
@@ -115,17 +115,13 @@ jobs:
       - name: Validate exact trusted Cargo AI candidate
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
           TRUSTED_TRIGGER_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
-          if [[ "$CARGO_AI_SHA" != "$TRUSTED_TRIGGER_SHA" ]]; then
-            comparison=$(gh api "/repos/$GITHUB_REPOSITORY/compare/$CARGO_AI_SHA...$TRUSTED_TRIGGER_SHA" --jq .status)
-            [[ "$comparison" == "ahead" ]]
-          fi
+          [[ "$CARGO_AI_SHA" == "$TRUSTED_TRIGGER_SHA" ]] || { echo "Expected candidate differs from workflow ref; select its branch or tag." >&2; exit 1; }
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ inputs.cargo_ai_sha || github.sha }}
@@ -165,17 +161,13 @@ jobs:
       - name: Validate exact trusted Cargo AI candidate
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
           TRUSTED_TRIGGER_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
-          if [[ "$CARGO_AI_SHA" != "$TRUSTED_TRIGGER_SHA" ]]; then
-            comparison=$(gh api "/repos/$GITHUB_REPOSITORY/compare/$CARGO_AI_SHA...$TRUSTED_TRIGGER_SHA" --jq .status)
-            [[ "$comparison" == "ahead" ]]
-          fi
+          [[ "$CARGO_AI_SHA" == "$TRUSTED_TRIGGER_SHA" ]] || { echo "Expected candidate differs from workflow ref; select its branch or tag." >&2; exit 1; }
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ inputs.cargo_ai_sha || github.sha }}
@@ -215,17 +207,13 @@ jobs:
       - name: Validate exact trusted Cargo AI candidate
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
           TRUSTED_TRIGGER_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
-          if [[ "$CARGO_AI_SHA" != "$TRUSTED_TRIGGER_SHA" ]]; then
-            comparison=$(gh api "/repos/$GITHUB_REPOSITORY/compare/$CARGO_AI_SHA...$TRUSTED_TRIGGER_SHA" --jq .status)
-            [[ "$comparison" == "ahead" ]]
-          fi
+          [[ "$CARGO_AI_SHA" == "$TRUSTED_TRIGGER_SHA" ]] || { echo "Expected candidate differs from workflow ref; select its branch or tag." >&2; exit 1; }
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ inputs.cargo_ai_sha || github.sha }}
@@ -265,17 +253,13 @@ jobs:
       - name: Validate exact trusted Cargo AI candidate
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
           TRUSTED_TRIGGER_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
-          if [[ "$CARGO_AI_SHA" != "$TRUSTED_TRIGGER_SHA" ]]; then
-            comparison=$(gh api "/repos/$GITHUB_REPOSITORY/compare/$CARGO_AI_SHA...$TRUSTED_TRIGGER_SHA" --jq .status)
-            [[ "$comparison" == "ahead" ]]
-          fi
+          [[ "$CARGO_AI_SHA" == "$TRUSTED_TRIGGER_SHA" ]] || { echo "Expected candidate differs from workflow ref; select its branch or tag." >&2; exit 1; }
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ inputs.cargo_ai_sha || github.sha }}
@@ -299,11 +283,19 @@ jobs:
   summary:
     name: Product qualification summary
     if: ${{ always() }}
-    needs: [deterministic, packages, official_package, live_openai, live_anthropic, live_gemini, live_xai, live_mistral]
+    needs: [security, deterministic, packages, official_package, live_openai, live_anthropic, live_gemini, live_xai, live_mistral]
     runs-on: ubuntu-latest
     environment: release-qualification
     timeout-minutes: 5
     steps:
+      - name: Validate summary candidate identity
+        id: identity
+        shell: bash
+        env:
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ && "$CARGO_AI_SHA" == "$GITHUB_SHA" ]]
       - name: Check out exact candidate qualification metadata
         id: candidate_metadata
         continue-on-error: true
@@ -323,6 +315,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PROVIDER_PROBE_RECORDS: ${{ toJSON(needs) }}
+          SECURITY_RESULT: ${{ needs.security.result }}
           DETERMINISTIC_RESULT: ${{ needs.deterministic.result }}
           PACKAGE_RESULT: ${{ needs.packages.result }}
           OFFICIAL_PACKAGE_RESULT: ${{ needs.official_package.result }}
@@ -345,6 +338,7 @@ jobs:
             then
               jobs_api_status=0
               expected_jobs=(
+                "Security audit"
                 "Deterministic qualification (ubuntu-latest)"
                 "Deterministic qualification (macos-latest)"
                 "Deterministic qualification (windows-latest)"

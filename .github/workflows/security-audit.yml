@@ -1,28 +1,49 @@
 name: Security Audit
 
+on:
+  workflow_dispatch:
+    inputs:
+      cargo_ai_sha:
+        description: Expected commit of the selected workflow ref (defaults to its snapshot)
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      cargo_ai_sha:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
-on:
-  push:
-    branches:
-      - main
-      - develop
-  workflow_dispatch:  # allows manual ad hoc runs from GitHub UI
-
 jobs:
   security_check:
+    name: Security audit
     runs-on: ubuntu-latest
-
+    timeout-minutes: 20
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-
+      - name: Validate exact candidate
+        shell: bash
+        env:
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ && "$CARGO_AI_SHA" == "$GITHUB_SHA" ]]
+      - name: Check out exact candidate
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.cargo_ai_sha || github.sha }}
+          persist-credentials: false
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, resolved 2026-08-02
       - name: Install cargo-audit
-        run: cargo install cargo-audit
-
-      - name: Run cargo audit
-        run: cargo audit
+        run: cargo install cargo-audit --locked --version 0.22.1
+      - name: Audit the candidate dependency graph
+        run: cargo audit --file Cargo.lock
+      - name: Record audit identity
+        run: |
+          echo "Security audit passed for $GITHUB_SHA using cargo-audit 0.22.1 and the advisory database fetched by this run." >> "$GITHUB_STEP_SUMMARY"
+          git -C "$HOME/.cargo/advisory-db" rev-parse HEAD >> "$GITHUB_STEP_SUMMARY"

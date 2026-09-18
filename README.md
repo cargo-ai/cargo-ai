@@ -1,9 +1,12 @@
 # cargo-ai™
 
-[![Security Audit](https://github.com/cargo-ai/cargo-ai/actions/workflows/security-audit.yml/badge.svg)](https://github.com/cargo-ai/cargo-ai/actions/workflows/security-audit.yml)
-[![Core CI](https://github.com/cargo-ai/cargo-ai/actions/workflows/multi-os-ci.yml/badge.svg)](https://github.com/cargo-ai/cargo-ai/actions/workflows/multi-os-ci.yml)
-[![Product Qualification](https://github.com/cargo-ai/cargo-ai/actions/workflows/release-qualification.yml/badge.svg)](https://github.com/cargo-ai/cargo-ai/actions/workflows/release-qualification.yml)
-[![Status: Stable – Ongoing Development](https://img.shields.io/badge/Status-Stable_–_Ongoing_Development-blue)](https://github.com/cargo-ai/cargo-ai)
+<!-- Update the release version, tag-specific checks and evidence links together after publication verification. -->
+[![Latest release: v0.4.1](https://img.shields.io/badge/release-v0.4.1-blue)](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.1)
+[![v0.4.1 native tests](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/v0.4.1?nameFilter=Deterministic%20qualification%20summary&label=v0.4.1%20native%20tests)](https://github.com/cargo-ai/cargo-ai/actions/runs/35258805842)
+
+[Release notes](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.1) · [Documentation at v0.4.1](https://github.com/cargo-ai/cargo-ai/blob/v0.4.1/README.md) · [Release testing](./docs/testing-and-release-qualification.md#release-status)
+
+Development status: [![Development CI](https://github.com/cargo-ai/cargo-ai/actions/workflows/development-ci.yml/badge.svg?branch=develop&event=push)](https://github.com/cargo-ai/cargo-ai/actions/workflows/development-ci.yml?query=branch%3Adevelop)
 
 Build declarative AI agents. Ship them as local CLI apps.
 
@@ -200,7 +203,7 @@ Runnable repository examples include [adder_test.json](./adder_test.json) and [w
 
 ## Project Status
 
-Cargo AI is stable for ongoing use and remains under active development. The Security Audit, Core CI, and Product Qualification badges at the top of this page show the current public automation state. Product Qualification combines credential-free multi-platform behavior, package lifecycle checks, enrolled hosted-provider checks, and one fail-closed GitHub-native summary; see [Testing and Product Qualification](./docs/testing-and-release-qualification.md).
+Cargo AI remains under active development. The top release badges describe the named checks attached to the released version; current `develop` status is labeled separately. Automatic Development CI provides focused feedback. On-demand Product Qualification combines full native Core CI, package lifecycles, required/enrolled hosted providers and security into one fail-closed summary. Each family is also independently runnable; see [Testing and Product Qualification](./docs/testing-and-release-qualification.md).
 
 Scheduling is not built into Cargo AI today. Use an operating-system scheduler such as `cron` or Windows Task Scheduler when a local agent must run on a schedule.
 
