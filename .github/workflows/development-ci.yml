@@ -34,11 +34,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/test-user-home" "$RUNNER_TEMP/cargo-home" "$RUNNER_TEMP/cargo-ai-home"
+          mkdir -p "$RUNNER_TEMP/test-user-home" "$RUNNER_TEMP/cargo-home"
           {
             echo "HOME=$RUNNER_TEMP/test-user-home"
             echo "CARGO_HOME=$RUNNER_TEMP/cargo-home"
-            echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home"
             echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
             echo "RUST_TEST_THREADS=1"
           } >> "$GITHUB_ENV"
