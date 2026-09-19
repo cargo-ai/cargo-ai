@@ -68,7 +68,9 @@ Artifacts retain compiler-reported dependency identities/features, installation 
 
 ## Release status
 
-README release badges and versioned links refer to the released tag; current `develop` CI is labeled separately. The initial `v0.4.1` badge shows its verified native summary only. Complete Product Qualification and security results are not attached to that tag and are not implied.
+README release badges and versioned links identify the released version; current `develop` CI is labeled separately. Verified: 2026-09-18. For `v0.4.1`, released commit `a81fda6d2cbbf3b7769f5f4abe38e139fc3eb521` passed [Core CI](https://github.com/cargo-ai/cargo-ai/actions/runs/35258805842) on Linux, macOS and Windows, including installed CLI smoke and freshly resolved packaged-source installation. The Core CI and package-installation badges represent those checks in the same run, not two separately executed suites or the catalog-based Package Qualification family.
+
+The release's [Security Audit](https://github.com/cargo-ai/cargo-ai/actions/runs/35271269371) passed on integrated commit `fbe7d4067ea15fd0bc0bc7d93b25e6f50c6cb50a`. Its Git source tree is identical to the released commit (`git diff a81fda6d2cbbf3b7769f5f4abe38e139fc3eb521 fbe7d4067ea15fd0bc0bc7d93b25e6f50c6cb50a` is empty). The security badge is pinned to that immutable check revision and retains its original evidence identity; it is not a claim that a security check is attached to the release tag or that today's advisory database was tested. Full Product Qualification was not run for v0.4.1; native registry installation remains pending. Neither is implied by the passing badges.
 
 After a qualified, published and verified release, update all version/tag/evidence references together. Filter Shields tag-check badges to actual named checks, such as `Product qualification summary`, and confirm the check commit equals the qualified release commit. Missing, pending, failed or unavailable results stay visible; never substitute unconditional green badges. Keep durable evidence/run links alongside badges. Non-release qualification does not advance release references.
 
