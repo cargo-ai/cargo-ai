@@ -2,7 +2,24 @@
 
 <!-- Update the release version, tag-specific checks and evidence links together after publication verification. -->
 [![Latest release: v0.4.1](https://img.shields.io/badge/release-v0.4.1-blue)](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.1)
-[![v0.4.1 native tests](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/v0.4.1?nameFilter=Deterministic%20qualification%20summary&label=v0.4.1%20native%20tests)](https://github.com/cargo-ai/cargo-ai/actions/runs/35258805842)
+[![v0.4.1 Core CI](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/v0.4.1?nameFilter=Deterministic%20qualification%20summary&label=v0.4.1%20Core%20CI)](https://github.com/cargo-ai/cargo-ai/actions/runs/35258805842)
+[![v0.4.1 package installation](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/v0.4.1?nameFilter=Deterministic%20qualification%20summary&label=v0.4.1%20package%20installation)](https://github.com/cargo-ai/cargo-ai/actions/runs/35258805842)
+[![v0.4.1 security audit](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/fbe7d4067ea15fd0bc0bc7d93b25e6f50c6cb50a?nameFilter=security_check&label=v0.4.1%20security%20audit)](https://github.com/cargo-ai/cargo-ai/actions/runs/35271269371)
+
+<details>
+<summary>Verified release checks — v0.4.1</summary>
+
+| Check | Recorded result |
+|---|---|
+| Core CI | Passed on Linux, macOS and Windows |
+| Package installation | Fresh packaged-source installation and installed CLI smoke passed on all three platforms as part of Core CI |
+| Security audit | Passed on the integrated commit with an identical source tree to the released commit |
+| Full Product Qualification | Not run for this release |
+| Registry Installation | Pending; separate verification of the published crates.io installation |
+
+The badges link to the recorded release checks. Package installation above is the Core CI source-install check; the separate catalog-based Package Qualification family belongs to the full Product Qualification umbrella. See [release evidence](./docs/testing-and-release-qualification.md#release-status) for commit identities and coverage.
+
+</details>
 
 [Release notes](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.1) · [Documentation at v0.4.1](https://github.com/cargo-ai/cargo-ai/blob/v0.4.1/README.md) · [Release testing](./docs/testing-and-release-qualification.md#release-status)
 
