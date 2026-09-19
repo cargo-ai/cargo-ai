@@ -15,7 +15,7 @@
 | Package installation | Fresh packaged-source installation and installed CLI smoke passed on all three platforms as part of Core CI |
 | Security audit | Passed on the integrated commit with an identical source tree to the released commit |
 | Full Product Qualification | Not run for this release |
-| Registry Installation | Pending; separate verification of the published crates.io installation |
+| Registry Installation | [Passed on Linux, macOS and Windows](https://github.com/cargo-ai/cargo-ai/actions/runs/35443223970); verified the published v0.4.1 crate |
 
 The badges link to the recorded release checks. Package installation above is the Core CI source-install check; the separate catalog-based Package Qualification family belongs to the full Product Qualification umbrella. See [release evidence](./docs/testing-and-release-qualification.md#release-status) for commit identities and coverage.
 
