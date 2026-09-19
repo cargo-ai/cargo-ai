@@ -1215,7 +1215,8 @@ fn marker_definition(fixture: &Fixture) -> PathBuf {
             "cmd",
             vec![
                 Value::String("/C".to_string()),
-                Value::String(format!("echo ran>\"{}\"", marker.display())),
+                Value::String("echo".to_string()),
+                Value::String("ran>action-ran.txt".to_string()),
             ],
             "windows",
         )
