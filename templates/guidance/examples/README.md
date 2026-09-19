@@ -7,6 +7,10 @@ Each example is meant to be validated and hatched into a CLI executable.
 
 - `basic-agent.json`
   - Smallest useful starting point for a single agent with simple output and one straightforward action.
+- `jev-choice-score.json`
+  - TypeSafe Jev Choice plus explicit 0–100 rubric Score using opt-in `2026-09-19.r1`. A high-urgency result prints a harmless local marker using Linux/macOS or Windows echo; no file write or email.
+  - Use `--profile jev` for hatch/check and run. This revision is for local/hatched execution; hosted storage is deferred. Other examples keep their existing strict revision.
+
 - `schema-features.json`
   - Shows the supported scalar schema surface together: `string`, `integer`, `number`, `boolean`, `description`, string `enum`, and numeric bounds, while still keeping the action flow small.
 - `runtime-file-local-exec.json`

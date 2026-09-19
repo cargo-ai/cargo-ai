@@ -812,6 +812,7 @@ fn provider_server_name(provider: crate::providers::ProviderKind) -> &'static st
         crate::providers::ProviderKind::Ollama => "ollama",
         crate::providers::ProviderKind::OpenAi => "openai",
         crate::providers::ProviderKind::Xai => "xai",
+        crate::providers::ProviderKind::TypeSafe => "typesafe",
     }
 }
 
@@ -2158,6 +2159,12 @@ async fn run_generate_image_step(
     let provider_started_at = Instant::now();
     let image_response = match tokio::time::timeout(remaining, async {
         match effective_provider_context.provider {
+            crate::providers::ProviderKind::TypeSafe => {
+                Err(crate::providers::ProviderError::invalid_request(
+                    crate::providers::ProviderKind::TypeSafe,
+                    "Jev does not generate images. Select a compatible image-generation profile for this step.",
+                ))
+            }
             crate::providers::ProviderKind::Anthropic => {
                 Err(crate::providers::ProviderError::invalid_request(
                     crate::providers::ProviderKind::Anthropic,
@@ -2464,6 +2471,12 @@ async fn resolve_generate_image_step_profile_context(
                 .map(|session| session.access_token)?
         }
         ProfileAuthMode::None => match provider {
+            crate::providers::ProviderKind::TypeSafe => {
+                return Err(format!(
+                    "Action '{}' generate_image step profile '{}' selects Jev, which does not generate images. Select a compatible image-generation profile.",
+                    action_name, profile.name
+                ));
+            }
             crate::providers::ProviderKind::Anthropic => {
                 return Err(format!(
                     "Action '{}' generate_image step profile '{}' auth mode is '{}'. Anthropic requires '{}'.",

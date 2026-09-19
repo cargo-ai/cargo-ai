@@ -69,6 +69,7 @@ pub(crate) struct HatchRequest {
     pub build_target: BuildTarget,
     pub output_dir: Option<PathBuf>,
     pub presentation: HatchPresentation,
+    pub compatibility_profile: Option<String>,
 }
 
 impl HatchRequest {
@@ -91,7 +92,13 @@ impl HatchRequest {
             build_target,
             output_dir,
             presentation,
+            compatibility_profile: None,
         }
+    }
+
+    pub(crate) fn with_compatibility_profile(mut self, profile: Option<String>) -> Self {
+        self.compatibility_profile = profile;
+        self
     }
 }
 
@@ -177,7 +184,17 @@ where
         build_target,
         output_dir,
         presentation,
+        compatibility_profile,
     } = request;
+
+    match super::hatch_compatibility::check(&file_contents, compatibility_profile.as_deref()) {
+        Ok(Some(summary)) => println!("{summary}"),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("x {error}");
+            return false;
+        }
+    }
 
     let _agent_lock = match acquire_lock(project_name.as_str()) {
         Ok(lock) => lock,

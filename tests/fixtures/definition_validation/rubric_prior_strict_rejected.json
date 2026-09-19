@@ -1,0 +1,27 @@
+{
+  "name": "rubric_prior_strict_rejected",
+  "definition": {
+    "agent_definition_schema_version": "2026-09-09.r1",
+    "agent_schema": {
+      "type": "object",
+      "properties": {
+        "score": {
+          "type": "number",
+          "description": "How urgent?",
+          "minimum": 0,
+          "maximum": 100,
+          "rubric": [
+            "Routine",
+            "Urgent"
+          ]
+        }
+      }
+    },
+    "actions": []
+  },
+  "expected": {
+    "accepted": false,
+    "code": "unknown_field",
+    "path": "$.agent_schema.properties.score.rubric"
+  }
+}

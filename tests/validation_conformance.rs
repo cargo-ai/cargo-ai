@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use support::{assert_success, output_text, Fixture, OneShotHttpServer};
 
+const PRECISE_MINIMUM: u64 = 9_007_199_254_740_993;
+const PRECISE_MAXIMUM: u64 = 9_007_199_254_741_093;
+
 const SELECTED_TOKEN: &str = "selected-profile-fixture-token";
 const FAKE_SECRET: &str = "unused-private-fixture-secret-4d390e";
 const DEFINITION: &str = include_str!("fixtures/definition_validation_process/agent.json");
@@ -115,6 +118,18 @@ fn run_output(
     (output, request)
 }
 
+fn assert_numeric_capture(project: &Path, precise_score: u64, fraction: Value) {
+    let captured: Value =
+        serde_json::from_slice(&fs::read(project.join(".cargo-ai/data/numeric.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        captured,
+        json!({"score": precise_score, "fraction": fraction}),
+        "the tool must receive the exact authored endpoint and fractional JSON number"
+    );
+    assert_eq!(captured["score"].as_u64(), Some(precise_score));
+}
+
 fn state_snapshot(paths: &[PathBuf]) -> Vec<Vec<u8>> {
     paths.iter().map(|path| fs::read(path).unwrap()).collect()
 }
@@ -129,7 +144,7 @@ fn assert_no_consumption(project: &Path, output: &Output, expected: &str, label:
         text.contains(expected),
         "{label} diagnostic should contain {expected}:\n{text}"
     );
-    for name in ["captured.txt", "marker.txt"] {
+    for name in ["captured.txt", "marker.txt", "numeric.json"] {
         assert!(
             !project.join(".cargo-ai/data").join(name).exists(),
             "{label} must reject before {name}"
@@ -229,7 +244,7 @@ fn interpreted_and_emitted_outputs_preserve_authority_and_reject_before_consumpt
     let before = state_snapshot(&protected);
     let describe_before = cli(&fixture, &project, &["tools", "describe", "envelope_probe"]);
     assert_success(&describe_before, "describe resource permissions");
-    let accepted = json!({"status": "authorized", "details": {"note": "fixture"}});
+    let accepted = json!({"status": "authorized", "score": 80, "precise_score": PRECISE_MINIMUM, "details": {"note": "fixture"}});
     let valid_envelope = json!({"protocol_version": 1, "result": "fixture-capture"});
 
     for runtime in [None, Some(executable.as_path())] {
@@ -251,6 +266,7 @@ fn interpreted_and_emitted_outputs_preserve_authority_and_reject_before_consumpt
             true,
         );
         assert_success(&control, "authorized positive control");
+        assert_numeric_capture(&project, PRECISE_MINIMUM, json!(80));
         assert_eq!(
             fs::read_to_string(project.join(".cargo-ai/data/captured.txt")).unwrap(),
             "fixture-capture"
@@ -259,22 +275,22 @@ fn interpreted_and_emitted_outputs_preserve_authority_and_reject_before_consumpt
             fs::read_to_string(project.join(".cargo-ai/data/marker.txt")).unwrap(),
             "authorized marker"
         );
-        for name in ["captured.txt", "marker.txt"] {
+        for name in ["captured.txt", "marker.txt", "numeric.json"] {
             fs::remove_file(project.join(".cargo-ai/data").join(name)).unwrap();
         }
 
         for (name, value) in [
             (
                 "unknown root model field",
-                json!({"status": "authorized", "details": {"note": "fixture"}, "profile": "forbidden"}),
+                json!({"status": "authorized", "score": 80, "precise_score": PRECISE_MINIMUM, "details": {"note": "fixture"}, "profile": "forbidden"}),
             ),
             (
                 "unknown nested model field",
-                json!({"status": "authorized", "details": {"note": "fixture", "credential_access": "required"}}),
+                json!({"status": "authorized", "score": 80, "precise_score": PRECISE_MINIMUM, "details": {"note": "fixture", "credential_access": "required"}}),
             ),
             (
                 "wrong nested model type",
-                json!({"status": "authorized", "details": {"note": 7}}),
+                json!({"status": "authorized", "score": 80, "precise_score": PRECISE_MINIMUM, "details": {"note": 7}}),
             ),
         ] {
             let (output, _) = run_output(
@@ -287,6 +303,81 @@ fn interpreted_and_emitted_outputs_preserve_authority_and_reject_before_consumpt
                 true,
             );
             assert_no_consumption(&project, &output, "required JSON schema", name);
+        }
+        for (score, precise_score) in [
+            (0.0, PRECISE_MINIMUM),
+            (12.5, PRECISE_MINIMUM),
+            (100.0, PRECISE_MAXIMUM),
+        ] {
+            let mut value = accepted.clone();
+            value["score"] = json!(score);
+            value["precise_score"] = json!(precise_score);
+            let (output, _) = run_output(
+                &fixture,
+                &project,
+                runtime,
+                value,
+                valid_envelope.clone(),
+                None,
+                true,
+            );
+            assert_success(&output, "inclusive and fractional rubric output");
+            assert_numeric_capture(&project, precise_score, json!(score));
+            for name in ["captured.txt", "marker.txt", "numeric.json"] {
+                fs::remove_file(project.join(".cargo-ai/data").join(name)).unwrap();
+            }
+        }
+        for score in [
+            Some(json!(-0.001)),
+            Some(json!(100.001)),
+            Some(json!("80")),
+            Some(Value::Null),
+            None,
+        ] {
+            let mut value = accepted.clone();
+            if let Some(score) = score {
+                value["score"] = score;
+            } else {
+                value.as_object_mut().unwrap().remove("score");
+            }
+            let (output, _) = run_output(
+                &fixture,
+                &project,
+                runtime,
+                value,
+                valid_envelope.clone(),
+                None,
+                true,
+            );
+            assert_no_consumption(
+                &project,
+                &output,
+                "required JSON schema",
+                "invalid rubric output",
+            );
+        }
+        for score in [
+            json!(PRECISE_MINIMUM - 1),
+            json!(PRECISE_MAXIMUM + 1),
+            json!(PRECISE_MINIMUM as f64),
+        ] {
+            let mut value = accepted.clone();
+            value["precise_score"] = score;
+            let (output, _) = run_output(
+                &fixture,
+                &project,
+                runtime,
+                value,
+                valid_envelope.clone(),
+                None,
+                true,
+            );
+            assert_no_consumption(
+                &project,
+                &output,
+                "required JSON schema",
+                "integer or rounded-float outside exact rubric bounds",
+            );
         }
         for (name, envelope) in [
             ("missing result", json!({"protocol_version": 1})),
@@ -325,7 +416,7 @@ fn interpreted_and_emitted_outputs_preserve_authority_and_reject_before_consumpt
             &fixture,
             &project,
             runtime,
-            json!({"status": "authorized", "details": {"note": literal}}),
+            json!({"status": "authorized", "score": 80, "precise_score": PRECISE_MINIMUM, "details": {"note": literal}}),
             json!({"protocol_version": 1, "result": literal}),
             Some(&retrieved.url),
             false,
@@ -341,7 +432,9 @@ fn interpreted_and_emitted_outputs_preserve_authority_and_reject_before_consumpt
             literal
         );
         assert!(!project.join(".cargo-ai/data/marker.txt").exists());
+        assert_numeric_capture(&project, PRECISE_MINIMUM, json!(80));
         fs::remove_file(project.join(".cargo-ai/data/captured.txt")).unwrap();
+        fs::remove_file(project.join(".cargo-ai/data/numeric.json")).unwrap();
         assert_eq!(
             state_snapshot(&protected),
             before,

@@ -15,17 +15,19 @@ provider.
 | [Anthropic](./anthropic.md) | `anthropic` | `https://api.anthropic.com/v1/messages` | required `api_key` | text, client-fetched URL text, images; no direct files |
 | [Google Gemini](./gemini.md) | `gemini` | `https://generativelanguage.googleapis.com/v1beta/interactions` | required `api_key` | text, client-fetched URL text, images; no direct files |
 | [xAI](./xai.md) | `xai` | `https://api.x.ai/v1/responses` | required `api_key` | text and client-fetched URL text only |
+| [TypeSafe Jev](./typesafe.md) | `typesafe` | `https://api.typesafe.ai/v1/systemone` | required `api_key` | text and client-fetched URL text only |
 | [Mistral API](./mistral.md) | `mistral` | `https://api.mistral.ai/v1/chat/completions` | required `api_key` | text and client-fetched URL text only |
 | [Ollama](./ollama.md) | `ollama` | `http://localhost:11434/v1/chat/completions` | none for the normal local server; optional `api_key` for compatible deployments | text, client-fetched URL text, images, and forwarded files, subject to model/endpoint support |
 
-All six provider identities support interpreted and hatched agents,
-JSON-schema-directed output, and normalized usage when the provider reports
-token counters. Compatible wire formats do not collapse provider identity:
+All seven provider identities support interpreted and hatched agents and
+normalized usage when the provider reports token counters. TypeSafe translates
+its supported flat enum/rubric schema to Choice/Score questions; general
+providers use JSON-schema-directed output. Compatible wire formats do not collapse provider identity:
 diagnostics and usage continue to report `mistral`, `ollama`, or `xai` as
 selected.
 
 OpenAI and Ollama also support Cargo AI `generate_image` actions. Anthropic,
-Gemini, Mistral, and xAI do not; select an OpenAI or Ollama step-level profile
+Gemini, Mistral, TypeSafe, and xAI do not; select an OpenAI or Ollama step-level profile
 when an otherwise different parent provider needs image generation.
 
 ## Create A Profile
@@ -96,8 +98,11 @@ Temperature does not select reasoning effort or guarantee identical output.
 
 ## Strict Output And Failure Behavior
 
-Cargo AI sends the complete authored return schema to the selected provider and
-validates the returned JSON locally before actions run. Provider-specific schema
+Cargo AI translates the authored return contract for the selected provider and
+validates returned output locally before actions run. TypeSafe supports flat
+Choice/Score fields. On general providers, optional rubric metadata becomes
+ordered descriptive instructions and numeric bounds remain in the schema;
+definitions without rubric retain their existing request representation. Provider-specific schema
 limits are surfaced as errors. Cargo AI does not remove constraints, change
 models, switch providers, retry through another transport, or run downstream
 actions after malformed or schema-invalid output.

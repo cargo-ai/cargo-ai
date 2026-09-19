@@ -55,11 +55,13 @@ pub(crate) struct ProviderUsage {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProviderTextResponse {
+    pub(crate) resolved_model: Option<String>,
     pub(crate) text: String,
     pub(crate) usage: Option<ProviderUsage>,
 }
 
 pub(crate) struct ProviderTextRequest<'a> {
+    pub(crate) rubric_enabled: bool,
     pub(crate) model: &'a str,
     pub(crate) content_parts: &'a [ContentPart],
     pub(crate) timeout_in_sec: u64,

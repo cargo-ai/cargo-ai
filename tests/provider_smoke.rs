@@ -7,6 +7,8 @@ mod provider_cache;
 mod qualification_policy;
 #[path = "support/qualification_report.rs"]
 mod qualification_report;
+#[path = "support/typesafe_smoke.rs"]
+mod typesafe_smoke;
 
 use serde_json::Value;
 use std::fs;
@@ -86,7 +88,9 @@ impl Fixture {
         command
             .current_dir(&self.root)
             .env("CARGO_AI_HOME", &self.home)
-            .env("CARGO_AI_DISABLE_KEYCHAIN", "1");
+            .env("CARGO_AI_DISABLE_KEYCHAIN", "1")
+            // Generated workspaces own their outputs independently of the test runner.
+            .env_remove("CARGO_TARGET_DIR");
         command
     }
 }
@@ -584,7 +588,9 @@ fn run_generated_hosted_smoke(
     if fixture.home.join("batch-seed-marker").exists() {
         assert!(
             String::from_utf8_lossy(&hatch.stdout).contains("Reused warmed template"),
-            "batch case should reuse its copied seed"
+            "batch case should reuse its copied seed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&hatch.stdout),
+            String::from_utf8_lossy(&hatch.stderr)
         );
         eprintln!(
             "generated-provider hatch: {}",
@@ -739,7 +745,9 @@ fn run_generated_openai_compatible_smoke(
     if fixture.home.join("batch-seed-marker").exists() {
         assert!(
             String::from_utf8_lossy(&hatch.stdout).contains("Reused warmed template"),
-            "batch case should reuse its copied seed"
+            "batch case should reuse its copied seed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&hatch.stdout),
+            String::from_utf8_lossy(&hatch.stderr)
         );
         eprintln!(
             "generated-provider hatch: {}",
@@ -889,7 +897,9 @@ fn generated_anthropic_case(fixture: &Fixture) {
     if fixture.home.join("batch-seed-marker").exists() {
         assert!(
             String::from_utf8_lossy(&hatch.stdout).contains("Reused warmed template"),
-            "batch case should reuse its copied seed"
+            "batch case should reuse its copied seed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&hatch.stdout),
+            String::from_utf8_lossy(&hatch.stderr)
         );
         eprintln!(
             "generated-provider hatch: {}",
@@ -959,7 +969,9 @@ fn generated_gemini_case(fixture: &Fixture) {
     if fixture.home.join("batch-seed-marker").exists() {
         assert!(
             String::from_utf8_lossy(&hatch.stdout).contains("Reused warmed template"),
-            "batch case should reuse its copied seed"
+            "batch case should reuse its copied seed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&hatch.stdout),
+            String::from_utf8_lossy(&hatch.stderr)
         );
         eprintln!(
             "generated-provider hatch: {}",
@@ -1136,16 +1148,22 @@ fn generated_provider_batch_isolated_and_deterministic() {
         "generated-provider neutral-seed: {:.2}s",
         started.elapsed().as_secs_f64()
     );
-    let cases: [(&str, fn(&Fixture)); 6] = [
+    let cases: [(&str, fn(&Fixture)); 7] = [
         ("anthropic", generated_anthropic_case),
         ("gemini", generated_gemini_case),
         ("mistral", generated_mistral_case),
         ("xai", generated_xai_case),
         ("openai", generated_openai_case),
         ("ollama", generated_ollama_case),
+        ("typesafe", typesafe_smoke::generated_typesafe_case),
     ];
     let mut completed = Vec::new();
     for (provider, case) in cases {
+        assert_eq!(
+            provider_cache::CacheIdentity::current(Path::new(env!("CARGO_BIN_EXE_cargo-ai"))),
+            identity,
+            "generated-provider {provider}: CLI/cache identity changed during the batch; rerun with no concurrent CLI builds"
+        );
         let fixture = Fixture::new();
         let copied = Instant::now();
         cache.copy_into(&fixture.home, &identity).unwrap();
@@ -1174,10 +1192,18 @@ fn generated_provider_batch_isolated_and_deterministic() {
     }
     assert_eq!(
         completed,
-        ["anthropic", "gemini", "mistral", "xai", "openai", "ollama"]
+        [
+            "anthropic",
+            "gemini",
+            "mistral",
+            "xai",
+            "openai",
+            "ollama",
+            "typesafe"
+        ]
     );
     eprintln!(
-        "generated-provider batch: 6/6 passed in {:.2}s",
+        "generated-provider batch: 7/7 passed in {:.2}s",
         started.elapsed().as_secs_f64()
     );
 }

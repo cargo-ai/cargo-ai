@@ -5,6 +5,13 @@ use clap::{Arg, ArgAction, ArgGroup, Command};
 pub fn command() -> Command {
     Command::new("hatch")
         .about("Hatch a native agent from JSON using the Cargo release profile")
+        .arg(
+            Arg::new("profile")
+                .long("profile")
+                .short('P')
+                .value_name("PROFILE")
+                .help("Check declared provider compatibility using this connection profile; does not run inference or pin the runtime profile"),
+        )
         .group(
             ArgGroup::new("explicit_definition_source")
                 .args(["config", "json", "stdin"]),

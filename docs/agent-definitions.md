@@ -83,7 +83,7 @@ A definition uses this top-level shape. The order is a readability convention:
 
 `agent_definition_schema_version` identifies the Cargo AI contract used to interpret the JSON. It is not the Cargo AI version, agent version, project version, or package version. Copy it from the current template or generated guidance; do not derive it from the date or invent it. The legacy top-level `version` key is rejected.
 
-`2026-09-09.r1` is the current strict revision: stable objects reject unknown fields, and validation has explicit resource limits. Syntactically valid earlier revisions retain their legacy parsing behavior, including permissive unknown fields. Every other revision at or after the cutoff is unsupported. Existing definitions are not rewritten automatically. To migrate, review the whole definition against the [current contract](../templates/guidance/agent-definition-contract.md), select the strict revision, and validate it; changing a version header alone is not a migration.
+`2026-09-09.r1` remains the strict revision used by ordinary scaffolds. `2026-09-19.r1` adds opt-in rubric metadata for top-level number outputs. Both reject unknown fields and apply explicit resource limits; the earlier strict revision still rejects rubric. Syntactically valid revisions before `2026-09-09.r1` retain their legacy parsing behavior, including permissive unknown fields. Every other revision at or after that cutoff is unsupported. Existing definitions are not rewritten automatically. To migrate, review the whole definition against the [current contract](../templates/guidance/agent-definition-contract.md), select the strict revision, and validate it; changing a version header alone is not a migration.
 
 ## Add Model Inputs
 
@@ -207,6 +207,12 @@ Structured top-level fields may flow only into tool parameters as raw JSON. Scal
 For a model-only agent, use `actions: []`. Each action that you do declare must have `name`, a supported JSON Logic expression in `logic`, and a nonempty `run` list. Strict `logic` and `when` reject unsupported operators, including `literal`; use `{ "==": [1, 1] }` for an unconditional true gate.
 
 ## Build A Structural Action-Only Agent
+
+For TypeSafe Jev, use string enums with descriptions for Choice and explicit bounded `number` rubrics for Score. A rubric has 2–10 ordered nonblank descriptive levels, a nonblank field description and finite inclusive `minimum < maximum` with a finite span. It is allowed only on top-level numbers in `2026-09-19.r1`. Bounds alone are ordinary numeric output, unsupported by Jev. Integer, boolean, free-form and structured outputs are also outside Jev's subset.
+
+Scores map linearly from native [0,N−1] to the authored range and retain fractional values. With three levels on [0,100], 1.6 maps to 80. Invalid values fail before actions. Other providers receive the ordered rubric/range in the description rather than an unsupported schema keyword. See the [complete rubric contract](../templates/guidance/agent-definition-contract.md#explicit-rubric-scores-and-typesafe-jev), [TypeSafe setup and compatibility checks](./providers/typesafe.md), and [executable example](../templates/guidance/examples/jev-choice-score.json).
+
+**New rubric definitions support local and hatched execution; hosted storage of `2026-09-19.r1` is deferred.** Keep ordinary scaffolds on `2026-09-09.r1` when no rubric is needed. Use an updated CLI and re-hatch for the new revision before running it; existing binaries are not upgraded automatically.
 
 Set `agent_schema.properties` to an empty object when the workflow should skip the initial model call and start at actions.
 

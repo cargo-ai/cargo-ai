@@ -29,7 +29,7 @@ pub fn command() -> Command {
                     Arg::new("server")
                         .long("server")
                         .short('s')
-                        .help("LLM server (anthropic, gemini, mistral, ollama, openai, or xai)")
+                        .help("LLM server (anthropic, gemini, mistral, ollama, openai, typesafe, or xai)")
                         .required(true)
                         .value_name("SERVER"),
                 )
@@ -146,7 +146,7 @@ pub fn command() -> Command {
                     Arg::new("server")
                         .long("server")
                         .short('s')
-                        .help("Update server (anthropic, gemini, mistral, ollama, openai, or xai)")
+                        .help("Update server (anthropic, gemini, mistral, ollama, openai, typesafe, or xai)")
                         .required(false)
                         .value_name("SERVER"),
                 )

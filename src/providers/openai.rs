@@ -354,6 +354,7 @@ async fn send_chat_completions_request(
     let usage = normalize_chat_usage(usage);
     match choices.first() {
         Some(choice) => Ok(ProviderTextResponse {
+            resolved_model: None,
             text: choice.message.content.clone(),
             usage,
         }),
@@ -480,12 +481,17 @@ async fn send_chatgpt_codex_responses_request(
     }
 
     if let Some(done) = completed_text {
-        return Ok(ProviderTextResponse { text: done, usage });
+        return Ok(ProviderTextResponse {
+            resolved_model: None,
+            text: done,
+            usage,
+        });
     }
 
     let fallback = accumulated_text.trim().to_string();
     if !fallback.is_empty() {
         return Ok(ProviderTextResponse {
+            resolved_model: None,
             text: fallback,
             usage,
         });

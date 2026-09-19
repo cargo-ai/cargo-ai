@@ -19,6 +19,264 @@ const PARTS: usize = 1_024;
 const DATA_PATH: &str = "$.actions[0].run[0].params.data";
 const STEP_PATH: &str = "$.actions[0].run[0]";
 
+pub fn rubric_definition() -> Value {
+    json!({
+        "agent_definition_schema_version": "2026-09-19.r1",
+        "agent_schema": {"type": "object", "properties": {
+            "score": {"type": "number", "description": "How urgent is the request?",
+                "minimum": -20, "maximum": 100, "rubric": ["Routine", "Urgent"]}
+        }},
+        "actions": []
+    })
+}
+
+pub fn visit_rubric_output_cases(mut visit: impl FnMut(&str, &Value, &Value, bool)) {
+    for (name, minimum, maximum, outputs) in [
+        (
+            "unsigned_precision",
+            json!(9_007_199_254_740_993_u64),
+            json!(9_007_199_254_741_095_u64),
+            vec![
+                (json!(9_007_199_254_740_992_u64), false),
+                (json!(9_007_199_254_740_993_u64), true),
+                (json!(9_007_199_254_741_095_u64), true),
+                (json!(9_007_199_254_741_096_u64), false),
+                (json!(9_007_199_254_740_992.0_f64), false),
+                (json!(9_007_199_254_740_994.0_f64), true),
+                (json!(9_007_199_254_741_096.0_f64), false),
+            ],
+        ),
+        (
+            "signed_precision",
+            json!(-9_007_199_254_741_095_i64),
+            json!(-9_007_199_254_740_993_i64),
+            vec![
+                (json!(-9_007_199_254_741_096_i64), false),
+                (json!(-9_007_199_254_741_095_i64), true),
+                (json!(-9_007_199_254_740_993_i64), true),
+                (json!(-9_007_199_254_740_992_i64), false),
+                (json!(-9_007_199_254_740_992.0_f64), false),
+            ],
+        ),
+        (
+            "positive_fractional_bounds",
+            json!(0.5),
+            json!(100.5),
+            vec![
+                (json!(0), false),
+                (json!(1), true),
+                (json!(100), true),
+                (json!(101), false),
+                (json!(12.5), true),
+            ],
+        ),
+        (
+            "negative_fractional_bounds",
+            json!(-100.5),
+            json!(-0.5),
+            vec![
+                (json!(-101), false),
+                (json!(-100), true),
+                (json!(-1), true),
+                (json!(0), false),
+                (json!(-12.5), true),
+            ],
+        ),
+        (
+            "near_zero",
+            json!(0),
+            json!(1),
+            vec![
+                (json!(-1e-100), false),
+                (json!(1e-100), true),
+                (json!(0), true),
+                (json!(1.0), true),
+            ],
+        ),
+        (
+            "u64_limit",
+            json!(u64::MAX - 4096),
+            json!(u64::MAX),
+            vec![
+                (json!(u64::MAX), true),
+                (json!(18_446_744_073_709_551_616.0_f64), false),
+                (json!(1e100), false),
+            ],
+        ),
+    ] {
+        let mut definition = rubric_definition();
+        definition["agent_schema"]["properties"]["score"]["minimum"] = minimum;
+        definition["agent_schema"]["properties"]["score"]["maximum"] = maximum;
+        for (index, (score, accepted)) in outputs.into_iter().enumerate() {
+            visit(
+                &format!("{name}_{index}"),
+                &definition,
+                &json!({"score": score}),
+                accepted,
+            );
+        }
+    }
+}
+
+/// Rubric authoring boundaries shared by interpreted and generated consumers.
+pub fn visit_rubric_cases(mut visit: impl FnMut(&str, &Value, Option<&str>)) {
+    for count in [0, 1, 2, 10, 11] {
+        let mut value = rubric_definition();
+        value["agent_schema"]["properties"]["score"]["rubric"] = json!(vec!["Level"; count]);
+        visit(
+            &format!("rubric_levels_{count}"),
+            &value,
+            (!(2..=10).contains(&count)).then_some("$.agent_schema.properties.score.rubric"),
+        );
+    }
+    for (name, rubric, path) in [
+        (
+            "non_array",
+            json!("Routine"),
+            "$.agent_schema.properties.score.rubric",
+        ),
+        (
+            "blank_level",
+            json!(["Routine", " \t\n"]),
+            "$.agent_schema.properties.score.rubric[1]",
+        ),
+        (
+            "numeric_level",
+            json!(["Routine", 2]),
+            "$.agent_schema.properties.score.rubric[1]",
+        ),
+        (
+            "structured_level",
+            json!(["Routine", {"description":"Urgent"}]),
+            "$.agent_schema.properties.score.rubric[1]",
+        ),
+    ] {
+        let mut value = rubric_definition();
+        value["agent_schema"]["properties"]["score"]["rubric"] = rubric;
+        visit(name, &value, Some(path));
+    }
+    for key in ["description", "minimum", "maximum"] {
+        let mut value = rubric_definition();
+        value["agent_schema"]["properties"]["score"]
+            .as_object_mut()
+            .unwrap()
+            .remove(key);
+        visit(
+            &format!("missing_{key}"),
+            &value,
+            Some(&format!("$.agent_schema.properties.score.{key}")),
+        );
+    }
+    for (name, key, replacement, path) in [
+        (
+            "blank_description",
+            "description",
+            json!(" \n"),
+            "$.agent_schema.properties.score.description",
+        ),
+        (
+            "integer_score",
+            "type",
+            json!("integer"),
+            "$.agent_schema.properties.score.rubric",
+        ),
+        (
+            "nullable_score",
+            "type",
+            json!(["number", "null"]),
+            "$.agent_schema.properties.score.type",
+        ),
+        (
+            "equal_bounds",
+            "minimum",
+            json!(100),
+            "$.agent_schema.properties.score.rubric",
+        ),
+        (
+            "reversed_bounds",
+            "minimum",
+            json!(101),
+            "$.agent_schema.properties.score",
+        ),
+        (
+            "nonnumeric_bound",
+            "minimum",
+            json!("0"),
+            "$.agent_schema.properties.score.minimum",
+        ),
+        (
+            "exclusive_minimum",
+            "exclusiveMinimum",
+            json!(-20),
+            "$.agent_schema.properties.score.exclusiveMinimum",
+        ),
+        (
+            "exclusive_maximum",
+            "exclusiveMaximum",
+            json!(100),
+            "$.agent_schema.properties.score.exclusiveMaximum",
+        ),
+    ] {
+        let mut value = rubric_definition();
+        value["agent_schema"]["properties"]["score"][key] = replacement;
+        if let Some(inclusive) = match key {
+            "exclusiveMinimum" => Some("minimum"),
+            "exclusiveMaximum" => Some("maximum"),
+            _ => None,
+        } {
+            value["agent_schema"]["properties"]["score"]
+                .as_object_mut()
+                .unwrap()
+                .remove(inclusive);
+        }
+        visit(name, &value, Some(path));
+    }
+    let mut value = rubric_definition();
+    value["agent_schema"]["properties"]["score"]["minimum"] = json!(-1e308);
+    value["agent_schema"]["properties"]["score"]["maximum"] = json!(1e308);
+    visit(
+        "overflowing_span",
+        &value,
+        Some("$.agent_schema.properties.score.rubric"),
+    );
+
+    for (name, wrapper, path) in [
+        (
+            "nested_object",
+            json!({"type":"object", "properties":{"score":rubric_definition()["agent_schema"]["properties"]["score"]}}),
+            "$.agent_schema.properties.score.properties.score.rubric",
+        ),
+        (
+            "array_item",
+            json!({"type":"array", "items":rubric_definition()["agent_schema"]["properties"]["score"]}),
+            "$.agent_schema.properties.score.items.rubric",
+        ),
+    ] {
+        let mut value = rubric_definition();
+        value["agent_schema"]["properties"]["score"] = wrapper;
+        visit(name, &value, Some(path));
+    }
+    let mut ordinary = rubric_definition();
+    ordinary["agent_schema"]["properties"]["score"]
+        .as_object_mut()
+        .unwrap()
+        .remove("rubric");
+    ordinary["agent_schema"]["properties"]["score"]["minimum"] = json!(100);
+    visit("ordinary_equal_inclusive_bounds", &ordinary, None);
+
+    for (version, expected) in [
+        (
+            "2026-09-09.r1",
+            Some("$.agent_schema.properties.score.rubric"),
+        ),
+        ("2026-09-08.r42", None),
+    ] {
+        let mut value = rubric_definition();
+        value["agent_definition_schema_version"] = json!(version);
+        visit(version, &value, expected);
+    }
+}
+
 /// Visit valid exact-limit definitions and definitions exceeding one limit.
 ///
 /// A rejected case supplies its expected resource name and canonical JSON path.

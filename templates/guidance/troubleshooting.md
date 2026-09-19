@@ -17,7 +17,7 @@ If the definition uses the legacy top-level `version` key, rename it to `agent_d
 
 ### Unsupported version or unknown field
 
-The current strict revision is `2026-09-09.r1`. Valid earlier revisions keep legacy parsing behavior. Every other revision at or after the cutoff produces `unsupported_schema_version`; check the intended contract or upgrade Cargo AI. Do not blindly replace an unsupported version header. Migration means reviewing and validating the complete definition.
+The supported strict revisions are `2026-09-09.r1` (ordinary scaffolds) and `2026-09-19.r1` (opt-in rubric). The former still rejects rubric and unknown fields. Valid revisions before `2026-09-09.r1` keep legacy parsing behavior. Every other revision at or after that cutoff produces `unsupported_schema_version`; check the intended contract or upgrade Cargo AI. Do not blindly replace an unsupported version header. Migration means reviewing and validating the complete definition.
 
 For `unknown_field`, read the reported JSON path and allowed keys. Correct a misspelling or remove an unsupported field; move commentary into a sidecar Markdown file. The step platform key is `platform`, not `platforms`.
 
@@ -138,6 +138,20 @@ Check for:
 - pointing a custom URL at an OpenAI-compatible facade; Cargo AI's `anthropic` adapter expects the native Messages request and response contract
 - sending direct file input or selecting an Anthropic profile for `generate_image`; use text, URL-text, or image input, or select an OpenAI/Ollama step profile for image generation
 - assuming Cargo AI silently simplifies an unsupported JSON Schema; provider schema errors are surfaced so the authored contract remains visible
+
+## TypeSafe Jev compatibility failures
+
+Use `hatch NAME --config FILE --check --profile jev` to assess declared schema/input kinds/settings. The check profile is metadata-only and does not lock runtime selection. Static success does not prove credentials, live model availability, context fit, fetched input content, runtime overrides, child selections or judgment quality.
+
+- `rubric` rejected: use opt-in `2026-09-19.r1` only for top-level `number`, with nonblank description, 2–10 ordered nonblank strings and finite inclusive `minimum < maximum` with finite span. No exclusive bounds or nested/integer rubric. Invalid rubrics fail on every provider.
+- Ordinary number rejected by Jev: add meaningful rubric levels if scoring is the intended task, or select a provider supporting ordinary numeric output. Bounds alone never imply scoring. Boolean/Noul, free-form and structured outputs are unsupported; do not remove fields silently.
+- Input rejected: Jev accepts text and client-fetched URL text only. Do not silently convert image/file inputs. Runtime overrides can invalidate a prior static result.
+- Unsupported setting: run `cargo ai profile set jev --clear-temperature` and/or `cargo ai profile set jev --clear-max-output-tokens`; inherited settings count too.
+- Missing/invalid response: preserve the failure. Missing/extra answer IDs, invalid labels/types or out-of-range scores stop downstream actions. Scores are never clamped. No automatic retry or fallback is added.
+- Context/auth/rate-limit/service failure: check the selected model, account access and provider limits; no exact local tokenizer certifies token fit. Never include keys or raw input payloads in shared diagnostics.
+- Hosted save fails for a rubric definition: new revision `2026-09-19.r1` is supported for local/hatch execution only; hosted storage is deferred. Keep ordinary scaffolds on `2026-09-09.r1` when no rubric is needed. Do not change the version header without reviewing the whole contract.
+
+A valid score is not a calibrated confidence/probability. Check representative labeled judgments; the syntax check cannot assess rubric quality. Failed children cannot undo prior actions.
 
 ### Mistral API provider confusion
 

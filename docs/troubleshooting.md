@@ -64,6 +64,12 @@ Standalone provider notes:
 
 Provider pages remain the authority for current endpoint and feature differences. Cargo AI surfaces unsupported input, image-generation, or schema behavior instead of silently changing providers or weakening the authored contract.
 
+## TypeSafe Jev Rejects A Definition Or Invocation
+
+Use [TypeSafe setup and limits](./providers/typesafe.md) and `hatch NAME --config FILE --check --profile jev` to assess declared compatibility. Jev requires described string enums or explicit bounded numeric rubrics; a bounded number alone is not Score. Rubric requires opt-in `2026-09-19.r1`, a top-level `number`, a description, 2–10 ordered nonblank levels and finite inclusive bounds. Image/file inputs and temperature/max-output-tokens are unsupported; clear inherited settings with `profile set jev --clear-temperature` or `--clear-max-output-tokens`.
+
+Static success cannot certify credentials, live availability, token fit, fetched content, runtime overrides, children or answer quality. Runtime failures stop downstream actions without fallback or automatic retries. New rubric definitions support local/hatched execution; hosted storage of the revision is deferred. See the [detailed repairs](../templates/guidance/troubleshooting.md#typesafe-jev-compatibility-failures).
+
 ## A Standalone Agent Works Only On The Author's Machine
 
 A standalone recipient does not need Cargo AI installed when the binary has no package-child (`alias::entrypoint`) references and the recipient supplies the required runtime context through a configured profile, such as:

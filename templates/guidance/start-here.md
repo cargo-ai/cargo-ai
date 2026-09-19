@@ -36,6 +36,10 @@ When the user wants token usage, runtime timing, provider timing, or embedding-f
 When selecting a model provider:
 - `anthropic` uses Anthropic's native Messages API and requires an `api_key` profile or explicit token
 - `gemini` uses Google's native Interactions API and requires an `api_key` profile or explicit token
+- `typesafe` uses hosted Jev with required `api_key` auth; pin an available model such as `jev-1.13.0`. It supports text/URL-text and flat described string enums (Choice) plus explicit bounded rubric numbers (Score); leave temperature and max-output-tokens unset.
+- Jev Score uses opt-in `2026-09-19.r1` with 2–10 ordered nonblank rubric levels, inclusive finite numeric bounds and a field description. Bounds alone are not a Score. New rubric definitions support local/hatched execution; hosted storage is deferred. Ordinary scaffolds stay on `2026-09-09.r1`. Explain this before account saving/sharing.
+- Use `hatch NAME --config FILE --check --profile jev` for declared profile compatibility. The assessment uses metadata without secrets/inference and does not certify live availability, credentials, token fit, judgment quality or dynamic inputs/steps. Runtime checks actual invocations; the target is not a runtime lock. See `examples/jev-choice-score.json`.
+
 - `mistral` uses Mistral's hosted Chat Completions API and requires an `api_key` profile or explicit token
 - `openai` supports direct API-key profiles and the OpenAI-only account-session flow
 - `ollama` supports local no-token operation and optional API-key-compatible endpoints

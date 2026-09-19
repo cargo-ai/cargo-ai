@@ -392,7 +392,8 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         build_target,
         output_dir,
         presentation,
-    );
+    )
+    .with_compatibility_profile(sub_m.get_one::<String>("profile").cloned());
 
     super::hatch_pipeline::run_hatch_pipeline(request)
 }

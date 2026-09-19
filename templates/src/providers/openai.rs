@@ -1,6 +1,8 @@
 // External Crates
 use super::{
-    runtime::{ContentPart, ImageReference, ProviderImageResponse, ProviderTextResponse, ProviderUsage},
+    runtime::{
+        ContentPart, ImageReference, ProviderImageResponse, ProviderTextResponse, ProviderUsage,
+    },
     ProviderError, ProviderKind,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -273,11 +275,15 @@ fn normalize_responses_usage(payload: &serde_json::Value) -> Option<ProviderUsag
         .or_else(|| payload.get("usage"))?;
 
     Some(ProviderUsage {
-        input_tokens: usage.get("input_tokens").and_then(serde_json::Value::as_u64),
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(serde_json::Value::as_u64),
         output_tokens: usage
             .get("output_tokens")
             .and_then(serde_json::Value::as_u64),
-        total_tokens: usage.get("total_tokens").and_then(serde_json::Value::as_u64),
+        total_tokens: usage
+            .get("total_tokens")
+            .and_then(serde_json::Value::as_u64),
         input_token_details: usage.get("input_tokens_details").cloned(),
         output_token_details: usage.get("output_tokens_details").cloned(),
     })
@@ -348,6 +354,7 @@ async fn send_chat_completions_request(
     let usage = normalize_chat_usage(usage);
     match choices.first() {
         Some(choice) => Ok(ProviderTextResponse {
+            resolved_model: None,
             text: choice.message.content.clone(),
             usage,
         }),
@@ -474,12 +481,17 @@ async fn send_chatgpt_codex_responses_request(
     }
 
     if let Some(done) = completed_text {
-        return Ok(ProviderTextResponse { text: done, usage });
+        return Ok(ProviderTextResponse {
+            resolved_model: None,
+            text: done,
+            usage,
+        });
     }
 
     let fallback = accumulated_text.trim().to_string();
     if !fallback.is_empty() {
         return Ok(ProviderTextResponse {
+            resolved_model: None,
             text: fallback,
             usage,
         });

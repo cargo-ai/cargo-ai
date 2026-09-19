@@ -1,0 +1,71 @@
+{
+  "agent_definition_schema_version": "2026-09-19.r1",
+  "inputs": [
+    {
+      "name": "message",
+      "type": "text",
+      "text": "All users are locked out of production and there is no workaround. Please restore access immediately."
+    }
+  ],
+  "agent_schema": {
+    "type": "object",
+    "properties": {
+      "department": {
+        "type": "string",
+        "enum": [
+          "billing",
+          "technical",
+          "sales"
+        ],
+        "description": "Which department should handle this message? Billing handles invoices and payments; technical handles service failures; sales handles quotes and licensing."
+      },
+      "urgency": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 100,
+        "description": "How urgently does this message need attention?",
+        "rubric": [
+          "Routine request that can wait until next week",
+          "Time-sensitive request needing attention today",
+          "Service-blocking issue requiring immediate attention"
+        ]
+      }
+    }
+  },
+  "actions": [
+    {
+      "name": "high_urgency_marker",
+      "logic": {
+        ">=": [
+          {
+            "var": "urgency"
+          },
+          75
+        ]
+      },
+      "run": [
+        {
+          "kind": "exec",
+          "program": "/bin/echo",
+          "args": [
+            "JEV_HIGH_URGENCY"
+          ],
+          "platform": [
+            "macos",
+            "linux"
+          ]
+        },
+        {
+          "kind": "exec",
+          "program": "cmd.exe",
+          "args": [
+            "/C",
+            "echo",
+            "JEV_HIGH_URGENCY"
+          ],
+          "platform": "windows"
+        }
+      ]
+    }
+  ]
+}

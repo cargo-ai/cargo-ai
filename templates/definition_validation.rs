@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 pub const STRICT_SCHEMA_VERSION: &str = "2026-09-09.r1";
+pub const RUBRIC_SCHEMA_VERSION: &str = "2026-09-19.r1";
 pub const VERSION_KEY: &str = "agent_definition_schema_version";
 pub const MAX_STRING_BYTES: usize = 256 * 1024;
 pub const MAX_KEY_BYTES: usize = 256;
@@ -272,7 +273,7 @@ pub fn definition_revision(root: &Value) -> Result<DefinitionRevision> {
     let strict = (2026, 9, 9, 1);
     if parsed < strict {
         Ok(DefinitionRevision::Legacy)
-    } else if value == STRICT_SCHEMA_VERSION {
+    } else if value == STRICT_SCHEMA_VERSION || value == RUBRIC_SCHEMA_VERSION {
         Ok(DefinitionRevision::Strict)
     } else {
         Err(error(
@@ -521,6 +522,7 @@ fn descriptor(
     value: &Value,
     path: &str,
     context: SchemaContext,
+    rubric_allowed: bool,
     budget: &mut Budget,
 ) -> Result<Kind> {
     budget.charge(path, 1)?;
@@ -529,6 +531,15 @@ fn descriptor(
     let allowed: &[&str] = match k {
         Kind::String => &["type", "description", "enum"],
         Kind::Boolean => &["type", "description"],
+        Kind::Number if rubric_allowed && context == SchemaContext::TopLevel => &[
+            "type",
+            "description",
+            "minimum",
+            "maximum",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+            "rubric",
+        ],
         Kind::Integer | Kind::Number => &[
             "type",
             "description",
@@ -576,11 +587,15 @@ fn descriptor(
     if k.numeric() {
         numeric_schema(map, path, k, budget)?;
     }
+    if let Some(rubric) = map.get("rubric") {
+        rubric_schema(map, rubric, path, budget)?;
+    }
     if k == Kind::Array {
         descriptor(
             required(map, "items", path)?,
             &field_path(path, "items"),
             SchemaContext::ArrayItem,
+            rubric_allowed,
             budget,
         )?;
     }
@@ -599,11 +614,55 @@ fn descriptor(
                 prop,
                 &field_path(&p, name),
                 SchemaContext::ObjectProperty,
+                rubric_allowed,
                 budget,
             )?;
         }
     }
     Ok(k)
+}
+
+fn rubric_schema(
+    map: &Map<String, Value>,
+    rubric: &Value,
+    path: &str,
+    budget: &mut Budget,
+) -> Result<()> {
+    let rubric_path = field_path(path, "rubric");
+    let levels = array(rubric, &rubric_path)?;
+    if !(2..=10).contains(&levels.len()) {
+        return Err(invalid(
+            &rubric_path,
+            "A rubric must contain 2–10 nonblank strings in low-to-high order.",
+        ));
+    }
+    for (index, level) in levels.iter().enumerate() {
+        let level_path = index_path(&rubric_path, index);
+        budget.charge(&level_path, 1)?;
+        nonempty(level, &level_path)?;
+    }
+    nonempty(
+        required(map, "description", path)?,
+        &field_path(path, "description"),
+    )?;
+    for key in ["exclusiveMinimum", "exclusiveMaximum"] {
+        if map.contains_key(key) {
+            return Err(invalid(
+                &field_path(path, key),
+                "Rubric scores require inclusive minimum and maximum bounds.",
+            ));
+        }
+    }
+    // Numeric schema validation has already established finite numeric values.
+    let minimum = required(map, "minimum", path)?.as_f64().unwrap();
+    let maximum = required(map, "maximum", path)?.as_f64().unwrap();
+    if minimum >= maximum || !(maximum - minimum).is_finite() {
+        return Err(invalid(
+            &rubric_path,
+            "Rubric bounds must satisfy minimum < maximum with a finite representable span.",
+        ));
+    }
+    Ok(())
 }
 fn numeric_schema(
     map: &Map<String, Value>,
@@ -781,7 +840,13 @@ pub fn validate_definition(value: &Value) -> Result<DefinitionRevision> {
         identifier(name, &p, true)?;
         fields.insert(
             name.clone(),
-            descriptor(prop, &p, SchemaContext::TopLevel, &mut budget)?,
+            descriptor(
+                prop,
+                &p,
+                SchemaContext::TopLevel,
+                value[VERSION_KEY] == RUBRIC_SCHEMA_VERSION,
+                &mut budget,
+            )?,
         );
     }
     if let Some(vars) = root.get("runtime_vars") {
@@ -1585,6 +1650,9 @@ fn output_value(value: &Value, schema: &Value, path: &str, budget: &mut Budget) 
                             .as_i64()
                             .ok_or_else(|| invalid(path, "Invalid integer schema bound."))?,
                     )
+                } else if schema.contains_key("rubric") {
+                    exact_number_order(value, bound)
+                        .ok_or_else(|| invalid(path, "Invalid finite numeric schema bound."))?
                 } else {
                     value
                         .as_f64()
@@ -1630,4 +1698,30 @@ fn output_value(value: &Value, schema: &Value, path: &str, budget: &mut Budget) 
         }
     }
     Ok(())
+}
+
+fn exact_number_order(value: &Value, bound: &Value) -> Option<std::cmp::Ordering> {
+    fn integer(value: &Value) -> Option<i128> {
+        value
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| value.as_u64().map(i128::from))
+    }
+    fn finite(value: &Value) -> Option<f64> {
+        value.as_f64().filter(|number| number.is_finite())
+    }
+    fn integer_float(integer: i128, float: f64) -> std::cmp::Ordering {
+        // Every JSON integer fits i128. Truncation preserves the float's whole
+        // part without rounding the integer to f64; saturation can only occur
+        // beyond the JSON integer range. The fractional sign breaks a tie.
+        integer
+            .cmp(&(float as i128))
+            .then_with(|| 0.0_f64.partial_cmp(&float.fract()).unwrap())
+    }
+    match (integer(value), integer(bound)) {
+        (Some(value), Some(bound)) => Some(value.cmp(&bound)),
+        (Some(value), None) => Some(integer_float(value, finite(bound)?)),
+        (None, Some(bound)) => Some(integer_float(bound, finite(value)?).reverse()),
+        (None, None) => finite(value)?.partial_cmp(&finite(bound)?),
+    }
 }

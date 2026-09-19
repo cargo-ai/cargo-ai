@@ -2252,9 +2252,11 @@ fn installed_authoring_examples_use_valid_strict_contracts() {
             }
             let raw = std::fs::read_to_string(&path).unwrap();
             let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-            assert_eq!(
-                value["agent_definition_schema_version"],
-                "2026-09-09.r1",
+            assert!(
+                matches!(
+                    value["agent_definition_schema_version"].as_str(),
+                    Some("2026-09-09.r1" | "2026-09-19.r1")
+                ),
                 "{}",
                 path.display()
             );
@@ -2321,4 +2323,66 @@ fn malformed_json_uses_shared_codegen_error() {
             error => panic!("missing shared parse failure: {error}"),
         }
     }
+}
+
+#[test]
+fn rubric_authoring_boundaries_match_codegen_contract() {
+    let mut count = 0;
+    boundary_cases::visit_rubric_cases(|name, value, expected| {
+        count += 1;
+        let actual = build_support::generate_agent_model_from_str(&value.to_string());
+        if let Some(path) = expected {
+            match actual.expect_err(name) {
+                build_support::BuildError::Definition(error) => {
+                    assert_eq!(error.path, path, "{name}: {error}")
+                }
+                error => panic!("{name}: missing shared contract error: {error}"),
+            }
+        } else {
+            assert!(actual.is_ok(), "{name}: {actual:?}");
+        }
+    });
+    assert_eq!(count, 26);
+}
+
+#[test]
+fn rubric_codegen_retains_metadata_and_gates_its_semantics_by_revision() {
+    for (version, enabled) in [("2026-09-19.r1", true), ("2026-09-08.r42", false)] {
+        let mut value = boundary_cases::rubric_definition();
+        value["agent_definition_schema_version"] = serde_json::json!(version);
+        let generated = build_support::generate_agent_model_from_str(&value.to_string()).unwrap();
+        assert!(generated.contains(&format!(
+            "pub fn rubric_enabled() -> bool {{\n    {enabled}\n}}"
+        )));
+        assert!(generated.contains("\\\"rubric\\\":[\\\"Routine\\\",\\\"Urgent\\\"]"));
+        assert!(generated.contains(if enabled {
+            "pub score: serde_json::Number"
+        } else {
+            "pub score: f64"
+        }));
+        if enabled {
+            assert!(generated.contains(
+                "crate::definition_validation::validate_model_output(value, &json_schema_value())"
+            ));
+        }
+    }
+}
+
+#[test]
+fn rubric_output_bounds_compare_exactly_in_generated_raw_validation() {
+    let mut count = 0;
+    boundary_cases::visit_rubric_output_cases(|name, definition, output, accepted| {
+        count += 1;
+        let generated =
+            build_support::generate_agent_model_from_str(&definition.to_string()).unwrap();
+        assert!(generated.contains(
+            "crate::definition_validation::validate_model_output(value, &json_schema_value())"
+        ));
+        let actual = build_support::definition_validation::validate_model_output(
+            output,
+            &definition["agent_schema"],
+        );
+        assert_eq!(actual.is_ok(), accepted, "{name}: {output}: {actual:?}");
+    });
+    assert_eq!(count, 29);
 }

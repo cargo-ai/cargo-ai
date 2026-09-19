@@ -31,6 +31,7 @@ struct AccountHatchCommand {
     keep_project: bool,
     build_target: BuildTarget,
     output_dir: Option<PathBuf>,
+    compatibility_profile: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -184,6 +185,11 @@ fn parse_hatch_command(hatch_m: &ArgMatches) -> Result<AccountHatchCommand, Stri
             .get_one::<String>("definition_path")
             .map(|s| s.to_string()),
         mode: hatch_mode_from_check_flag(hatch_m.get_flag("check")),
+        compatibility_profile: hatch_m
+            .try_get_one::<String>("profile")
+            .ok()
+            .flatten()
+            .cloned(),
         force_overwrite: hatch_m.get_flag("force"),
         keep_project: hatch_m.get_flag("keep_project"),
         build_target,
@@ -543,7 +549,8 @@ fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &Value) -
         hatch.build_target.clone(),
         hatch.output_dir.clone(),
         account_hatch_presentation(hatch, response),
-    );
+    )
+    .with_compatibility_profile(hatch.compatibility_profile.clone());
 
     crate::commands::hatch_pipeline::run_hatch_pipeline(request)
 }

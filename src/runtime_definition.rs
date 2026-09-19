@@ -51,6 +51,7 @@ pub(crate) struct RuntimeAgentDefinition {
     action_execution: crate::ActionExecutionMode,
     actions: Vec<crate::Action>,
     strict_definition: bool,
+    rubric_enabled: bool,
 }
 
 impl RuntimeAgentDefinition {
@@ -94,6 +95,7 @@ impl RuntimeAgentDefinition {
             action_execution,
             actions,
             strict_definition: revision == crate::definition_validation::DefinitionRevision::Strict,
+            rubric_enabled: schema_version == crate::definition_validation::RUBRIC_SCHEMA_VERSION,
         })
     }
 
@@ -115,6 +117,10 @@ impl RuntimeAgentDefinition {
 
     pub(crate) fn has_output_schema_properties(&self) -> bool {
         !self.schema_properties.is_empty()
+    }
+
+    pub(crate) fn rubric_enabled(&self) -> bool {
+        self.rubric_enabled
     }
 
     pub(crate) fn json_schema_value(&self) -> Value {
@@ -195,6 +201,10 @@ impl RuntimeAgentDefinition {
 }
 
 impl crate::commands::runtime::InvocationDefinition for RuntimeAgentDefinition {
+    fn rubric_enabled(&self) -> bool {
+        RuntimeAgentDefinition::rubric_enabled(self)
+    }
+
     fn named_inputs(&self) -> Vec<crate::Input> {
         self.named_inputs()
     }
@@ -420,11 +430,20 @@ fn parse_schema_properties(root_obj: &Map<String, Value>) -> Result<Vec<SchemaPr
 
         let property_path = format!("$.agent_schema.properties.{name}");
         let property = expect_object(raw_property, property_path.as_str())?;
-        let (_, schema_value) = normalize_schema_property(
+        let (_, mut schema_value) = normalize_schema_property(
             property,
             property_path.as_str(),
             SchemaPropertyContext::TopLevel,
         )?;
+        if root_obj[crate::definition_validation::VERSION_KEY]
+            == crate::definition_validation::RUBRIC_SCHEMA_VERSION
+            && property.contains_key("rubric")
+        {
+            // Exact authored endpoints are returned unchanged by rubric providers.
+            for key in ["minimum", "maximum"] {
+                schema_value[key] = property[key].clone();
+            }
+        }
 
         parsed.push(SchemaProperty {
             name: name.clone(),
@@ -3072,6 +3091,145 @@ mod tests {
             let error = RuntimeAgentDefinition::from_str(raw).unwrap_err();
             assert!(error.starts_with("invalid_json at $:"), "{error}");
             assert!(error.contains("Correct the JSON syntax"));
+        }
+    }
+
+    #[test]
+    fn rubric_authoring_boundaries_match_interpreted_contract() {
+        let mut count = 0;
+        super::boundary_cases::visit_rubric_cases(|name, value, expected| {
+            count += 1;
+            let actual = RuntimeAgentDefinition::from_str(&value.to_string());
+            if let Some(path) = expected {
+                let error = crate::definition_validation::validate_definition(value).unwrap_err();
+                assert_eq!(error.path, path, "{name}: {error}");
+                assert_eq!(actual.unwrap_err(), error.to_string(), "{name}");
+            } else {
+                assert!(actual.is_ok(), "{name}: {actual:?}");
+            }
+        });
+        assert_eq!(count, 26);
+    }
+
+    #[test]
+    fn rubric_metadata_and_inclusive_fractional_output_survive_normalization() {
+        for (version, enabled) in [("2026-09-19.r1", true), ("2026-09-08.r42", false)] {
+            let mut value = super::boundary_cases::rubric_definition();
+            value["agent_definition_schema_version"] = serde_json::json!(version);
+            let definition = RuntimeAgentDefinition::from_str(&value.to_string()).unwrap();
+            assert_eq!(definition.rubric_enabled(), enabled);
+            let mut expected_schema = value["agent_schema"]["properties"]["score"].clone();
+            if !enabled {
+                expected_schema["minimum"] = serde_json::json!(-20.0);
+                expected_schema["maximum"] = serde_json::json!(100.0);
+            }
+            assert_eq!(
+                definition.json_schema_value()["properties"]["score"],
+                expected_schema
+            );
+            for score in [-20.0, 12.5, 100.0] {
+                let output = serde_json::json!({"score":score});
+                assert_eq!(
+                    definition
+                        .validate_provider_output(&output.to_string())
+                        .unwrap(),
+                    output
+                );
+            }
+            for output in [
+                r#"{"score":-20.001}"#,
+                r#"{"score":100.001}"#,
+                r#"{"score":"10"}"#,
+                r#"{"score":null}"#,
+                "{}",
+                r#"{"score":10,"extra":true}"#,
+            ] {
+                assert!(
+                    definition.validate_provider_output(output).is_err(),
+                    "{version}: {output}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rubric_large_authored_endpoints_survive_interpreted_normalization() {
+        for (version, rubric) in [
+            ("2026-09-19.r1", true),
+            ("2026-09-19.r1", false),
+            ("2026-09-08.r42", true),
+            ("2026-09-09.r1", false),
+        ] {
+            let mut value = super::boundary_cases::rubric_definition();
+            value["agent_definition_schema_version"] = serde_json::json!(version);
+            let property = &mut value["agent_schema"]["properties"]["score"];
+            property["minimum"] = serde_json::json!(9_007_199_254_740_993_u64);
+            property["maximum"] = serde_json::json!(9_007_199_254_741_093_u64);
+            if !rubric {
+                property.as_object_mut().unwrap().remove("rubric");
+            }
+            let definition = RuntimeAgentDefinition::from_str(&value.to_string()).unwrap();
+            let schema = definition.json_schema_value();
+            for key in ["minimum", "maximum"] {
+                let authored = &value["agent_schema"]["properties"]["score"][key];
+                let actual = &schema["properties"]["score"][key];
+                if version == "2026-09-19.r1" && rubric {
+                    assert_eq!(actual, authored, "{key}");
+                    let output = serde_json::json!({"score":authored});
+                    assert_eq!(
+                        definition
+                            .validate_provider_output(&output.to_string())
+                            .unwrap(),
+                        output
+                    );
+                } else {
+                    assert_eq!(
+                        actual,
+                        &serde_json::json!(authored.as_f64().unwrap()),
+                        "{version}, rubric={rubric}: {key}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rubric_output_bounds_compare_integer_and_float_values_exactly() {
+        let mut count = 0;
+        super::boundary_cases::visit_rubric_output_cases(|name, definition, output, accepted| {
+            count += 1;
+            let runtime = RuntimeAgentDefinition::from_str(&definition.to_string()).unwrap();
+            let actual = runtime.validate_provider_output(&output.to_string());
+            assert_eq!(actual.is_ok(), accepted, "{name}: {output}: {actual:?}");
+        });
+        assert_eq!(count, 29);
+    }
+
+    #[test]
+    fn rubric_precision_checks_preserve_ordinary_and_legacy_number_behavior() {
+        for (version, rubric) in [
+            ("2026-09-19.r1", false),
+            ("2026-09-09.r1", false),
+            ("2026-09-08.r42", true),
+        ] {
+            let mut definition = super::boundary_cases::rubric_definition();
+            definition["agent_definition_schema_version"] = serde_json::json!(version);
+            let property = &mut definition["agent_schema"]["properties"]["score"];
+            property["minimum"] = serde_json::json!(9_007_199_254_740_993_u64);
+            property["maximum"] = serde_json::json!(9_007_199_254_741_095_u64);
+            if !rubric {
+                property.as_object_mut().unwrap().remove("rubric");
+            }
+            let runtime = RuntimeAgentDefinition::from_str(&definition.to_string()).unwrap();
+            // Prior numeric contracts compare through f64, including its rounding.
+            for score in [9_007_199_254_740_992_u64, 9_007_199_254_741_096_u64] {
+                assert!(
+                    runtime
+                        .validate_provider_output(&serde_json::json!({"score":score}).to_string())
+                        .is_ok(),
+                    "{version}: {score}"
+                );
+            }
         }
     }
 }

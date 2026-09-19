@@ -11,6 +11,7 @@ pub mod credentials;
 pub mod definition_source;
 #[cfg(feature = "developer-tools")]
 pub mod hatch;
+mod hatch_compatibility;
 pub mod hatch_pipeline;
 pub mod init;
 pub mod local_packages;
