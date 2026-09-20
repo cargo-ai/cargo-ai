@@ -121,3 +121,43 @@ fn preserves_older_date_revisions_and_unknown_root_fields() {
         );
     }
 }
+
+#[test]
+fn both_supported_strict_revisions_keep_unknown_keyword_rejection() {
+    for version in ["2026-09-09.r1", "2026-09-19.r1"] {
+        assert!(build_support::generate_agent_model_from_str(&minimal_agentcfg(version)).is_ok());
+        let config = minimal_agentcfg_with_header(&format!(
+            r#""agent_definition_schema_version": "{version}", "unknown_root_field": true"#
+        ));
+        let error = build_support::generate_agent_model_from_str(&config)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("unknown_field at $.unknown_root_field"),
+            "{error}"
+        );
+        let root: serde_json::Value = serde_json::from_str(&minimal_agentcfg(version)).unwrap();
+        assert_eq!(
+            build_support::definition_validation::definition_revision(&root).unwrap(),
+            build_support::definition_validation::DefinitionRevision::Strict
+        );
+    }
+}
+
+#[test]
+fn unrecognized_revisions_after_strict_cutoff_never_become_legacy() {
+    for version in [
+        "2026-09-09.r2",
+        "2026-09-10.r1",
+        "2026-09-19.r2",
+        "2026-09-20.r1",
+    ] {
+        let error = build_support::generate_agent_model_from_str(&minimal_agentcfg(version))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("unsupported_schema_version"),
+            "{version}: {error}"
+        );
+    }
+}

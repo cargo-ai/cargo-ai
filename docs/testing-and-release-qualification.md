@@ -103,7 +103,7 @@ This section is for Cargo AI maintainers validating provider adapters. It is not
 
 ### Deterministic interpreted adapters
 
-The ordinary provider suite uses loopback fixtures, fake credentials, and a temporary Cargo AI Home. It covers interpreted success for OpenAI, Anthropic, Gemini, xAI, Mistral, and the Ollama-compatible transport, plus focused failure and capability boundaries where applicable:
+The ordinary provider suite uses loopback fixtures, fake credentials, and a temporary Cargo AI Home. It covers interpreted success for OpenAI, Anthropic, Gemini, xAI, Mistral, TypeSafe Jev, and the Ollama-compatible transport, plus focused failure and capability boundaries where applicable:
 
 ```bash
 cargo test --locked --test provider_smoke
@@ -118,17 +118,18 @@ cargo test --locked --test provider_smoke interpreted_gemini_smoke_isolated_and_
 cargo test --locked --test provider_smoke interpreted_xai_smoke_isolated_and_deterministic -- --exact
 cargo test --locked --test provider_smoke interpreted_mistral_smoke_isolated_and_deterministic -- --exact
 cargo test --locked --test provider_smoke interpreted_ollama_smoke_isolated_and_deterministic -- --exact
+cargo test --locked --test provider_smoke typesafe_smoke::interpreted_typesafe_public_example_maps_scores_and_drives_condition -- --exact
 ```
 
 ### Deterministic generated adapters
 
-Generated-provider parity cases hatch and run complete standalone executables against the same loopback assertions. They are ignored by the ordinary Rust invocation because they compile full binaries. **Core CI** runs one sequential batch containing all six original case bodies on Ubuntu, macOS, and Windows:
+Generated-provider parity cases hatch and run complete standalone executables against the same loopback assertions. They are ignored by the ordinary Rust invocation because they compile full binaries. **Core CI** runs one sequential batch containing all seven provider cases on Ubuntu, macOS, and Windows:
 
 ```bash
 cargo test --locked --test provider_smoke generated_provider_batch_isolated_and_deterministic -- --ignored --exact --nocapture
 ```
 
-The batch prepares a neutral release seed, then copies its compatible template/compiler cache into each fresh case home. It preserves timestamps and executable permissions, verifies immutable seed SHA-256 digests in Rust, and transfers no credentials or provider-case state. Every generated application is still assembled and executed. The six individually selectable cases remain available for diagnosis:
+The batch prepares a neutral release seed, then copies its compatible template/compiler cache into each fresh case home. It preserves timestamps and executable permissions, verifies immutable seed SHA-256 digests in Rust, and transfers no credentials or provider-case state. Every generated application is still assembled and executed. The seven individually selectable cases remain available for diagnosis:
 
 ```bash
 cargo test --locked --test provider_smoke generated_openai_smoke_isolated_and_deterministic -- --ignored --exact
@@ -137,6 +138,7 @@ cargo test --locked --test provider_smoke generated_gemini_smoke_isolated_and_de
 cargo test --locked --test provider_smoke generated_xai_smoke_isolated_and_deterministic -- --ignored --exact
 cargo test --locked --test provider_smoke generated_mistral_smoke_isolated_and_deterministic -- --ignored --exact
 cargo test --locked --test provider_smoke generated_ollama_smoke_isolated_and_deterministic -- --ignored --exact
+cargo test --locked --test provider_smoke typesafe_smoke::generated_typesafe_smoke_isolated_and_deterministic -- --ignored --exact
 ```
 
 These checks prove interpreted/generated parity for representative fixtures. They do not contact a provider, validate an account, or certify every model.
@@ -152,6 +154,9 @@ Live cases are separately ignored and must be intentional. Load the matching key
 | Gemini | `GEMINI_API_KEY`, `GEMINI_MODEL` | `live_gemini_smoke_uses_isolated_stdin_credentials` |
 | xAI | `XAI_API_KEY`, `XAI_MODEL` | `live_xai_smoke_uses_isolated_stdin_credentials` |
 | Mistral | `MISTRAL_API_KEY`, `MISTRAL_MODEL` | `live_mistral_smoke_uses_isolated_stdin_credentials` |
+| TypeSafe Jev | `TYPESAFE_API_KEY`, `TYPESAFE_MODEL` | `typesafe_smoke::live_typesafe_journey_uses_isolated_stdin_credentials` |
+
+The TypeSafe journey makes at most eight inference requests with no automatic retries: three labeled Choice/Score messages interpreted and standalone, one fetched URL-text case and one live parent with a mocked child. It uses the existing isolated stdin credential store, omits unsupported generation settings and checks local marker behavior. It is a manually selected integration test; it is not enrolled in Product Qualification by this addition.
 
 After the selected provider's variables are already present, run its exact checkpoint:
 

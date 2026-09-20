@@ -460,6 +460,7 @@ fn provider_json(
             ProviderKind::Mistral => "mistral",
             ProviderKind::Ollama => "ollama",
             ProviderKind::OpenAi => "openai",
+            ProviderKind::TypeSafe => "typesafe",
             ProviderKind::Xai => "xai",
         },
         "profile": profile_name,

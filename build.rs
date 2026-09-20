@@ -90,6 +90,14 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
         source: "src/providers/error.rs",
     },
     TemplateSource {
+        destination: "src/providers/typesafe.rs",
+        source: "src/providers/typesafe.rs",
+    },
+    TemplateSource {
+        destination: "src/providers/compatibility.rs",
+        source: "src/providers/compatibility.rs",
+    },
+    TemplateSource {
         destination: "src/providers/xai.rs",
         source: "src/providers/xai.rs",
     },

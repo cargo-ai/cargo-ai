@@ -78,6 +78,10 @@ const EXAMPLE_BASIC_AGENT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/examples/basic-agent.json"
 ));
+const EXAMPLE_JEV_CHOICE_SCORE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/jev-choice-score.json"
+));
 const EXAMPLE_SCHEMA_FEATURES: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/examples/schema-features.json"
@@ -117,7 +121,7 @@ struct GuidanceArtifact {
     contents: &'static str,
 }
 
-const GUIDANCE_ARTIFACTS: [GuidanceArtifact; 22] = [
+const GUIDANCE_ARTIFACTS: [GuidanceArtifact; 23] = [
     GuidanceArtifact {
         relative_path: BUNDLE_ENTRY_PATH,
         contents: CANONICAL_GUIDANCE_TEMPLATE,
@@ -177,6 +181,10 @@ const GUIDANCE_ARTIFACTS: [GuidanceArtifact; 22] = [
     GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/examples/basic-agent.json",
         contents: EXAMPLE_BASIC_AGENT,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/jev-choice-score.json",
+        contents: EXAMPLE_JEV_CHOICE_SCORE,
     },
     GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/examples/schema-features.json",
@@ -489,7 +497,7 @@ mod tests {
             Some("AGENTS.md")
         );
         assert_eq!(report.entrypoints[0].status, EntrypointStatus::Written);
-        assert_eq!(report.written_paths.len(), 24);
+        assert_eq!(report.written_paths.len(), 25);
         assert!(dir.join("AGENTS.md").exists());
         assert!(dir.join(".cargo-ai/guidance/cargo-ai.md").exists());
         assert!(dir
@@ -498,6 +506,9 @@ mod tests {
         assert!(dir.join(".cargo-ai/guidance/action-rules.md").exists());
         assert!(dir
             .join(".cargo-ai/guidance/authoring-patterns.md")
+            .exists());
+        assert!(dir
+            .join(".cargo-ai/guidance/examples/jev-choice-score.json")
             .exists());
         assert!(dir.join(".cargo-ai/guidance/examples/README.md").exists());
         assert!(dir.join(".cargo-ai/guidance/start-here.md").exists());
@@ -631,7 +642,7 @@ mod tests {
         let report = write_guidance_bundle(&dir, &[GuidanceStyle::Codex])
             .expect("guidance write should work");
         assert_eq!(report.entrypoints[0].status, EntrypointStatus::Preserved);
-        assert_eq!(report.written_paths.len(), 23);
+        assert_eq!(report.written_paths.len(), 24);
         assert_eq!(
             fs::read_to_string(dir.join("AGENTS.md")).expect("existing AGENTS should be readable"),
             "existing guidance\n"
@@ -757,7 +768,7 @@ mod tests {
             .expect("combined guidance write should work");
 
         assert_eq!(report.entrypoints.len(), 2);
-        assert_eq!(report.written_paths.len(), 25);
+        assert_eq!(report.written_paths.len(), 26);
         assert!(dir.join("AGENTS.md").exists());
         assert!(dir.join("CLAUDE.md").exists());
         assert!(dir.join(".cargo-ai/guidance/cargo-ai.md").exists());
@@ -787,7 +798,7 @@ mod tests {
                 dir.join("CLAUDE.md")
             ]
         );
-        assert_eq!(report.reused_paths.len(), 22);
+        assert_eq!(report.reused_paths.len(), 23);
         assert_eq!(report.entrypoints[0].status, EntrypointStatus::Written);
 
         let _ = fs::remove_dir_all(dir);
@@ -804,7 +815,7 @@ mod tests {
             .expect("repeated style should be idempotent");
 
         assert!(report.written_paths.is_empty());
-        assert_eq!(report.reused_paths.len(), 24);
+        assert_eq!(report.reused_paths.len(), 25);
         assert_eq!(report.entrypoints[0].status, EntrypointStatus::Reused);
 
         let _ = fs::remove_dir_all(dir);

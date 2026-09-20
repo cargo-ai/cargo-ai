@@ -1,5 +1,5 @@
 {
-  "agent_definition_schema_version": "2026-09-09.r1",
+  "agent_definition_schema_version": "2026-09-19.r1",
   "inputs": [{
     "type": "text",
     "name": "request",
@@ -13,6 +13,8 @@
     "type": "object",
     "properties": {
       "status": {"type": "string"},
+      "score": {"type": "number", "description": "How urgent is the request?", "minimum": 0, "maximum": 100, "rubric": ["Routine", "Urgent"]},
+      "precise_score": {"type": "number", "description": "Score on the authored large range.", "minimum": 9007199254740993, "maximum": 9007199254741093, "rubric": ["Low", "High"]},
       "details": {"type": "object", "properties": {"note": {"type": "string"}}}
     }
   },
@@ -23,6 +25,7 @@
       "run": [
         {"kind": "tool", "name": "envelope_probe", "params": {"mode": "envelope", "value": {"var": "runtime.envelope"}}, "output_variable": "captured"},
         {"kind": "tool", "name": "envelope_probe", "params": {"mode": "capture", "value": {"var": "captured"}}},
+        {"kind": "tool", "name": "envelope_probe", "params": {"mode": "numeric", "value": "", "score": {"var": "precise_score"}, "fraction": {"var": "score"}}},
         {
           "kind": "tool",
           "name": "envelope_probe",

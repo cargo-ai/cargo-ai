@@ -200,6 +200,7 @@ pub(crate) async fn send_request(
     })?;
 
     Ok(ProviderTextResponse {
+        resolved_model: None,
         text,
         usage: normalize_usage(response.usage),
     })

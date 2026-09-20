@@ -11,6 +11,7 @@ pub(crate) enum ProviderKind {
     Mistral,
     Ollama,
     OpenAi,
+    TypeSafe,
     Xai,
 }
 
@@ -20,6 +21,7 @@ pub(crate) enum ProviderTransport {
     GeminiInteractions,
     OpenAiCompatibleChat,
     OpenAiNative,
+    TypeSafeSystemOne,
     XaiResponses,
 }
 
@@ -47,6 +49,7 @@ impl ProviderKind {
             "mistral" => Some(Self::Mistral),
             "ollama" => Some(Self::Ollama),
             "openai" => Some(Self::OpenAi),
+            "typesafe" => Some(Self::TypeSafe),
             "xai" => Some(Self::Xai),
             _ => None,
         }
@@ -59,6 +62,7 @@ impl ProviderKind {
             Self::Mistral => "Mistral API",
             Self::Ollama => "Ollama",
             Self::OpenAi => "OpenAI",
+            Self::TypeSafe => "TypeSafe",
             Self::Xai => "xAI",
         }
     }
@@ -70,6 +74,7 @@ impl ProviderKind {
             Self::Mistral => "https://api.mistral.ai/v1/chat/completions",
             Self::Ollama => "http://localhost:11434/v1/chat/completions",
             Self::OpenAi => "https://api.openai.com/v1/chat/completions",
+            Self::TypeSafe => "https://api.typesafe.ai/v1/systemone",
             Self::Xai => "https://api.x.ai/v1/responses",
         }
     }
@@ -80,6 +85,7 @@ impl ProviderKind {
             Self::Gemini => ProviderTransport::GeminiInteractions,
             Self::Mistral | Self::Ollama => ProviderTransport::OpenAiCompatibleChat,
             Self::OpenAi => ProviderTransport::OpenAiNative,
+            Self::TypeSafe => ProviderTransport::TypeSafeSystemOne,
             Self::Xai => ProviderTransport::XaiResponses,
         }
     }
@@ -98,7 +104,7 @@ impl ProviderKind {
                 supports_file_input: false,
                 supports_generate_image: false,
             },
-            Self::Mistral => ProviderCapabilities {
+            Self::Mistral | Self::TypeSafe => ProviderCapabilities {
                 authentication: AuthenticationPolicy::RequiredApiKey,
                 supports_image_input: false,
                 supports_file_input: false,
@@ -172,7 +178,15 @@ impl ProviderError {
         Self {
             provider,
             http_status: Some(status.as_u16()),
-            kind: classify_http_status(status, body),
+            kind: if provider == ProviderKind::TypeSafe && status.as_u16() == 529 {
+                ProviderErrorKind::RateLimited
+            } else if provider == ProviderKind::TypeSafe
+                && status == StatusCode::UNPROCESSABLE_ENTITY
+            {
+                ProviderErrorKind::InvalidRequest
+            } else {
+                classify_http_status(status, body)
+            },
             message: format!("HTTP error {status}: {body}"),
         }
     }
@@ -272,6 +286,7 @@ fn provider_hint(
 ) -> Option<&'static str> {
     match kind {
         ProviderErrorKind::ModelNotFound => match provider {
+            ProviderKind::TypeSafe => Some("Verify the Jev model name and confirm your TypeSafe account has access to it."),
             ProviderKind::Anthropic => {
                 Some("Verify the Claude model name and confirm your Anthropic Console organization has access to it.")
             }
@@ -292,6 +307,7 @@ fn provider_hint(
             }
         },
         ProviderErrorKind::Unauthorized => match provider {
+            ProviderKind::TypeSafe => Some("Verify your TypeSafe API key, account billing and Jev model access; update the profile through secure credential input."),
             ProviderKind::Anthropic => Some(
                 "Verify your Anthropic API key (`--token` or profile token), Console API credits, and model access. Claude.ai subscriptions do not include API usage.",
             ),
@@ -312,6 +328,7 @@ fn provider_hint(
             ),
         },
         ProviderErrorKind::RateLimited => match provider {
+            ProviderKind::TypeSafe => Some("TypeSafe is rate-limited or overloaded; retry later within your runtime budget."),
             ProviderKind::Anthropic => Some(
                 "Anthropic rate limit reached; retry later or review your Console usage limits.",
             ),
@@ -332,6 +349,7 @@ fn provider_hint(
             ),
         },
         ProviderErrorKind::Connectivity => match provider {
+            ProviderKind::TypeSafe => Some("Check network connectivity and ensure the configured TypeSafe System One URL is reachable."),
             ProviderKind::Anthropic => Some(
                 "Check network connectivity and ensure the configured Anthropic Messages URL is reachable.",
             ),
@@ -352,6 +370,7 @@ fn provider_hint(
             ),
         },
         ProviderErrorKind::Timeout => match provider {
+            ProviderKind::TypeSafe => Some("Request timed out; retry later or increase `--inference-timeout-in-sec`."),
             ProviderKind::Anthropic => Some(
                 "Request timed out; retry later or increase `--inference-timeout-in-sec`.",
             ),
@@ -450,6 +469,7 @@ pub(crate) fn validate_provider_request(
             ProviderKind::Mistral => "❌ Missing Mistral API key. Provide `--token <TOKEN>` or configure `cargo ai profile set <name> --token <TOKEN> --auth api_key`.".to_string(),
             ProviderKind::OpenAi => "❌ Missing OpenAI token. Provide `--token <TOKEN>`, run `cargo ai auth login openai`, or configure `cargo ai profile set <name> --token <TOKEN> --auth api_key`.".to_string(),
             ProviderKind::Xai => "❌ Missing xAI API key. Provide `--token <TOKEN>` or configure `cargo ai profile set <name> --token <TOKEN> --auth api_key`.".to_string(),
+            ProviderKind::TypeSafe => "❌ Missing TypeSafe API key. Configure `cargo ai profile set <name> --auth api_key --stdin` using secure credential input.".to_string(),
             ProviderKind::Ollama => unreachable!("Ollama accepts an optional API key"),
         });
     }
@@ -697,7 +717,11 @@ mod tests {
 
     #[test]
     fn validates_hosted_provider_tokens_and_sanitizes_error_envelopes() {
-        for provider in [ProviderKind::Mistral, ProviderKind::Xai] {
+        for provider in [
+            ProviderKind::Mistral,
+            ProviderKind::TypeSafe,
+            ProviderKind::Xai,
+        ] {
             let issues = validate_provider_request(
                 provider,
                 "operator-selected-model",
@@ -717,6 +741,30 @@ mod tests {
             sanitized_http_error_body(ProviderKind::Mistral, b"not-json"),
             "Mistral API returned an HTTP error response."
         );
+    }
+
+    #[test]
+    fn typesafe_identity_and_capabilities_are_explicit() {
+        assert_eq!(
+            ProviderKind::from_server_value("typesafe"),
+            Some(ProviderKind::TypeSafe)
+        );
+        assert_eq!(
+            ProviderKind::TypeSafe.default_url(),
+            "https://api.typesafe.ai/v1/systemone"
+        );
+        assert_eq!(
+            ProviderKind::TypeSafe.transport(),
+            super::ProviderTransport::TypeSafeSystemOne
+        );
+        let capabilities = ProviderKind::TypeSafe.capabilities();
+        assert_eq!(
+            capabilities.authentication,
+            super::AuthenticationPolicy::RequiredApiKey
+        );
+        assert!(!capabilities.supports_image_input);
+        assert!(!capabilities.supports_file_input);
+        assert!(!capabilities.supports_generate_image);
     }
 
     #[test]

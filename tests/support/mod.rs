@@ -43,7 +43,9 @@ impl Fixture {
             .current_dir(current_dir)
             .env("CARGO_AI_HOME", &self.cargo_ai_home)
             .env("CARGO_AI_DISABLE_KEYCHAIN", "1")
-            .env("HOME", &self.fallback_home);
+            .env("HOME", &self.fallback_home)
+            // Generated workspaces own their outputs independently of the test runner.
+            .env_remove("CARGO_TARGET_DIR");
         command
     }
 
@@ -54,7 +56,8 @@ impl Fixture {
             .current_dir(current_dir)
             .env("CARGO_AI_HOME", &self.cargo_ai_home)
             .env("CARGO_AI_DISABLE_KEYCHAIN", "1")
-            .env("HOME", &self.fallback_home);
+            .env("HOME", &self.fallback_home)
+            .env_remove("CARGO_TARGET_DIR");
         command
     }
 }

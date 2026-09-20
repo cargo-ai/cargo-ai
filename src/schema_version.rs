@@ -6,6 +6,7 @@ use serde_json::Value;
 
 const ROOT_AGENTCFG: &str = include_str!("../.agentcfg");
 
+/// Scaffolding uses the bundled default; newer contracts are explicit opt-ins.
 pub const SCHEMA_VERSION_EXAMPLE: &str = crate::definition_validation::STRICT_SCHEMA_VERSION;
 pub const AGENT_DEFINITION_SCHEMA_VERSION_KEY: &str = "agent_definition_schema_version";
 
@@ -78,5 +79,10 @@ mod tests {
         let current = current_schema_version();
         assert!(is_valid_schema_version(&current));
         assert_eq!(current, SCHEMA_VERSION_EXAMPLE);
+        assert_eq!(current, "2026-09-09.r1");
+        assert_eq!(
+            crate::definition_validation::RUBRIC_SCHEMA_VERSION,
+            "2026-09-19.r1"
+        );
     }
 }

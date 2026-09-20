@@ -3,7 +3,7 @@
 Use this file as the complete offline contract when you need to author or review a Cargo AI agent definition without looking at repository code.
 That JSON definition is the source for a generated CLI executable: it defines the inputs, structured output, and follow-up actions the hatched tool will use.
 
-The current strict contract is `2026-09-09.r1`. Unless a section says otherwise, the supported field lists below are exhaustive for that revision. Stable objects reject additional fields; user-named maps allow names whose values satisfy the stated contract.
+The supported strict contracts are `2026-09-09.r1` and the opt-in rubric revision `2026-09-19.r1`. Unless a section says otherwise, the supported field lists below are exhaustive for both revisions. Stable objects reject additional fields; user-named maps allow names whose values satisfy the stated contract.
 
 ## Required Top-Level Shape
 
@@ -21,12 +21,12 @@ Every agent definition must be a JSON object with these keys. Prefer this order 
 - Required.
 - Non-empty string.
 - Format: `YYYY-MM-DD.rN`
-- Current strict revision: `2026-09-09.r1`.
+- Ordinary scaffolds retain strict revision `2026-09-09.r1`; use `2026-09-19.r1` when authoring a rubric.
 - This identifies the Cargo AI contract used to interpret this definition. It is not the agent or package version; package version is `[project].version`.
 - Copy the schema version from the current Cargo AI template or guidance. Do not invent one from the current date, an agent/package/project version, or the Cargo AI product version.
 - The legacy top-level `version` key is invalid. Rename that key without changing its schema-version value.
 - Syntactically valid revisions chronologically before `2026-09-09.r1` keep their legacy parsing behavior, including permissive unknown fields. This includes `2026-03-03.r1`, `2026-03-11.r1`, and `2026-03-28.r1`; it is not a closed registry of old revisions.
-- Exactly `2026-09-09.r1` selects strict validation. Every other revision at or after that cutoff is unsupported. Date and revision components are compared numerically.
+- Exactly `2026-09-09.r1` and `2026-09-19.r1` select strict validation. Every other revision at or after the `2026-09-09.r1` cutoff is unsupported. The earlier strict revision still rejects `rubric` and unknown keywords; it does not become legacy. Date and revision components are compared numerically.
 - Existing definitions are not rewritten automatically. To migrate, review the complete definition against this contract and validate it with the strict revision. Do not replace an unsupported version header blindly; check the intended contract or upgrade Cargo AI.
 
 ## `inputs`
@@ -181,7 +181,7 @@ Exact descriptor keys are:
 |---|---|
 | Root `agent_schema` | `type`, `properties` |
 | String | `type`, optional `description`, optional `enum` |
-| Number or integer | `type`, optional `description`, optional `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum` |
+| Number or integer | `type`, optional `description`, optional `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`; top-level `number` may also use `rubric` in `2026-09-19.r1` |
 | Boolean | `type`, optional `description` |
 | Array | `type`, optional `description`, required `items` |
 | Object | `type`, optional `description`, required `properties` |
@@ -219,6 +219,22 @@ Structural action-only rule:
 - Top-level action `logic` starts with declared `runtime.*` values only.
 - Step `when` and substitution surfaces may use declared `runtime.*` values plus prior captured step variables as the action runs.
 - References to top-level model-output fields are invalid in that shape because no initial model output exists.
+
+## Explicit rubric scores and TypeSafe Jev
+
+In `2026-09-19.r1`, a top-level `number` output may add `rubric`: an array of 2–10 nonblank strings describing levels from low to high. It requires a nonblank `description`, finite inclusive `minimum < maximum`, and a finite representable span. Exclusive bounds, integer, nullable, nested and structured rubric locations are invalid. Invalid rubric syntax fails definition validation on every provider. Review the wording and ordering: syntax cannot establish meaningful criteria or judgment quality.
+
+For example, `"rubric": ["Routine request that can wait until next week", "Time-sensitive request needing attention today", "Service-blocking issue requiring immediate attention"]` with bounds 0 and 100 describes an urgency score. Bounds alone still describe ordinary numeric output; they do not imply scoring semantics.
+
+A TypeSafe (`typesafe`) profile supports a flat object containing string enums (Choice), explicit rubric numbers (Score), or both. Every field needs a nonblank description. Choice has 1–255 unique nonempty string labels; exact labels also supply their option descriptions. Explain category distinctions in the field description. Boolean/Noul, ordinary numbers, integers, free-form strings and structured/nullable outputs are unsupported. No confidence, probability, distribution or Score-legend fields are exposed. An authored unknown label is an ordinary Choice, not calibrated abstention.
+
+For N rubric levels, Cargo AI maps the native score s in [0,N−1] to authored [a,b] as `a + (s / (N - 1)) * (b - a)`. Fractional scores and exact endpoints are preserved; with three levels on [0,100], 1.6 maps to 80. Invalid native scores are rejected without clamping. The mapped output is validated locally before actions. General providers receive a normal schema with rubric metadata removed and ordered levels/range incorporated into the description; local validation retains the original definition. This preserves task instructions without promising identical answers across profiles.
+
+Use `cargo ai hatch triage --config ./triage.json --check --profile jev` (`-P jev`) for a metadata-only profile compatibility assessment alongside ordinary hatch checks. Ordinary hatch with the same profile assesses compatibility before compilation. Omit `--profile` to retain generic checking; the default profile is not implicitly certified. The target is not embedded as a runtime profile lock. Explicit missing profiles fail. Compatibility assessment neither loads secrets nor calls inference or model discovery, but other hatch operations can still fetch account definitions or audit tools.
+
+Text and client-fetched URL text are supported; image and file inputs fail before Jev inference. Keep temperature and max-output-tokens unset. A successful static assessment covers declared schema, input kinds and known settings only: credentials, live availability, token fit, fetched content, runtime overrides, dynamic children and answer quality remain runtime-dependent. Runtime checks the effective invocation and each child's effective profile. An empty action-only root skips inference and its children retain their own profile checks. Failed children cannot undo prior successful actions.
+
+**Local and hatched execution only for new rubric definitions:** hosted account storage of `2026-09-19.r1` is deferred. Do not attempt hosted saving/sharing of that revision as part of this workflow. Keep ordinary definitions/scaffolds on `2026-09-09.r1` when no rubric is needed. Existing definitions are not rewritten, and old binaries need an updated CLI/re-hatch to interpret the new revision. See `examples/jev-choice-score.json` for a complete definition.
 
 ## `actions`
 

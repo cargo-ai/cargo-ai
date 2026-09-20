@@ -764,7 +764,7 @@ fn unknown_server_messages(server: &str) -> Vec<String> {
 
     vec![
         format!("❌ Unknown AI server '{}'.", display_server),
-        "Use `--server anthropic`, `--server gemini`, `--server mistral`, `--server ollama`, `--server openai`, or `--server xai`.".to_string(),
+        "Use `--server anthropic`, `--server gemini`, `--server mistral`, `--server ollama`, `--server openai`, `--server typesafe`, or `--server xai`.".to_string(),
         "Hint: Set `--server` explicitly or configure a default profile with a supported server."
             .to_string(),
         "Example: cargo ai run --server xai --model <grok-model> --input-text \"What is 2 + 2?\""
@@ -1606,6 +1606,7 @@ fn provider_server_name(provider: ProviderKind) -> &'static str {
         ProviderKind::Ollama => "ollama",
         ProviderKind::OpenAi => "openai",
         ProviderKind::Xai => "xai",
+        ProviderKind::TypeSafe => "typesafe",
     }
 }
 
@@ -1907,7 +1908,8 @@ fn resolved_invocation_auth_mode(
         ProviderKind::Anthropic
         | ProviderKind::Gemini
         | ProviderKind::Mistral
-        | ProviderKind::Xai => {
+        | ProviderKind::Xai
+        | ProviderKind::TypeSafe => {
             if explicit_token_override {
                 "api_key"
             } else {
@@ -3370,6 +3372,19 @@ async fn main() {
     );
     action_output.seed_using_line(action_provider_context.using_line().as_str());
 
+    let response_schema = json_schema_value();
+    if let Err(error) = crate::providers::validate_provider_compatibility(
+        provider,
+        &response_schema,
+        &selected_inputs,
+        max_output_tokens,
+        temperature,
+        rubric_enabled(),
+    ) {
+        eprintln!("❌ {}", error.message());
+        exit_failure!();
+    }
+
     let resolved_inputs = match crate::providers::resolve_provider_inputs(&selected_inputs).await {
         Ok(resolved_inputs) => resolved_inputs,
         Err(error) => {
@@ -3397,7 +3412,6 @@ async fn main() {
     let content_parts = ai_cargo.content_parts();
     let mut response = String::new();
 
-    let response_schema = json_schema_value();
     let remaining = match remaining_runtime_duration(runtime_budget, "before starting inference") {
         Ok(remaining) => remaining,
         Err(error) => {
@@ -3420,6 +3434,7 @@ async fn main() {
                 timeout_in_sec: inference_timeout_in_sec,
                 token: &token,
                 response_schema: &response_schema,
+                rubric_enabled: rubric_enabled(),
                 max_output_tokens,
                 temperature,
             },
@@ -3428,6 +3443,9 @@ async fn main() {
     .await;
     let response = match provider_result {
         Ok(Ok(response)) => {
+            if let Some(resolved_model) = response.resolved_model.as_deref() {
+                println!("Provider response model: {resolved_model}");
+            }
             if let Some(usage_log) = usage_log_context.as_ref() {
                 usage_log.record_provider_request(usage_log::UsageProviderRequest {
                     provider,
@@ -4885,6 +4903,10 @@ async fn run_generate_image_step(
                     )
                     .await
                 }
+                ProviderKind::TypeSafe => Err(ProviderError::invalid_request(
+                    ProviderKind::TypeSafe,
+                    "Jev does not generate images. Select a compatible image-generation profile for this step.",
+                )),
                 ProviderKind::Xai => Err(ProviderError::invalid_request(
                     ProviderKind::Xai,
                     "xAI image generation is not supported.",
@@ -5119,7 +5141,7 @@ async fn resolve_generate_image_step_profile_context(
     );
 
     let resolved_token = match provider {
-        ProviderKind::Anthropic | ProviderKind::Gemini | ProviderKind::Mistral | ProviderKind::Xai => ResolvedOpenAiToken {
+        ProviderKind::Anthropic | ProviderKind::Gemini | ProviderKind::Mistral | ProviderKind::Xai | ProviderKind::TypeSafe => ResolvedOpenAiToken {
             token: resolve_api_key_provider_token(provider, Some(&selected_profile))?,
             uses_account_session: false,
         },

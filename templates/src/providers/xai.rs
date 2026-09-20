@@ -196,13 +196,11 @@ pub(crate) async fn send_request(
         )
     })?;
     let text = response_text(&response).ok_or_else(|| {
-        ProviderError::invalid_response(
-            ProviderKind::Xai,
-            "xAI returned no output_text content.",
-        )
+        ProviderError::invalid_response(ProviderKind::Xai, "xAI returned no output_text content.")
     })?;
 
     Ok(ProviderTextResponse {
+        resolved_model: None,
         text,
         usage: normalize_usage(response.usage),
     })
@@ -295,7 +293,9 @@ mod tests {
             .mock("POST", "/v1/responses")
             .with_status(400)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"error":{"message":"selected model rejected schema"},"debug":"do-not-print"}"#)
+            .with_body(
+                r#"{"error":{"message":"selected model rejected schema"},"debug":"do-not-print"}"#,
+            )
             .create_async()
             .await;
 

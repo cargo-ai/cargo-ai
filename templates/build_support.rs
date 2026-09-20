@@ -268,6 +268,7 @@ struct AgentConfig {
     action_execution: ActionExecutionMode,
     actions: Vec<Action>,
     strict_definition: bool,
+    rubric_enabled: bool,
 }
 
 // Shared build module: these symbols are used by cargo-ai's root build script,
@@ -493,8 +494,17 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
         validate_reserved_top_level_name(name, &format!("$.agent_schema.properties.{name}"))?;
         validate_rust_identifier(name, &format!("$.agent_schema.properties.{name}"))?;
         let prop_obj = expect_object(prop_value, &format!("$.agent_schema.properties.{name}"))?;
-        let parsed_property =
+        let mut parsed_property =
             parse_agent_property(name, prop_obj, &format!("$.agent_schema.properties.{name}"))?;
+        if schema_version == definition_validation::RUBRIC_SCHEMA_VERSION
+            && prop_obj.contains_key("rubric")
+        {
+            // Exact authored endpoints are returned unchanged by rubric providers.
+            parsed_property.rust_type = "serde_json::Number".to_string();
+            for key in ["minimum", "maximum"] {
+                parsed_property.schema_value[key] = prop_obj[key].clone();
+            }
+        }
         schema_field_types.insert(name.clone(), parsed_property.field_type.clone());
         parsed_properties.push(parsed_property);
     }
@@ -519,6 +529,8 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
         strict_definition: definition_validation::definition_revision(root)
             .map_err(BuildError::Definition)?
             == definition_validation::DefinitionRevision::Strict,
+        rubric_enabled: root[definition_validation::VERSION_KEY]
+            == definition_validation::RUBRIC_SCHEMA_VERSION,
     })
 }
 
@@ -4417,6 +4429,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
         .collect::<Vec<_>>()
         .join("");
     let has_output_schema_properties = !config.properties.is_empty();
+    let rubric_enabled = config.rubric_enabled;
     let action_execution = match config.action_execution {
         ActionExecutionMode::Sequential => "ActionExecutionMode::Sequential",
         ActionExecutionMode::Parallel => "ActionExecutionMode::Parallel",
@@ -4485,6 +4498,10 @@ pub fn inputs() -> Vec<Input> {{
 
 pub fn has_output_schema_properties() -> bool {{
     {has_output_schema_properties}
+}}
+
+pub fn rubric_enabled() -> bool {{
+    {rubric_enabled}
 }}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -4940,6 +4957,64 @@ fn render_runtime_var_type_expr(field_type: &FieldType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::generate_agent_model_from_str;
+
+    #[test]
+    fn rubric_large_authored_endpoints_survive_generated_normalization() {
+        for (version, rubric) in [
+            ("2026-09-19.r1", true),
+            ("2026-09-19.r1", false),
+            ("2026-09-08.r42", true),
+            ("2026-09-09.r1", false),
+        ] {
+            let mut property = serde_json::json!({"type":"number", "description":"How urgent?", "minimum":9_007_199_254_740_993_u64, "maximum":9_007_199_254_741_093_u64});
+            if rubric {
+                property["rubric"] = serde_json::json!(["Routine", "Urgent"]);
+            }
+            let definition = serde_json::json!({"agent_definition_schema_version":version, "agent_schema":{"type":"object", "properties":{"score":property}}, "actions":[]});
+            let (validated, _) =
+                super::definition_validation::parse_definition(&definition.to_string()).unwrap();
+            let config = super::parse_agent_config(&validated).unwrap();
+            let normalized = &config.properties[0].schema_value;
+            assert_eq!(
+                config.properties[0].rust_type,
+                if version == "2026-09-19.r1" && rubric {
+                    "serde_json::Number"
+                } else {
+                    "f64"
+                }
+            );
+            for key in ["minimum", "maximum"] {
+                let authored = &property[key];
+                let expected = if version == "2026-09-19.r1" && rubric {
+                    authored.clone()
+                } else {
+                    serde_json::json!(authored.as_f64().unwrap())
+                };
+                assert_eq!(
+                    normalized[key], expected,
+                    "{version}, rubric={rubric}: {key}"
+                );
+            }
+            let generated = super::render_agent_model(&config);
+            let emitted_schema = generated
+                .split("fn apply_output_schema_metadata(")
+                .nth(1)
+                .unwrap()
+                .split("serde_json::from_str(")
+                .nth(1)
+                .unwrap();
+            let encoded = serde_json::Deserializer::from_str(emitted_schema)
+                .into_iter::<String>()
+                .next()
+                .unwrap()
+                .unwrap();
+            let emitted: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(
+                &emitted, normalized,
+                "emitted schema must retain normalized endpoint JSON numbers"
+            );
+        }
+    }
 
     fn config_with_child_agent_target(target: &str) -> String {
         let encoded_target =

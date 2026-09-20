@@ -143,7 +143,11 @@ fn request_content_parts(content_parts: &[ContentPart]) -> Vec<RequestContentPar
 }
 
 fn response_text(content: &serde_json::Value) -> Option<String> {
-    if let Some(text) = content.as_str().map(str::trim).filter(|text| !text.is_empty()) {
+    if let Some(text) = content
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
         return Some(text.to_string());
     }
 
@@ -188,9 +192,7 @@ pub(crate) async fn send_request(
         .timeout(Duration::from_secs(timeout_in_sec))
         .build()
         .map_err(|error| ProviderError::from_reqwest(provider, error))?;
-    let mut request_builder = client
-        .post(url)
-        .header("Content-Type", "application/json");
+    let mut request_builder = client.post(url).header("Content-Type", "application/json");
     if !token.trim().is_empty() {
         request_builder = request_builder.header("Authorization", format!("Bearer {token}"));
     }
@@ -244,6 +246,7 @@ pub(crate) async fn send_request(
         })?;
 
     Ok(ProviderTextResponse {
+        resolved_model: None,
         text,
         usage: normalize_usage(usage, prompt_eval_count, eval_count),
     })
@@ -380,7 +383,9 @@ mod tests {
             .mock("POST", "/v1/chat/completions")
             .with_status(400)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"message":"selected model rejected json_schema","debug":"do-not-print"}"#)
+            .with_body(
+                r#"{"message":"selected model rejected json_schema","debug":"do-not-print"}"#,
+            )
             .create_async()
             .await;
 
@@ -400,7 +405,9 @@ mod tests {
 
         mock.assert_async().await;
         assert_eq!(error.provider(), ProviderKind::Mistral);
-        assert!(error.message().contains("selected model rejected json_schema"));
+        assert!(error
+            .message()
+            .contains("selected model rejected json_schema"));
         assert!(!error.message().contains("do-not-print"));
     }
 }

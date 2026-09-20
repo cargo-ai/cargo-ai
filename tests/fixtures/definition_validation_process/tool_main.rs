@@ -10,7 +10,9 @@ fn main() {
                 "description": "Return controlled protocol envelopes and record consumed values.",
                 "params": {
                     "mode": {"type": "string", "required": true},
-                    "value": {"type": "string", "required": true}
+                    "value": {"type": "string", "required": true},
+                    "score": {"type": "number", "required": false},
+                    "fraction": {"type": "number", "required": false}
                 },
                 "result": {"type": "string", "nullable": true},
                 "resource_profile": {
@@ -36,6 +38,19 @@ fn main() {
                 "envelope" => println!("{value}"),
                 "capture" => {
                     std::fs::write("captured.txt", value).unwrap();
+                    println!("{}", json!({"protocol_version": 1, "result": null}));
+                }
+                "numeric" => {
+                    assert!(params["score"].is_number());
+                    assert!(params["fraction"].is_number());
+                    std::fs::write(
+                        "numeric.json",
+                        serde_json::to_vec(&json!({
+                            "score": params["score"], "fraction": params["fraction"]
+                        }))
+                        .unwrap(),
+                    )
+                    .unwrap();
                     println!("{}", json!({"protocol_version": 1, "result": null}));
                 }
                 "marker" => {

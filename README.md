@@ -39,7 +39,7 @@ cargo ai hatch my-agent --config ./agent.json
 - **Readable by design:** one JSON definition makes inputs, output, and side effects reviewable and diffable.
 - **Run or hatch:** iterate through the Cargo AI runtime, then export a native CLI executable from the same definition.
 - **Real workflow building blocks:** use text, URLs, images, files, conditions, local commands, tools, email, image generation, and child agents where supported.
-- **Provider choice:** connect to OpenAI, Anthropic, Gemini, xAI, Mistral, or a local Ollama server without changing the agent format.
+- **Provider choice:** connect to OpenAI, Anthropic, Gemini, xAI, Mistral, TypeSafe Jev, or a local Ollama server using compatible schemas and inputs.
 - **Project and package workflows:** assemble agents, Rust tools, and assets into inspectable local or hosted packages with explicit permission boundaries.
 - **Portable and auditable:** target macOS, Linux, and Windows while keeping generated source and shipped behavior visible.
 
@@ -174,8 +174,11 @@ Provider capabilities differ. Unsupported input or action combinations fail expl
 | [Anthropic](./docs/providers/anthropic.md) | Native Messages API with an Anthropic API key |
 | [Google Gemini](./docs/providers/gemini.md) | Native Interactions API with a Gemini API key |
 | [xAI](./docs/providers/xai.md) | Responses API with an xAI API key |
+| [TypeSafe Jev](./docs/providers/typesafe.md) | Text/URL-text Choice and explicit rubric Score through an API-key profile |
 | [Mistral](./docs/providers/mistral.md) | Chat Completions API with a Mistral API key |
 | [Ollama](./docs/providers/ollama.md) | Locally operated OpenAI-compatible server |
+
+TypeSafe Jev supports local and hatched Choice/Score workflows. New rubric definitions opt into `2026-09-19.r1`; hosted storage of that revision is deferred. Ordinary scaffolds retain `2026-09-09.r1`. See [TypeSafe setup](./docs/providers/typesafe.md) for the complete limits and profile-aware hatch checks.
 
 The [provider overview](./docs/providers/README.md) compares the current input and image-generation boundaries. Model availability belongs to each provider or account; Cargo AI does not maintain a model allowlist or certify every model/schema combination.
 

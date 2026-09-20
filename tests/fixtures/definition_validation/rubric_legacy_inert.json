@@ -1,0 +1,48 @@
+{
+  "name": "rubric_legacy_inert",
+  "definition": {
+    "agent_definition_schema_version": "2026-09-08.r42",
+    "agent_schema": {
+      "type": "object",
+      "properties": {
+        "score": {
+          "type": "number",
+          "description": "How urgent?",
+          "minimum": 0,
+          "maximum": 100,
+          "rubric": [
+            "Routine",
+            "Urgent"
+          ]
+        }
+      }
+    },
+    "actions": [
+      {
+        "name": "print_score",
+        "logic": {
+          "==": [
+            {
+              "var": "score"
+            },
+            0
+          ]
+        },
+        "run": [
+          {
+            "kind": "exec",
+            "program": "echo",
+            "args": [
+              {
+                "var": "score"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "accepted": true
+  }
+}

@@ -106,15 +106,18 @@ impl UsageLogContext {
         depth: u32,
         agent: Option<Value>,
     ) -> Result<Option<(Self, UsageAgentRunGuard)>, String> {
-        let path = explicit_path
-            .and_then(non_empty_string)
-            .or_else(|| std::env::var(USAGE_LOG_ENV).ok().and_then(|v| non_empty_string(&v)));
+        let path = explicit_path.and_then(non_empty_string).or_else(|| {
+            std::env::var(USAGE_LOG_ENV)
+                .ok()
+                .and_then(|v| non_empty_string(&v))
+        });
         let Some(path) = path else {
             return Ok(None);
         };
 
-        let inherited_root_run_id =
-            std::env::var(USAGE_ROOT_RUN_ID_ENV).ok().and_then(|v| non_empty_string(&v));
+        let inherited_root_run_id = std::env::var(USAGE_ROOT_RUN_ID_ENV)
+            .ok()
+            .and_then(|v| non_empty_string(&v));
         let root_owner = inherited_root_run_id.is_none();
         let root_run_id =
             inherited_root_run_id.unwrap_or_else(|| format!("cai_run_{}", Uuid::now_v7()));
@@ -456,6 +459,7 @@ fn provider_json(
             ProviderKind::Mistral => "mistral",
             ProviderKind::Ollama => "ollama",
             ProviderKind::OpenAi => "openai",
+            ProviderKind::TypeSafe => "typesafe",
             ProviderKind::Xai => "xai",
         },
         "profile": profile_name,

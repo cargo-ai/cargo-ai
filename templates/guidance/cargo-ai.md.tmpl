@@ -51,6 +51,8 @@ Read these files before inventing structure:
 
 Useful examples:
 - `.cargo-ai/guidance/examples/basic-agent.json`
+- `.cargo-ai/guidance/examples/jev-choice-score.json`
+
 - `.cargo-ai/guidance/examples/schema-features.json`
 - `.cargo-ai/guidance/examples/runtime-file-local-exec.json`
 - `.cargo-ai/guidance/examples/child-agent.json`
@@ -109,6 +111,8 @@ For published packages, keep the contract narrow:
   - `actions`
 - `agent_definition_schema_version` identifies the Cargo AI contract used to interpret the definition. It is not the agent or package version; package version is `[project].version`.
 - Copy `agent_definition_schema_version` from the current local template or contract guidance. Never invent it from the current date, an agent/package/project version, or the Cargo AI product version, and never use the legacy top-level `version` key.
+- Ordinary scaffolds use `2026-09-09.r1`; explicit top-level numeric rubrics opt into `2026-09-19.r1`. Both remain strict. New rubric definitions support local/hatch execution; hosted account storage of that revision is deferred. Explain this boundary before proposing account saving/sharing.
+
 - Within named input objects, prefer `name`, then `type`, then the value-bearing field. Keep unnamed literal inputs as `type` then value.
 - Use `.cargo-ai/guidance/agent-definition-contract.md` as the complete output-schema contract.
 - Top-level output fields support `string`, `number`, `integer`, and `boolean`, plus the bounded `array` / `object` lane documented there for structured tool consumption.
@@ -116,6 +120,9 @@ For published packages, keep the contract narrow:
   - `description`
   - string-only `enum`
   - `minimum`, `maximum`, `exclusiveMinimum`, and `exclusiveMaximum` on `number` and `integer`
+- For TypeSafe Jev, select `--server typesafe --model jev-1.13.0 --auth api_key`; keep temperature/max-output-tokens unset and supply keys through the existing secure profile mechanism. Text/URL-text, described string enums (Choice), and described bounded numbers with 2–10 ordered rubric levels (Score) are supported. Bounds alone do not declare Score. See the contract and `jev-choice-score.json`; do not expose native confidence or Noul.
+- Use `hatch NAME --config FILE --check --profile jev` (`-P jev`) for declared compatibility before compilation. This target does not lock runtime profile selection or certify live credentials, token fit, answer quality or dynamic steps. Runtime checks effective inputs/settings and children; ordinary hatch without a target stays generic.
+
 - Treat nested arrays, deeper nested objects, and union types outside the contract's narrow nullable structured-field case as unsupported.
 - Treat the local contract and action helper docs as authoritative for step fields such as `platform`, runtime input override behavior, and child-agent data-flow limits.
 - If the user needs a reusable project-local capability behind `kind: "tool"`, read `.cargo-ai/guidance/tool-authoring.md` before inventing a custom tool workflow.

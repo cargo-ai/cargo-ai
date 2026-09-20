@@ -95,7 +95,9 @@ Provider events include:
 - `usage.output_tokens`
 - `usage.total_tokens`
 
-Anthropic, Gemini, Mistral, Ollama, OpenAI, and xAI usage counters are normalized into the same `input_tokens`, `output_tokens`, and `total_tokens` shape when reported. Compatible wire formats do not collapse identity: Mistral events use `provider.server = "mistral"`, and xAI Responses events use `provider.server = "xai"`. If a provider does not return counters, Cargo AI leaves `usage` null or omitted instead of estimating.
+TypeSafe Jev uses `provider.server = "typesafe"`. Reported input/output counters populate the matching fields; total tokens are their checked sum only when both are present. No cache/reasoning details are inferred. Usage counters describe reported token use, not Score values, native confidence, calibrated accuracy or a price estimate. Missing counters remain absent; static compatibility checking makes no inference request and supplies no inference usage.
+
+Anthropic, Gemini, Mistral, Ollama, OpenAI, TypeSafe, and xAI usage counters are normalized into the same `input_tokens`, `output_tokens`, and `total_tokens` shape when reported. Compatible wire formats do not collapse identity: Mistral events use `provider.server = "mistral"`, and xAI Responses events use `provider.server = "xai"`. If a provider does not return counters, Cargo AI leaves the counters absent (and may leave `usage` null or omitted) instead of estimating.
 
 ## Metadata Boundary
 
