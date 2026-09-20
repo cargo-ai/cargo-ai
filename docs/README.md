@@ -26,6 +26,7 @@ Cargo AI turns readable JSON agent definitions into directly runnable workflows 
 
 ## Maintain and Release
 
+- [Read release notes and upgrade guidance](../releases/README.md)
 - [Review testing and Product Qualification](./testing-and-release-qualification.md)
 - [Understand versioning and releases](../VERSIONING.md)
 
@@ -45,5 +46,5 @@ The older `templates/shared/docs/` paths are compatibility pointers, not another
 
 - [Public README](../README.md)
 - [Example agent definitions](../adder_test.json)
-- [Release notes](../releases/)
+- [Release notes](../releases/README.md)
 - [MIT license](../LICENSE)
