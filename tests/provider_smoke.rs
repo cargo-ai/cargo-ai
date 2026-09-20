@@ -854,6 +854,169 @@ fn assert_endpoint_diagnostics_exclude_secrets(fixture: &Fixture, executable: Op
 }
 
 #[test]
+fn interpreted_explicit_profile_selection_fails_closed() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind unused default endpoint");
+    listener.set_nonblocking(true).unwrap();
+    let url = format!(
+        "http://{}/v1/chat/completions",
+        listener.local_addr().unwrap()
+    );
+    let valid_config = format!(
+        r#"default_profile = "fallback"
+[[profile]]
+name = "fallback"
+server = "ollama"
+model = "fallback-model"
+url = "{url}"
+[[profile]]
+name = "empty-server"
+server = ""
+model = "selected-model"
+[[profile]]
+name = "unknown-server"
+server = "unsupported-provider"
+model = "selected-model"
+[[profile]]
+name = "missing-key"
+server = "typesafe"
+model = "jev-1.13.0"
+auth_mode = "api_key"
+"#
+    );
+    for (name, config, expected) in [
+        (
+            "missing",
+            Some(valid_config.as_str()),
+            "Profile 'missing' not found",
+        ),
+        ("", Some(valid_config.as_str()), "Profile '' not found"),
+        (" ", Some(valid_config.as_str()), "Profile ' ' not found"),
+        (
+            "Fallback",
+            Some(valid_config.as_str()),
+            "Profile 'Fallback' not found",
+        ),
+        (
+            "empty-server",
+            Some(valid_config.as_str()),
+            "Unknown AI server",
+        ),
+        (
+            "unknown-server",
+            Some(valid_config.as_str()),
+            "Unknown AI server",
+        ),
+        (
+            "missing-key",
+            Some(valid_config.as_str()),
+            "Missing API token",
+        ),
+        ("missing", None, "Profile 'missing' not found"),
+        (
+            "missing",
+            Some("not valid TOML = ["),
+            "Profile 'missing' not found",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        if let Some(config) = config {
+            fs::write(fixture.home.join("config.toml"), config).unwrap();
+        }
+        let output = fixture
+            .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
+            .args(["--no-update-check", "run", "--config"])
+            .arg(&fixture.definition)
+            .args([
+                "--profile",
+                name,
+                "--url",
+                &url,
+                "--inference-timeout-in-sec",
+                "1",
+            ])
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost")
+            .output()
+            .expect("isolated profile selection should run");
+        let diagnostics = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output.status.success(),
+            "{name:?} must fail: {diagnostics}"
+        );
+        assert!(diagnostics.contains(expected), "{name:?}: {diagnostics}");
+        assert!(
+            !diagnostics.contains("loaded profile: fallback"),
+            "{diagnostics}"
+        );
+        match listener.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            other => panic!("{name:?} must not contact the endpoint: {other:?}"),
+        }
+    }
+
+    for (profile, override_model, expected_model) in [
+        (None, None, "fallback-model"),
+        (Some("selected"), None, "selected-model"),
+        (Some("selected"), Some("override-model"), "override-model"),
+    ] {
+        let fixture = Fixture::new();
+        let mock = MockServer::ollama_success();
+        let config = format!(
+            r#"default_profile = "fallback"
+[[profile]]
+name = "fallback"
+server = "ollama"
+model = "fallback-model"
+url = "{url}"
+[[profile]]
+name = "selected"
+server = "ollama"
+model = "selected-model"
+url = "{url}"
+"#,
+            url = mock.url
+        );
+        fs::write(fixture.home.join("config.toml"), config).unwrap();
+        let mut command = fixture.isolated_command(env!("CARGO_BIN_EXE_cargo-ai"));
+        command
+            .args(["--no-update-check", "run", "--config"])
+            .arg(&fixture.definition)
+            .args(["--inference-timeout-in-sec", "2"])
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost");
+        if let Some(profile) = profile {
+            command.args(["--profile", profile]);
+        }
+        if let Some(model) = override_model {
+            command.args(["--model", model]);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "profile control failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let request = mock.finish();
+        let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["model"], expected_model);
+    }
+
+    // A caller can still select a provider and model without any saved profile.
+    let fixture = Fixture::new();
+    run_interpreted_openai_compatible_smoke(
+        &fixture,
+        "ollama",
+        "manual-model",
+        None,
+        MockServer::ollama_success(),
+    );
+}
+
+#[test]
 fn interpreted_endpoint_diagnostics_exclude_secrets() {
     assert_endpoint_diagnostics_exclude_secrets(&Fixture::new(), None);
 }
