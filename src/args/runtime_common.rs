@@ -8,7 +8,7 @@ pub(crate) fn runtime_command(name: &'static str, about: &'static str) -> Comman
             Arg::new("profile")
                 .long("profile")
                 .short('P')
-                .help("Use a saved connection profile instead of manual flags")
+                .help("Use a saved connection profile instead of manual flags; fails if the named profile is missing")
                 .required(false)
                 .value_name("PROFILE"),
         )

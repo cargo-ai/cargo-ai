@@ -83,6 +83,8 @@ cargo ai profile set PROFILE_NAME --default
 cargo ai run ./my_agent.json --profile PROFILE_NAME
 ```
 
+An explicit `--profile NAME` must resolve that saved profile; a missing name fails without selecting the default. Omitting `--profile` permits the configured default. Runtime flags such as `--model` override the selected profile in both direct and hatched execution. `hatch --profile` only checks compatibility while building; pass `--profile` again when running the exported executable.
+
 Use regular saved profiles for provider authentication. Create the provider profile with its documented auth mode before storing a key. For native setup, launch `cargo-ai` directly with arguments `profile`, `set`, `PROFILE_NAME`, `--stdin`; write the key from a secure entry field to the child's pipe and close it to signal EOF. Never place the secret in shell commands/history, process arguments, JSON, or logs. Keep `CARGO_AI_HOME` and supported credential-storage configuration consistent between setup and runs; stdin uses the existing store.
 
 Profile stdin accepts at most **16,384 raw bytes**, including trailing newline bytes, and rejects terminal stdin without prompting. It reads through EOF (failing once the limit is exceeded), removes trailing CR/LF and trims surrounding spaces/tabs. Empty content, remaining embedded CR/LF, NUL, and invalid UTF-8 fail before storage. No newline, LF, and CRLF are accepted. `--token`, `--stdin`, `--env`, and `--clear-token` remain mutually exclusive; existing non-stdin interfaces remain available, but direct piped stdin is preferred for native secret entry. Successful completion follows credential and metadata persistence; storage/configuration failure exits nonzero, and a partial write is not a rollback.

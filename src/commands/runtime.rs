@@ -76,6 +76,27 @@ enum LoadedProfileKind {
     Default,
 }
 
+fn resolve_loaded_profile<'a>(
+    config: Option<&'a crate::config::schema::Config>,
+    explicit_profile_name: Option<&str>,
+) -> Result<Option<(&'a crate::config::schema::Profile, LoadedProfileKind)>, String> {
+    if let Some(profile_name) = explicit_profile_name {
+        let profile = config
+            .and_then(|config| find_profile(config, profile_name))
+            .ok_or_else(|| format!("Profile '{}' not found.", profile_name))?;
+        return Ok(Some((profile, LoadedProfileKind::Explicit)));
+    }
+
+    Ok(config
+        .and_then(|config| {
+            config
+                .default_profile
+                .as_deref()
+                .and_then(|name| find_profile(config, name))
+        })
+        .map(|profile| (profile, LoadedProfileKind::Default)))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeInputMode {
     Replace,
@@ -1126,57 +1147,27 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     let mut loaded_profile_message: Option<(LoadedProfileKind, String)> = None;
     let mut use_openai_account_transport = false;
 
-    // 1️⃣ If profile is set, load values from config
-    if let Some(profile_name) = sub_m.get_one::<String>("profile") {
-        if let Some(cfg) = load_config() {
-            if let Some(profile) = find_profile(&cfg, profile_name) {
-                server = profile.server.clone().to_lowercase();
-                model = profile.model.clone();
-                inference_timeout_in_sec = profile.timeout_in_sec;
-                max_output_tokens = profile.max_output_tokens;
-                temperature = profile.temperature;
-                // Updated URL assignment logic:
-                url = profile.url.clone().unwrap_or_default();
-                selected_profile = Some(SelectedProfile {
-                    name: profile.name.clone(),
-                    auth_mode: profile.auth_mode,
-                    legacy_token: profile.token.clone(),
-                });
-                loaded_profile_message =
-                    Some((LoadedProfileKind::Explicit, profile_name.to_string()));
-            } else {
-                eprintln!("Profile '{}' not found.", profile_name);
-            }
-        } else {
-            eprintln!("No config file found.");
+    let config = load_config();
+    let explicit_profile_name = sub_m.get_one::<String>("profile").map(String::as_str);
+    match resolve_loaded_profile(config.as_ref(), explicit_profile_name) {
+        Ok(Some((profile, kind))) => {
+            server = profile.server.clone().to_lowercase();
+            model = profile.model.clone();
+            inference_timeout_in_sec = profile.timeout_in_sec;
+            max_output_tokens = profile.max_output_tokens;
+            temperature = profile.temperature;
+            url = profile.url.clone().unwrap_or_default();
+            selected_profile = Some(SelectedProfile {
+                name: profile.name.clone(),
+                auth_mode: profile.auth_mode,
+                legacy_token: profile.token.clone(),
+            });
+            loaded_profile_message = Some((kind, profile.name.clone()));
         }
-    }
-
-    // Default profile if no explicit profile was provided
-    //
-    // If no --profile flag is provided, attempt to use the configured default profile.
-    //
-    // Precedence order:
-    //   CLI args > explicit --profile > default_profile (from config) > empty values
-    if server.is_empty() {
-        if let Some(cfg) = load_config() {
-            if let Some(ref default_profile_name) = cfg.default_profile {
-                if let Some(profile) = find_profile(&cfg, default_profile_name) {
-                    server = profile.server.clone().to_lowercase();
-                    model = profile.model.clone();
-                    inference_timeout_in_sec = profile.timeout_in_sec;
-                    max_output_tokens = profile.max_output_tokens;
-                    temperature = profile.temperature;
-                    url = profile.url.clone().unwrap_or_default();
-                    selected_profile = Some(SelectedProfile {
-                        name: profile.name.clone(),
-                        auth_mode: profile.auth_mode,
-                        legacy_token: profile.token.clone(),
-                    });
-                    loaded_profile_message =
-                        Some((LoadedProfileKind::Default, default_profile_name.to_string()));
-                }
-            }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("x {error}");
+            return false;
         }
     }
 
@@ -1782,6 +1773,42 @@ mod tests {
     use clap::Command;
     use serde_json::json;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn resolve_loaded_profile_preserves_explicit_default_and_manual_selection() {
+        let config: crate::config::schema::Config = toml::from_str(
+            r#"default_profile = "default"
+    [[profile]]
+    name = "default"
+    server = "ollama"
+    model = "default-model"
+    [[profile]]
+    name = "selected"
+    server = ""
+    model = "selected-model"
+    "#,
+        )
+        .unwrap();
+        let (profile, kind) = super::resolve_loaded_profile(Some(&config), Some("selected"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(profile.name, "selected");
+        assert!(
+            profile.server.is_empty(),
+            "an unusable explicit profile must not select the default"
+        );
+        assert!(matches!(kind, LoadedProfileKind::Explicit));
+        let (profile, kind) = super::resolve_loaded_profile(Some(&config), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(profile.name, "default");
+        assert!(matches!(kind, LoadedProfileKind::Default));
+        assert!(super::resolve_loaded_profile(None, None).unwrap().is_none());
+        for name in ["missing", "", " ", "Selected"] {
+            assert!(super::resolve_loaded_profile(Some(&config), Some(name)).is_err());
+            assert!(super::resolve_loaded_profile(None, Some(name)).is_err());
+        }
+    }
 
     fn input_debug_strings(inputs: &[crate::Input]) -> Vec<String> {
         inputs.iter().map(|input| format!("{input:?}")).collect()
