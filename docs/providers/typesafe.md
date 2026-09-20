@@ -4,6 +4,8 @@
 
 Use `--server typesafe` with an API-key profile for hosted Jev inference. Cargo AI remains a local Rust client; selected text leaves the machine for TypeSafe. No SDK, companion runtime or local model weights are required.
 
+Jev support requires Cargo AI **0.4.2 or newer**. See the [0.4.2 release notes](../../releases/0.4.2.md) and [release status](../testing-and-release-qualification.md#release-status) for publication availability; the published 0.4.1 crate does not include this provider.
+
 ## Set Up The Profile
 
 Obtain TypeSafe account/API access and confirm that your account can use the selected model. The example pins `jev-1.13.0`; Cargo AI does not substitute a model or resolve an alias to a permanent version for you.

@@ -178,7 +178,7 @@ Provider capabilities differ. Unsupported input or action combinations fail expl
 | [Mistral](./docs/providers/mistral.md) | Chat Completions API with a Mistral API key |
 | [Ollama](./docs/providers/ollama.md) | Locally operated OpenAI-compatible server |
 
-TypeSafe Jev supports local and hatched Choice/Score workflows. New rubric definitions opt into `2026-09-19.r1`; hosted storage of that revision is deferred. Ordinary scaffolds retain `2026-09-09.r1`. See [TypeSafe setup](./docs/providers/typesafe.md) for the complete limits and profile-aware hatch checks.
+TypeSafe Jev support is introduced in [0.4.2](./releases/0.4.2.md) for local and hatched Choice/Score workflows; see [release status](./docs/testing-and-release-qualification.md#release-status) for publication availability. New rubric definitions opt into `2026-09-19.r1`; hosted storage of that revision is deferred. Ordinary scaffolds retain `2026-09-09.r1`. See [TypeSafe setup](./docs/providers/typesafe.md) for the complete limits and profile-aware hatch checks.
 
 The [provider overview](./docs/providers/README.md) compares the current input and image-generation boundaries. Model availability belongs to each provider or account; Cargo AI does not maintain a model allowlist or certify every model/schema combination.
 
@@ -217,9 +217,13 @@ See [Accounts and sharing](./docs/accounts-and-sharing.md). Account-agent manage
 - [Accounts and sharing](./docs/accounts-and-sharing.md)
 - [Troubleshooting](./docs/troubleshooting.md)
 - [Testing and Product Qualification](./docs/testing-and-release-qualification.md)
-- [Versioning](./VERSIONING.md) and [release notes](./releases/)
+- [Versioning](./VERSIONING.md) and [release notes](./releases/README.md)
 
 Runnable repository examples include [adder_test.json](./adder_test.json) and [weather_test.json](./weather_test.json).
+
+## Releases
+
+The [release history](./releases/README.md) collects changes and upgrade guidance by version. [0.4.2](./releases/0.4.2.md) introduces TypeSafe Jev support and fixes unresolved explicit profile selection. Check [release status and verification](./docs/testing-and-release-qualification.md#release-status) for the published version and its recorded checks.
 
 ## Project Status
 

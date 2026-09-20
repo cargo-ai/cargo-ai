@@ -68,6 +68,12 @@ Artifacts retain compiler-reported dependency identities/features, installation 
 
 ## Release status
 
+### 0.4.2 preparation
+
+[0.4.2](../releases/0.4.2.md) introduces TypeSafe Jev support. Qualification and publication are pending; current source support does not imply that the published 0.4.1 crate includes Jev. Release verification requires fresh full Product Qualification, a separate bounded live Jev journey and dependency policy checks, followed by native registry installation after publication. No 0.4.2 passing or released claim is made here yet.
+
+### 0.4.1 recorded results
+
 README release badges and versioned links identify the released version; current `develop` CI is labeled separately. Verified: 2026-09-18. For `v0.4.1`, released commit `a81fda6d2cbbf3b7769f5f4abe38e139fc3eb521` passed [Core CI](https://github.com/cargo-ai/cargo-ai/actions/runs/35258805842) on Linux, macOS and Windows, including installed CLI smoke and freshly resolved packaged-source installation. The Core CI and package-installation badges represent those checks in the same run, not two separately executed suites or the catalog-based Package Qualification family.
 
 The release's [Security Audit](https://github.com/cargo-ai/cargo-ai/actions/runs/35271269371) passed on integrated commit `fbe7d4067ea15fd0bc0bc7d93b25e6f50c6cb50a`. Its Git source tree is identical to the released commit (`git diff a81fda6d2cbbf3b7769f5f4abe38e139fc3eb521 fbe7d4067ea15fd0bc0bc7d93b25e6f50c6cb50a` is empty). The security badge is pinned to that immutable check revision and retains its original evidence identity; it is not a claim that a security check is attached to the release tag or that today's advisory database was tested. Full Product Qualification was not run for v0.4.1 and is not implied by these passing checks.
