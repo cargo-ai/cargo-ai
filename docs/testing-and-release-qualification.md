@@ -68,9 +68,17 @@ Artifacts retain compiler-reported dependency identities/features, installation 
 
 ## Release status
 
-### 0.4.2 preparation
+### 0.4.2 recorded results
 
-[0.4.2](../releases/0.4.2.md) introduces TypeSafe Jev support. Qualification and publication are pending; current source support does not imply that the published 0.4.1 crate includes Jev. Release verification requires fresh full Product Qualification, a separate bounded live Jev journey and dependency policy checks, followed by native registry installation after publication. No 0.4.2 passing or released claim is made here yet.
+Verified: 2026-09-21. [0.4.2](../releases/0.4.2.md) introduces TypeSafe Jev support. The published crates.io archive embeds clean source `3a71b3629405e042b704794944868ccf6e66122a`, matching tag `v0.4.2`. Its SHA-256 is `1de60a0c251fc17aac802d8af08b8a2867d51fdaeb1ca9cc10d9bb5e8a82ef39`, identical to the qualified package; the registry version is non-yanked.
+
+[Product Qualification 35545290245](https://github.com/cargo-ai/cargo-ai/actions/runs/35545290245) passed on that exact source, including Core/native checks on Linux, macOS and Windows, source-canary and official-package qualification on all three platforms, security audit and the combined summary. The separate `cargo deny --locked check` passed dependency license, source, ban and advisory policy on the same source, retaining existing duplicate-version warnings. Security results describe the advisory data fetched for these checks, not future advisory status.
+
+OpenAI (`gpt-5.6-luna`), Anthropic (`claude-sonnet-5`), Gemini (`gemini-3.7-flash`) and xAI (`grok-4.6`) passed live conformance. Mistral (`mistral-small-2603`) was rate-limited on all three bounded attempts and remains **unverified** under the supplemental-provider availability-warning policy; a successful aggregate is not a Mistral live pass.
+
+A separate local macOS journey passed all eight bounded requests using `jev-1.13.0`: interpreted and hatched Choice/Score cases, fetched URL text and a live parent with a mocked child. These fixed fixtures establish the selected runtime journeys, not general model judgment or performance. Jev is not yet part of the hosted-provider GitHub aggregate.
+
+[Registry Installation 35552785215](https://github.com/cargo-ai/cargo-ai/actions/runs/35552785215) passed on Linux, macOS and Windows against published source `3a71b3629405e042b704794944868ccf6e66122a`; its workflow revision is separately recorded as the same commit. Each clean environment installed normally from crates.io and verified version, embedded source, direct/Cargo CLI dispatch and a local action. The matching [GitHub release](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.2) was then published as Latest. Later documentation updates do not change this released source or claim qualification of another commit.
 
 ### 0.4.1 recorded results
 
