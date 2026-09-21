@@ -1,27 +1,27 @@
 # cargo-ai™
 
 <!-- Update the release version, tag-specific checks and evidence links together after publication verification. -->
-[![Latest release: v0.4.1](https://img.shields.io/badge/release-v0.4.1-blue)](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.1)
-[![v0.4.1 Core CI](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/v0.4.1?nameFilter=Deterministic%20qualification%20summary&label=v0.4.1%20Core%20CI)](https://github.com/cargo-ai/cargo-ai/actions/runs/35258805842)
-[![v0.4.1 package installation](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/v0.4.1?nameFilter=Deterministic%20qualification%20summary&label=v0.4.1%20package%20installation)](https://github.com/cargo-ai/cargo-ai/actions/runs/35258805842)
-[![v0.4.1 security audit](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/fbe7d4067ea15fd0bc0bc7d93b25e6f50c6cb50a?nameFilter=security_check&label=v0.4.1%20security%20audit)](https://github.com/cargo-ai/cargo-ai/actions/runs/35271269371)
+[![Latest release: v0.4.2](https://img.shields.io/badge/release-v0.4.2-blue)](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.2)
+[![v0.4.2 Product Qualification](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/v0.4.2?nameFilter=Product%20qualification%20summary&label=v0.4.2%20Product%20Qualification)](https://github.com/cargo-ai/cargo-ai/actions/runs/35545290245)
+[![v0.4.2 Registry Installation](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/v0.4.2?nameFilter=Registry%20installation%20summary&label=v0.4.2%20Registry%20Installation)](https://github.com/cargo-ai/cargo-ai/actions/runs/35552785215)
 
 <details>
-<summary>Verified release checks — v0.4.1</summary>
+<summary>Verified release checks — v0.4.2</summary>
 
 | Check | Recorded result |
 |---|---|
-| Core CI | Passed on Linux, macOS and Windows |
-| Package installation | Fresh packaged-source installation and installed CLI smoke passed on all three platforms as part of Core CI |
-| Security audit | Passed on the integrated commit with an identical source tree to the released commit |
-| Full Product Qualification | Not run for this release |
-| Registry Installation | [Passed on Linux, macOS and Windows](https://github.com/cargo-ai/cargo-ai/actions/runs/35443223970); verified the published v0.4.1 crate |
+| Core CI | Passed on Linux, macOS and Windows, including packaged-source installation and installed CLI smoke |
+| Package Qualification | Source canary and enrolled official package passed on all three platforms |
+| Security | Audit and separate dependency policy checks passed on the released source |
+| Full Product Qualification | [Passed](https://github.com/cargo-ai/cargo-ai/actions/runs/35545290245); OpenAI, Anthropic, Gemini and xAI live checks passed; Mistral remains unverified after rate limiting |
+| Jev | Eight separate local live Choice/Score journey requests passed using `jev-1.13.0`; outside the GitHub provider aggregate |
+| Registry Installation | [Passed on Linux, macOS and Windows](https://github.com/cargo-ai/cargo-ai/actions/runs/35552785215); verified the published v0.4.2 crate and exact source |
 
-The badges link to the recorded release checks. Package installation above is the Core CI source-install check; the separate catalog-based Package Qualification family belongs to the full Product Qualification umbrella. See [release evidence](./docs/testing-and-release-qualification.md#release-status) for commit identities and coverage.
+These checks describe the released commit and bounded scenarios. See [release evidence](./docs/testing-and-release-qualification.md#release-status) for source identities, provider limitations and historical results.
 
 </details>
 
-[Release notes](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.1) · [Documentation at v0.4.1](https://github.com/cargo-ai/cargo-ai/blob/v0.4.1/README.md) · [Release testing](./docs/testing-and-release-qualification.md#release-status)
+[Release notes](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.2) · [Documentation at v0.4.2](https://github.com/cargo-ai/cargo-ai/blob/v0.4.2/README.md) · [Release testing](./docs/testing-and-release-qualification.md#release-status)
 
 Development status: [![Development CI](https://github.com/cargo-ai/cargo-ai/actions/workflows/development-ci.yml/badge.svg?branch=develop&event=push)](https://github.com/cargo-ai/cargo-ai/actions/workflows/development-ci.yml?query=branch%3Adevelop)
 
