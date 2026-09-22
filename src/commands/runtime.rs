@@ -800,9 +800,9 @@ fn validate_runtime_file_extension(path: &str, name: &str) -> Result<(), String>
 
     match extension.as_deref() {
         Some(
-            "pdf" | "docx" | "csv" | "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlsx" | "xlt"
-            | "xlw" | "tsv" | "iif" | "doc" | "dot" | "odt" | "rtf" | "pot" | "ppa" | "pps"
-            | "ppt" | "pptx" | "pwz" | "wiz",
+            "pdf" | "docx" | "csv" | "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlsx" | "xlt" | "xlw"
+            | "tsv" | "iif" | "doc" | "dot" | "odt" | "rtf" | "pot" | "ppa" | "pps" | "ppt"
+            | "pptx" | "pwz" | "wiz",
         ) => Ok(()),
         _ => Err(format!(
             "Named input override '{}' must use a supported file extension: pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz.",
@@ -1553,9 +1553,39 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
 
     let content_parts = ai_cargo.content_parts();
 
+    let _remaining = match remaining_runtime_duration(runtime_budget, "before starting inference") {
+        Ok(remaining) => remaining,
+        Err(error) => {
+            eprintln!(
+                "x {}",
+                current_agent_runtime_timeout_message(runtime_budget, error.as_str())
+            );
+            return false;
+        }
+    };
+    let usage_attempt = usage_log_context.as_ref().map(|usage_log| {
+        usage_log.start_provider_request(
+            provider,
+            selected_profile
+                .as_ref()
+                .map(|profile| profile.name.as_str()),
+            action_provider_context.auth_mode.as_str(),
+            model.as_str(),
+            crate::usage_log::UsageStep {
+                kind: "agent_inference",
+                action: None,
+                step_index: None,
+            },
+        )
+    });
     let remaining = match remaining_runtime_duration(runtime_budget, "before starting inference") {
         Ok(remaining) => remaining,
         Err(error) => {
+            if let (Some(usage_log), Some(attempt)) =
+                (usage_log_context.as_ref(), usage_attempt.as_ref())
+            {
+                usage_log.abort_provider_before_dispatch(attempt);
+            }
             eprintln!(
                 "x {}",
                 current_agent_runtime_timeout_message(runtime_budget, error.as_str())
@@ -1587,14 +1617,20 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
             if let Some(resolved_model) = response.resolved_model.as_deref() {
                 println!("Provider response model: {resolved_model}");
             }
-            if let Some(usage_log) = usage_log_context.as_ref() {
+            if let (Some(usage_log), Some(attempt)) =
+                (usage_log_context.as_ref(), usage_attempt.as_ref())
+            {
                 usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                    attempt,
                     provider,
                     profile_name: selected_profile
                         .as_ref()
                         .map(|profile| profile.name.as_str()),
                     auth_mode: action_provider_context.auth_mode.as_str(),
                     model: model.as_str(),
+                    resolved_model: response.resolved_model.as_deref(),
+                    provider_request_id: response.provider_request_id.as_deref(),
+                    finish_reason: response.finish_reason.as_deref(),
                     step: crate::usage_log::UsageStep {
                         kind: "agent_inference",
                         action: None,
@@ -1609,20 +1645,26 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
             response.text
         }
         Ok(Err(error)) => {
-            if let Some(usage_log) = usage_log_context.as_ref() {
+            if let (Some(usage_log), Some(attempt)) =
+                (usage_log_context.as_ref(), usage_attempt.as_ref())
+            {
                 usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                    attempt,
                     provider,
                     profile_name: selected_profile
                         .as_ref()
                         .map(|profile| profile.name.as_str()),
                     auth_mode: action_provider_context.auth_mode.as_str(),
                     model: model.as_str(),
+                    resolved_model: error.resolved_model.as_deref(),
+                    provider_request_id: error.provider_request_id.as_deref(),
+                    finish_reason: error.finish_reason.as_deref(),
                     step: crate::usage_log::UsageStep {
                         kind: "agent_inference",
                         action: None,
                         step_index: None,
                     },
-                    usage: None,
+                    usage: error.usage.as_ref(),
                     duration: provider_started_at.elapsed(),
                     status: crate::usage_log::UsageStatus::Failed,
                     error: Some(super::runtime_actions::usage_provider_error(&error)),
@@ -1647,14 +1689,20 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
             return false;
         }
         Err(_) => {
-            if let Some(usage_log) = usage_log_context.as_ref() {
+            if let (Some(usage_log), Some(attempt)) =
+                (usage_log_context.as_ref(), usage_attempt.as_ref())
+            {
                 usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                    attempt,
                     provider,
                     profile_name: selected_profile
                         .as_ref()
                         .map(|profile| profile.name.as_str()),
                     auth_mode: action_provider_context.auth_mode.as_str(),
                     model: model.as_str(),
+                    resolved_model: None,
+                    provider_request_id: None,
+                    finish_reason: None,
                     step: crate::usage_log::UsageStep {
                         kind: "agent_inference",
                         action: None,

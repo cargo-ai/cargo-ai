@@ -140,3 +140,9 @@ The difference is only how the executable is installed and discovered on `PATH`.
 - [Packages and installed data](./packages.md)
 - [Documentation home](./README.md)
 - [Public README](../README.md)
+
+## Usage History
+
+Current runtimes automatically retain metadata under `usage/usage.sqlite3` in this same selected home. The embedded SQLite engine requires no runtime installation; source builds need the supported C toolchain. Profiles remain in `config.toml` and credentials remain in their existing credential backend. Keep the live database on a local filesystem, outside network shares and cloud file sync.
+
+Use `cargo ai usage settings --tracking off` to stop new automatic collection while retaining history, or `CARGO_AI_USAGE_TRACKING=off` for a process and its children. Explicit `--usage-log` exports remain independent. Empty-history reads and disabled collection do not initialize the database. History persists until explicit deletion; see the [usage contract](../templates/guidance/usage-ledger.md) for queries, coverage, pagination, export and deletion. [Hosted backup](usage-backup.md) is a separate explicit consent and never a prerequisite for local execution. Its queue and consent windows share the usage database; configuration remains in the existing store.

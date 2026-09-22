@@ -51,6 +51,8 @@ pub fn default_profile_auth_mode() -> ProfileAuthMode {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<toml::Value>,
     pub profile: Vec<Profile>,
 
     // Reserved for future install or account identification and management (currently unused).

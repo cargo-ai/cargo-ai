@@ -11,7 +11,7 @@ Development CI supplies automatic PR and `develop` feedback. Product Qualificati
 | **Development CI** (`development-ci.yml`) | Automatic PR/`develop` and manual: Linux formatting, all-target compilation, binary units, interpreted providers, qualification-policy checks and security. PR checks use the prospective merge commit. This is not full native qualification. |
 | **Core CI** (`multi-os-ci.yml`) | Manual/reusable: full credential-free tests, generated providers, build and local/packaged-source installation on Ubuntu, macOS and Windows. |
 | **Package Qualification** (`package-qualification.yml`) | Manual/reusable: source-canary or official-package lifecycle on declared native platforms, with exact package selection and failure-only baseline diagnosis. |
-| **Live Provider Conformance** (`live-provider-conformance.yml`) | Manually select one provider or all enrolled providers, using the same Rust probe, typed outcomes and bounded retries as the umbrella. Each job receives only its own protected key. |
+| **Live Provider Conformance** (`live-provider-conformance.yml`) | Manually select one provider or all enrolled providers, using the same Rust probe and typed outcomes as the umbrella. Jev runs one bounded journey; the other providers retain bounded retries. Each job receives only its own protected key. |
 | **Security Audit** (`security-audit.yml`) | Manual/reusable dependency audit, also called by Development CI and Product Qualification. |
 | **Product Qualification** (`release-qualification.yml`) | Manual full umbrella: Core CI, packages, required/enrolled providers and security, followed by one fail-closed summary. No push, merge or weekly trigger. |
 | **Registry Installation** (`registry-install.yml`) | Manual/reusable post-publication check: plain crates.io installation, source/version checks and smoke on all three OSes. No Core CI rerun or publication. |
@@ -76,7 +76,7 @@ Verified: 2026-09-21. [0.4.2](../releases/0.4.2.md) introduces TypeSafe Jev supp
 
 OpenAI (`gpt-5.6-luna`), Anthropic (`claude-sonnet-5`), Gemini (`gemini-3.7-flash`) and xAI (`grok-4.6`) passed live conformance. Mistral (`mistral-small-2603`) was rate-limited on all three bounded attempts and remains **unverified** under the supplemental-provider availability-warning policy; a successful aggregate is not a Mistral live pass.
 
-A separate local macOS journey passed all eight bounded requests using `jev-1.13.0`: interpreted and hatched Choice/Score cases, fetched URL text and a live parent with a mocked child. These fixed fixtures establish the selected runtime journeys, not general model judgment or performance. Jev is not yet part of the hosted-provider GitHub aggregate.
+A separate local macOS journey passed all eight bounded requests using `jev-1.13.0`: interpreted and hatched Choice/Score cases, fetched URL text and a live parent with a mocked child. These fixed fixtures establish the selected runtime journeys, not general model judgment or performance. That historical release did not include Jev in the hosted-provider GitHub aggregate. Current source supports explicit Jev enrollment as described below.
 
 [Registry Installation 35552785215](https://github.com/cargo-ai/cargo-ai/actions/runs/35552785215) passed on Linux, macOS and Windows against published source `3a71b3629405e042b704794944868ccf6e66122a`; its workflow revision is separately recorded as the same commit. Each clean environment installed normally from crates.io and verified version, embedded source, direct/Cargo CLI dispatch and a local action. The matching [GitHub release](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.2) was then published as Latest. Later documentation updates do not change this released source or claim qualification of another commit.
 
@@ -170,7 +170,7 @@ Live cases are separately ignored and must be intentional. Load the matching key
 | Mistral | `MISTRAL_API_KEY`, `MISTRAL_MODEL` | `live_mistral_smoke_uses_isolated_stdin_credentials` |
 | TypeSafe Jev | `TYPESAFE_API_KEY`, `TYPESAFE_MODEL` | `typesafe_smoke::live_typesafe_journey_uses_isolated_stdin_credentials` |
 
-The TypeSafe journey makes at most eight inference requests with no automatic retries: three labeled Choice/Score messages interpreted and standalone, one fetched URL-text case and one live parent with a mocked child. It uses the existing isolated stdin credential store, omits unsupported generation settings and checks local marker behavior. It is a manually selected integration test; it is not enrolled in Product Qualification by this addition.
+The TypeSafe journey makes at most eight inference requests with no automatic retries: three labeled Choice/Score messages interpreted and standalone, one fetched URL-text case and one live parent with a mocked child. It uses the existing isolated stdin credential store, omits unsupported generation settings and checks local marker behavior. It also asserts automatic history through `usage runs --json`, `usage show <run-id> --json` and `usage summary --json`, without `--usage-log` or `CARGO_AI_USAGE_LOG`. The standalone and Product Qualification workflows use this same journey when Jev is explicitly enrolled.
 
 After the selected provider's variables are already present, run its exact checkpoint:
 
@@ -220,7 +220,7 @@ Candidate failure always blocks. When an exact last product-qualified Cargo AI c
 
 ## Hosted provider configuration
 
-Use standalone families when commissioning access or diagnosing failures. Ordinary full qualification needs only Product Qualification; do not first rerun every family independently. OpenAI and Anthropic are required; enroll supplemental Gemini, xAI or Mistral explicitly. A single-provider run starts only the selected provider job and is integration evidence, not a Product Qualification decision. **Product Qualification** starts new direct jobs for required OpenAI and Anthropic plus every explicitly enrolled supplemental provider and remains the only complete aggregate gate.
+Use standalone families when commissioning access or diagnosing failures. Ordinary full qualification needs only Product Qualification; do not first rerun every family independently. OpenAI and Anthropic are required; enroll supplemental Gemini, xAI, Mistral or TypeSafe Jev explicitly. A single-provider run starts only the selected provider job and is integration evidence, not a Product Qualification decision. **Product Qualification** starts new direct jobs for required OpenAI and Anthropic plus every explicitly enrolled supplemental provider and remains the only complete aggregate gate.
 
 The live workflow has no semantic dependency between providers:
 
@@ -231,6 +231,7 @@ workflow dispatch
   +-- Gemini (when enrolled)
   +-- xAI (when enrolled)
   +-- Mistral (when enrolled)
+  +-- TypeSafe Jev (when enrolled)
   `-- complete after every selected job finishes
 ```
 
@@ -239,6 +240,7 @@ Store these non-secret repository variables under **Settings → Secrets and var
 - `LIVE_GEMINI_ENABLED`
 - `LIVE_XAI_ENABLED`
 - `LIVE_MISTRAL_ENABLED`
+- `LIVE_TYPESAFE_ENABLED`
 
 The workflow never probes secret presence to infer enrollment. An invalid enrollment value fails visibly. Explicitly dispatching an optional provider also requires its enrollment variable to equal `true`.
 
@@ -249,7 +251,7 @@ Create a GitHub Environment named `live-provider-ci`. Store the required primary
 - `ANTHROPIC_API_KEY`
 - `ANTHROPIC_MODEL` as a non-secret Environment variable
 
-For each supplemental provider being enrolled, add only its matching Environment secret and non-secret model variable: `GEMINI_API_KEY`/`GEMINI_MODEL`, `XAI_API_KEY`/`XAI_MODEL`, or `MISTRAL_API_KEY`/`MISTRAL_MODEL`. Select one representative hosted model per enrolled provider. Do not add an Ollama secret or model variable; real local-server provisioning is outside this workflow.
+For each supplemental provider being enrolled, add only its matching Environment secret and non-secret model variable: `GEMINI_API_KEY`/`GEMINI_MODEL`, `XAI_API_KEY`/`XAI_MODEL`, `MISTRAL_API_KEY`/`MISTRAL_MODEL`, or `TYPESAFE_API_KEY`/`TYPESAFE_MODEL`. Select one representative hosted model per enrolled provider. Do not add an Ollama secret or model variable; real local-server provisioning is outside this workflow.
 
 Restrict `live-provider-ci` to the trusted default branch and approved release tags. Before any provider key is injected, each focused or aggregate live job directly targets that Environment, requires an exact lowercase Cargo AI commit, and verifies that it equals the trusted triggering commit. Select the matching trusted workflow ref; an arbitrary older checkout cannot borrow a newer commit’s check status. It is intended to run unattended, so human release approval belongs to a separate `release-qualification` Environment attached only to the final aggregate summary.
 
@@ -261,7 +263,7 @@ Integration policy should require Development checks and Development security / 
 
 The protected aggregate job writes the canonical human-readable dashboard directly to the GitHub Actions run summary. Open the Cargo AI repository, select **Actions**, select **Product Qualification**, and open a run's **Summary** page. When required proof passes, the headline says **Product Qualification: Passed**. The front table shows required product, package and primary-provider evidence; supplemental providers appear inside **Supplemental provider details**. Rows link to their producing jobs.
 
-OpenAI and Anthropic must pass. An enrolled Gemini, Mistral or xAI probe may instead report **not verified — rate limited** when its completed isolated usage record positively classifies HTTP 429 as `ratelimited`. That qualified warning leaves its job, aggregate and overall workflow successful when every other obligation passes; the unsuccessful service result remains in collapsed details. Auth/configuration errors, malformed responses, unknown errors, timeouts, arbitrary 5xx responses, harness failures and missing/stale/cancelled evidence still block. Unenrolled supplemental providers are `not configured`, never passed. The legacy `LIVE_ANTHROPIC_ENABLED` flag cannot disable required Anthropic proof.
+OpenAI and Anthropic must pass. An enrolled Gemini, Mistral, xAI or TypeSafe Jev probe may instead report **not verified — rate limited** when its completed isolated usage record positively classifies HTTP 429 as `ratelimited`. That qualified warning leaves its job, aggregate and overall workflow successful when every other obligation passes; the unsuccessful service result remains in collapsed details. Auth/configuration errors, malformed responses, unknown errors, timeouts, arbitrary 5xx responses, harness failures and missing/stale/cancelled evidence still block. Unenrolled supplemental providers are `not configured`, never passed. The legacy `LIVE_ANTHROPIC_ENABLED` flag cannot disable required Anthropic proof.
 
 Qualification uses an explicit report mode and sanitized candidate/provider/run/attempt/probe-bound records. Standalone Live Provider Conformance and the umbrella use the same probe helper and policy: required providers must pass; a positively classified supplemental rate limit is reported as not verified. Direct live test invocations remain strict. The policy does not substitute providers or turn unavailable evidence into a model pass; the bounded retry behavior below applies to both workflow entry points. Earlier failed workflow runs retain their original conclusions.
 
@@ -286,6 +288,43 @@ The official Animal Patrol source is enrolled separately from the source canary 
 
 Use GitHub Actions **Re-run jobs** for an individual provider job, or **Re-run failed jobs** to repeat failures and their dependent summary. Successful dependencies retain their results within the same workflow run and candidate. The summary shows the original evidence attempt; it rejects future attempts, another candidate/run, unsuccessful jobs and missing evidence. A new workflow run still starts fresh checks.
 
-The qualification gate makes at most three probe attempts for rate limits, HTTP 5xx, connection errors or timeouts, with 2- and 4-second delays. It does not retry invalid credentials, models, requests, response schemas or harness failures. Retry-After headers are not available in the current usage evidence; delays are fixed and bounded. Normal CLI and generated-agent inference do not gain automatic retries.
+For OpenAI, Anthropic, Gemini, xAI and Mistral, the qualification gate makes at most three probe attempts for rate limits, HTTP 5xx, connection errors or timeouts, with 2- and 4-second delays. It does not retry invalid credentials, models, requests, response schemas or harness failures. Retry-After headers are not available in the current usage evidence; delays are fixed and bounded. Normal CLI and generated-agent inference do not gain automatic retries.
 
 Each attempt records only typed outcome and error category in the job log and step summary. Final evidence retains the attempt history, and the aggregate identifies a pass after retry. Exhausted supplemental rate limits remain **unverified**, never a model pass; required provider failures still block qualification. Request bodies, raw provider errors and credentials are not published.
+
+
+### Jev journey and automatic history
+
+Select `typesafe` in Live Provider Conformance. Set repository variable
+`LIVE_TYPESAFE_ENABLED=true`, place `TYPESAFE_API_KEY` only in the
+`live-provider-ci` Environment, and set its `TYPESAFE_MODEL` variable to a
+representative supported model (the existing fixture uses `jev-1.13.0`). The
+optional `typesafe_model` dispatch input overrides that model; record the selected
+value with the candidate. Environment branch restrictions still apply. Enrollment
+and a stored secret do not establish that a key or model works.
+
+The gate selects
+`typesafe_smoke::live_typesafe_journey_uses_isolated_stdin_credentials` exactly once.
+It compiles the standalone fixture before reading the live key, reserves at most
+eight Jev request attempts, and stops at the first failure. A timeout consumes an
+attempt; neither the inference nor the entire journey is automatically retried.
+Rerunning a workflow starts a new paid journey and needs an intentional budget
+decision. Other providers' retry behavior is unchanged.
+
+A pass requires all eight capability cases and automatic local-history assertions:
+each interpreted or standalone request has distinct identity, provider/profile and
+requested/returned model attribution, available input/output usage, a valid total,
+timing and completed status. The mocked child is separately attributed and linked
+to its parent; summary totals count its request once. Repeated CLI JSON queries
+must preserve the same facts. This tests a representative model and journey,
+not the entire model catalog, SQLite concurrency, cloud backup or model quality
+beyond the frozen labeled cases.
+
+Public evidence contains only candidate/workflow/probe identity, bounded sanitized
+model identifiers, started-request and completed-case counts, and typed outcomes.
+Raw history, credentials, prompts, outputs and tool payloads are not uploaded.
+A positively classified HTTP 429 can produce the supplemental **not verified —
+rate limited** warning; completed earlier cases remain partial evidence and the
+journey is not a live pass. Missing, malformed or inconsistent evidence and failed
+capability/history assertions block qualification. Direct test invocations remain
+strict even when a workflow's supplemental rate-limit policy permits a warning.

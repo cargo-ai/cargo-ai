@@ -194,7 +194,9 @@ Append-only output labels action-owned output, reports liveness for long-running
 
 ## Record Usage And Timing
 
-Opt into a usage ledger with `--usage-log <path>` or `CARGO_AI_USAGE_LOG=<path>`:
+Usage metadata is collected automatically in the selected Cargo AI Home for current interpreted/generated runtimes and their children. Query it with `cargo ai usage runs --json`, `usage show <run-id> --json`, or `usage summary --json`. Disable collection with `cargo ai usage settings --tracking off` or `CARGO_AI_USAGE_TRACKING=off`; existing history remains.
+
+Request an additional per-run NDJSON export with `--usage-log <path>` or `CARGO_AI_USAGE_LOG=<path>`:
 
 ```bash
 cargo ai run ./my_agent.json \

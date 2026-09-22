@@ -244,6 +244,7 @@ mod tests {
 
     fn default_test_config() -> Config {
         Config {
+            usage: None,
             profile: Vec::new(),
             cargo_ai_token: None,
             default_profile: None,

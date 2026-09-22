@@ -100,7 +100,15 @@ fn probe(provider: &str) -> Result<()> {
     }
     let directory = ProbeDirectory::new()?;
     let mut attempts = Vec::new();
-    for attempt in 1..=3 {
+    // A Jev probe is already a bounded eight-request journey. Replaying it would
+    // repeat successful calls as well as the failed case.
+    let max_attempts = if provider == "typesafe" { 1 } else { 3 };
+    let selector = if provider == "typesafe" {
+        "typesafe_smoke::live_typesafe_journey_uses_isolated_stdin_credentials".into()
+    } else {
+        format!("live_{provider}_smoke_uses_isolated_stdin_credentials")
+    };
+    for attempt in 1..=max_attempts {
         let report = directory.0.join(format!("result-{attempt}.json"));
         let nonce = uuid::Uuid::new_v4().simple().to_string();
         let harness = Command::new("cargo")
@@ -109,7 +117,7 @@ fn probe(provider: &str) -> Result<()> {
                 "--locked",
                 "--test",
                 "provider_smoke",
-                &format!("live_{provider}_smoke_uses_isolated_stdin_credentials"),
+                &selector,
                 "--",
                 "--ignored",
                 "--exact",
@@ -151,9 +159,21 @@ fn probe(provider: &str) -> Result<()> {
                 record.outcome, record.diagnostic
             ),
         )?;
+        if let Some(journey) = &record.journey {
+            append(
+                "GITHUB_STEP_SUMMARY",
+                &format!(
+                    "- Jev model `{}`; returned `{}`; completed {}/8 cases; {} request(s) started; no retries.\n",
+                    journey.requested_model,
+                    journey.returned_models.join(", "),
+                    journey.completed_cases,
+                    journey.requests_started,
+                ),
+            )?;
+        }
         if record.outcome != qualification_policy::Outcome::Pass
             && record.diagnostic.retryable()
-            && attempt < 3
+            && attempt < max_attempts
         {
             std::thread::sleep(std::time::Duration::from_secs(2u64.pow(attempt)));
             continue;

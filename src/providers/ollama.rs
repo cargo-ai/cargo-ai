@@ -52,6 +52,7 @@ fn normalize_usage(
 ) -> Option<ProviderUsage> {
     if let Some(usage) = usage {
         return Some(ProviderUsage {
+            total_tokens_source: Some("reported".to_string()),
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
@@ -65,9 +66,11 @@ fn normalize_usage(
     }
 
     Some(ProviderUsage {
+        total_tokens_source: Some("derived_input_plus_output".to_string()),
         input_tokens: prompt_eval_count,
         output_tokens: eval_count,
-        total_tokens: prompt_eval_count.and_then(|input| eval_count.map(|output| input + output)),
+        total_tokens: prompt_eval_count
+            .and_then(|input| eval_count.and_then(|output| input.checked_add(output))),
         input_token_details: None,
         output_token_details: None,
     })
@@ -120,6 +123,12 @@ pub async fn send_image_request(
         .await
         .map_err(|error| ProviderError::from_reqwest(ProviderKind::Ollama, error))?;
 
+    let response_id = http_resp
+        .headers()
+        .get("x-request-id")
+        .or_else(|| http_resp.headers().get("request-id"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let status = http_resp.status();
     let body_bytes = http_resp
         .bytes()
@@ -128,49 +137,61 @@ pub async fn send_image_request(
 
     if !status.is_success() {
         let raw = String::from_utf8_lossy(&body_bytes);
-        return Err(ProviderError::from_http_status(
-            ProviderKind::Ollama,
-            status,
-            &raw,
-        ));
+        return Err(
+            ProviderError::from_http_status(ProviderKind::Ollama, status, &raw)
+                .with_request_id(response_id.as_deref(), token),
+        );
     }
 
-    let response: ImageGenerationResponse =
-        serde_json::from_slice(&body_bytes).map_err(|error| {
-            let raw = String::from_utf8_lossy(&body_bytes);
+    let facts = super::runtime::ProviderFacts::from_body(&body_bytes, ProviderKind::Ollama)
+        .with_request_id(response_id.as_deref())
+        .redact_token(token);
+    (|| {
+        let response: ImageGenerationResponse =
+            serde_json::from_slice(&body_bytes).map_err(|error| {
+                ProviderError::invalid_response(
+                    ProviderKind::Ollama,
+                    format!(
+                        "Failed to parse image-generation JSON at line {} column {}.",
+                        error.line(),
+                        error.column()
+                    ),
+                )
+            })?;
+
+        let encoded_image = response
+            .data
+            .first()
+            .map(|image| image.b64_json.trim())
+            .filter(|image| !image.is_empty())
+            .ok_or_else(|| {
+                ProviderError::invalid_response(
+                    ProviderKind::Ollama,
+                    "Image generation response did not include `data[0].b64_json`.",
+                )
+            })?;
+
+        let bytes = BASE64_STANDARD.decode(encoded_image).map_err(|error| {
             ProviderError::invalid_response(
                 ProviderKind::Ollama,
-                format!("Failed to parse image-generation JSON: {error}\nRaw response:\n{raw}"),
+                format!("Failed to decode generated image bytes: {error}"),
             )
         })?;
 
-    let encoded_image = response
-        .data
-        .first()
-        .map(|image| image.b64_json.trim())
-        .filter(|image| !image.is_empty())
-        .ok_or_else(|| {
-            ProviderError::invalid_response(
-                ProviderKind::Ollama,
-                "Image generation response did not include `data[0].b64_json`.",
-            )
-        })?;
-
-    let bytes = BASE64_STANDARD.decode(encoded_image).map_err(|error| {
-        ProviderError::invalid_response(
-            ProviderKind::Ollama,
-            format!("Failed to decode generated image bytes: {error}"),
-        )
-    })?;
-
-    Ok(ProviderImageResponse {
-        bytes,
-        usage: normalize_usage(
-            response.usage,
-            response.prompt_eval_count,
-            response.eval_count,
-        ),
-    })
+        Ok(ProviderImageResponse {
+            resolved_model: None,
+            provider_request_id: None,
+            finish_reason: None,
+            bytes,
+            usage: normalize_usage(
+                response.usage,
+                response.prompt_eval_count,
+                response.eval_count,
+            ),
+        })
+    })()
+    .map(|response| facts.image(response))
+    .map_err(|error: ProviderError| facts.error(error.redact_token(token)))
 }
 
 #[cfg(test)]

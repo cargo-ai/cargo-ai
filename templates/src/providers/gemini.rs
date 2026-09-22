@@ -225,11 +225,16 @@ fn normalize_usage(usage: Option<Usage>) -> Option<ProviderUsage> {
             None
         };
         ProviderUsage {
+            total_tokens_source: Some("reported".to_string()),
             input_tokens: usage.total_input_tokens,
             output_tokens: usage.total_output_tokens,
             total_tokens: usage.total_tokens,
-            input_token_details,
-            output_token_details,
+            input_token_details: input_token_details
+                .as_ref()
+                .and_then(super::runtime::sanitize_token_details),
+            output_token_details: output_token_details
+                .as_ref()
+                .and_then(super::runtime::sanitize_token_details),
         }
     })
 }
@@ -278,6 +283,12 @@ pub(crate) async fn send_request(
         .send()
         .await
         .map_err(|error| ProviderError::from_reqwest(ProviderKind::Gemini, error))?;
+    let response_id = response
+        .headers()
+        .get("x-request-id")
+        .or_else(|| response.headers().get("request-id"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let status = response.status();
     let body = response
         .bytes()
@@ -288,42 +299,54 @@ pub(crate) async fn send_request(
             ProviderKind::Gemini,
             status,
             &error_message(&body),
-        ));
-    }
-
-    let response: Response = serde_json::from_slice(&body).map_err(|error| {
-        ProviderError::invalid_response(
-            ProviderKind::Gemini,
-            format!("Failed to parse Gemini response JSON: {error}"),
         )
-    })?;
-    let text = response
-        .steps
-        .iter()
-        .rev()
-        .find(|step| step.r#type == "model_output")
-        .map(|step| {
-            step.content
-                .iter()
-                .filter(|content| content.r#type == "text")
-                .filter_map(|content| content.text.as_deref())
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default();
-    if text.is_empty() {
-        let status = response.status.as_deref().unwrap_or("unknown");
-        return Err(ProviderError::invalid_response(
-            ProviderKind::Gemini,
-            format!("Gemini returned no text content in a model_output step (status: {status})."),
-        ));
+        .with_request_id(response_id.as_deref(), token));
     }
 
-    Ok(ProviderTextResponse {
-        resolved_model: None,
-        text,
-        usage: normalize_usage(response.usage),
-    })
+    let facts = super::runtime::ProviderFacts::from_body(&body, ProviderKind::Gemini)
+        .with_request_id(response_id.as_deref())
+        .redact_token(token);
+    (|| {
+        let response: Response = serde_json::from_slice(&body).map_err(|error| {
+            ProviderError::invalid_response(
+                ProviderKind::Gemini,
+                format!("Failed to parse Gemini response JSON: {error}"),
+            )
+        })?;
+        let text = response
+            .steps
+            .iter()
+            .rev()
+            .find(|step| step.r#type == "model_output")
+            .map(|step| {
+                step.content
+                    .iter()
+                    .filter(|content| content.r#type == "text")
+                    .filter_map(|content| content.text.as_deref())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default();
+        if text.is_empty() {
+            let status = response.status.as_deref().unwrap_or("unknown");
+            return Err(ProviderError::invalid_response(
+                ProviderKind::Gemini,
+                format!(
+                    "Gemini returned no text content in a model_output step (status: {status})."
+                ),
+            ));
+        }
+
+        Ok(ProviderTextResponse {
+            provider_request_id: None,
+            finish_reason: None,
+            resolved_model: None,
+            text,
+            usage: normalize_usage(response.usage),
+        })
+    })()
+    .map(|response| facts.text(response))
+    .map_err(|error: ProviderError| facts.error(error.redact_token(token)))
 }
 
 #[cfg(test)]
@@ -407,6 +430,55 @@ mod tests {
             usage.output_token_details.unwrap()["total_thought_tokens"],
             2
         );
+    }
+
+    #[tokio::test]
+    async fn modality_facts_survive_empty_and_invalid_output_without_payloads() {
+        let expected_input = serde_json::json!({"total_cached_tokens": 2, "input_tokens_by_modality": [{"modality": "IMAGE", "token_count": u64::MAX}]});
+        let expected_output = serde_json::json!({"total_thought_tokens": 1, "output_tokens_by_modality": [{"modality": "TEXT", "token_count": 3}]});
+        for outcome in ["success", "empty", "invalid"] {
+            let mut server = mockito::Server::new_async().await;
+            let steps = match outcome {
+                "success" => {
+                    serde_json::json!([{"type": "model_output", "content": [{"type": "text", "text": "private-output"}]}])
+                }
+                "empty" => serde_json::json!([]),
+                _ => serde_json::json!({"private": "malformed-output"}),
+            };
+            let mock = server.mock("POST", "/v1beta/interactions").with_status(200).with_body(serde_json::json!({
+                "status": "completed", "steps": steps,
+                "usage": {"total_input_tokens": 7, "total_output_tokens": 3, "total_tokens": 10,
+                    "total_cached_tokens": 2, "total_thought_tokens": 1,
+                    "input_tokens_by_modality": [{"modality": "IMAGE", "tokenCount": u64::MAX, "payload": "private-image"}, {"modality": "private-label", "token_count": 1}],
+                    "output_tokens_by_modality": [{"modality": "TEXT", "token_count": 3, "text": "private-output"}],
+                    "prompt": "private-prompt"}
+            }).to_string()).create_async().await;
+            let result = send_request(
+                &format!("{}/v1beta/interactions", server.url()),
+                "gemini-test",
+                &[ContentPart::Text("private-prompt".into())],
+                10,
+                "fixture-key",
+                &schema(),
+                None,
+            )
+            .await;
+            mock.assert_async().await;
+            let usage = if outcome == "success" {
+                result.expect("valid output").usage
+            } else {
+                result.expect_err("output validation fails").usage
+            }
+            .expect("usage survives");
+            assert_eq!(usage.input_tokens, Some(7));
+            assert_eq!(usage.output_tokens, Some(3));
+            assert_eq!(usage.total_tokens, Some(10));
+            assert_eq!(usage.input_token_details, Some(expected_input.clone()));
+            assert_eq!(usage.output_token_details, Some(expected_output.clone()));
+            let serialized = serde_json::to_string(&usage).unwrap();
+            assert!(!serialized.contains("private"));
+            assert!(!serialized.contains("malformed-output"));
+        }
     }
 
     #[tokio::test]

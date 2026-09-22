@@ -1521,6 +1521,7 @@ fn append_compressed_archive_entries<W: Write>(
 
         if relative_path == ".cargo-ai/publish-requests"
             || relative_path.starts_with(".cargo-ai/publish-requests/")
+            || crate::commands::runtime_data::is_usage_state(Path::new(&relative_path))
         {
             continue;
         }
@@ -2610,6 +2611,29 @@ mod tests {
         let _ = fs::remove_dir_all(source_root);
         let _ = fs::remove_dir_all(dest_root);
         let _ = fs::remove_dir_all(expanded_dest);
+    }
+
+    #[test]
+    fn usage_state_is_excluded_from_project_archives() {
+        let source = temp_dir("usage-state-source");
+        let destination = temp_dir("usage-state-destination");
+        fs::create_dir_all(source.join("assets")).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(source.join("assets/seed.json"), "{}").unwrap();
+        for name in [
+            "usage.sqlite3",
+            "usage.sqlite3-wal",
+            "usage.sqlite3-shm",
+            "capture-incomplete",
+        ] {
+            fs::write(source.join("assets").join(name), "private mutable state").unwrap();
+        }
+        let archive = create_package_archive_bytes(&source).unwrap();
+        extract_package_archive_bytes(&archive, &destination).unwrap();
+        assert!(destination.join("assets/seed.json").exists());
+        assert_eq!(fs::read_dir(destination.join("assets")).unwrap().count(), 1);
+        fs::remove_dir_all(source).unwrap();
+        fs::remove_dir_all(destination).unwrap();
     }
 
     #[test]

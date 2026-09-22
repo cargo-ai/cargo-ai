@@ -15,8 +15,19 @@ use std::{
 };
 
 fn record(provider: &str, outcome: &str) -> Value {
-    json!({"schema_version":1,"candidate":"a".repeat(40),"provider":provider,
-        "run_id":"123","run_attempt":"2","probe_id":format!("{:032x}", PROVIDERS.iter().position(|p| *p == provider).unwrap() + 1),"outcome":outcome})
+    let mut value = json!({"schema_version":1,"candidate":"a".repeat(40),"provider":provider,
+        "run_id":"123","run_attempt":"2","probe_id":format!("{:032x}", PROVIDERS.iter().position(|p| *p == provider).unwrap() + 1),"outcome":outcome});
+    if provider == "typesafe" {
+        value["diagnostic"] = json!(if outcome == "rate_limited" {
+            "rate_limited"
+        } else if outcome == "pass" {
+            "none"
+        } else {
+            "execution_failure"
+        });
+        value["journey"] = json!({"requested_model":"jev-1.13.0","returned_models":["jev-1.13.0"],"requests_started":8,"completed_cases":if outcome == "pass" {8} else {7}});
+    }
+    value
 }
 
 #[test]
@@ -216,6 +227,7 @@ impl Dashboard {
             ("LIVE_GEMINI_ENABLED", "true"),
             ("LIVE_XAI_ENABLED", "true"),
             ("LIVE_MISTRAL_ENABLED", "true"),
+            ("LIVE_TYPESAFE_ENABLED", "true"),
         ] {
             env.insert(key.into(), value.into());
         }
@@ -576,7 +588,7 @@ fn main() {
  let args:Vec<_>=env::args().skip(1).collect();
  assert_eq!(&args[..4], ["test","--locked","--test","provider_smoke"]);
  assert_eq!(&args[5..], ["--","--ignored","--exact"]);
- let provider=args[4].strip_prefix("live_").unwrap().strip_suffix("_smoke_uses_isolated_stdin_credentials").unwrap();
+ let provider=if args[4] == "typesafe_smoke::live_typesafe_journey_uses_isolated_stdin_credentials" { "typesafe" } else {args[4].strip_prefix("live_").unwrap().strip_suffix("_smoke_uses_isolated_stdin_credentials").unwrap()};
  let mode=env::var("FIXTURE_MODE").unwrap();
  if mode=="missing" {return;}
  let path=env::var("CARGO_AI_QUALIFICATION_REPORT").unwrap();
@@ -586,6 +598,7 @@ fn main() {
  let outcome=if transient {"failure"} else if mode=="rate_limited" {"rate_limited"} else if mode=="failure" {"failure"} else {"pass"};
  let raw=format!(r##"{{"schema_version":1,"candidate":"{}","provider":"{}","run_id":"123","run_attempt":"2","probe_id":"{}","outcome":"{}"}}"##,env::var("CARGO_AI_SHA").unwrap(),provider,nonce,outcome);
  let raw=if retrying {raw.trim_end_matches('}').to_string()+&format!(",\"diagnostic\":\"{}\"}}",if transient {"server_error"} else {"none"})} else {raw};
+ let raw=if provider=="typesafe" {raw.trim_end_matches('}').to_string()+&format!(r##","journey":{{"requested_model":"jev-1.13.0","returned_models":["jev-1.13.0"],"requests_started":8,"completed_cases":{}}}{} }}"##, if outcome=="pass" {8} else {7}, if retrying {String::new()} else {format!(",\"diagnostic\":\"{}\"",if mode=="rate_limited" {"rate_limited"} else if mode=="pass" {"none"} else {"execution_failure"})})} else {raw};
  fs::write(path,if mode=="malformed" {"secret-marker".into()} else {raw}).unwrap();
  if mode=="harness_failure" {std::process::exit(3);}
 }
@@ -629,7 +642,7 @@ fn main() {
     let paths = std::iter::once(bin_dir)
         .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap()))
         .collect::<Vec<_>>();
-    for provider in ["openai", "anthropic", "mistral"] {
+    for provider in ["openai", "anthropic", "mistral", "typesafe"] {
         for mode in [
             "pass",
             "rate_limited",
@@ -641,7 +654,7 @@ fn main() {
             "retry_pass",
             "retry_exhausted",
         ] {
-            if mode.starts_with("retry_") && provider != "mistral" {
+            if mode.starts_with("retry_") && !matches!(provider, "mistral" | "typesafe") {
                 continue;
             }
             let _ = fs::remove_file(fixture.path("output"));
@@ -655,15 +668,15 @@ fn main() {
                 .env("FIXTURE_MODE", mode)
                 .output()
                 .unwrap();
-            let accepted = matches!(mode, "pass" | "retry_pass")
-                || (mode == "rate_limited" && provider == "mistral");
+            let accepted = (mode == "pass" || (mode == "retry_pass" && provider != "typesafe"))
+                || (mode == "rate_limited" && matches!(provider, "mistral" | "typesafe"));
             assert_eq!(
                 result.status.success(),
                 accepted,
                 "{provider}/{mode}: {}",
                 String::from_utf8_lossy(&result.stderr)
             );
-            if accepted || mode == "failure" || mode == "rate_limited" || mode == "retry_exhausted"
+            if accepted || mode == "failure" || mode == "rate_limited" || mode.starts_with("retry_")
             {
                 let raw = fs::read_to_string(fixture.path("output")).unwrap();
                 assert_eq!(raw.lines().count(), 1);
@@ -673,7 +686,13 @@ fn main() {
                 if mode.starts_with("retry_") {
                     assert_eq!(
                         record.attempts.len(),
-                        if mode == "retry_pass" { 2 } else { 3 }
+                        if provider == "typesafe" {
+                            1
+                        } else if mode == "retry_pass" {
+                            2
+                        } else {
+                            3
+                        }
                     );
                     assert_eq!(
                         record.attempts[0].diagnostic,
@@ -798,4 +817,160 @@ fn transient_retry_classification_and_history_are_bounded() {
         4
     ]);
     assert!(Record::parse(value.to_string().as_bytes()).is_err());
+}
+
+#[test]
+fn jev_journey_requires_complete_bounded_sanitized_evidence() {
+    let valid = record("typesafe", "pass");
+    assert!(Record::parse(valid.to_string().as_bytes()).is_ok());
+    for (field, value) in [
+        ("requests_started", json!(9)),
+        ("completed_cases", json!(7)),
+        ("returned_models", json!([])),
+        ("returned_models", json!(["model\n::warning::injection"])),
+        ("requested_model", json!("[model](https://example.invalid)")),
+        ("requested_model", json!("x".repeat(129))),
+    ] {
+        let mut invalid = valid.clone();
+        invalid["journey"][field] = value;
+        assert!(
+            Record::parse(invalid.to_string().as_bytes()).is_err(),
+            "{field}"
+        );
+    }
+    let mut missing = valid.clone();
+    missing.as_object_mut().unwrap().remove("journey");
+    assert!(Record::parse(missing.to_string().as_bytes()).is_err());
+    let mut wrong = valid.clone();
+    wrong["provider"] = json!("mistral");
+    assert!(Record::parse(wrong.to_string().as_bytes()).is_err());
+    let mut retried = valid;
+    retried["attempts"] = json!([
+        {"outcome":"failure","diagnostic":"server_error"},
+        {"outcome":"pass","diagnostic":"none"}
+    ]);
+    assert!(Record::parse(retried.to_string().as_bytes()).is_err());
+    let limited = record("typesafe", "rate_limited");
+    assert!(Record::parse(limited.to_string().as_bytes()).is_ok());
+    let mut untyped = limited;
+    untyped["diagnostic"] = json!("unknown");
+    assert!(Record::parse(untyped.to_string().as_bytes()).is_err());
+}
+
+#[test]
+fn jev_workflows_preserve_enrollment_identity_and_secret_scope() {
+    let standalone =
+        include_str!("../.github/workflows/live-provider-conformance.yml").replace("\r\n", "\n");
+    let umbrella =
+        include_str!("../.github/workflows/release-qualification.yml").replace("\r\n", "\n");
+    // Exercise both checkout encodings on every host, retaining all assertions.
+    for newline in ["\n", "\r\n"] {
+        assert_jev_workflow_contract(
+            &standalone.replace('\n', newline),
+            &umbrella.replace('\n', newline),
+        );
+    }
+}
+
+fn assert_jev_workflow_contract(standalone: &str, umbrella: &str) {
+    let standalone = standalone.replace("\r\n", "\n");
+    let umbrella = umbrella.replace("\r\n", "\n");
+    for (workflow, job, after) in [
+        (standalone.as_str(), "  typesafe:\n", None),
+        (
+            umbrella.as_str(),
+            "  live_typesafe:\n",
+            Some("  summary:\n"),
+        ),
+    ] {
+        assert!(workflow.contains("      typesafe_model:\n"));
+        let (_, rest) = workflow.split_once(job).unwrap();
+        let section = after.map_or(rest, |end| rest.split_once(end).unwrap().0);
+        for required in [
+            "name: Live TypeSafe Jev conformance",
+            "environment: live-provider-ci",
+            "vars.LIVE_TYPESAFE_ENABLED",
+            "[[ \"$PROVIDER_ENABLED\" == \"true\" ]]",
+            "[[ \"$CARGO_AI_SHA\" == \"$TRUSTED_TRIGGER_SHA\" ]]",
+            "TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}",
+            "TYPESAFE_MODEL: ${{ inputs.typesafe_model || vars.TYPESAFE_MODEL }}",
+            "cargo run --locked --example qualification-gate -- probe typesafe",
+            "persist-credentials: false",
+        ] {
+            assert!(section.contains(required), "missing {required}");
+        }
+        assert_eq!(workflow.matches("secrets.TYPESAFE_API_KEY").count(), 1);
+        for other in ["OPENAI", "ANTHROPIC", "GEMINI", "XAI", "MISTRAL"] {
+            assert!(!section.contains(&format!("secrets.{other}_API_KEY")));
+        }
+        assert!(
+            workflow.contains("permissions:\n  contents: read\n")
+                || workflow.contains("permissions:\n  actions: read\n  contents: read\n")
+        );
+        assert!(!workflow.contains("pull_request_target:"));
+    }
+    assert!(standalone.contains("          - typesafe\n"));
+    assert_eq!(standalone.matches("mistral|typesafe|all)").count(), 6);
+    assert!(umbrella.contains("live_mistral, live_typesafe]"));
+    assert!(umbrella.contains("LIVE_TYPESAFE_ENABLED: ${{ vars.LIVE_TYPESAFE_ENABLED }}"));
+    assert!(umbrella.contains("\"Live TypeSafe Jev conformance\""));
+    assert!(umbrella
+        .split_once("  live_typesafe:\n")
+        .unwrap()
+        .1
+        .split_once("  summary:\n")
+        .unwrap()
+        .0
+        .contains("evidence: ${{ steps.probe.outputs.evidence }}"));
+}
+
+#[test]
+fn jev_dashboard_distinguishes_pass_partial_warning_and_unconfigured() {
+    let good = Dashboard::new();
+    let (result, summary) = good.run();
+    assert!(result.status.success());
+    assert!(
+        summary.contains("TypeSafe Jev")
+            && summary.contains("jev-1.13.0")
+            && summary.contains("8/8 cases")
+    );
+    let mut limited = Dashboard::new();
+    limited.outcome("typesafe", "rate_limited");
+    let (result, summary) = limited.run();
+    assert!(result.status.success());
+    assert!(summary.contains("not verified — rate limited") && summary.contains("7/8 cases"));
+    let mut disabled = Dashboard::new();
+    disabled
+        .env
+        .insert("LIVE_TYPESAFE_ENABLED".into(), "false".into());
+    disabled.jobs["jobs"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|job| job["name"] != "Live TypeSafe Jev conformance");
+    disabled.needs["live_typesafe"] = json!({"result":"skipped","outputs":{}});
+    let (result, summary) = disabled.run();
+    assert!(result.status.success());
+    assert!(summary.contains("not configured"));
+    for mode in ["missing", "partial", "unenrolled", "malformed"] {
+        let mut data = Dashboard::new();
+        match mode {
+            "missing" => data.needs["live_typesafe"]["outputs"] = json!({}),
+            "partial" => {
+                let mut partial = record("typesafe", "pass");
+                partial["journey"]["completed_cases"] = json!(7);
+                data.needs["live_typesafe"]["outputs"]["evidence"] = json!(partial.to_string());
+            }
+            "unenrolled" => {
+                data.env
+                    .insert("LIVE_TYPESAFE_ENABLED".into(), "false".into());
+            }
+            "malformed" => {
+                data.needs["live_typesafe"]["outputs"]["evidence"] = json!("private-marker")
+            }
+            _ => unreachable!(),
+        }
+        let (result, summary) = data.run();
+        assert!(!result.status.success(), "{mode}");
+        assert!(!summary.contains("private-marker"));
+    }
 }

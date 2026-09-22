@@ -146,6 +146,10 @@ pub(crate) enum ProviderErrorKind {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProviderError {
+    pub(crate) usage: Option<super::runtime::ProviderUsage>,
+    pub(crate) resolved_model: Option<String>,
+    pub(crate) provider_request_id: Option<String>,
+    pub(crate) finish_reason: Option<String>,
     provider: ProviderKind,
     kind: ProviderErrorKind,
     message: String,
@@ -167,6 +171,10 @@ impl ProviderError {
         };
 
         Self {
+            usage: None,
+            resolved_model: None,
+            provider_request_id: None,
+            finish_reason: None,
             provider,
             http_status: None,
             kind,
@@ -176,6 +184,10 @@ impl ProviderError {
 
     pub(crate) fn from_http_status(provider: ProviderKind, status: StatusCode, body: &str) -> Self {
         Self {
+            usage: None,
+            resolved_model: None,
+            provider_request_id: None,
+            finish_reason: None,
             provider,
             http_status: Some(status.as_u16()),
             kind: if provider == ProviderKind::TypeSafe && status.as_u16() == 529 {
@@ -193,6 +205,10 @@ impl ProviderError {
 
     pub(crate) fn invalid_response(provider: ProviderKind, message: impl Into<String>) -> Self {
         Self {
+            usage: None,
+            resolved_model: None,
+            provider_request_id: None,
+            finish_reason: None,
             provider,
             http_status: None,
             kind: ProviderErrorKind::InvalidResponse,
@@ -202,11 +218,30 @@ impl ProviderError {
 
     pub(crate) fn invalid_request(provider: ProviderKind, message: impl Into<String>) -> Self {
         Self {
+            usage: None,
+            resolved_model: None,
+            provider_request_id: None,
+            finish_reason: None,
             provider,
             http_status: None,
             kind: ProviderErrorKind::InvalidRequest,
             message: message.into(),
         }
+    }
+
+    pub(crate) fn redact_token(mut self, token: &str) -> Self {
+        if !token.is_empty() && self.message.contains(token) {
+            self.message =
+                "Provider response contained credential material; details omitted.".into();
+        }
+        self
+    }
+
+    pub(crate) fn with_request_id(self, request_id: Option<&str>, token: &str) -> Self {
+        super::runtime::ProviderFacts::default()
+            .with_request_id(request_id)
+            .redact_token(token)
+            .error(self.redact_token(token))
     }
 
     pub(crate) fn provider(&self) -> ProviderKind {

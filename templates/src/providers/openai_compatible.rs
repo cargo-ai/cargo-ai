@@ -87,6 +87,7 @@ fn normalize_usage(
 ) -> Option<ProviderUsage> {
     if let Some(usage) = usage {
         return Some(ProviderUsage {
+            total_tokens_source: Some("reported".to_string()),
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
@@ -100,9 +101,11 @@ fn normalize_usage(
     }
 
     Some(ProviderUsage {
+        total_tokens_source: Some("derived_input_plus_output".to_string()),
         input_tokens: prompt_eval_count,
         output_tokens: eval_count,
-        total_tokens: prompt_eval_count.and_then(|input| eval_count.map(|output| input + output)),
+        total_tokens: prompt_eval_count
+            .and_then(|input| eval_count.and_then(|output| input.checked_add(output))),
         input_token_details: None,
         output_token_details: None,
     })
@@ -202,6 +205,12 @@ pub(crate) async fn send_request(
         .send()
         .await
         .map_err(|error| ProviderError::from_reqwest(provider, error))?;
+    let response_id = response
+        .headers()
+        .get("x-request-id")
+        .or_else(|| response.headers().get("request-id"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let status = response.status();
     let body = response
         .bytes()
@@ -213,43 +222,53 @@ pub(crate) async fn send_request(
             provider,
             status,
             sanitized_http_error_body(provider, &body).as_str(),
-        ));
+        )
+        .with_request_id(response_id.as_deref(), token));
     }
 
-    let response: Response = serde_json::from_slice(&body).map_err(|error| {
-        ProviderError::invalid_response(
-            provider,
-            format!(
-                "Failed to parse {} response JSON: {error}",
-                provider.display_name()
-            ),
-        )
-    })?;
-
-    let Response {
-        choices,
-        usage,
-        prompt_eval_count,
-        eval_count,
-    } = response;
-    let text = choices
-        .first()
-        .and_then(|choice| response_text(&choice.message.content))
-        .ok_or_else(|| {
+    let facts = super::runtime::ProviderFacts::from_body(&body, provider)
+        .with_request_id(response_id.as_deref())
+        .redact_token(token);
+    (|| {
+        let response: Response = serde_json::from_slice(&body).map_err(|error| {
             ProviderError::invalid_response(
                 provider,
                 format!(
-                    "{} returned no text chat completion choice.",
+                    "Failed to parse {} response JSON: {error}",
                     provider.display_name()
                 ),
             )
         })?;
 
-    Ok(ProviderTextResponse {
-        resolved_model: None,
-        text,
-        usage: normalize_usage(usage, prompt_eval_count, eval_count),
-    })
+        let Response {
+            choices,
+            usage,
+            prompt_eval_count,
+            eval_count,
+        } = response;
+        let text = choices
+            .first()
+            .and_then(|choice| response_text(&choice.message.content))
+            .ok_or_else(|| {
+                ProviderError::invalid_response(
+                    provider,
+                    format!(
+                        "{} returned no text chat completion choice.",
+                        provider.display_name()
+                    ),
+                )
+            })?;
+
+        Ok(ProviderTextResponse {
+            provider_request_id: None,
+            finish_reason: None,
+            resolved_model: None,
+            text,
+            usage: normalize_usage(usage, prompt_eval_count, eval_count),
+        })
+    })()
+    .map(|response| facts.text(response))
+    .map_err(|error: ProviderError| facts.error(error.redact_token(token)))
 }
 
 #[cfg(test)]
