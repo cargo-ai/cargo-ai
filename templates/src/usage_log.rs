@@ -945,6 +945,108 @@ mod automatic_failure_tests {
         assert_eq!(std::fs::read_to_string(log).unwrap().lines().count(), 4);
     }
     #[test]
+    fn concurrent_writers_and_reader_preserve_facts_through_runtime_final_flush() {
+        let _home = Home::new();
+        let contexts: Vec<_> = (0..8)
+            .map(|_| {
+                UsageLogContext::from_runtime(None, 0, None)
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect();
+        let mut writer = crate::usage_store::open_database(true).unwrap().unwrap();
+        let reader = crate::usage_store::open_database(false).unwrap().unwrap();
+        let transaction = writer
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let phases = Arc::new(std::sync::Barrier::new(9));
+        let threads: Vec<_> = contexts
+            .into_iter()
+            .enumerate()
+            .map(|(writer_index, (context, guard))| {
+                let phases = phases.clone();
+                std::thread::spawn(move || {
+                    let mut expected = Vec::new();
+                    for event_index in 0..20 {
+                        let event = json!({
+                            "event_id": format!("concurrent-{writer_index}-{event_index}"),
+                            "event_type": "provider_request_completed",
+                            "timestamp": "2026-09-22T00:00:00Z",
+                            "root_run_id": context.root_run_id,
+                            "agent_run_id": context.agent_run_id,
+                            "usage": {"input_tokens": writer_index, "output_tokens": event_index}
+                        });
+                        // Exercise the same bounded queue used by automatic capture,
+                        // rather than requiring every individual SQLite write to win.
+                        context.persist_history(event.clone());
+                        expected.push(event);
+                        if event_index == 0 {
+                            let pending = context.sink.pending.lock().unwrap().len();
+                            phases.wait();
+                            phases.wait();
+                            assert_eq!(pending, 1, "the held writer must exercise buffering");
+                        }
+                    }
+                    (context, guard, expected)
+                })
+            })
+            .collect();
+
+        phases.wait();
+        let initial_count: i64 = reader
+            .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))
+            .unwrap();
+        drop(transaction);
+        phases.wait();
+        assert_eq!(
+            initial_count, 16,
+            "WAL readers retain the committed lifecycle facts while a writer holds the database"
+        );
+        assert!(crate::usage_store::incomplete());
+        let live_count: i64 = reader
+            .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))
+            .unwrap();
+        assert!((16..=176).contains(&live_count));
+        let completed: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        let mut expected = std::collections::BTreeMap::new();
+        for (context, mut guard, events) in completed {
+            // Contention has ended. One ordinary run completion is the production
+            // final-flush opportunity; no test-only insert retries are performed.
+            guard.finish_success();
+            assert!(context.sink.pending.lock().unwrap().is_empty());
+            for event in events {
+                expected.insert(event["event_id"].as_str().unwrap().to_owned(), event);
+            }
+        }
+        let mut statement = reader.prepare("SELECT event_id, record_json FROM usage_events WHERE event_type='provider_request_completed'").unwrap();
+        let records: Vec<(String, String)> = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(records.len(), 160);
+        assert_eq!(expected.len(), 160);
+        for (id, raw) in records {
+            assert_eq!(
+                serde_json::from_str::<Value>(&raw).unwrap(),
+                expected.remove(&id).unwrap()
+            );
+        }
+        assert!(expected.is_empty());
+        let (total, unique): (i64, i64) = reader
+            .query_row(
+                "SELECT COUNT(*), COUNT(DISTINCT event_id) FROM usage_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((total, unique), (192, 192));
+    }
+
+    #[test]
     fn busy_pending_facts_flush_once_after_writer_releases() {
         let _home = Home::new();
         let mut db = crate::usage_store::open_database(true).unwrap().unwrap();

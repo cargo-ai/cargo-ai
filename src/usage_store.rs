@@ -311,37 +311,6 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn concurrent_writers_and_reader_preserve_counts() {
-        let dir = fixture();
-        drop(open_at(&dir, true).unwrap());
-        let threads: Vec<_> = (0..8)
-            .map(|i| {
-                let dir = dir.clone();
-                std::thread::spawn(move || {
-                    let db = open_at(&dir, true).unwrap().unwrap();
-                    for j in 0..20 {
-                        insert_event(&db, &event(&format!("{i}-{j}"))).unwrap();
-                    }
-                })
-            })
-            .collect();
-        let read = open_at(&dir, false).unwrap().unwrap();
-        let _: i64 = read
-            .query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))
-            .unwrap();
-        for thread in threads {
-            thread.join().unwrap();
-        }
-        assert_eq!(
-            read.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            160
-        );
-        drop(read);
-        fs::remove_dir_all(dir).unwrap();
-    }
-    #[test]
     fn busy_write_is_bounded_and_rollback_preserves_data() {
         let dir = fixture();
         let mut db = open_at(&dir, true).unwrap().unwrap();
