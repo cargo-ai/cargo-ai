@@ -68,9 +68,17 @@ Artifacts retain compiler-reported dependency identities/features, installation 
 
 ## Release status
 
-### 0.4.3 preparation
+### 0.4.3 recorded results
 
-[0.4.3](../releases/0.4.3.md) adds automatic local usage history and optional account backup/restore. Its release qualification and registry publication are pending. The latest verified release below remains 0.4.2; its passing checks do not qualify the newer source. Jev is included in the current candidate's provider aggregate when explicitly enrolled, with one bounded eight-request journey and no inference retry.
+Verified: 2026-09-22. [0.4.3](../releases/0.4.3.md) adds automatic local usage history and optional account backup/restore. The published, non-yanked crates.io archive embeds clean source `25bbe4705a771a612f0b3bd0ee2d019489bd5a20`, matching tag `v0.4.3`. Its SHA-256 is `c51b4a3f03ae82da92d7cbfb0e24204242064021dd40ec7162ce83d2b6d0ae54`, identical to the reviewed package. Later documentation commits do not change that released candidate.
+
+[Product Qualification 35760660610](https://github.com/cargo-ai/cargo-ai/actions/runs/35760660610) passed on that exact source: nine parallel native stages, six source-canary/official-package cells, security and the aggregate summary. OpenAI, Anthropic, xAI and TypeSafe Jev live checks passed. Jev completed all eight interpreted/generated journey cases with eight requests and no retry; requested and returned model were `jev-1.13.0`. Gemini encountered two server errors then a rate limit; Mistral encountered three rate limits. Both remain supplemental **unverified**, not live-success passes. No all-provider or general model-judgment claim follows from aggregate success.
+
+The earlier [qualification attempt](https://github.com/cargo-ai/cargo-ai/actions/runs/35742680595) timed out in the Windows installation stage after tests and generated parity passed. Its candidate remains unqualified. The corrected release separates native tests, generated parity and installation into independent jobs while retaining every check and the 60-minute limit.
+
+Security audit passed with cargo-audit 0.22.1 and its freshly fetched advisory database. Separate `cargo deny --locked check` passed advisory, license, source and ban policy using RustSec revision `f7dc4b2860b29978f400fda0aab31cc4dbd21134`, retaining existing duplicate-version warnings. These are dated observations, not future security guarantees.
+
+[Registry Installation 35786303701](https://github.com/cargo-ai/cargo-ai/actions/runs/35786303701) passed plain fresh registry installation on Linux, macOS and Windows, including exact archive/source/version, Cargo dispatch and a local action. A separate isolated macOS installation of the published binary confirmed schema-1 history capture for a successful local-only action; disabling tracking prevented new records while preserving existing facts. No provider or account request was made in that local check. The matching [GitHub release](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.3) is published as Latest. Existing generated binaries require rebuilding/re-hatching to gain the new history behavior.
 
 ### 0.4.2 recorded results
 
