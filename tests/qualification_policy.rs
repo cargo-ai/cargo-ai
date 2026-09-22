@@ -235,10 +235,7 @@ impl Dashboard {
         env.insert("TRUSTED_TRIGGER_SHA".into(), "c".repeat(40));
         let mut jobs = Vec::new();
         let mut needs = json!({});
-        for family in [
-            "Deterministic qualification",
-            "Source package qualification",
-        ] {
+        for family in ["Deterministic tests", "Source package qualification"] {
             for os in ["ubuntu-latest", "macos-latest", "windows-latest"] {
                 jobs.push(Self::job(&format!("{family} ({os})")));
             }
@@ -251,6 +248,11 @@ impl Dashboard {
             needs[format!("live_{provider}")] = json!({"result":"success","outputs":{"evidence":record(provider, "pass").to_string()}});
         }
         jobs.push(Self::job("Security audit"));
+        for stage in ["Generated provider parity", "Installation qualification"] {
+            for os in ["ubuntu-latest", "macos-latest", "windows-latest"] {
+                jobs.push(Self::job(&format!("{stage} ({os})")));
+            }
+        }
         Self {
             env,
             jobs: json!({"jobs":jobs}),
@@ -972,5 +974,29 @@ fn jev_dashboard_distinguishes_pass_partial_warning_and_unconfigured() {
         let (result, summary) = data.run();
         assert!(!result.status.success(), "{mode}");
         assert!(!summary.contains("private-marker"));
+    }
+}
+
+#[test]
+fn dashboard_requires_every_parallel_native_stage() {
+    for stage in [
+        "Deterministic tests",
+        "Generated provider parity",
+        "Installation qualification",
+    ] {
+        for os in ["ubuntu-latest", "macos-latest", "windows-latest"] {
+            let name = format!("{stage} ({os})");
+            for outcome in ["missing", "failure", "cancelled", "skipped"] {
+                let mut data = Dashboard::new();
+                let jobs = data.jobs["jobs"].as_array_mut().unwrap();
+                let index = jobs.iter().position(|job| job["name"] == name).unwrap();
+                if outcome == "missing" {
+                    jobs.remove(index);
+                } else {
+                    jobs[index]["conclusion"] = json!(outcome);
+                }
+                assert!(!data.run().0.status.success(), "{name}: {outcome}");
+            }
+        }
     }
 }

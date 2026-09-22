@@ -198,7 +198,19 @@ pub fn render(input: &Inputs) -> Result<(String, bool)> {
             &url,
         )
     };
-    let deterministic = family("Deterministic qualification");
+    let native_stages = [
+        "Deterministic tests",
+        "Generated provider parity",
+        "Installation qualification",
+    ];
+    let native_jobs: Vec<_> = native_stages
+        .iter()
+        .flat_map(|stage| {
+            ["ubuntu-latest", "macos-latest", "windows-latest"]
+                .map(|os| (*stage, format!("{stage} ({os})")))
+        })
+        .collect();
+    let deterministic = aggregate(&jobs, &native_jobs, trigger, attempt, &url);
     let mut security = aggregate(
         &jobs,
         &[("Security audit", "Security audit".into())],

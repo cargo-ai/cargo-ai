@@ -48,7 +48,7 @@ Two provenance exceptions are intentional: external callers of the credential-fr
 
 ```text
 exact Cargo AI candidate = first-party workflow-ref snapshot
-  +-- Core CI: Ubuntu, macOS, Windows
+  +-- Core CI: tests, generated parity, installation × Ubuntu, macOS, Windows
   +-- source-package lifecycle: declared native platforms
   +-- registered official-package lifecycle
   +-- live OpenAI and Anthropic + enrolled supplemental providers
@@ -56,9 +56,9 @@ exact Cargo AI candidate = first-party workflow-ref snapshot
   `-- product qualification summary: all required evidence must pass
 ```
 
-Core CI checks Cargo AI with loopback fixtures. Package families exercise independently maintained, allowlisted packages through build/package/install/inspect/run/hatch/uninstall. Their native OS coverage proves different behavior. Hosted-provider protocol checks run on Linux rather than multiplying paid calls across OSes. Existing optional-provider failure rules below remain unchanged.
+Core CI runs three independent stages on each of Ubuntu, macOS and Windows: deterministic tests, generated-provider parity, and CLI/packaged-source installation. Each of the nine jobs has isolated state and a 60-minute limit; tests remain serial within each job. Every stage must pass. Core CI checks Cargo AI with loopback fixtures. Package families exercise independently maintained, allowlisted packages through build/package/install/inspect/run/hatch/uninstall. Their native OS coverage proves different behavior. Hosted-provider protocol checks run on Linux rather than multiplying paid calls across OSes. Existing optional-provider failure rules below remain unchanged.
 
-The no-official-package baseline is ten required jobs: three Core CI, three canary-package, two primary providers, security and summary. Each supplemental provider adds one job; the supported official package adds three. The global ceiling remains 21. Use the candidate catalog and actual run for applicability; missing required evidence is never a pass.
+The no-official-package baseline is sixteen required jobs: nine Core CI, three canary-package, two primary providers, security and summary. Each supplemental provider adds one job; the supported official package adds three. With all four supplemental providers and the official package, 23 jobs execute; redundant standalone family summaries are suppressed. Use the candidate catalog and actual run for applicability; missing required evidence is never a pass.
 
 ## Registry installation
 

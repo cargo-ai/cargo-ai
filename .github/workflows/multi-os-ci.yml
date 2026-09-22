@@ -47,13 +47,14 @@ env:
 
 jobs:
   deterministic:
-    name: Deterministic qualification (${{ matrix.os }})
+    name: ${{ matrix.stage }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
       fail-fast: ${{ ! inputs.collect_all }}
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        stage: [Deterministic tests, Generated provider parity, Installation qualification]
     steps:
       - name: Validate exact Cargo AI candidate
         shell: bash
@@ -86,30 +87,38 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Check qualification policy
+        if: ${{ matrix.stage == 'Deterministic tests' }}
         run: cargo test --locked --test qualification_policy
 
       - name: Check formatting
+        if: ${{ matrix.stage == 'Deterministic tests' }}
         run: cargo fmt --all -- --check
 
       - name: Check all targets
+        if: ${{ matrix.stage == 'Deterministic tests' }}
         run: cargo check --locked --all-targets
 
       - name: Run deterministic test suite
+        if: ${{ matrix.stage == 'Deterministic tests' }}
         run: cargo test --locked --all-targets
 
       - name: Run generated provider parity
+        if: ${{ matrix.stage == 'Generated provider parity' }}
         shell: bash
         run: |
           set -euo pipefail
           cargo test --locked --test provider_smoke generated_provider_batch_isolated_and_deterministic -- --ignored --exact --nocapture
 
       - name: Build candidate CLI
+        if: ${{ matrix.stage == 'Installation qualification' }}
         run: cargo build --locked
 
       - name: Install candidate CLI into runner-local root
+        if: ${{ matrix.stage == 'Installation qualification' }}
         run: cargo install --locked --path . --root "${{ runner.temp }}/cargo-ai-install"
 
       - name: Smoke installed CLI
+        if: ${{ matrix.stage == 'Installation qualification' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -119,6 +128,7 @@ jobs:
           "$cli" --no-update-check hatch adder_test --check
 
       - name: Install freshly resolved packaged source
+        if: ${{ matrix.stage == 'Installation qualification' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -190,7 +200,7 @@ jobs:
           echo "Packaged-source fresh-resolution install, Cargo dispatch, guidance and local action passed." >> "$evidence/identity.txt"
 
       - name: Preserve packaged installation evidence
-        if: ${{ always() }}
+        if: ${{ always() && matrix.stage == 'Installation qualification' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: packaged-install-${{ matrix.os }}
@@ -206,7 +216,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require every operating system
+      - name: Require every stage on every operating system
         env:
           MATRIX_RESULT: ${{ needs.deterministic.result }}
         run: |

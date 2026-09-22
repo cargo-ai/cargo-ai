@@ -389,9 +389,15 @@ jobs:
               jobs_api_status=0
               expected_jobs=(
                 "Security audit"
-                "Deterministic qualification (ubuntu-latest)"
-                "Deterministic qualification (macos-latest)"
-                "Deterministic qualification (windows-latest)"
+                "Deterministic tests (ubuntu-latest)"
+                "Deterministic tests (macos-latest)"
+                "Deterministic tests (windows-latest)"
+                "Generated provider parity (ubuntu-latest)"
+                "Generated provider parity (macos-latest)"
+                "Generated provider parity (windows-latest)"
+                "Installation qualification (ubuntu-latest)"
+                "Installation qualification (macos-latest)"
+                "Installation qualification (windows-latest)"
                 "Source package qualification (ubuntu-latest)"
                 "Source package qualification (macos-latest)"
                 "Source package qualification (windows-latest)"
