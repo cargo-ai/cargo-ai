@@ -68,6 +68,10 @@ Artifacts retain compiler-reported dependency identities/features, installation 
 
 ## Release status
 
+### 0.4.3 preparation
+
+[0.4.3](../releases/0.4.3.md) adds automatic local usage history and optional account backup/restore. Its release qualification and registry publication are pending. The latest verified release below remains 0.4.2; its passing checks do not qualify the newer source. Jev is included in the current candidate's provider aggregate when explicitly enrolled, with one bounded eight-request journey and no inference retry.
+
 ### 0.4.2 recorded results
 
 Verified: 2026-09-21. [0.4.2](../releases/0.4.2.md) introduces TypeSafe Jev support. The published crates.io archive embeds clean source `3a71b3629405e042b704794944868ccf6e66122a`, matching tag `v0.4.2`. Its SHA-256 is `1de60a0c251fc17aac802d8af08b8a2867d51fdaeb1ca9cc10d9bb5e8a82ef39`, identical to the qualified package; the registry version is non-yanked.
