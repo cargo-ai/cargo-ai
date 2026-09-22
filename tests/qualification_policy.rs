@@ -859,14 +859,26 @@ fn jev_journey_requires_complete_bounded_sanitized_evidence() {
 
 #[test]
 fn jev_workflows_preserve_enrollment_identity_and_secret_scope() {
+    let standalone =
+        include_str!("../.github/workflows/live-provider-conformance.yml").replace("\r\n", "\n");
+    let umbrella =
+        include_str!("../.github/workflows/release-qualification.yml").replace("\r\n", "\n");
+    // Exercise both checkout encodings on every host, retaining all assertions.
+    for newline in ["\n", "\r\n"] {
+        assert_jev_workflow_contract(
+            &standalone.replace('\n', newline),
+            &umbrella.replace('\n', newline),
+        );
+    }
+}
+
+fn assert_jev_workflow_contract(standalone: &str, umbrella: &str) {
+    let standalone = standalone.replace("\r\n", "\n");
+    let umbrella = umbrella.replace("\r\n", "\n");
     for (workflow, job, after) in [
+        (standalone.as_str(), "  typesafe:\n", None),
         (
-            include_str!("../.github/workflows/live-provider-conformance.yml"),
-            "  typesafe:\n",
-            None,
-        ),
-        (
-            include_str!("../.github/workflows/release-qualification.yml"),
+            umbrella.as_str(),
             "  live_typesafe:\n",
             Some("  summary:\n"),
         ),
@@ -897,10 +909,8 @@ fn jev_workflows_preserve_enrollment_identity_and_secret_scope() {
         );
         assert!(!workflow.contains("pull_request_target:"));
     }
-    let standalone = include_str!("../.github/workflows/live-provider-conformance.yml");
     assert!(standalone.contains("          - typesafe\n"));
     assert_eq!(standalone.matches("mistral|typesafe|all)").count(), 6);
-    let umbrella = include_str!("../.github/workflows/release-qualification.yml");
     assert!(umbrella.contains("live_mistral, live_typesafe]"));
     assert!(umbrella.contains("LIVE_TYPESAFE_ENABLED: ${{ vars.LIVE_TYPESAFE_ENABLED }}"));
     assert!(umbrella.contains("\"Live TypeSafe Jev conformance\""));
