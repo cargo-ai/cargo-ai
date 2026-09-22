@@ -1,5 +1,7 @@
 # Optional usage backup and restore
 
+Introduced in [Cargo AI 0.4.3](../releases/0.4.3.md); check [release availability](testing-and-release-qualification.md#release-status) before installing. Existing generated agents need rebuilding with the updated runtime.
+
 Automatic usage history is local by default. Cloud backup is off until you enable
 it explicitly for the signed-in Cargo AI account. Collection, upload, local deletion
 and cloud deletion are separate controls. This feature backs up logical metadata
