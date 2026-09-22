@@ -1,5 +1,10 @@
 # Accounts and sharing
 
+Automatic agent usage history works without an account. [Optional usage backup and
+restore](usage-backup.md) uses the existing account sign-in only after explicit
+enablement. Future backup, historical selection and cloud deletion have separate
+consent controls; changing accounts never redirects an existing queue.
+
 [Documentation hub](./README.md) · [Cargo AI README](../README.md)
 
 A Cargo AI account is optional. Local `run`, `hatch`, project, build, and package workflows do not require registration. Register when you want hosted agent-definition storage, public sharing through a handle, account email workflows, or hosted package publishing.

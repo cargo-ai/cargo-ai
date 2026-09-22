@@ -1,6 +1,6 @@
+use crate::config::schema::{Config, Profile};
 use std::fs;
 use std::path::PathBuf;
-use crate::config::schema::{Config, Profile};
 
 fn resolve_config_path(
     cargo_ai_home: Option<PathBuf>,
@@ -77,7 +77,10 @@ mod tests {
     fn falls_back_to_home_dir_when_cargo_home_missing() {
         let path = resolve_config_path(None, None, Some(PathBuf::from("/Users/example")));
 
-        assert_eq!(path, PathBuf::from("/Users/example/.cargo/.cargo-ai/config.toml"));
+        assert_eq!(
+            path,
+            PathBuf::from("/Users/example/.cargo/.cargo-ai/config.toml")
+        );
     }
 
     #[test]

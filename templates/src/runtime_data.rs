@@ -213,6 +213,9 @@ pub(crate) fn confined_path(root: &Path, relative: &Path, label: &str) -> Result
 /// Runtime data is reserved even if it was accidentally tracked or nested in tool sources.
 #[allow(dead_code)]
 pub(crate) fn is_runtime_data(path: &Path) -> bool {
+    if is_usage_state(path) {
+        return true;
+    }
     let components = path
         .components()
         .filter_map(|part| match part {
@@ -222,6 +225,23 @@ pub(crate) fn is_runtime_data(path: &Path) -> bool {
         .collect::<Vec<_>>();
     components.windows(2).any(|pair| {
         pair[0].eq_ignore_ascii_case(".cargo-ai") && pair[1].eq_ignore_ascii_case("data")
+    })
+}
+
+/// The managed usage database is mutable device state, even when copied under a project.
+pub(crate) fn is_usage_state(path: &Path) -> bool {
+    path.components().any(|part| match part {
+        Component::Normal(value) => value.to_str().is_some_and(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "usage.sqlite3"
+                    | "usage.sqlite3-wal"
+                    | "usage.sqlite3-shm"
+                    | "usage.sqlite3-journal"
+                    | "capture-incomplete"
+            )
+        }),
+        _ => false,
     })
 }
 
@@ -405,6 +425,10 @@ mod tests {
             ".cargo-ai/data",
             ".cargo-ai/data/x",
             "tools/a/.cargo-ai/data/x",
+            "usage/usage.sqlite3",
+            "state/usage.sqlite3-wal",
+            "state/usage.sqlite3-shm",
+            "state/capture-incomplete",
         ] {
             assert!(validate_declared_input(path).is_err());
         }

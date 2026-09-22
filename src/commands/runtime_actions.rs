@@ -2148,11 +2148,37 @@ async fn run_generate_image_step(
         provider_context.project_data.as_ref(),
     )?;
 
+    let _remaining = remaining_runtime_duration(
+        runtime_budget,
+        &format!("before starting image generation with model '{}'", model),
+    )
+    .map_err(|context| {
+        action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
+    })?;
+
+    let usage_attempt = provider_context.usage_log.as_ref().map(|usage_log| {
+        usage_log.start_provider_request(
+            effective_provider_context.provider,
+            usage_provider_profile(effective_provider_context),
+            effective_provider_context.auth_mode.as_str(),
+            model.as_str(),
+            crate::usage_log::UsageStep {
+                kind: "generate_image",
+                action: Some(action_name.to_string()),
+                step_index: Some(step_index),
+            },
+        )
+    });
     let remaining = remaining_runtime_duration(
         runtime_budget,
         &format!("before starting image generation with model '{}'", model),
     )
     .map_err(|context| {
+        if let (Some(usage_log), Some(attempt)) =
+            (provider_context.usage_log.as_ref(), usage_attempt.as_ref())
+        {
+            usage_log.abort_provider_before_dispatch(attempt);
+        }
         action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
     })?;
 
@@ -2216,12 +2242,16 @@ async fn run_generate_image_step(
     .await
     {
         Ok(Ok(response)) => {
-            if let Some(usage_log) = provider_context.usage_log.as_ref() {
+            if let (Some(usage_log), Some(attempt)) = (provider_context.usage_log.as_ref(), usage_attempt.as_ref()) {
                 usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                    attempt,
                     provider: effective_provider_context.provider,
                     profile_name: usage_provider_profile(effective_provider_context),
                     auth_mode: effective_provider_context.auth_mode.as_str(),
                     model: model.as_str(),
+                    resolved_model: response.resolved_model.as_deref(),
+                    provider_request_id: response.provider_request_id.as_deref(),
+                    finish_reason: response.finish_reason.as_deref(),
                     step: crate::usage_log::UsageStep {
                         kind: "generate_image",
                         action: Some(action_name.to_string()),
@@ -2236,18 +2266,22 @@ async fn run_generate_image_step(
             response
         }
         Ok(Err(error)) => {
-            if let Some(usage_log) = provider_context.usage_log.as_ref() {
+            if let (Some(usage_log), Some(attempt)) = (provider_context.usage_log.as_ref(), usage_attempt.as_ref()) {
                 usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                    attempt,
                     provider: effective_provider_context.provider,
                     profile_name: usage_provider_profile(effective_provider_context),
                     auth_mode: effective_provider_context.auth_mode.as_str(),
                     model: model.as_str(),
+                    resolved_model: error.resolved_model.as_deref(),
+                    provider_request_id: error.provider_request_id.as_deref(),
+                    finish_reason: error.finish_reason.as_deref(),
                     step: crate::usage_log::UsageStep {
                         kind: "generate_image",
                         action: Some(action_name.to_string()),
                         step_index: Some(step_index),
                     },
-                    usage: None,
+                    usage: error.usage.as_ref(),
                     duration: provider_started_at.elapsed(),
                     status: crate::usage_log::UsageStatus::Failed,
                     error: Some(usage_provider_error(&error)),
@@ -2261,12 +2295,16 @@ async fn run_generate_image_step(
             return Err(lines.join("\n"));
         }
         Err(_) => {
-            if let Some(usage_log) = provider_context.usage_log.as_ref() {
+            if let (Some(usage_log), Some(attempt)) = (provider_context.usage_log.as_ref(), usage_attempt.as_ref()) {
                 usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
+                    attempt,
                     provider: effective_provider_context.provider,
                     profile_name: usage_provider_profile(effective_provider_context),
                     auth_mode: effective_provider_context.auth_mode.as_str(),
                     model: model.as_str(),
+                    resolved_model: None,
+                    provider_request_id: None,
+                    finish_reason: None,
                     step: crate::usage_log::UsageStep {
                         kind: "generate_image",
                         action: Some(action_name.to_string()),
@@ -6993,6 +7031,60 @@ auth_mode = "{auth_mode}"
         assert!(error.contains("invalid URL"));
         assert!(error.contains("image_profile"));
         assert!(!error.contains("synthetic-"), "endpoint leaked: {error}");
+    }
+
+    #[tokio::test]
+    async fn usage_capture_delay_rechecks_deadline_without_dispatch_or_fake_latency() {
+        let _test_env = TestCargoHome::new("");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (usage, mut guard) = crate::usage_log::UsageLogContext::from_runtime(None, 0, None)
+            .unwrap()
+            .unwrap();
+        let mut provider = provider_context();
+        provider.url = format!("http://{}/v1", listener.local_addr().unwrap());
+        provider.usage_log = Some(usage);
+        let step: crate::RunStep = serde_json::from_value(json!({
+            "kind":"generate_image", "args":[], "tool_params":{}, "ignore_tools":false, "model":{"Literal":"gpt-image-1"}, "prompt":[{"Literal":"fixture"}], "path":[{"Literal":"unwritten.png"}]
+        })).unwrap();
+        let db = crate::usage_store::open_database(true).unwrap().unwrap();
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let now = super::current_time_millis();
+        let budget = super::InvocationRuntimeBudget {
+            max_runtime_secs: 1,
+            started_at_ms: now,
+            deadline_ms: now + 200,
+        };
+        let result = run_generate_image_step(
+            &step,
+            &json!({}),
+            &no_named_inputs(),
+            0,
+            "image",
+            1,
+            &provider,
+            budget,
+        )
+        .await;
+        assert!(result.unwrap_err().contains("runtime"));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        db.execute_batch("ROLLBACK").unwrap();
+        guard.finish_failed();
+        let mut statement = db.prepare("SELECT record_json FROM usage_events WHERE event_type='provider_request_completed'").unwrap();
+        let events: Vec<serde_json::Value> = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["provider_completion"], "not_dispatched");
+        assert_eq!(events[0]["error"]["kind"], "timeout");
+        assert!(events[0]["usage"].is_null());
+        assert!(events[0].get("duration_ms").is_none());
+        assert!(events[0].get("timing").is_none());
     }
 
     #[tokio::test]

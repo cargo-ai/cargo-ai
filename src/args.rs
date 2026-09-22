@@ -25,6 +25,7 @@ mod profile;
 mod run;
 pub(crate) mod runtime_common;
 mod tools;
+mod usage;
 mod version;
 
 #[cfg(test)]
@@ -65,6 +66,7 @@ fn cli_command(bin_name: &'static str) -> Command {
         .subcommand(credentials::command())
         .subcommand(account::command())
         .subcommand(version::command())
+        .subcommand(usage::command())
 }
 
 /// Parses CLI arguments into clap matches.

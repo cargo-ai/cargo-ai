@@ -3,7 +3,14 @@
 use serde::{Deserialize, Serialize};
 
 pub type Result<T> = std::result::Result<T, &'static str>;
-pub const PROVIDERS: [&str; 5] = ["openai", "anthropic", "gemini", "xai", "mistral"];
+pub const PROVIDERS: [&str; 6] = [
+    "openai",
+    "anthropic",
+    "gemini",
+    "xai",
+    "mistral",
+    "typesafe",
+];
 
 pub fn hexadecimal(value: &str, length: usize) -> bool {
     value.len() == length
@@ -32,6 +39,7 @@ pub fn label(provider: &str) -> &'static str {
         "gemini" => "Gemini",
         "xai" => "xAI",
         "mistral" => "Mistral",
+        "typesafe" => "TypeSafe Jev",
         _ => "Unknown",
     }
 }
@@ -77,6 +85,24 @@ pub struct Attempt {
     pub diagnostic: Diagnostic,
 }
 
+/// Public journey evidence contains identities and assertion counts, never raw usage.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Journey {
+    pub requested_model: String,
+    pub returned_models: Vec<String>,
+    pub requests_started: u8,
+    pub completed_cases: u8,
+}
+
+pub fn safe_model(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._:/-".contains(&b))
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
@@ -91,6 +117,8 @@ pub struct Record {
     pub diagnostic: Diagnostic,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attempts: Vec<Attempt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journey: Option<Journey>,
 }
 
 impl Record {
@@ -118,6 +146,33 @@ impl Record {
                 .any(|a| a.outcome == Outcome::Pass || !a.diagnostic.retryable())
         {
             return Err("invalid probe attempt history");
+        }
+        match (&record.journey, record.provider.as_str()) {
+            (Some(journey), "typesafe") => {
+                if !safe_model(&journey.requested_model)
+                    || journey.returned_models.len() > 8
+                    || journey
+                        .returned_models
+                        .iter()
+                        .any(|model| !safe_model(model))
+                    || journey.requests_started > 8
+                    || journey.completed_cases > journey.requests_started
+                    || journey.requests_started - journey.completed_cases > 1
+                    || record.attempts.len() > 1
+                    || (record.outcome == Outcome::Pass
+                        && (journey.completed_cases != 8
+                            || journey.returned_models.is_empty()
+                            || record.diagnostic != Diagnostic::None))
+                    || (record.outcome != Outcome::Pass && journey.completed_cases == 8)
+                    || (record.outcome == Outcome::RateLimited
+                        && (record.diagnostic != Diagnostic::RateLimited
+                            || journey.requests_started != journey.completed_cases + 1))
+                {
+                    return Err("invalid Jev journey evidence");
+                }
+            }
+            (None, "typesafe") | (Some(_), _) => return Err("unexpected journey evidence"),
+            _ => {}
         }
         positive(&record.run_id)?;
         positive(&record.run_attempt)?;

@@ -776,7 +776,120 @@ fn run_generated_openai_compatible_smoke(
     assert_openai_compatible_success(provider, model, token, &output, &request, &fixture.usage);
     if provider == "ollama" {
         assert_endpoint_diagnostics_exclude_secrets(fixture, Some(&executable));
+        assert_inflight_attempt_survives_termination(Some(&executable));
     }
+}
+
+fn assert_inflight_attempt_survives_termination(executable: Option<&Path>) {
+    let fixture = Fixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://{}/v1/chat/completions",
+        listener.local_addr().unwrap()
+    );
+    let (received_tx, received_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_http_request(&mut stream);
+        received_tx.send(request).unwrap();
+        let _ = release_rx.recv_timeout(Duration::from_secs(30));
+    });
+    let mut command = match executable {
+        Some(executable) => fixture.isolated_command(executable),
+        None => {
+            let mut command = fixture.isolated_command(env!("CARGO_BIN_EXE_cargo-ai"));
+            command
+                .args(["--no-update-check", "run", "--config"])
+                .arg(&fixture.definition);
+            command
+        }
+    };
+    let mut child = command
+        .env("CARGO_AI_USAGE_TRACKING", "on")
+        .args([
+            "--server",
+            "ollama",
+            "--model",
+            "interrupted-model",
+            "--url",
+            &url,
+            "--inference-timeout-in-sec",
+            "30",
+            "--render-mode",
+            "append-only",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let request = received_rx.recv_timeout(Duration::from_secs(20));
+    let query = || {
+        fixture
+            .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
+            .args(["usage", "export", "--format", "ndjson"])
+            .output()
+            .unwrap()
+    };
+    let inflight = query();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let _ = release_tx.send(());
+    server.join().unwrap();
+    let interrupted = query();
+    assert!(
+        request.is_ok(),
+        "provider request should reach the held endpoint"
+    );
+    assert!(inflight.status.success());
+    assert!(interrupted.status.success());
+    assert_eq!(
+        inflight.stdout, interrupted.stdout,
+        "termination must preserve committed start facts"
+    );
+    let events: Vec<Value> = String::from_utf8(inflight.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let starts: Vec<_> = events
+        .iter()
+        .filter(|event| event["event_type"] == "provider_request_started")
+        .collect();
+    assert_eq!(starts.len(), 1);
+    let start = starts[0];
+    assert!(start["attempt_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("cai_attempt_"));
+    assert!(start["operation_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("cai_operation_"));
+    assert_eq!(start["provider"]["requested_model"], "interrupted-model");
+    assert_eq!(start["started_at"], start["timestamp"]);
+    assert!(start.get("usage").is_none());
+    assert_eq!(start["retry_count"], 0);
+    assert!(!events
+        .iter()
+        .any(|event| event["event_type"] == "provider_request_completed"));
+    let summary = fixture
+        .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
+        .args(["usage", "summary", "--json"])
+        .output()
+        .unwrap();
+    assert!(summary.status.success());
+    let summary: Value = serde_json::from_slice(&summary.stdout).unwrap();
+    assert_eq!(summary["summary"]["request_count"], 1);
+    assert_eq!(summary["summary"]["unfinished_request_count"], 1);
+    for counter in ["input_tokens", "output_tokens", "total_tokens"] {
+        assert_eq!(summary["summary"]["unknown_request_counts"][counter], 1);
+    }
+}
+
+#[test]
+fn interpreted_inflight_attempt_survives_termination() {
+    assert_inflight_attempt_survives_termination(None);
 }
 
 fn assert_endpoint_diagnostics_exclude_secrets(fixture: &Fixture, executable: Option<&Path>) {

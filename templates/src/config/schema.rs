@@ -51,6 +51,8 @@ pub fn default_profile_auth_mode() -> ProfileAuthMode {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<toml::Value>,
     pub profile: Vec<Profile>,
 
     #[serde(default)]
@@ -150,10 +152,12 @@ mod temperature_tests {
         let base = serde_json::json!({"name":"local", "server":"openai", "model":"example"});
         let profile: Profile = serde_json::from_value(base.clone()).unwrap();
         assert_eq!(profile.temperature, None);
-        assert!(serde_json::to_value(profile)
-            .unwrap()
-            .get("temperature")
-            .is_none());
+        assert!(
+            serde_json::to_value(profile)
+                .unwrap()
+                .get("temperature")
+                .is_none()
+        );
         for temperature in [0.0, 0.7, 12.0] {
             let mut value = base.clone();
             value["temperature"] = temperature.into();

@@ -14,6 +14,7 @@ pub fn add_profile(
     new_profile.token = None;
 
     let mut cfg = load_config().unwrap_or(Config {
+        usage: None,
         profile: Vec::new(),
         cargo_ai_token: None,
         default_profile: None,
@@ -72,6 +73,7 @@ pub fn add_profile(
 
 pub fn set_account_email(email: String, overwrite: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = load_config().unwrap_or(Config {
+        usage: None,
         profile: Vec::new(),
         cargo_ai_token: None,
         default_profile: None,
@@ -148,6 +150,7 @@ pub fn set_account_tokens(
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let mut cfg = load_config().unwrap_or(Config {
+        usage: None,
         profile: Vec::new(),
         cargo_ai_token: None,
         default_profile: None,

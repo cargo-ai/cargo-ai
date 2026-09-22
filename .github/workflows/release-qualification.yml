@@ -26,6 +26,9 @@ on:
       mistral_model:
         required: false
         type: string
+      typesafe_model:
+        required: false
+        type: string
 permissions:
   actions: read
   contents: read
@@ -280,10 +283,56 @@ jobs:
           [[ -n "${MISTRAL_MODEL:-}" ]] || { echo "MISTRAL_MODEL is required for enrolled Mistral" >&2; exit 1; }
           cargo run --locked --example qualification-gate -- probe mistral
 
+  live_typesafe:
+    name: Live TypeSafe Jev conformance
+    if: ${{ vars.LIVE_TYPESAFE_ENABLED != '' && vars.LIVE_TYPESAFE_ENABLED != 'false' }}
+    runs-on: ubuntu-latest
+    environment: live-provider-ci
+    timeout-minutes: 30
+    outputs:
+      evidence: ${{ steps.probe.outputs.evidence }}
+    steps:
+      - name: Validate TypeSafe Jev enrollment
+        shell: bash
+        env:
+          PROVIDER_ENABLED: ${{ vars.LIVE_TYPESAFE_ENABLED }}
+        run: |
+          set -euo pipefail
+          [[ "$PROVIDER_ENABLED" == "true" ]] || { echo "LIVE_TYPESAFE_ENABLED must equal true" >&2; exit 1; }
+      - name: Validate exact trusted Cargo AI candidate
+        shell: bash
+        env:
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+          TRUSTED_TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CARGO_AI_SHA" == "$TRUSTED_TRIGGER_SHA" ]] || { echo "Expected candidate differs from workflow ref; select its branch or tag." >&2; exit 1; }
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.cargo_ai_sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, resolved 2026-08-02
+      - name: Configure isolated Cargo AI Home
+        shell: bash
+        run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Run one representative TypeSafe Jev check
+        id: probe
+        env:
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          TYPESAFE_MODEL: ${{ inputs.typesafe_model || vars.TYPESAFE_MODEL }}
+        run: |
+          set -euo pipefail
+          [[ -n "${TYPESAFE_API_KEY:-}" ]] || { echo "TYPESAFE_API_KEY is required for enrolled TypeSafe Jev" >&2; exit 1; }
+          [[ -n "${TYPESAFE_MODEL:-}" ]] || { echo "TYPESAFE_MODEL is required for enrolled TypeSafe Jev" >&2; exit 1; }
+          cargo run --locked --example qualification-gate -- probe typesafe
+
   summary:
     name: Product qualification summary
     if: ${{ always() }}
-    needs: [security, deterministic, packages, official_package, live_openai, live_anthropic, live_gemini, live_xai, live_mistral]
+    needs: [security, deterministic, packages, official_package, live_openai, live_anthropic, live_gemini, live_xai, live_mistral, live_typesafe]
     runs-on: ubuntu-latest
     environment: release-qualification
     timeout-minutes: 5
@@ -326,6 +375,7 @@ jobs:
           LIVE_GEMINI_ENABLED: ${{ vars.LIVE_GEMINI_ENABLED }}
           LIVE_XAI_ENABLED: ${{ vars.LIVE_XAI_ENABLED }}
           LIVE_MISTRAL_ENABLED: ${{ vars.LIVE_MISTRAL_ENABLED }}
+          LIVE_TYPESAFE_ENABLED: ${{ vars.LIVE_TYPESAFE_ENABLED }}
         run: |
           set -uo pipefail
           jobs_json="$RUNNER_TEMP/release-qualification-jobs.json"
@@ -353,6 +403,7 @@ jobs:
                 "Live Gemini conformance"
                 "Live xAI conformance"
                 "Live Mistral conformance"
+                "Live TypeSafe Jev conformance"
               )
               jobs_ready=true
               for expected_job in "${expected_jobs[@]}"; do

@@ -84,6 +84,48 @@ impl Context {
         Ok(())
     }
 
+    pub fn write_journey(
+        &self,
+        journey: super::qualification_policy::Journey,
+        outcome: super::qualification_policy::Outcome,
+        diagnostic: Diagnostic,
+        token: &str,
+    ) -> Result<(), &'static str> {
+        self.validate()?;
+        if token.is_empty()
+            || journey.requested_model.contains(token)
+            || journey
+                .returned_models
+                .iter()
+                .any(|model| model.contains(token))
+        {
+            return Err("invalid journey redaction");
+        }
+        let record = super::qualification_policy::Record {
+            schema_version: 1,
+            candidate: self.candidate.clone(),
+            provider: "typesafe".into(),
+            run_id: self.run_id.clone(),
+            run_attempt: self.run_attempt.clone(),
+            probe_id: self.probe_id.clone(),
+            outcome,
+            diagnostic,
+            attempts: Vec::new(),
+            journey: Some(journey),
+        };
+        let bytes = serde_json::to_vec(&record).map_err(|_| "invalid journey encoding")?;
+        if String::from_utf8_lossy(&bytes).contains(token) {
+            return Err("invalid journey redaction");
+        }
+        super::qualification_policy::Record::parse(&bytes)?;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.path)
+            .and_then(|mut file| file.write_all(&bytes))
+            .map_err(|_| "cannot write journey evidence")
+    }
+
     pub fn write(
         &self,
         provider: &str,

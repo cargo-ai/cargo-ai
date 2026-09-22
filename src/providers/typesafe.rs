@@ -223,8 +223,11 @@ fn map_response(
         _ => None,
     };
     Ok(ProviderTextResponse {
+        provider_request_id: None,
+        finish_reason: None,
         text: Value::Object(output).to_string(),
         usage: Some(ProviderUsage {
+            total_tokens_source: Some("derived_input_plus_output".to_string()),
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
             total_tokens,
@@ -266,23 +269,38 @@ pub(super) async fn send_request(
         .send()
         .await
         .map_err(|error| ProviderError::from_reqwest(PROVIDER, error))?;
+    let response_id = response
+        .headers()
+        .get("x-request-id")
+        .or_else(|| response.headers().get("request-id"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let status = response.status();
     if !status.is_success() {
         // Error bodies can echo input and credentials. Status alone selects safe guidance.
-        return Err(http_error(status));
+        return Err(http_error(status).with_request_id(response_id.as_deref(), request.token));
     }
     let body = response
         .bytes()
         .await
         .map_err(|error| ProviderError::from_reqwest(PROVIDER, error))?;
-    let mapped = map_response(&body, request.response_schema, &questions)?;
-    if mapped.resolved_model.as_deref() == Some(request.token) {
-        return Err(invalid_answer(
+    let facts = super::runtime::ProviderFacts::from_body(&body, PROVIDER)
+        .with_request_id(response_id.as_deref())
+        .redact_token(request.token);
+    let mapped = map_response(&body, request.response_schema, &questions)
+        .map_err(|error: ProviderError| facts.error(error.redact_token(request.token)))?;
+    if !request.token.is_empty()
+        && mapped
+            .resolved_model
+            .as_deref()
+            .is_some_and(|value| value.contains(request.token))
+    {
+        return Err(facts.error(invalid_answer(
             "$.model",
             "TypeSafe returned an invalid model identifier.",
-        ));
+        )));
     }
-    Ok(mapped)
+    Ok(facts.text(mapped))
 }
 
 #[cfg(test)]

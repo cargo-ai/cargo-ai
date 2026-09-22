@@ -162,7 +162,7 @@ Read [Agent definitions](./docs/agent-definitions.md) and [Actions and child age
 | Runtime | Direct interpreted execution or generated native executables |
 | Projects | Explicit build profiles, project-local Rust tools, assets, and runtime defaults |
 | Packages | Local and hosted install, version management, exported entrypoints, permissions, and persistent data |
-| Observability | Deterministic terminal status plus opt-in metadata-only usage ledgers |
+| Observability | Deterministic terminal status, automatic local usage history and optional NDJSON export |
 
 Provider capabilities differ. Unsupported input or action combinations fail explicitly instead of silently dropping data or falling back to another provider.
 

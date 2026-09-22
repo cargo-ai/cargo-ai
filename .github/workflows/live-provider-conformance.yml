@@ -14,6 +14,7 @@ on:
           - gemini
           - xai
           - mistral
+          - typesafe
           - all
       cargo_ai_sha:
         description: Expected commit of the selected workflow ref (defaults to its snapshot)
@@ -34,6 +35,9 @@ on:
       mistral_model:
         required: false
         type: string
+      typesafe_model:
+        required: false
+        type: string
 permissions:
   contents: read
 
@@ -48,7 +52,7 @@ env:
 jobs:
   openai:
     name: Live OpenAI conformance
-    if: ${{ inputs.provider == 'openai' || inputs.provider == 'all' || !contains(fromJSON('["openai","anthropic","gemini","xai","mistral","all"]'), inputs.provider) }}
+    if: ${{ inputs.provider == 'openai' || inputs.provider == 'all' || !contains(fromJSON('["openai","anthropic","gemini","xai","mistral","typesafe","all"]'), inputs.provider) }}
     runs-on: ubuntu-latest
     environment: live-provider-ci
     timeout-minutes: 15
@@ -60,8 +64,8 @@ jobs:
         run: |
           set -euo pipefail
           case "$PROVIDER" in
-            openai|anthropic|gemini|xai|mistral|all) ;;
-            *) echo "provider must be openai, anthropic, gemini, xai, mistral, or all" >&2; exit 1 ;;
+            openai|anthropic|gemini|xai|mistral|typesafe|all) ;;
+            *) echo "provider must be openai, anthropic, gemini, xai, mistral, typesafe, or all" >&2; exit 1 ;;
           esac
       - name: Validate exact trusted Cargo AI candidate
         shell: bash
@@ -106,8 +110,8 @@ jobs:
         run: |
           set -euo pipefail
           case "$PROVIDER" in
-            openai|anthropic|gemini|xai|mistral|all) ;;
-            *) echo "provider must be openai, anthropic, gemini, xai, mistral, or all" >&2; exit 1 ;;
+            openai|anthropic|gemini|xai|mistral|typesafe|all) ;;
+            *) echo "provider must be openai, anthropic, gemini, xai, mistral, typesafe, or all" >&2; exit 1 ;;
           esac
       - name: Validate exact trusted Cargo AI candidate
         shell: bash
@@ -159,8 +163,8 @@ jobs:
         run: |
           set -euo pipefail
           case "$PROVIDER" in
-            openai|anthropic|gemini|xai|mistral|all) ;;
-            *) echo "provider must be openai, anthropic, gemini, xai, mistral, or all" >&2; exit 1 ;;
+            openai|anthropic|gemini|xai|mistral|typesafe|all) ;;
+            *) echo "provider must be openai, anthropic, gemini, xai, mistral, typesafe, or all" >&2; exit 1 ;;
           esac
       - name: Validate exact trusted Cargo AI candidate
         shell: bash
@@ -212,8 +216,8 @@ jobs:
         run: |
           set -euo pipefail
           case "$PROVIDER" in
-            openai|anthropic|gemini|xai|mistral|all) ;;
-            *) echo "provider must be openai, anthropic, gemini, xai, mistral, or all" >&2; exit 1 ;;
+            openai|anthropic|gemini|xai|mistral|typesafe|all) ;;
+            *) echo "provider must be openai, anthropic, gemini, xai, mistral, typesafe, or all" >&2; exit 1 ;;
           esac
       - name: Validate exact trusted Cargo AI candidate
         shell: bash
@@ -265,8 +269,8 @@ jobs:
         run: |
           set -euo pipefail
           case "$PROVIDER" in
-            openai|anthropic|gemini|xai|mistral|all) ;;
-            *) echo "provider must be openai, anthropic, gemini, xai, mistral, or all" >&2; exit 1 ;;
+            openai|anthropic|gemini|xai|mistral|typesafe|all) ;;
+            *) echo "provider must be openai, anthropic, gemini, xai, mistral, typesafe, or all" >&2; exit 1 ;;
           esac
       - name: Validate exact trusted Cargo AI candidate
         shell: bash
@@ -296,3 +300,56 @@ jobs:
           [[ -n "${MISTRAL_API_KEY:-}" ]] || { echo "MISTRAL_API_KEY is required for enrolled Mistral" >&2; exit 1; }
           [[ -n "${MISTRAL_MODEL:-}" ]] || { echo "MISTRAL_MODEL is required for enrolled Mistral" >&2; exit 1; }
           cargo run --locked --example qualification-gate -- probe mistral
+
+  typesafe:
+    name: Live TypeSafe Jev conformance
+    if: ${{ inputs.provider == 'typesafe' || (inputs.provider == 'all' && vars.LIVE_TYPESAFE_ENABLED != '' && vars.LIVE_TYPESAFE_ENABLED != 'false') }}
+    runs-on: ubuntu-latest
+    environment: live-provider-ci
+    timeout-minutes: 30
+    steps:
+      - name: Validate TypeSafe Jev enrollment
+        shell: bash
+        env:
+          PROVIDER_ENABLED: ${{ vars.LIVE_TYPESAFE_ENABLED }}
+        run: |
+          set -euo pipefail
+          [[ "$PROVIDER_ENABLED" == "true" ]] || { echo "LIVE_TYPESAFE_ENABLED must equal true" >&2; exit 1; }
+      - name: Validate provider selection
+        shell: bash
+        env:
+          PROVIDER: ${{ inputs.provider }}
+        run: |
+          set -euo pipefail
+          case "$PROVIDER" in
+            openai|anthropic|gemini|xai|mistral|typesafe|all) ;;
+            *) echo "provider must be openai, anthropic, gemini, xai, mistral, typesafe, or all" >&2; exit 1 ;;
+          esac
+      - name: Validate exact trusted Cargo AI candidate
+        shell: bash
+        env:
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+          TRUSTED_TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CARGO_AI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRUSTED_TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CARGO_AI_SHA" == "$TRUSTED_TRIGGER_SHA" ]] || { echo "Expected candidate differs from workflow ref; select its branch or tag." >&2; exit 1; }
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.cargo_ai_sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, resolved 2026-08-02
+      - name: Configure isolated Cargo AI Home
+        shell: bash
+        run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Run one representative TypeSafe Jev check
+        env:
+          CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          TYPESAFE_MODEL: ${{ inputs.typesafe_model || vars.TYPESAFE_MODEL }}
+        run: |
+          set -euo pipefail
+          [[ -n "${TYPESAFE_API_KEY:-}" ]] || { echo "TYPESAFE_API_KEY is required for enrolled TypeSafe Jev" >&2; exit 1; }
+          [[ -n "${TYPESAFE_MODEL:-}" ]] || { echo "TYPESAFE_MODEL is required for enrolled TypeSafe Jev" >&2; exit 1; }
+          cargo run --locked --example qualification-gate -- probe typesafe

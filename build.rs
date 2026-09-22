@@ -10,6 +10,8 @@ use build_support::TemplateSource;
 const _: &str = include_str!("templates/build_support.rs");
 
 const BUILD_RERUN_PATHS: &[&str] = &[
+    "src/usage_store.rs",
+    "src/usage_log.rs",
     ".agentcfg",
     "build.rs",
     "templates",
@@ -17,6 +19,30 @@ const BUILD_RERUN_PATHS: &[&str] = &[
 ];
 
 const TEMPLATE_SOURCES: &[TemplateSource] = &[
+    TemplateSource {
+        destination: "src/usage_backup.rs",
+        source: "src/usage_backup.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_backup_host.rs",
+        source: "src/usage_backup_host.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_backup/queue.rs",
+        source: "src/usage_backup/queue.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_backup/projection.rs",
+        source: "src/usage_backup/projection.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_backup/transport.rs",
+        source: "src/usage_backup/transport.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_store.rs",
+        source: "../src/usage_store.rs",
+    },
     TemplateSource {
         destination: "build.rs",
         source: "build.rs",
@@ -51,7 +77,7 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
     },
     TemplateSource {
         destination: "src/usage_log.rs",
-        source: "src/usage_log.rs",
+        source: "../src/usage_log.rs",
     },
     TemplateSource {
         destination: "src/web_resources.rs",

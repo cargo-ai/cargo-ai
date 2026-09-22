@@ -326,6 +326,15 @@ pub fn render(input: &Inputs) -> Result<(String, bool)> {
                         evidence.links.push_str(" · passed after retry");
                     }
                 }
+                if let Some(journey) = &record.journey {
+                    evidence.links.push_str(&format!(
+                        " · model {} → {} · {}/8 cases, {} request(s) started",
+                        cell(&journey.requested_model),
+                        cell(&journey.returned_models.join(", ")),
+                        journey.completed_cases,
+                        journey.requests_started,
+                    ));
+                }
             }
             policy::evaluate(
                 provider,

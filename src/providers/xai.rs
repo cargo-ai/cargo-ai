@@ -128,6 +128,7 @@ fn response_text(response: &Response) -> Option<String> {
 
 fn normalize_usage(usage: Option<Usage>) -> Option<ProviderUsage> {
     usage.map(|usage| ProviderUsage {
+        total_tokens_source: Some("reported".to_string()),
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
         total_tokens: usage.total_tokens,
@@ -175,6 +176,12 @@ pub(crate) async fn send_request(
         .send()
         .await
         .map_err(|error| ProviderError::from_reqwest(ProviderKind::Xai, error))?;
+    let response_id = response
+        .headers()
+        .get("x-request-id")
+        .or_else(|| response.headers().get("request-id"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let status = response.status();
     let body = response
         .bytes()
@@ -186,24 +193,37 @@ pub(crate) async fn send_request(
             ProviderKind::Xai,
             status,
             sanitized_http_error_body(ProviderKind::Xai, &body).as_str(),
-        ));
+        )
+        .with_request_id(response_id.as_deref(), token));
     }
 
-    let response: Response = serde_json::from_slice(&body).map_err(|error| {
-        ProviderError::invalid_response(
-            ProviderKind::Xai,
-            format!("Failed to parse xAI response JSON: {error}"),
-        )
-    })?;
-    let text = response_text(&response).ok_or_else(|| {
-        ProviderError::invalid_response(ProviderKind::Xai, "xAI returned no output_text content.")
-    })?;
+    let facts = super::runtime::ProviderFacts::from_body(&body, ProviderKind::Xai)
+        .with_request_id(response_id.as_deref())
+        .redact_token(token);
+    (|| {
+        let response: Response = serde_json::from_slice(&body).map_err(|error| {
+            ProviderError::invalid_response(
+                ProviderKind::Xai,
+                format!("Failed to parse xAI response JSON: {error}"),
+            )
+        })?;
+        let text = response_text(&response).ok_or_else(|| {
+            ProviderError::invalid_response(
+                ProviderKind::Xai,
+                "xAI returned no output_text content.",
+            )
+        })?;
 
-    Ok(ProviderTextResponse {
-        resolved_model: None,
-        text,
-        usage: normalize_usage(response.usage),
-    })
+        Ok(ProviderTextResponse {
+            provider_request_id: None,
+            finish_reason: None,
+            resolved_model: None,
+            text,
+            usage: normalize_usage(response.usage),
+        })
+    })()
+    .map(|response| facts.text(response))
+    .map_err(|error: ProviderError| facts.error(error.redact_token(token)))
 }
 
 #[cfg(test)]

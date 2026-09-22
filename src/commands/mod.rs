@@ -36,3 +36,5 @@ pub mod scaffold;
 pub(crate) mod secret_input;
 pub mod tools;
 pub mod version;
+
+pub(crate) mod usage;

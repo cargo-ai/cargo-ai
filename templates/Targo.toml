@@ -5,6 +5,7 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
+rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
 base64 = { version = "0.22.1", default-features = false, features = ["std"] }
 clap = "4.5.35"
 futures = "0.3.31"
@@ -17,7 +18,7 @@ serde_json = "1.0.140"
 tokio = { version = "1.44.1", features = ["full"] }
 dirs = "6.0.0"
 toml = "0.9.8"
-time = { version = "0.3.41", default-features = false, features = ["formatting", "std"] }
+time = { version = "0.3.41", default-features = false, features = ["formatting", "parsing", "std"] }
 uuid = { version = "1.21.0", default-features = false, features = ["std", "v4", "v7"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
@@ -35,5 +36,5 @@ keyring = { version = "3.6.3", default-features = false, features = ["sync-secre
 [build-dependencies]
 serde_json = "1.0"
 sha2 = { version = "0.10.9", default-features = false, features = ["std"] }
-time = { version = "0.3.41", default-features = false, features = ["formatting", "std"] }
+time = { version = "0.3.41", default-features = false, features = ["formatting", "parsing", "std"] }
 uuid = { version = "1.21.0", default-features = false, features = ["std", "v4"] }

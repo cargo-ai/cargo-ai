@@ -6,6 +6,7 @@ use std::fs;
 
 fn default_config() -> Config {
     Config {
+        usage: None,
         profile: Vec::new(),
         cargo_ai_token: None,
         default_profile: None,
@@ -117,4 +118,43 @@ pub fn set_openai_auth_locally_disabled(disabled: bool) -> Result<(), String> {
         cfg.openai_auth = Some(openai_auth);
         Ok(())
     })
+}
+
+/// Collection never rewrites cloud consent from an earlier settings snapshot.
+pub(crate) fn mutate_usage_tracking(tracking: bool) -> Result<(), String> {
+    crate::config::storage::persist_section_fields(
+        "usage",
+        &[("tracking", Some(toml::Value::Boolean(tracking)))],
+    )?;
+    Ok(())
+}
+
+/// Backup callers serialize consent transitions with the shared usage lease.
+/// Patch only backup-owned fields; preserve collection and unknown settings.
+pub(crate) fn mutate_usage_backup_settings(
+    settings: &crate::usage_store::UsageSettings,
+) -> Result<(), String> {
+    let generation = settings
+        .backup_generation
+        .map(|value| i64::try_from(value).map(toml::Value::Integer))
+        .transpose()
+        .map_err(|_| "Backup generation is out of range")?;
+    crate::config::storage::persist_section_fields(
+        "usage",
+        &[
+            (
+                "backup_enabled",
+                Some(toml::Value::Boolean(settings.backup_enabled)),
+            ),
+            (
+                "backup_account_binding",
+                settings
+                    .backup_account_binding
+                    .clone()
+                    .map(toml::Value::String),
+            ),
+            ("backup_generation", generation),
+        ],
+    )?;
+    Ok(())
 }

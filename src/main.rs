@@ -16,7 +16,12 @@ mod runtime_definition;
 mod schema_version;
 mod ui;
 mod update_check;
+#[path = "../templates/src/usage_backup.rs"]
+mod usage_backup;
+mod usage_backup_cli;
+mod usage_backup_host;
 mod usage_log;
+mod usage_store;
 mod web_resources;
 
 use serde::{Deserialize, Serialize};
@@ -37,6 +42,18 @@ fn should_run_automatic_update_check(
 #[tokio::main]
 async fn main() {
     let cmd_args = args::build_cli();
+    if let Some(usage) = cmd_args.subcommand_matches("usage") {
+        if let Some(backup) = usage.subcommand_matches("backup") {
+            if !usage_backup_cli::run(backup).await {
+                process::exit(1);
+            }
+            return;
+        }
+        if !commands::usage::run(usage) {
+            process::exit(1);
+        }
+        return;
+    }
     // Installed guidance operates only on the selected project. Dispatch it
     // before home initialization, credential migration or network checks.
     let guidance_result = if let Some(sub_m) = cmd_args.subcommand_matches("guidance") {
@@ -167,6 +184,11 @@ async fn main() {
         }
     };
 
+    if matches!(cmd_args.subcommand_name(), Some("run" | "agents"))
+        && std::env::var_os(usage_log::USAGE_ROOT_RUN_ID_ENV).is_none()
+    {
+        usage_backup::opportunistic().await;
+    }
     if !command_succeeded {
         process::exit(1);
     }

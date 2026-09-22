@@ -250,6 +250,7 @@ fn find_image_generation_result(payload: &serde_json::Value) -> Option<&str> {
 
 fn normalize_chat_usage(usage: Option<Usage>) -> Option<ProviderUsage> {
     usage.map(|usage| ProviderUsage {
+        total_tokens_source: Some("reported".to_string()),
         input_tokens: usage.prompt_tokens,
         output_tokens: usage.completion_tokens,
         total_tokens: usage.total_tokens,
@@ -260,6 +261,7 @@ fn normalize_chat_usage(usage: Option<Usage>) -> Option<ProviderUsage> {
 
 fn normalize_image_usage(usage: Option<ImageUsage>) -> Option<ProviderUsage> {
     usage.map(|usage| ProviderUsage {
+        total_tokens_source: Some("reported".to_string()),
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
         total_tokens: usage.total_tokens,
@@ -275,6 +277,7 @@ fn normalize_responses_usage(payload: &serde_json::Value) -> Option<ProviderUsag
         .or_else(|| payload.get("usage"))?;
 
     Some(ProviderUsage {
+        total_tokens_source: Some("reported".to_string()),
         input_tokens: usage
             .get("input_tokens")
             .and_then(serde_json::Value::as_u64),
@@ -324,6 +327,12 @@ async fn send_chat_completions_request(
         .await
         .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
 
+    let response_id = http_resp
+        .headers()
+        .get("x-request-id")
+        .or_else(|| http_resp.headers().get("request-id"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let status = http_resp.status();
     let body_bytes = http_resp
         .bytes()
@@ -331,38 +340,50 @@ async fn send_chat_completions_request(
         .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
 
     if !status.is_success() {
-        let raw = String::from_utf8_lossy(&body_bytes);
         return Err(ProviderError::from_http_status(
             ProviderKind::OpenAi,
             status,
-            &raw,
-        ));
+            &super::error::sanitized_http_error_body(ProviderKind::OpenAi, &body_bytes),
+        )
+        .with_request_id(response_id.as_deref(), token));
     }
 
-    let response: ChatCompletionsResponse = match serde_json::from_slice(&body_bytes) {
-        Ok(resp) => resp,
-        Err(error) => {
-            let raw = String::from_utf8_lossy(&body_bytes);
-            return Err(ProviderError::invalid_response(
+    let facts = super::runtime::ProviderFacts::from_body(&body_bytes, ProviderKind::OpenAi)
+        .with_request_id(response_id.as_deref())
+        .redact_token(token);
+    (|| {
+        let response: ChatCompletionsResponse = match serde_json::from_slice(&body_bytes) {
+            Ok(resp) => resp,
+            Err(error) => {
+                return Err(ProviderError::invalid_response(
+                    ProviderKind::OpenAi,
+                    format!(
+                        "Failed to parse JSON at line {} column {}.",
+                        error.line(),
+                        error.column()
+                    ),
+                ));
+            }
+        };
+
+        let ChatCompletionsResponse { choices, usage, .. } = response;
+        let usage = normalize_chat_usage(usage);
+        match choices.first() {
+            Some(choice) => Ok(ProviderTextResponse {
+                provider_request_id: None,
+                finish_reason: None,
+                resolved_model: None,
+                text: choice.message.content.clone(),
+                usage,
+            }),
+            None => Err(ProviderError::invalid_response(
                 ProviderKind::OpenAi,
-                format!("Failed to parse JSON: {error}\\nRaw response:\\n{raw}"),
-            ));
+                "No ChatGPT response choice at index 0.",
+            )),
         }
-    };
-
-    let ChatCompletionsResponse { choices, usage, .. } = response;
-    let usage = normalize_chat_usage(usage);
-    match choices.first() {
-        Some(choice) => Ok(ProviderTextResponse {
-            resolved_model: None,
-            text: choice.message.content.clone(),
-            usage,
-        }),
-        None => Err(ProviderError::invalid_response(
-            ProviderKind::OpenAi,
-            "No ChatGPT response choice at index 0.",
-        )),
-    }
+    })()
+    .map(|response| facts.text(response))
+    .map_err(|error: ProviderError| facts.error(error.redact_token(token)))
 }
 
 async fn send_chatgpt_codex_responses_request(
@@ -404,6 +425,12 @@ async fn send_chatgpt_codex_responses_request(
         .await
         .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
 
+    let response_id = http_resp
+        .headers()
+        .get("x-request-id")
+        .or_else(|| http_resp.headers().get("request-id"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let status = http_resp.status();
     if !status.is_success() {
         let raw = http_resp
@@ -413,8 +440,9 @@ async fn send_chatgpt_codex_responses_request(
         return Err(ProviderError::from_http_status(
             ProviderKind::OpenAi,
             status,
-            raw.as_str(),
-        ));
+            &super::error::sanitized_http_error_body(ProviderKind::OpenAi, raw.as_bytes()),
+        )
+        .with_request_id(response_id.as_deref(), token));
     }
 
     let raw_stream = http_resp
@@ -422,85 +450,102 @@ async fn send_chatgpt_codex_responses_request(
         .await
         .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
 
-    let mut accumulated_text = String::new();
-    let mut completed_text: Option<String> = None;
-    let mut usage: Option<ProviderUsage> = None;
+    let mut facts = super::runtime::ProviderFacts::default()
+        .with_request_id(response_id.as_deref())
+        .redact_token(token);
+    (|| {
+        let mut accumulated_text = String::new();
+        let mut completed_text: Option<String> = None;
+        let mut usage: Option<ProviderUsage> = None;
 
-    for raw_line in raw_stream.lines() {
-        let line = raw_line.trim_end_matches('\r');
-        let Some(payload) = line.strip_prefix("data: ") else {
-            continue;
-        };
-        if payload.trim().is_empty() || payload.trim() == "[DONE]" {
-            continue;
-        }
-
-        let event_json = serde_json::from_str::<serde_json::Value>(payload).map_err(|error| {
-            ProviderError::invalid_response(
-                ProviderKind::OpenAi,
-                format!("Failed to parse streaming payload: {error}\\nPayload: {payload}"),
-            )
-        })?;
-
-        let event_type = event_json
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-
-        if let Some(event_usage) = normalize_responses_usage(&event_json) {
-            usage = Some(event_usage);
-        }
-
-        if event_type == "response.output_text.delta" {
-            if let Some(delta) = event_json.get("delta").and_then(serde_json::Value::as_str) {
-                accumulated_text.push_str(delta);
+        for raw_line in raw_stream.lines() {
+            let line = raw_line.trim_end_matches('\r');
+            let Some(payload) = line.strip_prefix("data: ") else {
+                continue;
+            };
+            if payload.trim().is_empty() || payload.trim() == "[DONE]" {
+                continue;
             }
-            continue;
-        }
 
-        if event_type == "response.output_text.done" {
-            if let Some(text) = event_json
-                .get("text")
+            let event_json =
+                serde_json::from_str::<serde_json::Value>(payload).map_err(|error| {
+                    ProviderError::invalid_response(
+                        ProviderKind::OpenAi,
+                        format!(
+                            "Failed to parse streaming JSON at line {} column {}.",
+                            error.line(),
+                            error.column()
+                        ),
+                    )
+                })?;
+
+            facts.merge_value(&event_json, token);
+            let event_type = event_json
+                .get("type")
                 .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-            {
-                completed_text = Some(text.to_string());
+                .unwrap_or("");
+
+            if let Some(event_usage) = normalize_responses_usage(&event_json) {
+                usage = Some(event_usage);
             }
-            continue;
+
+            if event_type == "response.output_text.delta" {
+                if let Some(delta) = event_json.get("delta").and_then(serde_json::Value::as_str) {
+                    accumulated_text.push_str(delta);
+                }
+                continue;
+            }
+
+            if event_type == "response.output_text.done" {
+                if let Some(text) = event_json
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                {
+                    completed_text = Some(text.to_string());
+                }
+                continue;
+            }
+
+            if event_type == "response.failed" || event_type == "error" {
+                let detail = parse_stream_failure_message(&event_json)
+                    .unwrap_or_else(|| "No error details were provided.".to_string());
+                return Err(ProviderError::invalid_response(
+                    ProviderKind::OpenAi,
+                    format!("OpenAI stream failed: {detail}"),
+                ));
+            }
         }
 
-        if event_type == "response.failed" || event_type == "error" {
-            let detail =
-                parse_stream_failure_message(&event_json).unwrap_or_else(|| payload.to_string());
-            return Err(ProviderError::invalid_response(
-                ProviderKind::OpenAi,
-                format!("OpenAI stream failed: {detail}"),
-            ));
+        if let Some(done) = completed_text {
+            return Ok(ProviderTextResponse {
+                provider_request_id: None,
+                finish_reason: None,
+                resolved_model: None,
+                text: done,
+                usage,
+            });
         }
-    }
 
-    if let Some(done) = completed_text {
-        return Ok(ProviderTextResponse {
-            resolved_model: None,
-            text: done,
-            usage,
-        });
-    }
+        let fallback = accumulated_text.trim().to_string();
+        if !fallback.is_empty() {
+            return Ok(ProviderTextResponse {
+                provider_request_id: None,
+                finish_reason: None,
+                resolved_model: None,
+                text: fallback,
+                usage,
+            });
+        }
 
-    let fallback = accumulated_text.trim().to_string();
-    if !fallback.is_empty() {
-        return Ok(ProviderTextResponse {
-            resolved_model: None,
-            text: fallback,
-            usage,
-        });
-    }
-
-    Err(ProviderError::invalid_response(
-        ProviderKind::OpenAi,
-        "OpenAI stream completed without output text.",
-    ))
+        Err(ProviderError::invalid_response(
+            ProviderKind::OpenAi,
+            "OpenAI stream completed without output text.",
+        ))
+    })()
+    .map(|response| facts.text(response))
+    .map_err(|error: ProviderError| facts.error(error.redact_token(token)))
 }
 
 async fn send_chatgpt_codex_image_request(
@@ -558,6 +603,12 @@ async fn send_chatgpt_codex_image_request(
         .await
         .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
 
+    let response_id = http_resp
+        .headers()
+        .get("x-request-id")
+        .or_else(|| http_resp.headers().get("request-id"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let status = http_resp.status();
     let raw_stream = http_resp
         .text()
@@ -568,68 +619,92 @@ async fn send_chatgpt_codex_image_request(
         return Err(ProviderError::from_http_status(
             ProviderKind::OpenAi,
             status,
-            raw_stream.as_str(),
-        ));
+            &super::error::sanitized_http_error_body(ProviderKind::OpenAi, raw_stream.as_bytes()),
+        )
+        .with_request_id(response_id.as_deref(), token));
     }
 
-    let mut encoded_image: Option<String> = None;
-    let mut usage: Option<ProviderUsage> = None;
+    let mut facts = super::runtime::ProviderFacts::default()
+        .with_request_id(response_id.as_deref())
+        .redact_token(token);
+    (|| {
+        let mut encoded_image: Option<String> = None;
+        let mut usage: Option<ProviderUsage> = None;
 
-    for raw_line in raw_stream.lines() {
-        let line = raw_line.trim_end_matches('\r');
-        let Some(payload) = line.strip_prefix("data: ") else {
-            continue;
-        };
-        if payload.trim().is_empty() || payload.trim() == "[DONE]" {
-            continue;
+        for raw_line in raw_stream.lines() {
+            let line = raw_line.trim_end_matches('\r');
+            let Some(payload) = line.strip_prefix("data: ") else {
+                continue;
+            };
+            if payload.trim().is_empty() || payload.trim() == "[DONE]" {
+                continue;
+            }
+
+            let event_json =
+                serde_json::from_str::<serde_json::Value>(payload).map_err(|error| {
+                    ProviderError::invalid_response(
+                        ProviderKind::OpenAi,
+                        format!(
+                            "Failed to parse streaming JSON at line {} column {}.",
+                            error.line(),
+                            error.column()
+                        ),
+                    )
+                })?;
+
+            facts.merge_value(&event_json, token);
+            if let Some(event_usage) = normalize_responses_usage(&event_json) {
+                usage = Some(event_usage);
+            }
+            if let Some(result) = find_image_generation_result(&event_json) {
+                encoded_image = Some(result.to_string());
+                continue;
+            }
+
+            facts.merge_value(&event_json, token);
+            let event_type = event_json
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+
+            if let Some(event_usage) = normalize_responses_usage(&event_json) {
+                usage = Some(event_usage);
+            }
+
+            if event_type == "response.failed" || event_type == "error" {
+                let detail = parse_stream_failure_message(&event_json)
+                    .unwrap_or_else(|| "No error details were provided.".to_string());
+                return Err(ProviderError::invalid_response(
+                    ProviderKind::OpenAi,
+                    format!("OpenAI stream failed: {detail}"),
+                ));
+            }
         }
 
-        let event_json = serde_json::from_str::<serde_json::Value>(payload).map_err(|error| {
+        let encoded_image = encoded_image.ok_or_else(|| {
             ProviderError::invalid_response(
-                ProviderKind::OpenAi,
-                format!("Failed to parse streaming payload: {error}\nPayload: {payload}"),
-            )
-        })?;
-
-        if let Some(result) = find_image_generation_result(&event_json) {
-            encoded_image = Some(result.to_string());
-            continue;
-        }
-
-        let event_type = event_json
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-
-        if let Some(event_usage) = normalize_responses_usage(&event_json) {
-            usage = Some(event_usage);
-        }
-
-        if event_type == "response.failed" || event_type == "error" {
-            let detail =
-                parse_stream_failure_message(&event_json).unwrap_or_else(|| payload.to_string());
-            return Err(ProviderError::invalid_response(
-                ProviderKind::OpenAi,
-                format!("OpenAI stream failed: {detail}"),
-            ));
-        }
-    }
-
-    let encoded_image = encoded_image.ok_or_else(|| {
-        ProviderError::invalid_response(
             ProviderKind::OpenAi,
             "Image generation stream did not include an `image_generation_call` result payload.",
         )
-    })?;
+        })?;
 
-    let bytes = BASE64_STANDARD.decode(encoded_image).map_err(|error| {
-        ProviderError::invalid_response(
-            ProviderKind::OpenAi,
-            format!("Failed to decode generated image bytes: {error}"),
-        )
-    })?;
+        let bytes = BASE64_STANDARD.decode(encoded_image).map_err(|error| {
+            ProviderError::invalid_response(
+                ProviderKind::OpenAi,
+                format!("Failed to decode generated image bytes: {error}"),
+            )
+        })?;
 
-    Ok(ProviderImageResponse { bytes, usage })
+        Ok(ProviderImageResponse {
+            resolved_model: None,
+            provider_request_id: None,
+            finish_reason: None,
+            bytes,
+            usage,
+        })
+    })()
+    .map(|response| facts.image(response))
+    .map_err(|error: ProviderError| facts.error(error.redact_token(token)))
 }
 
 async fn send_image_edit_request(
@@ -668,7 +743,7 @@ async fn send_image_edit_request(
         .await
         .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
 
-    decode_image_generation_response(http_resp).await
+    decode_image_generation_response(http_resp, token).await
 }
 
 fn multipart_boundary() -> String {
@@ -746,7 +821,14 @@ fn sanitize_multipart_filename(filename: &str) -> String {
 
 async fn decode_image_generation_response(
     http_resp: reqwest::Response,
+    token: &str,
 ) -> Result<ProviderImageResponse, ProviderError> {
+    let response_id = http_resp
+        .headers()
+        .get("x-request-id")
+        .or_else(|| http_resp.headers().get("request-id"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let status = http_resp.status();
     let body_bytes = http_resp
         .bytes()
@@ -754,46 +836,59 @@ async fn decode_image_generation_response(
         .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
 
     if !status.is_success() {
-        let raw = String::from_utf8_lossy(&body_bytes);
         return Err(ProviderError::from_http_status(
             ProviderKind::OpenAi,
             status,
-            &raw,
-        ));
+            &super::error::sanitized_http_error_body(ProviderKind::OpenAi, &body_bytes),
+        )
+        .with_request_id(response_id.as_deref(), token));
     }
 
-    let response: ImageGenerationResponse =
-        serde_json::from_slice(&body_bytes).map_err(|error| {
-            let raw = String::from_utf8_lossy(&body_bytes);
+    let facts = super::runtime::ProviderFacts::from_body(&body_bytes, ProviderKind::OpenAi)
+        .with_request_id(response_id.as_deref())
+        .redact_token(token);
+    (|| {
+        let response: ImageGenerationResponse =
+            serde_json::from_slice(&body_bytes).map_err(|error| {
+                ProviderError::invalid_response(
+                    ProviderKind::OpenAi,
+                    format!(
+                        "Failed to parse image-generation JSON at line {} column {}.",
+                        error.line(),
+                        error.column()
+                    ),
+                )
+            })?;
+
+        let encoded_image = response
+            .data
+            .first()
+            .map(|image| image.b64_json.trim())
+            .filter(|image| !image.is_empty())
+            .ok_or_else(|| {
+                ProviderError::invalid_response(
+                    ProviderKind::OpenAi,
+                    "Image generation response did not include `data[0].b64_json`.",
+                )
+            })?;
+
+        let bytes = BASE64_STANDARD.decode(encoded_image).map_err(|error| {
             ProviderError::invalid_response(
                 ProviderKind::OpenAi,
-                format!("Failed to parse image-generation JSON: {error}\nRaw response:\n{raw}"),
+                format!("Failed to decode generated image bytes: {error}"),
             )
         })?;
 
-    let encoded_image = response
-        .data
-        .first()
-        .map(|image| image.b64_json.trim())
-        .filter(|image| !image.is_empty())
-        .ok_or_else(|| {
-            ProviderError::invalid_response(
-                ProviderKind::OpenAi,
-                "Image generation response did not include `data[0].b64_json`.",
-            )
-        })?;
-
-    let bytes = BASE64_STANDARD.decode(encoded_image).map_err(|error| {
-        ProviderError::invalid_response(
-            ProviderKind::OpenAi,
-            format!("Failed to decode generated image bytes: {error}"),
-        )
-    })?;
-
-    Ok(ProviderImageResponse {
-        bytes,
-        usage: normalize_image_usage(response.usage),
-    })
+        Ok(ProviderImageResponse {
+            resolved_model: None,
+            provider_request_id: None,
+            finish_reason: None,
+            bytes,
+            usage: normalize_image_usage(response.usage),
+        })
+    })()
+    .map(|response| facts.image(response))
+    .map_err(|error: ProviderError| facts.error(error.redact_token(token)))
 }
 
 pub async fn send_request(
@@ -889,7 +984,7 @@ pub async fn send_image_request(
         .await
         .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
 
-    decode_image_generation_response(http_resp).await
+    decode_image_generation_response(http_resp, token).await
 }
 
 fn chat_request_content_parts(content_parts: &[ContentPart]) -> Vec<ChatRequestContentPart> {
@@ -947,6 +1042,86 @@ mod tests {
     };
     use crate::providers::runtime::{ContentPart, ImageReference};
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+
+    #[tokio::test]
+    async fn request_metadata_and_errors_reject_credential_echoes() {
+        let token = "sk-fixture-credential".to_string();
+        for echo in [
+            token.clone(),
+            format!("req-{token}"),
+            format!("{token}-model"),
+            format!("req-{token}-end"),
+        ] {
+            for image in [false, true] {
+                for outcome in ["success", "invalid", "http_error"] {
+                    let mut server = mockito::Server::new_async().await;
+                    let mut body = serde_json::json!({
+                        "id": echo, "model": echo, "status": echo, "object": "chat.completion", "created": 1,
+                        "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+                        "choices": [{"index": 0, "message": {"role": "assistant", "content": "safe answer"}, "finish_reason": echo}],
+                        "data": [{"b64_json": BASE64_STANDARD.encode(b"safe image")}]
+                    });
+                    if outcome == "invalid" {
+                        body["choices"] = serde_json::json!("private-response-payload");
+                        body["data"] = serde_json::json!("private-response-payload");
+                    } else if outcome == "http_error" {
+                        body = serde_json::json!({"error": {"message": format!("failed-{echo}")}, "payload": "private-response-payload"});
+                    }
+                    let mock = server
+                        .mock(
+                            "POST",
+                            if image {
+                                "/v1/images/generations"
+                            } else {
+                                "/v1/chat/completions"
+                            },
+                        )
+                        .match_header("authorization", format!("Bearer {token}").as_str())
+                        .with_status(if outcome == "http_error" { 400 } else { 200 })
+                        .with_header("x-request-id", &echo)
+                        .with_body(body.to_string())
+                        .create_async()
+                        .await;
+                    let url = format!("{}/v1/chat/completions", server.url());
+                    let model = "requested-model".to_string();
+                    // This is the metadata boundary consumed by history/export and backup.
+                    let metadata = if image {
+                        send_image_request(&url, &model, "private-prompt", 10, &token, "png", &[]).await.map(|response| {
+                            serde_json::json!({"model": response.resolved_model, "request_id": response.provider_request_id, "finish_reason": response.finish_reason, "usage": response.usage})
+                        })
+                    } else {
+                        send_request(&url, &model, &[ContentPart::Text("private-prompt".into())], 10, &token, serde_json::json!({"type":"json_object"}), None).await.map(|response| {
+                            serde_json::json!({"model": response.resolved_model, "request_id": response.provider_request_id, "finish_reason": response.finish_reason, "usage": response.usage})
+                        })
+                    };
+                    mock.assert_async().await;
+                    let metadata = if outcome == "success" {
+                        metadata.expect("valid response")
+                    } else {
+                        let error = metadata.expect_err("invalid response");
+                        assert!(!error.message().contains(&token));
+                        assert!(!error.message().contains("private-response-payload"));
+                        serde_json::json!({"model": error.resolved_model, "request_id": error.provider_request_id, "finish_reason": error.finish_reason, "usage": error.usage})
+                    };
+                    let serialized = metadata.to_string();
+                    for excluded in [
+                        &token,
+                        "private-prompt",
+                        "private-response-payload",
+                        "safe answer",
+                    ] {
+                        assert!(!serialized.contains(excluded), "{image}/{outcome}");
+                    }
+                    assert!(metadata["model"].is_null());
+                    assert!(metadata["request_id"].is_null());
+                    assert!(metadata["finish_reason"].is_null());
+                    if outcome != "http_error" {
+                        assert_eq!(metadata["usage"]["total_tokens"], 10);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn chat_request_content_parts_encode_pdf_files() {

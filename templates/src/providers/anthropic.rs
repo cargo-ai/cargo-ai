@@ -65,8 +65,10 @@ struct ResponseContentBlock {
 
 #[derive(Debug, Deserialize)]
 struct Usage {
-    input_tokens: u64,
-    output_tokens: u64,
+    #[serde(default)]
+    input_tokens: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
     #[serde(default)]
     cache_creation_input_tokens: Option<u64>,
     #[serde(default)]
@@ -149,9 +151,13 @@ fn normalize_usage(usage: Option<Usage>) -> Option<ProviderUsage> {
             None
         };
         ProviderUsage {
-            input_tokens: Some(usage.input_tokens),
-            output_tokens: Some(usage.output_tokens),
-            total_tokens: usage.input_tokens.checked_add(usage.output_tokens),
+            total_tokens_source: Some("derived_input_plus_output".to_string()),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            total_tokens: usage
+                .input_tokens
+                .zip(usage.output_tokens)
+                .and_then(|(input, output)| input.checked_add(output)),
             input_token_details,
             output_token_details: None,
         }
@@ -245,6 +251,12 @@ pub(crate) async fn send_request(
         .send()
         .await
         .map_err(|error| ProviderError::from_reqwest(ProviderKind::Anthropic, error))?;
+    let response_id = response
+        .headers()
+        .get("x-request-id")
+        .or_else(|| response.headers().get("request-id"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let status = response.status();
     let body = response
         .bytes()
@@ -256,34 +268,44 @@ pub(crate) async fn send_request(
             ProviderKind::Anthropic,
             status,
             error_message(&body).as_str(),
-        ));
-    }
-
-    let response: Response = serde_json::from_slice(&body).map_err(|error| {
-        ProviderError::invalid_response(
-            ProviderKind::Anthropic,
-            format!("Failed to parse Anthropic response JSON: {error}"),
         )
-    })?;
-    let text = response
-        .content
-        .iter()
-        .filter(|block| block.r#type == "text")
-        .filter_map(|block| block.text.as_deref())
-        .collect::<Vec<_>>()
-        .join("");
-    if text.is_empty() {
-        return Err(ProviderError::invalid_response(
-            ProviderKind::Anthropic,
-            "Anthropic returned no text content blocks.",
-        ));
+        .with_request_id(response_id.as_deref(), token));
     }
 
-    Ok(ProviderTextResponse {
-        resolved_model: None,
-        text,
-        usage: normalize_usage(response.usage),
-    })
+    let facts = super::runtime::ProviderFacts::from_body(&body, ProviderKind::Anthropic)
+        .with_request_id(response_id.as_deref())
+        .redact_token(token);
+    (|| {
+        let response: Response = serde_json::from_slice(&body).map_err(|error| {
+            ProviderError::invalid_response(
+                ProviderKind::Anthropic,
+                format!("Failed to parse Anthropic response JSON: {error}"),
+            )
+        })?;
+        let text = response
+            .content
+            .iter()
+            .filter(|block| block.r#type == "text")
+            .filter_map(|block| block.text.as_deref())
+            .collect::<Vec<_>>()
+            .join("");
+        if text.is_empty() {
+            return Err(ProviderError::invalid_response(
+                ProviderKind::Anthropic,
+                "Anthropic returned no text content blocks.",
+            ));
+        }
+
+        Ok(ProviderTextResponse {
+            provider_request_id: None,
+            finish_reason: None,
+            resolved_model: None,
+            text,
+            usage: normalize_usage(response.usage),
+        })
+    })()
+    .map(|response| facts.text(response))
+    .map_err(|error: ProviderError| facts.error(error.redact_token(token)))
 }
 
 #[cfg(test)]

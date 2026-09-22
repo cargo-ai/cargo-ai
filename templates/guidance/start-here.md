@@ -30,7 +30,7 @@ When action behavior may vary by invocation, also clarify:
 
 When the user wants token usage, runtime timing, provider timing, or embedding-friendly accounting:
 - use `usage-ledger.md`
-- keep usage logging opt-in with `--usage-log <path>` or `CARGO_AI_USAGE_LOG=<path>`
+- explain default-on local metadata history, `cargo ai usage settings --tracking off`, and optional NDJSON exports with `--usage-log <path>` or `CARGO_AI_USAGE_LOG=<path>`
 - do not design a custom logging backend unless the user explicitly wants business logs or a destination-specific tool
 
 When selecting a model provider:

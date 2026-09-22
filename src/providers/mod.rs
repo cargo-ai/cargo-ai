@@ -9,7 +9,7 @@ mod gemini;
 mod ollama;
 mod openai;
 mod openai_compatible;
-mod runtime;
+pub(crate) mod runtime;
 mod typesafe;
 mod xai;
 
@@ -211,6 +211,70 @@ mod temperature_tests {
             assert_eq!(response.text, "{\"n\":50}");
             assert_eq!(response.resolved_model, None);
             mock.assert_async().await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod usage_retention_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn every_adapter_retains_usage_when_response_output_is_invalid() {
+        let schema = json!({"type":"object","properties":{"answer":{"type":"string","enum":["a","b"],"description":"Choose one"}},"required":["answer"],"additionalProperties":false});
+        for provider in [
+            ProviderKind::Anthropic,
+            ProviderKind::Gemini,
+            ProviderKind::Mistral,
+            ProviderKind::Ollama,
+            ProviderKind::OpenAi,
+            ProviderKind::TypeSafe,
+            ProviderKind::Xai,
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let mock = server.mock("POST", "/")
+                .with_status(200).with_header("x-request-id", "fixture-request")
+                .with_body(json!({"model":"resolved-model","content":[],"steps":[],"output":[],"choices":[],"answers":{},
+                    "usage":{"input_tokens":7,"output_tokens":2,"total_tokens":9,"prompt_tokens":7,"completion_tokens":2,"total_input_tokens":7,"total_output_tokens":2}}).to_string())
+                .create_async().await;
+            let error = send_text_request(
+                provider,
+                &server.url(),
+                ProviderTextRequest {
+                    rubric_enabled: true,
+                    model: "requested-model",
+                    content_parts: &[runtime::ContentPart::Text("fixture".into())],
+                    timeout_in_sec: 5,
+                    token: "fixture-token",
+                    response_schema: &schema,
+                    max_output_tokens: None,
+                    temperature: None,
+                },
+            )
+            .await
+            .expect_err("invalid output must remain a failure");
+            mock.assert_async().await;
+            assert_eq!(
+                error.usage.as_ref().and_then(|usage| usage.input_tokens),
+                Some(7),
+                "{provider:?}"
+            );
+            assert_eq!(
+                error.usage.as_ref().and_then(|usage| usage.output_tokens),
+                Some(2),
+                "{provider:?}"
+            );
+            assert_eq!(
+                error.resolved_model.as_deref(),
+                Some("resolved-model"),
+                "{provider:?}"
+            );
+            assert_eq!(
+                error.provider_request_id.as_deref(),
+                Some("fixture-request"),
+                "{provider:?}"
+            );
         }
     }
 }

@@ -1,12 +1,15 @@
-mod runtime_data;
 mod args;
-mod web_resources;
 mod config;
 mod credentials;
 #[path = "../definition_validation.rs"]
 mod definition_validation;
 mod providers;
+mod runtime_data;
+mod usage_backup;
+mod usage_backup_host;
 mod usage_log;
+mod usage_store;
+mod web_resources;
 
 use jsonlogic::apply;
 use serde::{Deserialize, Serialize};
@@ -25,8 +28,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use config::loader::{config_path, find_profile, load_config};
 use config::schema::{Profile, ProfileAuthMode, SecretStoreMode};
 use providers::{
-    provider_error_messages, validate_provider_content_parts, validate_provider_request,
-    AuthenticationPolicy, ProviderError, ProviderKind,
+    AuthenticationPolicy, ProviderError, ProviderKind, provider_error_messages,
+    validate_provider_content_parts, validate_provider_request,
 };
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
@@ -49,8 +52,7 @@ const PROJECT_METADATA_RELATIVE_PATH: &str = ".cargo-ai/project.toml";
 const PROJECT_TOOLS_RELATIVE_PATH: &str = ".cargo-ai/tools";
 const TOOL_MANIFEST_FILE_NAME: &str = "tool.json";
 const TOOL_PROTOCOL_VERSION: u32 = 1;
-const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str =
-    "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
+const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str = "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
 const ACTION_LANE_OUTPUT_BUFFER_LIMIT: usize = 6;
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
@@ -192,7 +194,10 @@ impl ActionOutput {
             lane.lane_finished_after = None;
             lane.last_message = Some("started".to_string());
             if state.mode == ActionOutputMode::AppendOnly {
-                println!("{}", format_action_line(action_index, action_name, "started"));
+                println!(
+                    "{}",
+                    format_action_line(action_index, action_name, "started")
+                );
             } else {
                 render_live_dashboard(state);
             }
@@ -267,16 +272,16 @@ impl ActionOutput {
                 lane.status = ActionLaneStatus::Completed;
                 lane.current_step = None;
                 lane.step_started_at = None;
-                lane.lane_finished_after = lane
-                    .lane_started_at
-                    .map(|started_at| started_at.elapsed());
+                lane.lane_finished_after =
+                    lane.lane_started_at.map(|started_at| started_at.elapsed());
                 lane.last_message = Some(summary.to_string());
                 if append_only {
                     Some(format!(
                         "{} · {}",
                         summary,
                         format_elapsed_duration(
-                            lane.lane_finished_after.unwrap_or_else(|| Duration::from_secs(0))
+                            lane.lane_finished_after
+                                .unwrap_or_else(|| Duration::from_secs(0))
                         )
                     ))
                 } else {
@@ -302,9 +307,8 @@ impl ActionOutput {
                 lane.status = ActionLaneStatus::Failed;
                 lane.current_step = None;
                 lane.step_started_at = None;
-                lane.lane_finished_after = lane
-                    .lane_started_at
-                    .map(|started_at| started_at.elapsed());
+                lane.lane_finished_after =
+                    lane.lane_started_at.map(|started_at| started_at.elapsed());
                 lane.last_message = compact_action_output_line(error)
                     .map(|line| format!("failed: {}", line))
                     .or_else(|| Some("failed".to_string()));
@@ -313,7 +317,8 @@ impl ActionOutput {
                     Some(format!(
                         "failed · {}",
                         format_elapsed_duration(
-                            lane.lane_finished_after.unwrap_or_else(|| Duration::from_secs(0))
+                            lane.lane_finished_after
+                                .unwrap_or_else(|| Duration::from_secs(0))
                         )
                     ))
                 } else {
@@ -339,9 +344,8 @@ impl ActionOutput {
                 lane.status = ActionLaneStatus::Aborted;
                 lane.current_step = None;
                 lane.step_started_at = None;
-                lane.lane_finished_after = lane
-                    .lane_started_at
-                    .map(|started_at| started_at.elapsed());
+                lane.lane_finished_after =
+                    lane.lane_started_at.map(|started_at| started_at.elapsed());
                 lane.last_message = compact_action_output_line(error)
                     .map(|line| format!("abort requested: {}", line))
                     .or_else(|| Some("abort requested".to_string()));
@@ -350,7 +354,8 @@ impl ActionOutput {
                     Some(format!(
                         "abort requested · {}: {}",
                         format_elapsed_duration(
-                            lane.lane_finished_after.unwrap_or_else(|| Duration::from_secs(0))
+                            lane.lane_finished_after
+                                .unwrap_or_else(|| Duration::from_secs(0))
                         ),
                         error
                     ))
@@ -379,9 +384,7 @@ impl ActionOutput {
             lane.status = ActionLaneStatus::Aborted;
             lane.current_step = None;
             lane.step_started_at = None;
-            lane.lane_finished_after = lane
-                .lane_started_at
-                .map(|started_at| started_at.elapsed());
+            lane.lane_finished_after = lane.lane_started_at.map(|started_at| started_at.elapsed());
             lane.last_message = Some("stopped after invocation abort.".to_string());
             render_live_dashboard(state);
         });
@@ -458,7 +461,9 @@ impl ActionLaneStatus {
 
 fn live_dashboard_supported() -> bool {
     io::stdout().is_terminal()
-        && std::env::var("TERM").map(|term| term != "dumb").unwrap_or(true)
+        && std::env::var("TERM")
+            .map(|term| term != "dumb")
+            .unwrap_or(true)
         && std::env::var_os("CI").is_none()
 }
 
@@ -518,7 +523,10 @@ fn emit_action_line_locked(
 ) {
     if state.mode == ActionOutputMode::AppendOnly {
         for line in split_action_output_lines(message) {
-            println!("{}", format_action_line(action_index, action_name, line.as_str()));
+            println!(
+                "{}",
+                format_action_line(action_index, action_name, line.as_str())
+            );
         }
         return;
     }
@@ -577,8 +585,7 @@ fn maybe_spawn_live_action_refresh(
 fn inferred_lane_status(message: &str) -> ActionLaneStatus {
     if message.starts_with("logic evaluation failed:") {
         ActionLaneStatus::LogicError
-    } else if message.contains("no run steps matched")
-        || message.contains("unsupported step kind")
+    } else if message.contains("no run steps matched") || message.contains("unsupported step kind")
     {
         ActionLaneStatus::Skipped
     } else {
@@ -601,9 +608,7 @@ fn compact_action_output_line(message: &str) -> Option<String> {
 
 fn should_surface_live_dashboard_message(message: &str) -> bool {
     compact_action_output_line(message)
-        .map(|line| {
-            !line.starts_with("using: ") && !line.contains("resolved dynamic child-agent ")
-        })
+        .map(|line| !line.starts_with("using: ") && !line.contains("resolved dynamic child-agent "))
         .unwrap_or(false)
 }
 
@@ -622,19 +627,14 @@ fn lane_step_label(lane: &ActionLaneState) -> String {
         ActionLaneStatus::Failed | ActionLaneStatus::LogicError => "x failed".to_string(),
         ActionLaneStatus::Aborted => "! aborted".to_string(),
         ActionLaneStatus::Skipped => "skipped".to_string(),
-        _ => lane
-            .current_step
-            .clone()
-            .unwrap_or_else(|| "-".to_string()),
+        _ => lane.current_step.clone().unwrap_or_else(|| "-".to_string()),
     }
 }
 
 fn lane_last_message(lane: &ActionLaneState) -> Option<&str> {
     let message = lane.last_message.as_deref()?;
 
-    if lane.status == ActionLaneStatus::Completed
-        && matches!(message, "completed" | "completed.")
-    {
+    if lane.status == ActionLaneStatus::Completed && matches!(message, "completed" | "completed.") {
         return None;
     }
 
@@ -1140,9 +1140,17 @@ fn current_tool_target_triple() -> &'static str {
         "aarch64-apple-darwin"
     } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
         "x86_64-apple-darwin"
-    } else if cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) {
+    } else if cfg!(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        target_env = "gnu"
+    )) {
         "x86_64-unknown-linux-gnu"
-    } else if cfg!(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu")) {
+    } else if cfg!(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        target_env = "gnu"
+    )) {
         "aarch64-unknown-linux-gnu"
     } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         "x86_64-pc-windows-msvc"
@@ -1188,7 +1196,9 @@ fn audit_actions_for_tools(
                 action.name.as_str(),
                 step_index,
             )?;
-            if contract.describe.name != tool_name && contract.describe.name != contract.resolved.binary_name {
+            if contract.describe.name != tool_name
+                && contract.describe.name != contract.resolved.binary_name
+            {
                 return Err(format!(
                     "Tool '{}' describe contract reported name '{}', which does not match the referenced tool id.",
                     tool_name, contract.describe.name
@@ -1223,7 +1233,10 @@ fn resolve_tool_invoke_params(
         };
 
         let expected = describe.params.get(name).ok_or_else(|| {
-            format!("Action '{}' references unknown tool param '{}'.", action_name, name)
+            format!(
+                "Action '{}' references unknown tool param '{}'.",
+                action_name, name
+            )
         })?;
         if !json_value_matches_declared_type(&resolved, expected.kind.as_str()) {
             return Err(format!(
@@ -1279,7 +1292,10 @@ fn validate_tool_step_against_contract(
     }
 
     for (name, param_spec) in &describe.params {
-        if param_spec.required && param_spec.default.is_none() && !step.tool_params.contains_key(name) {
+        if param_spec.required
+            && param_spec.default.is_none()
+            && !step.tool_params.contains_key(name)
+        {
             return Err(format!(
                 "Action '{}' tool step {} is missing required tool param '{}'.",
                 action_name,
@@ -1332,10 +1348,20 @@ fn resolve_tool_from_scope_root(
 }
 
 fn load_tool_manifest(path: &Path, expected_tool_id: &str) -> Result<ToolManifest, String> {
-    let contents = fs::read_to_string(path)
-        .map_err(|error| format!("Failed to read tool manifest '{}': {}", path.display(), error))?;
-    let manifest: ToolManifest = serde_json::from_str(&contents)
-        .map_err(|error| format!("Failed to parse tool manifest '{}': {}", path.display(), error))?;
+    let contents = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "Failed to read tool manifest '{}': {}",
+            path.display(),
+            error
+        )
+    })?;
+    let manifest: ToolManifest = serde_json::from_str(&contents).map_err(|error| {
+        format!(
+            "Failed to parse tool manifest '{}': {}",
+            path.display(),
+            error
+        )
+    })?;
     if manifest.schema_version != 1 {
         return Err(format!(
             "Tool manifest '{}' uses unsupported schema_version {}.",
@@ -1502,7 +1528,10 @@ fn validate_describe_document(
         ));
     }
 
-    for example in [&describe.examples.minimal_invoke, &describe.examples.full_invoke] {
+    for example in [
+        &describe.examples.minimal_invoke,
+        &describe.examples.full_invoke,
+    ] {
         let Some(example_obj) = example.as_object() else {
             return Err(format!(
                 "Tool '{}' describe examples must be objects.",
@@ -1549,8 +1578,14 @@ fn validate_tool_invoke_response(
             resolved.tool_id, response.protocol_version
         ));
     }
-    crate::definition_validation::validate_data_limits(&response.result, "$.result")
-        .map_err(|error| format!("Tool '{}' returned invalid invoke JSON: {error}", resolved.tool_id))?;
+    crate::definition_validation::validate_data_limits(&response.result, "$.result").map_err(
+        |error| {
+            format!(
+                "Tool '{}' returned invalid invoke JSON: {error}",
+                resolved.tool_id
+            )
+        },
+    )?;
     match response.result {
         serde_json::Value::Null => Ok(None),
         serde_json::Value::String(result) => Ok(Some(result)),
@@ -1639,12 +1674,16 @@ fn generated_usage_agent_info() -> serde_json::Value {
     let artifact = std::env::current_exe()
         .ok()
         .map(|path| path.display().to_string());
-    let name = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.file_name().map(|name| name.to_string_lossy().to_string()));
+    let name = std::env::current_exe().ok().and_then(|path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_string())
+    });
 
     serde_json::json!({
         "source": "hatched_agent",
+        "definition_sha256": AGENT_DEFINITION_SHA256,
+        "runtime_version": GENERATED_BY_CARGO_AI_VERSION,
+        "package_revision": env!("CARGO_PKG_VERSION"),
         "artifact": artifact,
         "name": name,
         "generated": true,
@@ -1716,10 +1755,7 @@ impl InvocationAbortSignal {
     }
 
     fn trigger(&self, action_index: usize, action_name: &str, error: &str) -> bool {
-        let mut state = self
-            .inner
-            .lock()
-            .expect("abort signal lock should succeed");
+        let mut state = self.inner.lock().expect("abort signal lock should succeed");
         if state.record.is_none() {
             state.record = Some(InvocationAbortRecord {
                 action_index,
@@ -1840,8 +1876,8 @@ fn cli_override_descriptions(
     }
 
     if let Some(url) = matches.get_one::<String>("url") {
-        let origin = providers::provider_url_origin(url)
-            .unwrap_or_else(|| "(invalid URL)".to_string());
+        let origin =
+            providers::provider_url_origin(url).unwrap_or_else(|| "(invalid URL)".to_string());
         overrides.push(format!("url={origin}"));
     }
 
@@ -2053,7 +2089,9 @@ fn load_codex_session() -> Result<Option<CodexSession>, String> {
 
 fn codex_access_token_expired_or_near(expires_at_unix: Option<i64>) -> bool {
     match expires_at_unix {
-        Some(expires_at) => expires_at.saturating_sub(OPENAI_REFRESH_BUFFER_SEC) <= now_unix_seconds(),
+        Some(expires_at) => {
+            expires_at.saturating_sub(OPENAI_REFRESH_BUFFER_SEC) <= now_unix_seconds()
+        }
         None => false,
     }
 }
@@ -2117,9 +2155,13 @@ fn load_account_tokens_from_keychain() -> Result<Option<AccountAuth>, String> {
     }
 
     let access_entry = keyring::Entry::new(KEYCHAIN_SERVICE, ACCOUNT_ACCESS_TOKEN_STORAGE_KEY)
-        .map_err(|error| format!("failed to initialize account access-token keyring entry: {error}"))?;
+        .map_err(|error| {
+            format!("failed to initialize account access-token keyring entry: {error}")
+        })?;
     let refresh_entry = keyring::Entry::new(KEYCHAIN_SERVICE, ACCOUNT_REFRESH_TOKEN_STORAGE_KEY)
-        .map_err(|error| format!("failed to initialize account refresh-token keyring entry: {error}"))?;
+        .map_err(|error| {
+            format!("failed to initialize account refresh-token keyring entry: {error}")
+        })?;
 
     let access_token = match access_entry.get_password() {
         Ok(token) if !token.trim().is_empty() => token,
@@ -2127,7 +2169,7 @@ fn load_account_tokens_from_keychain() -> Result<Option<AccountAuth>, String> {
         Err(error) => {
             return Err(format!(
                 "keyring lookup failed for account access token: {error}"
-            ))
+            ));
         }
     };
 
@@ -2137,7 +2179,7 @@ fn load_account_tokens_from_keychain() -> Result<Option<AccountAuth>, String> {
         Err(error) => {
             return Err(format!(
                 "keyring lookup failed for account refresh token: {error}"
-            ))
+            ));
         }
     };
 
@@ -2272,23 +2314,30 @@ fn persist_account_tokens_to_keychain(
     }
 
     let access_entry = keyring::Entry::new(KEYCHAIN_SERVICE, ACCOUNT_ACCESS_TOKEN_STORAGE_KEY)
-        .map_err(|error| format!("failed to initialize account access-token keyring entry: {error}"))?;
+        .map_err(|error| {
+            format!("failed to initialize account access-token keyring entry: {error}")
+        })?;
     access_entry
         .set_password(access_token)
         .map_err(|error| format!("failed to update account access token in keychain: {error}"))?;
 
     let refresh_entry = keyring::Entry::new(KEYCHAIN_SERVICE, ACCOUNT_REFRESH_TOKEN_STORAGE_KEY)
-        .map_err(|error| format!("failed to initialize account refresh-token keyring entry: {error}"))?;
-    match refresh_token.map(str::trim).filter(|token| !token.is_empty()) {
-        Some(token) => refresh_entry
-            .set_password(token)
-            .map_err(|error| format!("failed to update account refresh token in keychain: {error}"))?,
+        .map_err(|error| {
+            format!("failed to initialize account refresh-token keyring entry: {error}")
+        })?;
+    match refresh_token
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        Some(token) => refresh_entry.set_password(token).map_err(|error| {
+            format!("failed to update account refresh token in keychain: {error}")
+        })?,
         None => match refresh_entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => {}
             Err(error) => {
                 return Err(format!(
                     "failed to clear account refresh token from keychain: {error}"
-                ))
+                ));
             }
         },
     }
@@ -2468,8 +2517,12 @@ async fn run_email_me_action(
     if succeeded {
         Ok(response)
     } else {
-        Err(format_backend_error_message(&response)
-            .unwrap_or_else(|| format!("email_me request failed.\n{}", pretty_backend_json(&response))))
+        Err(format_backend_error_message(&response).unwrap_or_else(|| {
+            format!(
+                "email_me request failed.\n{}",
+                pretty_backend_json(&response)
+            )
+        }))
     }
 }
 
@@ -2701,7 +2754,9 @@ fn resolved_named_inputs_for_run(cmd_args: &clap::ArgMatches) -> Result<Vec<Inpu
                 )
             })?;
 
-        input.value = Some(validate_input_override_value(input.kind, &raw_value, &name)?);
+        input.value = Some(validate_input_override_value(
+            input.kind, &raw_value, &name,
+        )?);
     }
 
     let forwarded_inputs = runtime_input_overrides(cmd_args)?;
@@ -2817,9 +2872,9 @@ fn validate_runtime_file_extension(path: &str, name: &str) -> Result<(), String>
 
     match extension.as_deref() {
         Some(
-            "pdf" | "docx" | "csv" | "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlsx" | "xlt"
-            | "xlw" | "tsv" | "iif" | "doc" | "dot" | "odt" | "rtf" | "pot" | "ppa" | "pps"
-            | "ppt" | "pptx" | "pwz" | "wiz",
+            "pdf" | "docx" | "csv" | "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlsx" | "xlt" | "xlw"
+            | "tsv" | "iif" | "doc" | "dot" | "odt" | "rtf" | "pot" | "ppa" | "pps" | "ppt"
+            | "pptx" | "pwz" | "wiz",
         ) => Ok(()),
         _ => Err(format!(
             "Named input override '{}' must use a supported file extension: {}.",
@@ -2831,7 +2886,10 @@ fn validate_runtime_file_extension(path: &str, name: &str) -> Result<(), String>
 fn resolved_action_execution_override_for_run(
     cmd_args: &clap::ArgMatches,
 ) -> Result<Option<ActionExecutionMode>, String> {
-    match cmd_args.get_one::<String>("action_execution").map(String::as_str) {
+    match cmd_args
+        .get_one::<String>("action_execution")
+        .map(String::as_str)
+    {
         None => Ok(None),
         Some("sequential") => Ok(Some(ActionExecutionMode::Sequential)),
         Some(other) => Err(format!(
@@ -2849,7 +2907,10 @@ fn effective_action_execution_for_run(
 fn resolved_render_mode_for_run(
     cmd_args: &clap::ArgMatches,
 ) -> Result<RequestedActionRenderMode, String> {
-    match cmd_args.get_one::<String>("render_mode").map(String::as_str) {
+    match cmd_args
+        .get_one::<String>("render_mode")
+        .map(String::as_str)
+    {
         None | Some("auto") => Ok(RequestedActionRenderMode::Auto),
         Some("live") => Ok(RequestedActionRenderMode::Live),
         Some("append-only") => Ok(RequestedActionRenderMode::AppendOnly),
@@ -2873,10 +2934,12 @@ fn validate_structural_action_only_inputs(
         .filter_map(|input| input.name.as_deref())
         .collect::<std::collections::BTreeSet<_>>();
 
-    if selected_inputs
-        .iter()
-        .all(|input| input.name.as_deref().is_some_and(|name| declared_named_inputs.contains(name)))
-    {
+    if selected_inputs.iter().all(|input| {
+        input
+            .name
+            .as_deref()
+            .is_some_and(|name| declared_named_inputs.contains(name))
+    }) {
         return Ok(());
     }
 
@@ -2910,11 +2973,7 @@ fn resolve_runtime_vars_from_specs(
     let mut resolved = serde_json::Map::new();
     let mut provided_names = std::collections::BTreeSet::new();
 
-    for raw_assignment in cmd_args
-        .get_many::<String>("run_var")
-        .into_iter()
-        .flatten()
-    {
+    for raw_assignment in cmd_args.get_many::<String>("run_var").into_iter().flatten() {
         let (name, raw_value) = parse_runtime_var_assignment(raw_assignment)?;
         let Some(spec) = declared_specs.get(name) else {
             return Err(format!(
@@ -3048,6 +3107,9 @@ async fn main() {
             if let Some(guard) = usage_agent_guard.as_mut() {
                 guard.finish_failed();
             }
+            if std::env::var_os(usage_log::USAGE_ROOT_RUN_ID_ENV).is_none() {
+                usage_backup::opportunistic().await;
+            }
             std::process::exit(1);
         }};
     }
@@ -3124,13 +3186,12 @@ async fn main() {
             .as_ref()
             .and_then(|defaults| defaults.max_agent_depth),
     );
-    let runtime_budget =
-        configured_agent_action_runtime_budget_with_project_default(
-            cmd_args.get_one::<u64>("max_runtime_in_sec").copied(),
-            project_runtime_defaults
-                .as_ref()
-                .and_then(|defaults| defaults.max_runtime_in_sec),
-        );
+    let runtime_budget = configured_agent_action_runtime_budget_with_project_default(
+        cmd_args.get_one::<u64>("max_runtime_in_sec").copied(),
+        project_runtime_defaults
+            .as_ref()
+            .and_then(|defaults| defaults.max_runtime_in_sec),
+    );
 
     let provider = match ProviderKind::from_server_value(&server) {
         Some(provider) => provider,
@@ -3142,16 +3203,15 @@ async fn main() {
         }
     };
 
-    let explicit_token_override = cmd_args.get_one::<String>("token").map(|token| token.to_string());
+    let explicit_token_override = cmd_args
+        .get_one::<String>("token")
+        .map(|token| token.to_string());
     let has_explicit_token_override = explicit_token_override.is_some();
     if let Some((kind, profile_name)) = loaded_profile_message.as_ref() {
         for line in profile_selection_messages(
             *kind,
             profile_name,
-            &cli_override_descriptions(
-                &cmd_args,
-                has_explicit_token_override,
-            ),
+            &cli_override_descriptions(&cmd_args, has_explicit_token_override),
         ) {
             println!("{line}");
         }
@@ -3180,7 +3240,7 @@ async fn main() {
                 };
             }
             _ => {
-                token = match provider.capabilities().authentication {
+                let resolved_token = match provider.capabilities().authentication {
                     AuthenticationPolicy::RequiredApiKey => {
                         resolve_api_key_provider_token(provider, selected_profile.as_ref())
                     }
@@ -3188,11 +3248,14 @@ async fn main() {
                         resolve_optional_api_key_provider_token(provider, selected_profile.as_ref())
                     }
                     AuthenticationPolicy::None => Ok(String::new()),
-                }
-                .unwrap_or_else(|error| {
-                    eprintln!("❌ {error}");
-                    exit_failure!();
-                });
+                };
+                token = match resolved_token {
+                    Ok(token) => token,
+                    Err(error) => {
+                        eprintln!("❌ {error}");
+                        exit_failure!();
+                    }
+                };
             }
         }
     }
@@ -3269,11 +3332,9 @@ async fn main() {
         None => None,
     };
     if !ignore_tools {
-        if let Err(error) = audit_actions_for_tools(
-            &actions,
-            tool_resolver.as_ref(),
-            current_action_platform(),
-        ) {
+        if let Err(error) =
+            audit_actions_for_tools(&actions, tool_resolver.as_ref(), current_action_platform())
+        {
             eprintln!("❌ {error}");
             exit_failure!();
         }
@@ -3288,7 +3349,9 @@ async fn main() {
     let action_provider_context = ActionProviderContext {
         project_data,
         provider,
-        profile_name: selected_profile.as_ref().map(|profile| profile.name.clone()),
+        profile_name: selected_profile
+            .as_ref()
+            .map(|profile| profile.name.clone()),
         auth_mode: resolved_invocation_auth_mode(
             provider,
             selected_profile.as_ref(),
@@ -3304,13 +3367,11 @@ async fn main() {
         usage_log: usage_log_context.clone(),
     };
 
-    if let Err(error) =
-        validate_structural_action_only_inputs(
-            has_output_schema_properties,
-            &named_inputs,
-            &selected_inputs,
-        )
-    {
+    if let Err(error) = validate_structural_action_only_inputs(
+        has_output_schema_properties,
+        &named_inputs,
+        &selected_inputs,
+    ) {
         eprintln!("❌ {error}");
         exit_failure!();
     }
@@ -3331,29 +3392,31 @@ async fn main() {
         action_output.seed_using_line(action_provider_context.using_line().as_str());
         println!("{}", action_provider_context.using_line());
         action_output.print_execution_header();
-        if let Err(error) =
-            apply_actions(
-                &output,
-                &actions,
-                &runtime_vars,
-                &named_inputs,
-                effective_action_execution,
-                action_execution_override,
-                requested_render_mode,
-                config.as_ref(),
-                &action_provider_context,
-                max_agent_depth,
-                runtime_budget,
-                full_run_started_at,
-                Some(action_output),
-            )
-            .await
+        if let Err(error) = apply_actions(
+            &output,
+            &actions,
+            &runtime_vars,
+            &named_inputs,
+            effective_action_execution,
+            action_execution_override,
+            requested_render_mode,
+            config.as_ref(),
+            &action_provider_context,
+            max_agent_depth,
+            runtime_budget,
+            full_run_started_at,
+            Some(action_output),
+        )
+        .await
         {
             eprintln!("❌ {error}");
             exit_failure!();
         }
         if let Some(guard) = usage_agent_guard.as_mut() {
             guard.finish_success();
+        }
+        if std::env::var_os(usage_log::USAGE_ROOT_RUN_ID_ENV).is_none() {
+            usage_backup::opportunistic().await;
         }
         return;
     }
@@ -3404,17 +3467,46 @@ async fn main() {
     }
     println!("{}", action_provider_context.using_line());
 
-    let static_context =
-        "A question will be asked and you will need to return the answer in the specified JSON format.";
+    let static_context = "A question will be asked and you will need to return the answer in the specified JSON format.";
     let mut ai_cargo =
         crate::providers::AgentCargo::<Output>::new(resolved_inputs, static_context.to_string());
 
     let content_parts = ai_cargo.content_parts();
     let mut response = String::new();
 
+    let _remaining = match remaining_runtime_duration(runtime_budget, "before starting inference") {
+        Ok(remaining) => remaining,
+        Err(error) => {
+            eprintln!(
+                "❌ {}",
+                current_agent_runtime_timeout_message(runtime_budget, error.as_str())
+            );
+            exit_failure!();
+        }
+    };
+    let usage_attempt = usage_log_context.as_ref().map(|usage_log| {
+        usage_log.start_provider_request(
+            provider,
+            selected_profile
+                .as_ref()
+                .map(|profile| profile.name.as_str()),
+            action_provider_context.auth_mode.as_str(),
+            model.as_str(),
+            usage_log::UsageStep {
+                kind: "agent_inference",
+                action: None,
+                step_index: None,
+            },
+        )
+    });
     let remaining = match remaining_runtime_duration(runtime_budget, "before starting inference") {
         Ok(remaining) => remaining,
         Err(error) => {
+            if let (Some(usage_log), Some(attempt)) =
+                (usage_log_context.as_ref(), usage_attempt.as_ref())
+            {
+                usage_log.abort_provider_before_dispatch(attempt);
+            }
             eprintln!(
                 "❌ {}",
                 current_agent_runtime_timeout_message(runtime_budget, error.as_str())
@@ -3446,12 +3538,20 @@ async fn main() {
             if let Some(resolved_model) = response.resolved_model.as_deref() {
                 println!("Provider response model: {resolved_model}");
             }
-            if let Some(usage_log) = usage_log_context.as_ref() {
+            if let (Some(usage_log), Some(attempt)) =
+                (usage_log_context.as_ref(), usage_attempt.as_ref())
+            {
                 usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                    attempt,
                     provider,
-                    profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
+                    profile_name: selected_profile
+                        .as_ref()
+                        .map(|profile| profile.name.as_str()),
                     auth_mode: action_provider_context.auth_mode.as_str(),
                     model: model.as_str(),
+                    resolved_model: response.resolved_model.as_deref(),
+                    provider_request_id: response.provider_request_id.as_deref(),
+                    finish_reason: response.finish_reason.as_deref(),
                     step: usage_log::UsageStep {
                         kind: "agent_inference",
                         action: None,
@@ -3466,18 +3566,26 @@ async fn main() {
             response.text
         }
         Ok(Err(error)) => {
-            if let Some(usage_log) = usage_log_context.as_ref() {
+            if let (Some(usage_log), Some(attempt)) =
+                (usage_log_context.as_ref(), usage_attempt.as_ref())
+            {
                 usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                    attempt,
                     provider,
-                    profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
+                    profile_name: selected_profile
+                        .as_ref()
+                        .map(|profile| profile.name.as_str()),
                     auth_mode: action_provider_context.auth_mode.as_str(),
                     model: model.as_str(),
+                    resolved_model: error.resolved_model.as_deref(),
+                    provider_request_id: error.provider_request_id.as_deref(),
+                    finish_reason: error.finish_reason.as_deref(),
                     step: usage_log::UsageStep {
                         kind: "agent_inference",
                         action: None,
                         step_index: None,
                     },
-                    usage: None,
+                    usage: error.usage.as_ref(),
                     duration: provider_started_at.elapsed(),
                     status: usage_log::UsageStatus::Failed,
                     error: Some(usage_provider_error(&error)),
@@ -3489,12 +3597,20 @@ async fn main() {
             exit_failure!();
         }
         Err(_) => {
-            if let Some(usage_log) = usage_log_context.as_ref() {
+            if let (Some(usage_log), Some(attempt)) =
+                (usage_log_context.as_ref(), usage_attempt.as_ref())
+            {
                 usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                    attempt,
                     provider,
-                    profile_name: selected_profile.as_ref().map(|profile| profile.name.as_str()),
+                    profile_name: selected_profile
+                        .as_ref()
+                        .map(|profile| profile.name.as_str()),
                     auth_mode: action_provider_context.auth_mode.as_str(),
                     model: model.as_str(),
+                    resolved_model: None,
+                    provider_request_id: None,
+                    finish_reason: None,
                     step: usage_log::UsageStep {
                         kind: "agent_inference",
                         action: None,
@@ -3532,29 +3648,31 @@ async fn main() {
     };
 
     action_output.print_execution_header();
-    if let Err(error) =
-        apply_actions(
-            &output,
-            &actions,
-            &runtime_vars,
-            &named_inputs,
-            effective_action_execution,
-            action_execution_override,
-            requested_render_mode,
-            config.as_ref(),
-            &action_provider_context,
-            max_agent_depth,
-            runtime_budget,
-            full_run_started_at,
-            Some(action_output),
-        )
-        .await
+    if let Err(error) = apply_actions(
+        &output,
+        &actions,
+        &runtime_vars,
+        &named_inputs,
+        effective_action_execution,
+        action_execution_override,
+        requested_render_mode,
+        config.as_ref(),
+        &action_provider_context,
+        max_agent_depth,
+        runtime_budget,
+        full_run_started_at,
+        Some(action_output),
+    )
+    .await
     {
         eprintln!("❌ {error}");
         exit_failure!();
     }
     if let Some(guard) = usage_agent_guard.as_mut() {
         guard.finish_success();
+    }
+    if std::env::var_os(usage_log::USAGE_ROOT_RUN_ID_ENV).is_none() {
+        usage_backup::opportunistic().await;
     }
 }
 
@@ -3600,18 +3718,23 @@ mod tests {
             "protocol_version": 1,
             "result": "x".repeat(crate::definition_validation::MAX_STRING_BYTES),
         });
-        assert!(super::validate_tool_invoke_response(&resolved, at_limit.to_string().as_bytes()).is_ok());
+        assert!(
+            super::validate_tool_invoke_response(&resolved, at_limit.to_string().as_bytes())
+                .is_ok()
+        );
         let over_limit = serde_json::json!({
             "protocol_version": 1,
             "result": "x".repeat(crate::definition_validation::MAX_STRING_BYTES + 1),
         });
-        let error = super::validate_tool_invoke_response(&resolved, over_limit.to_string().as_bytes()).unwrap_err();
+        let error =
+            super::validate_tool_invoke_response(&resolved, over_limit.to_string().as_bytes())
+                .unwrap_err();
         assert!(error.contains("string_bytes"));
     }
     use super::{
+        ActionOutputMode, LoadedProfileKind, RequestedActionRenderMode,
         package_child_project_root_from, resolve_action_render_mode_for_capability,
-        resolve_loaded_profile, validate_agent_step_target, ActionOutputMode, LoadedProfileKind,
-        RequestedActionRenderMode,
+        resolve_loaded_profile, validate_agent_step_target,
     };
     use crate::config::schema::{Config, OpenAiAuth, Profile, ProfileAuthMode, WebResources};
     use std::fs;
@@ -3633,6 +3756,7 @@ mod tests {
 
     fn config(default_profile: Option<&str>, profiles: Vec<Profile>) -> Config {
         Config {
+            usage: None,
             profile: profiles,
             cargo_ai_token: None,
             default_profile: default_profile.map(str::to_string),
@@ -3650,17 +3774,13 @@ mod tests {
         ));
         fs::create_dir_all(&root).expect("temporary directory should exist");
 
-        let error =
-            package_child_project_root_from(&root, "reports::daily", "invoke_dependency")
-                .expect_err("moved hatched binary must not resolve an unbound package child");
+        let error = package_child_project_root_from(&root, "reports::daily", "invoke_dependency")
+            .expect_err("moved hatched binary must not resolve an unbound package child");
         assert!(error.contains("fail closed"));
 
         fs::create_dir_all(root.join(".cargo-ai")).expect("metadata directory should exist");
-        fs::write(
-            root.join(".cargo-ai/project.toml"),
-            "format_version = 1\n",
-        )
-        .expect("project metadata should be written");
+        fs::write(root.join(".cargo-ai/project.toml"), "format_version = 1\n")
+            .expect("project metadata should be written");
         assert_eq!(
             package_child_project_root_from(&root, "reports::daily", "invoke_dependency")
                 .expect("an undeclared local alias should defer policy to Cargo AI"),
@@ -3689,12 +3809,8 @@ mod tests {
         fs::create_dir_all(inner.join(".cargo-ai/project.toml"))
             .expect("invalid inner marker should exist");
 
-        let error = package_child_project_root_from(
-            &inner,
-            "reports::daily",
-            "invoke_dependency",
-        )
-        .expect_err("invalid nearest marker must not fall through to the outer project");
+        let error = package_child_project_root_from(&inner, "reports::daily", "invoke_dependency")
+            .expect_err("invalid nearest marker must not fall through to the outer project");
         assert!(error.contains("must be a regular file"));
         let _ = fs::remove_dir_all(outer);
     }
@@ -3719,12 +3835,8 @@ mod tests {
         )
         .expect("inner marker symlink should exist");
 
-        let error = package_child_project_root_from(
-            &inner,
-            "reports::daily",
-            "invoke_dependency",
-        )
-        .expect_err("symlink nearest marker must not fall through to the outer project");
+        let error = package_child_project_root_from(&inner, "reports::daily", "invoke_dependency")
+            .expect_err("symlink nearest marker must not fall through to the outer project");
         assert!(error.contains("must not be a symbolic link"));
         let _ = fs::remove_dir_all(outer);
     }
@@ -3749,22 +3861,21 @@ mod tests {
         )
         .expect("dangling inner marker should exist");
 
-        let error = package_child_project_root_from(
-            &inner,
-            "reports::daily",
-            "invoke_dependency",
-        )
-        .expect_err("dangling nearest marker must not fall through to the outer project");
+        let error = package_child_project_root_from(&inner, "reports::daily", "invoke_dependency")
+            .expect_err("dangling nearest marker must not fall through to the outer project");
         assert!(error.contains("must not be a symbolic link"));
         let _ = fs::remove_dir_all(outer);
     }
 
     #[test]
     fn resolve_loaded_profile_uses_explicit_profile_when_present() {
-        let cfg = config(Some("default_openai"), vec![profile("default_openai"), profile("named")]);
+        let cfg = config(
+            Some("default_openai"),
+            vec![profile("default_openai"), profile("named")],
+        );
 
-        let resolved =
-            resolve_loaded_profile(Some(&cfg), Some("named")).expect("explicit profile should resolve");
+        let resolved = resolve_loaded_profile(Some(&cfg), Some("named"))
+            .expect("explicit profile should resolve");
 
         let Some((profile, kind)) = resolved else {
             panic!("expected explicit profile");
@@ -3859,73 +3970,73 @@ async fn apply_actions(
                 }
             },
             async move {
-            let abort_signal = InvocationAbortSignal::new();
-            let action_secret_store_mode = config.and_then(|cfg| cfg.secret_store);
-            let data = action_data_from_output(output, runtime_vars).map_err(|error| {
-                format!("Failed to serialize output for action evaluation: {error}")
-            })?;
-            let current_platform = current_action_platform();
-            let named_input_lookup = named_input_lookup(named_inputs);
-            print_action_execution_header(action_execution);
-            let top_level_failures = match action_execution {
-                ActionExecutionMode::Sequential => {
-                    apply_actions_sequential(
-                        actions,
-                        &data,
-                        &named_input_lookup,
-                        current_platform,
-                        action_execution_override,
-                        action_secret_store_mode,
-                        provider_context,
-                        max_agent_depth,
-                        runtime_budget,
-                        &abort_signal,
-                    )
-                    .await?
+                let abort_signal = InvocationAbortSignal::new();
+                let action_secret_store_mode = config.and_then(|cfg| cfg.secret_store);
+                let data = action_data_from_output(output, runtime_vars).map_err(|error| {
+                    format!("Failed to serialize output for action evaluation: {error}")
+                })?;
+                let current_platform = current_action_platform();
+                let named_input_lookup = named_input_lookup(named_inputs);
+                print_action_execution_header(action_execution);
+                let top_level_failures = match action_execution {
+                    ActionExecutionMode::Sequential => {
+                        apply_actions_sequential(
+                            actions,
+                            &data,
+                            &named_input_lookup,
+                            current_platform,
+                            action_execution_override,
+                            action_secret_store_mode,
+                            provider_context,
+                            max_agent_depth,
+                            runtime_budget,
+                            &abort_signal,
+                        )
+                        .await?
+                    }
+                    ActionExecutionMode::Parallel => {
+                        apply_actions_parallel(
+                            actions,
+                            &data,
+                            &named_input_lookup,
+                            current_platform,
+                            action_execution_override,
+                            action_secret_store_mode,
+                            provider_context,
+                            max_agent_depth,
+                            runtime_budget,
+                            &abort_signal,
+                        )
+                        .await?
+                    }
+                };
+
+                finish_action_output();
+
+                if let Some(abort) = abort_signal.record() {
+                    return Err(format!(
+                        "{}\n{}",
+                        format_abort_summary(&abort),
+                        root_run_abort_message(full_run_started_at.elapsed())
+                    ));
                 }
-                ActionExecutionMode::Parallel => {
-                    apply_actions_parallel(
-                        actions,
-                        &data,
-                        &named_input_lookup,
-                        current_platform,
-                        action_execution_override,
-                        action_secret_store_mode,
-                        provider_context,
-                        max_agent_depth,
-                        runtime_budget,
-                        &abort_signal,
-                    )
-                    .await?
+
+                if let Some(message) = root_run_completion_message(full_run_started_at.elapsed()) {
+                    if top_level_failures.is_empty() {
+                        println!();
+                        println!("{message}");
+                    }
                 }
-            };
 
-            finish_action_output();
-
-            if let Some(abort) = abort_signal.record() {
-                return Err(format!(
-                    "{}\n{}",
-                    format_abort_summary(&abort),
-                    root_run_abort_message(full_run_started_at.elapsed())
-                ));
-            }
-
-            if let Some(message) = root_run_completion_message(full_run_started_at.elapsed()) {
                 if top_level_failures.is_empty() {
-                    println!();
-                    println!("{message}");
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{}\n{}",
+                        format_top_level_action_failures(&top_level_failures),
+                        root_run_failure_message(full_run_started_at.elapsed())
+                    ))
                 }
-            }
-
-            if top_level_failures.is_empty() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "{}\n{}",
-                    format_top_level_action_failures(&top_level_failures),
-                    root_run_failure_message(full_run_started_at.elapsed())
-                ))
-            }
             },
         )
         .await
@@ -4172,9 +4283,15 @@ async fn run_matching_action_steps(
         );
 
         let step_result = if step.kind.eq_ignore_ascii_case("exec") {
-            run_exec_step(step, &action_data, action_index, &action.name, runtime_budget)
-                .await
-                .map(|captured_output| (StepExecutionOutcome::Completed, captured_output))
+            run_exec_step(
+                step,
+                &action_data,
+                action_index,
+                &action.name,
+                runtime_budget,
+            )
+            .await
+            .map(|captured_output| (StepExecutionOutcome::Completed, captured_output))
         } else if step.kind.eq_ignore_ascii_case("email_me") {
             run_email_me_step(
                 step,
@@ -4416,13 +4533,11 @@ async fn run_exec_step(
                 "Action '{}' exec step failed while waiting for command '{}': {}",
                 action_name, program, error
             )),
-            Err(_) => {
-                Err(action_runtime_timeout_message(
-                    action_name,
-                    runtime_budget,
-                    &format!("while waiting for command '{}'", program),
-                ))
-            }
+            Err(_) => Err(action_runtime_timeout_message(
+                action_name,
+                runtime_budget,
+                &format!("while waiting for command '{}'", program),
+            )),
         }
     }
 }
@@ -4444,15 +4559,13 @@ async fn run_tool_step(
             action_name
         )
     })?;
-    let mut usage_tool_guard =
-        provider_context
-            .usage_log
-            .as_ref()
-            .map(|usage_log| usage_log.start_tool_run(usage_log::UsageTool {
-                name: tool_name.to_string(),
-                action: action_name.to_string(),
-                step_index: Some(step_index),
-            }));
+    let mut usage_tool_guard = provider_context.usage_log.as_ref().map(|usage_log| {
+        usage_log.start_tool_run(usage_log::UsageTool {
+            name: tool_name.to_string(),
+            action: action_name.to_string(),
+            step_index: Some(step_index),
+        })
+    });
     let resolver = provider_context.tool_resolver.as_ref().ok_or_else(|| {
         format!(
             "Action '{}' tool step '{}' cannot resolve tools because no tool resolver is available.",
@@ -4772,14 +4885,13 @@ async fn run_generate_image_step(
     provider_context: &ActionProviderContext,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
-    let step_profile_context =
-        resolve_generate_image_step_profile_context(
-            step.profile.as_ref(),
-            data,
-            action_name,
-            provider_context.inference_timeout_in_sec,
-        )
-        .await?;
+    let step_profile_context = resolve_generate_image_step_profile_context(
+        step.profile.as_ref(),
+        data,
+        action_name,
+        provider_context.inference_timeout_in_sec,
+    )
+    .await?;
     let effective_provider_context = step_profile_context.as_ref().unwrap_or(provider_context);
 
     let model = resolve_generate_image_model(
@@ -4792,7 +4904,9 @@ async fn run_generate_image_step(
     print_action_using_line_if_changed(
         action_index,
         action_name,
-        effective_provider_context.using_line_with_model(model.as_str()).as_str(),
+        effective_provider_context
+            .using_line_with_model(model.as_str())
+            .as_str(),
     );
 
     if effective_provider_context
@@ -4852,16 +4966,38 @@ async fn run_generate_image_step(
         provider_context.project_data.as_ref(),
     )?;
 
+    let _remaining = remaining_runtime_duration(
+        runtime_budget,
+        &format!("before starting image generation with model '{}'", model),
+    )
+    .map_err(|context| {
+        action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
+    })?;
+
+    let usage_attempt = provider_context.usage_log.as_ref().map(|usage_log| {
+        usage_log.start_provider_request(
+            effective_provider_context.provider,
+            usage_provider_profile(effective_provider_context),
+            effective_provider_context.auth_mode.as_str(),
+            model.as_str(),
+            usage_log::UsageStep {
+                kind: "generate_image",
+                action: Some(action_name.to_string()),
+                step_index: Some(step_index),
+            },
+        )
+    });
     let remaining = remaining_runtime_duration(
         runtime_budget,
         &format!("before starting image generation with model '{}'", model),
     )
     .map_err(|context| {
-        action_runtime_timeout_message(
-            action_name,
-            runtime_budget,
-            context.as_str(),
-        )
+        if let (Some(usage_log), Some(attempt)) =
+            (provider_context.usage_log.as_ref(), usage_attempt.as_ref())
+        {
+            usage_log.abort_provider_before_dispatch(attempt);
+        }
+        action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
     })?;
 
     let provider_started_at = Instant::now();
@@ -4917,12 +5053,16 @@ async fn run_generate_image_step(
     .await
     {
         Ok(Ok(response)) => {
-            if let Some(usage_log) = provider_context.usage_log.as_ref() {
+            if let (Some(usage_log), Some(attempt)) = (provider_context.usage_log.as_ref(), usage_attempt.as_ref()) {
                 usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                    attempt,
                     provider: effective_provider_context.provider,
                     profile_name: usage_provider_profile(effective_provider_context),
                     auth_mode: effective_provider_context.auth_mode.as_str(),
                     model: model.as_str(),
+                    resolved_model: response.resolved_model.as_deref(),
+                    provider_request_id: response.provider_request_id.as_deref(),
+                    finish_reason: response.finish_reason.as_deref(),
                     step: usage_log::UsageStep {
                         kind: "generate_image",
                         action: Some(action_name.to_string()),
@@ -4937,18 +5077,22 @@ async fn run_generate_image_step(
             response
         }
         Ok(Err(error)) => {
-            if let Some(usage_log) = provider_context.usage_log.as_ref() {
+            if let (Some(usage_log), Some(attempt)) = (provider_context.usage_log.as_ref(), usage_attempt.as_ref()) {
                 usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                    attempt,
                     provider: effective_provider_context.provider,
                     profile_name: usage_provider_profile(effective_provider_context),
                     auth_mode: effective_provider_context.auth_mode.as_str(),
                     model: model.as_str(),
+                    resolved_model: error.resolved_model.as_deref(),
+                    provider_request_id: error.provider_request_id.as_deref(),
+                    finish_reason: error.finish_reason.as_deref(),
                     step: usage_log::UsageStep {
                         kind: "generate_image",
                         action: Some(action_name.to_string()),
                         step_index: Some(step_index),
                     },
-                    usage: None,
+                    usage: error.usage.as_ref(),
                     duration: provider_started_at.elapsed(),
                     status: usage_log::UsageStatus::Failed,
                     error: Some(usage_provider_error(&error)),
@@ -4960,12 +5104,16 @@ async fn run_generate_image_step(
             return Err(lines.join("\n"));
         }
         Err(_) => {
-            if let Some(usage_log) = provider_context.usage_log.as_ref() {
+            if let (Some(usage_log), Some(attempt)) = (provider_context.usage_log.as_ref(), usage_attempt.as_ref()) {
                 usage_log.record_provider_request(usage_log::UsageProviderRequest {
+                    attempt,
                     provider: effective_provider_context.provider,
                     profile_name: usage_provider_profile(effective_provider_context),
                     auth_mode: effective_provider_context.auth_mode.as_str(),
                     model: model.as_str(),
+                    resolved_model: None,
+                    provider_request_id: None,
+                    finish_reason: None,
                     step: usage_log::UsageStep {
                         kind: "generate_image",
                         action: Some(action_name.to_string()),
@@ -5141,7 +5289,11 @@ async fn resolve_generate_image_step_profile_context(
     );
 
     let resolved_token = match provider {
-        ProviderKind::Anthropic | ProviderKind::Gemini | ProviderKind::Mistral | ProviderKind::Xai | ProviderKind::TypeSafe => ResolvedOpenAiToken {
+        ProviderKind::Anthropic
+        | ProviderKind::Gemini
+        | ProviderKind::Mistral
+        | ProviderKind::Xai
+        | ProviderKind::TypeSafe => ResolvedOpenAiToken {
             token: resolve_api_key_provider_token(provider, Some(&selected_profile))?,
             uses_account_session: false,
         },
@@ -5329,8 +5481,9 @@ async fn run_agent_step(
     } else {
         None
     };
-    if let Some(profile_name) = resolve_step_profile_name(step.profile.as_ref(), data, action_name, "agent")?
-        .or(inherited_profile_name)
+    if let Some(profile_name) =
+        resolve_step_profile_name(step.profile.as_ref(), data, action_name, "agent")?
+            .or(inherited_profile_name)
     {
         let config_file = config_path();
         let Some(config) = load_config() else {
@@ -5398,11 +5551,7 @@ async fn run_agent_step(
         &format!("before starting child agent '{}'", artifact),
     )
     .map_err(|context| {
-        action_runtime_timeout_message(
-            action_name,
-            runtime_budget,
-            context.as_str(),
-        )
+        action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
     })?;
 
     let child = command.spawn().map_err(|error| {
@@ -5510,7 +5659,11 @@ async fn run_agent_step(
             Err(action_runtime_timeout_message(
                 action_name,
                 runtime_budget,
-                &format!("while waiting for child agent '{}' at depth {}", artifact, current_depth + 1),
+                &format!(
+                    "while waiting for child agent '{}' at depth {}",
+                    artifact,
+                    current_depth + 1
+                ),
             ))
         }
     };
@@ -5675,7 +5828,8 @@ fn action_completion_summary(outcomes: &[StepExecutionOutcome]) -> Option<&'stat
         || outcomes.iter().any(|outcome| {
             matches!(
                 outcome,
-                StepExecutionOutcome::SoftFailureLogged | StepExecutionOutcome::SuccessAlreadyPrinted
+                StepExecutionOutcome::SoftFailureLogged
+                    | StepExecutionOutcome::SuccessAlreadyPrinted
             )
         })
     {
@@ -5710,7 +5864,10 @@ fn format_abort_summary(abort: &InvocationAbortRecord) -> String {
 
 fn run_completion_message_for_depth(depth: u32, elapsed: Duration) -> Option<String> {
     if depth == 0 {
-        Some(format!("Run complete · {} total", format_elapsed_duration(elapsed)))
+        Some(format!(
+            "Run complete · {} total",
+            format_elapsed_duration(elapsed)
+        ))
     } else {
         None
     }
@@ -5746,7 +5903,13 @@ fn note_action_step_started(
     step_count: usize,
 ) {
     if let Some(output) = current_action_output() {
-        output.action_step_started(action_index, action_name, step_kind, step_number, step_count);
+        output.action_step_started(
+            action_index,
+            action_name,
+            step_kind,
+            step_number,
+            step_count,
+        );
     }
 }
 
@@ -5787,7 +5950,10 @@ fn print_action_using_line_if_changed(action_index: usize, action_name: &str, us
     if let Some(output) = current_action_output() {
         output.action_using_line_if_changed(action_index, action_name, using_line);
     } else {
-        println!("{}", format_action_line(action_index, action_name, using_line));
+        println!(
+            "{}",
+            format_action_line(action_index, action_name, using_line)
+        );
     }
 }
 
@@ -5796,11 +5962,19 @@ fn action_lane_prefix(action_index: usize, action_name: &str) -> String {
 }
 
 fn format_action_line(action_index: usize, action_name: &str, message: &str) -> String {
-    format!("{} {}", action_lane_prefix(action_index, action_name), message)
+    format!(
+        "{} {}",
+        action_lane_prefix(action_index, action_name),
+        message
+    )
 }
 
 fn format_action_failure(action_index: usize, action_name: &str, error: &str) -> String {
-    format_action_line(action_index, action_name, format!("failed: {}", error).as_str())
+    format_action_line(
+        action_index,
+        action_name,
+        format!("failed: {}", error).as_str(),
+    )
 }
 
 fn print_action_line(action_index: usize, action_name: &str, message: &str) {
@@ -5820,7 +5994,10 @@ fn emit_using_line_with_output(
     if let Some(output) = output {
         output.action_using_line_if_changed(action_index, action_name, using_line);
     } else {
-        println!("{}", format_action_line(action_index, action_name, using_line));
+        println!(
+            "{}",
+            format_action_line(action_index, action_name, using_line)
+        );
     }
 }
 
@@ -5861,7 +6038,10 @@ fn format_backend_ui_message(
         return None;
     }
 
-    let kind = ui.get("kind").and_then(|value| value.as_str()).unwrap_or("info");
+    let kind = ui
+        .get("kind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("info");
     let title = ui
         .get("title")
         .and_then(|value| value.as_str())
@@ -5901,7 +6081,10 @@ fn format_backend_ui_message(
         let action_lines = actions
             .iter()
             .filter_map(|action| {
-                let label = action.get("label").and_then(|value| value.as_str()).unwrap_or("");
+                let label = action
+                    .get("label")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
                 let command = action
                     .get("command")
                     .and_then(|value| value.as_str())
@@ -5964,7 +6147,10 @@ fn append_backend_section_lines(section: &serde_json::Value, lines: &mut Vec<Str
         "kv" => {
             if let Some(items) = section.get("items").and_then(|value| value.as_array()) {
                 for item in items {
-                    let label = item.get("label").and_then(|value| value.as_str()).unwrap_or("");
+                    let label = item
+                        .get("label")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
                     let value = item
                         .get("value")
                         .map(backend_ui_value_to_string)
@@ -6245,14 +6431,12 @@ fn child_input_args_with_data(
                         value: Some(value.to_string()),
                     };
                     args.push("--forwarded-input".to_string());
-                    args.push(
-                        serde_json::to_string(&payload).map_err(|error| {
-                            format!(
-                                "Action '{}' failed to serialize forwarded named input '{}': {}",
-                                action_name, input, error
-                            )
-                        })?,
-                    );
+                    args.push(serde_json::to_string(&payload).map_err(|error| {
+                        format!(
+                            "Action '{}' failed to serialize forwarded named input '{}': {}",
+                            action_name, input, error
+                        )
+                    })?);
                 }
             }
         }
@@ -6310,7 +6494,14 @@ fn resolve_child_run_var_value(
     run_var_name: &str,
 ) -> Result<(String, Option<String>), String> {
     match value {
-        ActionRunVarValue::Literal(literal) => Ok((stringify_scalar_json_value(literal, action_name, &format!("child-agent runtime var '{}'", run_var_name))?, None)),
+        ActionRunVarValue::Literal(literal) => Ok((
+            stringify_scalar_json_value(
+                literal,
+                action_name,
+                &format!("child-agent runtime var '{}'", run_var_name),
+            )?,
+            None,
+        )),
         ActionRunVarValue::Variable(variable) => {
             let resolved = resolve_scalar_action_variable(
                 data,
@@ -6416,7 +6607,10 @@ fn validate_generated_image_output_path(path: &Path, action_name: &str) -> Resul
     generated_image_output_format(raw_path.as_ref(), action_name).map(|_| ())
 }
 
-fn generated_image_output_format(raw_path: &str, action_name: &str) -> Result<&'static str, String> {
+fn generated_image_output_format(
+    raw_path: &str,
+    action_name: &str,
+) -> Result<&'static str, String> {
     let extension = Path::new(raw_path)
         .extension()
         .and_then(|value| value.to_str())
@@ -6595,7 +6789,11 @@ fn validate_generate_image_reference_path(
     Ok(())
 }
 
-fn validate_child_input_url(url: &str, action_name: &str, input_index: usize) -> Result<(), String> {
+fn validate_child_input_url(
+    url: &str,
+    action_name: &str,
+    input_index: usize,
+) -> Result<(), String> {
     if url.starts_with("http://") || url.starts_with("https://") {
         Ok(())
     } else {
@@ -6652,9 +6850,9 @@ fn validate_child_file_extension(
 
     match extension.as_deref() {
         Some(
-            "pdf" | "docx" | "csv" | "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlsx" | "xlt"
-            | "xlw" | "tsv" | "iif" | "doc" | "dot" | "odt" | "rtf" | "pot" | "ppa" | "pps"
-            | "ppt" | "pptx" | "pwz" | "wiz",
+            "pdf" | "docx" | "csv" | "xla" | "xlb" | "xlc" | "xlm" | "xls" | "xlsx" | "xlt" | "xlw"
+            | "tsv" | "iif" | "doc" | "dot" | "odt" | "rtf" | "pot" | "ppa" | "pps" | "ppt"
+            | "pptx" | "pwz" | "wiz",
         ) => Ok(()),
         _ => Err(format!(
             "Action '{}' child-agent file input {} must use a supported extension: {}.",
@@ -6898,8 +7096,7 @@ fn command_candidates_for_directory(directory: &Path, command: &str) -> Vec<Path
             return vec![directory.join(command)];
         }
 
-        let pathext = std::env::var_os("PATHEXT")
-            .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+        let pathext = std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
         let candidates = pathext
             .to_string_lossy()
             .split(';')
@@ -6931,9 +7128,8 @@ fn is_single_normal_path_component(path: &str) -> bool {
 fn step_matches_platform(platforms: Option<&[String]>, current_platform: Option<&str>) -> bool {
     match platforms {
         None => true,
-        Some(platforms) => current_platform.is_some_and(|platform| {
-            platforms.iter().any(|candidate| candidate == platform)
-        }),
+        Some(platforms) => current_platform
+            .is_some_and(|platform| platforms.iter().any(|candidate| candidate == platform)),
     }
 }
 
@@ -7008,7 +7204,10 @@ fn resolve_run_arg(
     }
 }
 
-fn lookup_action_variable<'a>(data: &'a serde_json::Value, variable: &str) -> Option<&'a serde_json::Value> {
+fn lookup_action_variable<'a>(
+    data: &'a serde_json::Value,
+    variable: &str,
+) -> Option<&'a serde_json::Value> {
     if let Some(runtime_name) = variable.strip_prefix("runtime.") {
         return data
             .get("runtime")

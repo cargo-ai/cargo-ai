@@ -39,6 +39,10 @@ fn text(output: &Output) -> String {
 }
 
 fn command(fixture: &Fixture, executable: Option<&Path>) -> Command {
+    execution_command(fixture, executable, true)
+}
+
+fn execution_command(fixture: &Fixture, executable: Option<&Path>, legacy_log: bool) -> Command {
     let mut command =
         fixture.isolated_command(executable.unwrap_or(Path::new(env!("CARGO_BIN_EXE_cargo-ai"))));
     // Child JSON execution must find this candidate, never the installed CLI.
@@ -52,6 +56,7 @@ fn command(fixture: &Fixture, executable: Option<&Path>) -> Command {
     command
         .env("PATH", std::env::join_paths(paths).unwrap())
         .env_remove("TYPESAFE_API_KEY")
+        .env_remove("CARGO_AI_USAGE_LOG")
         .env_remove("CARGO_AI_USAGE_ROOT_RUN_ID")
         .env_remove("CARGO_AI_USAGE_PARENT_AGENT_RUN_ID")
         .env("NO_PROXY", "127.0.0.1,localhost")
@@ -61,9 +66,10 @@ fn command(fixture: &Fixture, executable: Option<&Path>) -> Command {
             .args(["--no-update-check", "run", "--config"])
             .arg(&fixture.definition);
     }
-    command
-        .args(["--render-mode", "append-only", "--usage-log"])
-        .arg(&fixture.usage);
+    command.args(["--render-mode", "append-only"]);
+    if legacy_log {
+        command.arg("--usage-log").arg(&fixture.usage);
+    }
     command
 }
 
@@ -223,14 +229,15 @@ pub(super) fn generated_typesafe_case(fixture: &Fixture) {
     assert_unsupported_inputs(fixture, Some(&executable));
     assert_invalid_answers(fixture, Some(&executable));
     assert_general_provider_adaptation(fixture, Some(&executable));
-    child_definition(fixture);
+    let journey_fixture = Fixture::new();
+    child_definition(&journey_fixture);
     fs::write(
-        &fixture.definition,
-        serde_json::to_vec(&live_definition(fixture)).unwrap(),
+        &journey_fixture.definition,
+        serde_json::to_vec(&live_definition(&journey_fixture)).unwrap(),
     )
     .unwrap();
-    let executable = hatch(fixture, "typesafe_journey_smoke");
-    assert_labeled_fixture(fixture, Some(&executable));
+    let executable = hatch(&journey_fixture, "typesafe_journey_smoke");
+    assert_labeled_fixture(&journey_fixture, Some(&executable));
 }
 
 fn assert_input_overrides(fixture: &Fixture, executable: Option<&Path>) {
@@ -681,10 +688,17 @@ fn point_live_profile_at_mock(fixture: &Fixture, url: &str) {
 
 fn assert_labeled_fixture(fixture: &Fixture, executable: Option<&Path>) {
     install_live_profile(fixture, MODEL, TOKEN);
+    let mut journey = qualification_policy::Journey {
+        requested_model: MODEL.into(),
+        returned_models: Vec::new(),
+        requests_started: 0,
+        completed_cases: 0,
+    };
     for (case, native) in [(0, 0.0), (1, 1.6), (2, 1.0)] {
         let mock = mock(response(LIVE_CASES[case].1, native));
         point_live_profile_at_mock(fixture, &mock.url);
-        let score = live_run(fixture, executable, case, None, false, MODEL, TOKEN);
+        let score = live_run(fixture, executable, case, None, false, &mut journey, TOKEN)
+            .expect("automatic history and judgment");
         assert_eq!(score, native * 50.0);
         assert_state(&assert_request(&mock.finish()), &[LIVE_CASES[case].0]);
     }
@@ -692,16 +706,17 @@ fn assert_labeled_fixture(fixture: &Fixture, executable: Option<&Path>) {
     let child = MockServer::ollama_success();
     point_live_profile_at_mock(fixture, &parent.url);
     child_profile(fixture, &child.url);
-    live_run(fixture, executable, 1, None, true, MODEL, TOKEN);
+    live_run(fixture, executable, 1, None, true, &mut journey, TOKEN)
+        .expect("automatic parent/child history");
     assert_request(&parent.finish());
     assert_child(&child.finish());
-    let events = events(fixture);
+    let events = history_events(fixture, TOKEN).unwrap();
     assert_eq!(
         events
             .iter()
             .filter(|event| event["event_type"] == "provider_request_completed")
             .count(),
-        2
+        5
     );
 }
 
@@ -717,23 +732,125 @@ fn interpreted_typesafe_labeled_fixture_and_mixed_child_are_deterministic() {
     assert_labeled_fixture(&fixture, None);
 }
 
+type LiveResult<T> = Result<T, qualification_policy::Diagnostic>;
+
+fn require_live(condition: bool) -> LiveResult<()> {
+    if condition {
+        Ok(())
+    } else {
+        Err(qualification_policy::Diagnostic::ExecutionFailure)
+    }
+}
+
+fn history_json(fixture: &Fixture, args: &[&str], key: &str) -> LiveResult<Value> {
+    let output = fixture
+        .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
+        .env_remove("TYPESAFE_API_KEY")
+        .env_remove("CARGO_AI_USAGE_LOG")
+        .args(["--no-update-check", "usage"])
+        .args(args)
+        .output()
+        .map_err(|_| qualification_policy::Diagnostic::ExecutionFailure)?;
+    require_live(output.status.success() && !text(&output).contains(key))?;
+    let value: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| qualification_policy::Diagnostic::ExecutionFailure)?;
+    require_live(value["schema_version"] == 1)?;
+    Ok(value)
+}
+
+fn history_events(fixture: &Fixture, key: &str) -> LiveResult<Vec<Value>> {
+    let runs = history_json(fixture, &["runs", "--json"], key)?;
+    require_live(runs["next_cursor"].is_null() && runs["coverage"]["capture_incomplete"] == false)?;
+    let runs = runs["runs"]
+        .as_array()
+        .ok_or(qualification_policy::Diagnostic::ExecutionFailure)?;
+    require_live(runs.len() <= 8)?;
+    let mut events = Vec::new();
+    let mut roots = std::collections::HashSet::new();
+    let mut ids = std::collections::HashSet::new();
+    for run in runs {
+        let root = run["root_run_id"]
+            .as_str()
+            .ok_or(qualification_policy::Diagnostic::ExecutionFailure)?;
+        require_live(!root.is_empty() && roots.insert(root.to_owned()))?;
+        let detail = history_json(fixture, &["show", root, "--json"], key)?;
+        let repeated = history_json(fixture, &["show", root, "--json"], key)?;
+        require_live(detail == repeated)?;
+        require_live(
+            detail["next_cursor"].is_null() && detail["coverage"]["capture_incomplete"] == false,
+        )?;
+        for event in detail["events"]
+            .as_array()
+            .ok_or(qualification_policy::Diagnostic::ExecutionFailure)?
+        {
+            let id = event["event_id"]
+                .as_str()
+                .ok_or(qualification_policy::Diagnostic::ExecutionFailure)?;
+            require_live(
+                !id.is_empty() && ids.insert(id.to_owned()) && event["root_run_id"] == root,
+            )?;
+            let encoded = event.to_string();
+            require_live(event["schema_version"] == 1)?;
+            require_live(!LIVE_CASES.iter().any(|case| encoded.contains(case.0)))?;
+            // Event metadata must not acquire prompt, response or tool payload fields.
+            require_live(
+                !["prompt", "response", "arguments", "tool_output"]
+                    .iter()
+                    .any(|field| event.get(*field).is_some()),
+            )?;
+            events.push(event.clone());
+        }
+    }
+    Ok(events)
+}
+
+fn failed_request_diagnostic(
+    event: &Value,
+    events: &[Value],
+    exit: Option<i32>,
+) -> qualification_policy::Diagnostic {
+    use qualification_policy::Diagnostic as D;
+    // A rate-limit exemption requires a correlated, normally completed failed run.
+    let terminal = events.iter().any(|e| {
+        e["event_type"] == "root_run_completed"
+            && e["root_run_id"] == event["root_run_id"]
+            && e["status"] == "failed"
+    });
+    if exit != Some(1) || event["status"] != "failed" || !terminal {
+        return D::ExecutionFailure;
+    }
+    match event["error"]["kind"].as_str() {
+        Some("ratelimited") if event["error"]["http_status"] == 429 => D::RateLimited,
+        Some("unauthorized") => D::Unauthorized,
+        Some("modelnotfound") => D::ModelNotFound,
+        Some("invalidrequest") => D::InvalidRequest,
+        Some("invalidresponse") => D::InvalidResponse,
+        Some("connectivity") => D::Connectivity,
+        Some("timeout") => D::Timeout,
+        _ if event["error"]["http_status"]
+            .as_u64()
+            .is_some_and(|s| (500..600).contains(&s)) =>
+        {
+            D::ServerError
+        }
+        _ => D::Unknown,
+    }
+}
+
 fn live_run(
     fixture: &Fixture,
     executable: Option<&Path>,
     case: usize,
     input_url: Option<&str>,
     invoke_child: bool,
-    model: &str,
+    journey: &mut qualification_policy::Journey,
     key: &str,
-) -> f64 {
+) -> LiveResult<f64> {
     let marker = fixture.root.join("action-ran.txt");
     if marker.exists() {
-        fs::remove_file(&marker).unwrap();
+        fs::remove_file(&marker).map_err(|_| qualification_policy::Diagnostic::ExecutionFailure)?;
     }
-    if fixture.usage.exists() {
-        fs::remove_file(&fixture.usage).unwrap();
-    }
-    let mut command = command(fixture, executable);
+    let mut command = execution_command(fixture, executable, false);
     command.args([
         "--profile",
         "jev-live",
@@ -753,91 +870,189 @@ fn live_run(
     if invoke_child {
         command.args(["--run-var", "invoke_child=true"]);
     }
-    let started = Instant::now();
+    // Reserve one call before launch, including an invocation whose transmission
+    // later becomes uncertain. No path can launch a ninth call or retry a case.
+    require_live(journey.requests_started < 8)?;
+    journey.requests_started += 1;
     let output = command
         .output()
-        .expect("live TypeSafe process should start");
-    let wall_ms = started.elapsed().as_millis();
-    let raw_events = fs::read_to_string(&fixture.usage).unwrap_or_default();
-    assert!(
-        !text(&output).contains(key) && !raw_events.contains(key),
-        "live diagnostics must not expose credentials"
-    );
-    let provider_events: Vec<Value> = raw_events
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|event| {
-            event["event_type"] == "provider_request_completed"
-                && event["provider"]["server"] == "typesafe"
-        })
+        .map_err(|_| qualification_policy::Diagnostic::ExecutionFailure)?;
+    require_live(!text(&output).contains(key) && !fixture.usage.exists())?;
+    let events = history_events(fixture, key)?;
+    let requests: Vec<_> = events
+        .iter()
+        .filter(|event| event["event_type"] == "provider_request_completed")
         .collect();
-    let returned = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("Provider response model: ")
-                .map(str::to_owned)
-        });
-    let observed = judgment(&output);
-    let message_bytes = LIVE_CASES[case].0.len();
-    let state_bytes = DEFAULT_CONTEXT.len()
-        + input_url.map_or(message_bytes, |url| {
-            format!("Web resource from {url}:\n{}", LIVE_CASES[case].0).len()
-        });
-    eprintln!("TypeSafe live case={} path={} url={} child={} message_bytes={} state_bytes={} exit={:?} whole_ms={} requested_model={} returned_model={:?} judgment={:?}",
-        case, if executable.is_some() { "standalone" } else { "interpreted" }, input_url.is_some(), invoke_child,
-        message_bytes, state_bytes, output.status.code(), wall_ms, model, returned, observed);
-    for event in &provider_events {
-        eprintln!(
-            "TypeSafe live inference: status={} duration_ms={} usage={}",
-            event["status"], event["duration_ms"], event["usage"]
-        );
+    let typesafe: Vec<_> = requests
+        .iter()
+        .copied()
+        .filter(|event| event["provider"]["server"] == "typesafe")
+        .collect();
+    require_live(typesafe.len() == journey.requests_started as usize)?;
+    let mut roots = std::collections::HashSet::new();
+    let mut attempts = std::collections::HashSet::new();
+    for event in &typesafe {
+        require_live(roots.insert(event["root_run_id"].clone().to_string()))?;
+        let attempt = event["attempt_id"]
+            .as_str()
+            .ok_or(qualification_policy::Diagnostic::ExecutionFailure)?;
+        require_live(
+            !attempt.is_empty()
+                && attempts.insert(attempt)
+                && event["attempt_index"] == 1
+                && event["retry_count"] == 0,
+        )?;
+        require_live(
+            event["provider"]["profile"] == "jev-live"
+                && event["provider"]["requested_model"] == journey.requested_model
+                && event["parent_agent_run_id"].is_null(),
+        )?;
     }
-    assert!(
-        output.status.success(),
-        "bounded TypeSafe live invocation failed; no automatic retry is permitted"
-    );
-    assert_eq!(
-        provider_events.len(),
-        1,
-        "each live case must issue exactly one TypeSafe inference"
-    );
-    assert_eq!(provider_events[0]["provider"]["model"], model);
-    assert_eq!(provider_events[0]["status"], "success");
-    assert!(provider_events[0]["usage"]["input_tokens"]
-        .as_u64()
-        .is_some());
-    assert!(provider_events[0]["usage"]["output_tokens"]
-        .as_u64()
-        .is_some());
-    assert!(
-        returned.is_some_and(|name| !name.is_empty()),
-        "returned TypeSafe model identity must be recorded"
-    );
-    let (department, score) = observed.expect("authored action must expose the validated judgment");
-    assert_eq!(department, LIVE_CASES[case].1);
-    assert!(
-        (LIVE_CASES[case].2..=LIVE_CASES[case].3).contains(&score),
-        "judgment is outside the frozen labeled interval"
-    );
-    assert_eq!(
-        marker.exists(),
-        case == 1,
-        "only the high-urgency case may write the marker"
-    );
-    score
+    if !output.status.success() {
+        let failed: Vec<_> = typesafe
+            .iter()
+            .copied()
+            .filter(|event| event["status"] != "success")
+            .collect();
+        require_live(failed.len() == 1)?;
+        return Err(failed_request_diagnostic(
+            failed[0],
+            &events,
+            output.status.code(),
+        ));
+    }
+    for event in &typesafe {
+        let returned = event["provider"]["resolved_model"]
+            .as_str()
+            .ok_or(qualification_policy::Diagnostic::ExecutionFailure)?;
+        require_live(qualification_policy::safe_model(returned) && !returned.contains(key))?;
+        if !journey.returned_models.iter().any(|name| name == returned) {
+            journey.returned_models.push(returned.to_owned());
+        }
+        let input = event["usage"]["input_tokens"]
+            .as_u64()
+            .ok_or(qualification_policy::Diagnostic::ExecutionFailure)?;
+        let output = event["usage"]["output_tokens"]
+            .as_u64()
+            .ok_or(qualification_policy::Diagnostic::ExecutionFailure)?;
+        let timestamp = |field: &str| -> LiveResult<time::OffsetDateTime> {
+            let raw = event[field]
+                .as_str()
+                .ok_or(qualification_policy::Diagnostic::ExecutionFailure)?;
+            let parsed =
+                time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339)
+                    .map_err(|_| qualification_policy::Diagnostic::ExecutionFailure)?;
+            require_live(parsed.offset().is_utc())?;
+            Ok(parsed)
+        };
+        require_live(timestamp("started_at")? <= timestamp("ended_at")?)?;
+        timestamp("timestamp")?;
+        require_live(
+            input.checked_add(output) == event["usage"]["total_tokens"].as_u64()
+                && event["coverage"]["input_tokens"] == "reported"
+                && event["coverage"]["output_tokens"] == "reported"
+                && event["coverage"]["total_tokens"] == "derived_input_plus_output"
+                && event["status"] == "success"
+                && event["duration_ms"].as_u64().is_some()
+                && event["timestamp"]
+                    .as_str()
+                    .is_some_and(|stamp| stamp.contains('T')),
+        )?;
+        require_live(events.iter().any(|e| {
+            e["event_type"] == "root_run_completed"
+                && e["root_run_id"] == event["root_run_id"]
+                && e["status"] == "success"
+        }))?;
+    }
+    let children: Vec<_> = requests
+        .iter()
+        .copied()
+        .filter(|event| event["provider"]["server"] != "typesafe")
+        .collect();
+    require_live(children.len() == usize::from(invoke_child))?;
+    if let Some(child) = children.first() {
+        require_live(
+            child["provider"]["server"] == "ollama"
+                && child["provider"]["profile"] == "local-child"
+                && child["provider"]["requested_model"] == "child-smoke"
+                && typesafe.iter().any(|parent| {
+                    parent["root_run_id"] == child["root_run_id"]
+                        && parent["agent_run_id"] == child["parent_agent_run_id"]
+                        && parent["agent_run_id"] != child["agent_run_id"]
+                }),
+        )?;
+    }
+    let (department, score) =
+        judgment(&output).ok_or(qualification_policy::Diagnostic::ExecutionFailure)?;
+    require_live(
+        department == LIVE_CASES[case].1
+            && (LIVE_CASES[case].2..=LIVE_CASES[case].3).contains(&score)
+            && marker.exists() == (case == 1),
+    )?;
+    // Query twice: reads must not create runs or duplicate provider usage.
+    let summary = history_json(fixture, &["summary", "--json"], key)?;
+    require_live(summary == history_json(fixture, &["summary", "--json"], key)?)?;
+    validate_history_summary(&summary, &requests)?;
+    journey.completed_cases += 1;
+    Ok(score)
+}
+
+fn validate_history_summary(summary: &Value, requests: &[&Value]) -> LiveResult<()> {
+    require_live(summary["coverage"]["capture_incomplete"] == false)?;
+    let summary = &summary["summary"];
+    require_live(
+        summary["request_count"].as_u64() == Some(requests.len() as u64)
+            && summary["incomplete_run_count"] == 0
+            && summary["error_count"] == 0,
+    )?;
+    for counter in ["input_tokens", "output_tokens", "total_tokens"] {
+        let mut known = 0u64;
+        let mut unknown = 0u64;
+        for event in requests {
+            if let Some(value) = event["usage"][counter].as_u64() {
+                known = known
+                    .checked_add(value)
+                    .ok_or(qualification_policy::Diagnostic::ExecutionFailure)?;
+            } else {
+                unknown += 1;
+            }
+        }
+        require_live(
+            summary["tokens"][counter].as_u64() == Some(known)
+                && summary["unknown_request_counts"][counter].as_u64() == Some(unknown),
+        )?;
+    }
+    let roots: std::collections::HashSet<_> = requests
+        .iter()
+        .map(|e| e["root_run_id"].to_string())
+        .collect();
+    let agents: std::collections::HashSet<_> = requests
+        .iter()
+        .map(|e| e["agent_run_id"].to_string())
+        .collect();
+    require_live(
+        summary["root_run_count"].as_u64() == Some(roots.len() as u64)
+            && summary["agent_run_count"].as_u64() == Some(agents.len() as u64)
+            && summary["retry_rate"]["numerator"] == 0,
+    )
 }
 
 #[test]
-#[ignore = "requires TYPESAFE_API_KEY and TYPESAFE_MODEL; exactly eight approved live inferences, no retries"]
+#[ignore = "requires TYPESAFE_API_KEY and TYPESAFE_MODEL; at most eight live inferences, no retries"]
 fn live_typesafe_journey_uses_isolated_stdin_credentials() {
+    use qualification_policy::{Diagnostic, Journey, Outcome};
     let model = std::env::var("TYPESAFE_MODEL").expect("TYPESAFE_MODEL is required");
-    assert!(!model.trim().is_empty());
+    assert!(
+        qualification_policy::safe_model(&model),
+        "invalid requested Jev model"
+    );
+    let report =
+        qualification_report::Context::from_environment().expect("valid qualification mode");
     let fixture = Fixture::new();
     child_definition(&fixture);
-    let definition = live_definition(&fixture);
     fs::write(
         &fixture.definition,
-        serde_json::to_vec_pretty(&definition).unwrap(),
+        serde_json::to_vec_pretty(&live_definition(&fixture)).unwrap(),
     )
     .unwrap();
     // Finish compilation before opening the live key or spending the inference budget.
@@ -845,25 +1060,199 @@ fn live_typesafe_journey_uses_isolated_stdin_credentials() {
     let key = std::env::var("TYPESAFE_API_KEY").expect("TYPESAFE_API_KEY is required");
     assert!(!key.is_empty());
     install_live_profile(&fixture, &model, &key);
-    for executable in [None, Some(executable.as_path())] {
-        for case in 0..LIVE_CASES.len() {
-            live_run(&fixture, executable, case, None, false, &model, &key);
+    let mut journey = Journey {
+        requested_model: model,
+        returned_models: Vec::new(),
+        requests_started: 0,
+        completed_cases: 0,
+    };
+    let result: LiveResult<()> = (|| {
+        for executable in [None, Some(executable.as_path())] {
+            for case in 0..LIVE_CASES.len() {
+                live_run(&fixture, executable, case, None, false, &mut journey, &key)?;
+            }
         }
+        let url = MockServer::respond_after_at(
+            "/billing-message",
+            Duration::ZERO,
+            200,
+            LIVE_CASES[0].0.into(),
+        );
+        live_run(&fixture, None, 0, Some(&url.url), false, &mut journey, &key)?;
+        let fetch = url.finish();
+        require_live(
+            fetch.starts_with("GET /billing-message HTTP/1.1")
+                && !fetch.to_ascii_lowercase().contains("authorization:")
+                && !fetch.contains(&key),
+        )?;
+        let child = MockServer::ollama_success();
+        child_profile(&fixture, &child.url);
+        live_run(&fixture, None, 1, None, true, &mut journey, &key)?;
+        let request = child.finish();
+        require_live(
+            request.starts_with("POST /v1/chat/completions HTTP/1.1")
+                && !request.to_ascii_lowercase().contains("authorization:")
+                && !request.contains(&key),
+        )?;
+        Ok(())
+    })();
+    let diagnostic = result.err().unwrap_or(Diagnostic::None);
+    if diagnostic != Diagnostic::None {
+        journey.completed_cases = journey
+            .completed_cases
+            .min(journey.requests_started.saturating_sub(1));
     }
-    let url = MockServer::respond_after_at(
-        "/billing-message",
-        Duration::ZERO,
-        200,
-        LIVE_CASES[0].0.into(),
+    let outcome = match diagnostic {
+        Diagnostic::None => Outcome::Pass,
+        Diagnostic::RateLimited => Outcome::RateLimited,
+        _ => Outcome::Failure,
+    };
+    if let Some(report) = report {
+        report
+            .write_journey(journey, outcome, diagnostic, &key)
+            .expect("valid sanitized journey report");
+    } else {
+        assert_eq!(
+            outcome,
+            Outcome::Pass,
+            "bounded Jev journey failed; no automatic retry is permitted"
+        );
+    }
+}
+
+#[test]
+fn jev_report_preserves_partial_counts_and_rejects_secret_model_identity() {
+    use qualification_policy::{Diagnostic, Journey, Outcome, Record};
+    for (outcome, diagnostic, completed) in [
+        (Outcome::Pass, Diagnostic::None, 8),
+        (Outcome::RateLimited, Diagnostic::RateLimited, 3),
+        (Outcome::Failure, Diagnostic::ExecutionFailure, 3),
+    ] {
+        let fixture = Fixture::new();
+        let report = qualification_report::Context {
+            path: fixture.root.join("report.json"),
+            candidate: "a".repeat(40),
+            run_id: "123".into(),
+            run_attempt: "1".into(),
+            probe_id: "b".repeat(32),
+        };
+        let journey = Journey {
+            requested_model: MODEL.into(),
+            returned_models: vec![MODEL.into()],
+            requests_started: if completed == 8 { 8 } else { completed + 1 },
+            completed_cases: completed,
+        };
+        report
+            .write_journey(journey.clone(), outcome, diagnostic, TOKEN)
+            .unwrap();
+        let bytes = fs::read(&report.path).unwrap();
+        let saved = Record::parse(&bytes).unwrap();
+        assert_eq!(saved.outcome, outcome);
+        assert_eq!(saved.journey.unwrap().completed_cases, completed);
+        assert!(!String::from_utf8_lossy(&bytes).contains(TOKEN));
+        assert!(report
+            .write_journey(journey, outcome, diagnostic, TOKEN)
+            .is_err());
+        assert_eq!(fs::read(&report.path).unwrap(), bytes);
+    }
+    let fixture = Fixture::new();
+    let report = qualification_report::Context {
+        path: fixture.root.join("report.json"),
+        candidate: "a".repeat(40),
+        run_id: "123".into(),
+        run_attempt: "1".into(),
+        probe_id: "b".repeat(32),
+    };
+    let journey = Journey {
+        requested_model: MODEL.into(),
+        returned_models: vec![TOKEN.into()],
+        requests_started: 8,
+        completed_cases: 8,
+    };
+    assert!(report
+        .write_journey(journey, Outcome::Pass, Diagnostic::None, TOKEN)
+        .is_err());
+    assert!(!report.path.exists());
+}
+
+#[test]
+fn jev_rate_limit_requires_http_status_and_completed_failed_root() {
+    use qualification_policy::Diagnostic as D;
+    let request = json!({"root_run_id":"root","status":"failed","error":{"kind":"ratelimited","http_status":429}});
+    let terminal =
+        json!({"event_type":"root_run_completed","root_run_id":"root","status":"failed"});
+    assert_eq!(
+        failed_request_diagnostic(&request, &[terminal.clone()], Some(1)),
+        D::RateLimited
     );
-    live_run(&fixture, None, 0, Some(&url.url), false, &model, &key);
-    let fetch = url.finish();
-    assert!(fetch.starts_with("GET /billing-message HTTP/1.1"));
-    assert!(!fetch.to_ascii_lowercase().contains("authorization:") && !fetch.contains(&key));
-    let child = MockServer::ollama_success();
-    child_profile(&fixture, &child.url);
-    live_run(&fixture, None, 1, None, true, &model, &key);
-    let child_request = child.finish();
-    assert_child(&child_request);
-    assert!(!child_request.contains(&key));
+    assert_eq!(
+        failed_request_diagnostic(&request, &[], Some(1)),
+        D::ExecutionFailure
+    );
+    assert_eq!(
+        failed_request_diagnostic(&request, &[terminal.clone()], None),
+        D::ExecutionFailure
+    );
+    let mut wrong = request.clone();
+    wrong["error"]["http_status"] = json!(500);
+    assert_eq!(
+        failed_request_diagnostic(&wrong, &[terminal.clone()], Some(1)),
+        D::ServerError
+    );
+    wrong["error"]["http_status"] = Value::Null;
+    assert_eq!(
+        failed_request_diagnostic(&wrong, &[terminal], Some(1)),
+        D::Unknown
+    );
+}
+
+#[test]
+fn jev_summary_assertions_preserve_unknowns_and_do_not_double_count_children() {
+    let parent = json!({"root_run_id":"root","agent_run_id":"parent","usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}});
+    let child = json!({"root_run_id":"root","agent_run_id":"child","usage":{"input_tokens":2,"output_tokens":null,"total_tokens":null}});
+    let summary = json!({"coverage":{"capture_incomplete":false},"summary":{
+        "request_count":2,"root_run_count":1,"agent_run_count":2,"incomplete_run_count":0,"error_count":0,
+        "tokens":{"input_tokens":14,"output_tokens":3,"total_tokens":15},
+        "unknown_request_counts":{"input_tokens":0,"output_tokens":1,"total_tokens":1},
+        "retry_rate":{"numerator":0}
+    }});
+    assert!(validate_history_summary(&summary, &[&parent, &child]).is_ok());
+    for (section, field, value) in [
+        ("tokens", "input_tokens", json!(16)),
+        ("unknown_request_counts", "output_tokens", json!(0)),
+        ("retry_rate", "numerator", json!(1)),
+    ] {
+        let mut wrong = summary.clone();
+        wrong["summary"][section][field] = value;
+        assert!(validate_history_summary(&wrong, &[&parent, &child]).is_err());
+    }
+    let mut incomplete = summary;
+    incomplete["coverage"]["capture_incomplete"] = json!(true);
+    assert!(validate_history_summary(&incomplete, &[&parent, &child]).is_err());
+}
+
+#[test]
+fn interpreted_jev_automatic_history_is_queryable_without_log_flags() {
+    let fixture = Fixture::new();
+    child_definition(&fixture);
+    fs::write(
+        &fixture.definition,
+        serde_json::to_vec(&live_definition(&fixture)).unwrap(),
+    )
+    .unwrap();
+    install_live_profile(&fixture, MODEL, TOKEN);
+    let server = mock(response("billing", 0.0));
+    point_live_profile_at_mock(&fixture, &server.url);
+    let mut journey = qualification_policy::Journey {
+        requested_model: MODEL.into(),
+        returned_models: Vec::new(),
+        requests_started: 0,
+        completed_cases: 0,
+    };
+    let result = live_run(&fixture, None, 0, None, false, &mut journey, TOKEN);
+    assert_request(&server.finish());
+    assert_eq!(result, Ok(0.0), "automatic usage/history contract failed");
+    assert_eq!(journey.completed_cases, 1);
+    assert_eq!(journey.returned_models, [MODEL]);
+    assert!(!fixture.usage.exists());
 }

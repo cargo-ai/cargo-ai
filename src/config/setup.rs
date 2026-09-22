@@ -21,6 +21,7 @@ pub fn ensure_config_file_exists() -> Result<(), Box<dyn std::error::Error>> {
     let path = config_path();
     if !path.exists() {
         let cfg = Config {
+            usage: None,
             profile: Vec::new(),
             cargo_ai_token: None,
             default_profile: None,
