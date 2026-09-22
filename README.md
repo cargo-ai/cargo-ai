@@ -1,27 +1,27 @@
 # cargo-ai™
 
 <!-- Update the release version, tag-specific checks and evidence links together after publication verification. -->
-[![Latest release: v0.4.2](https://img.shields.io/badge/release-v0.4.2-blue)](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.2)
-[![v0.4.2 Product Qualification](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/v0.4.2?nameFilter=Product%20qualification%20summary&label=v0.4.2%20Product%20Qualification)](https://github.com/cargo-ai/cargo-ai/actions/runs/35545290245)
-[![v0.4.2 Registry Installation](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/v0.4.2?nameFilter=Registry%20installation%20summary&label=v0.4.2%20Registry%20Installation)](https://github.com/cargo-ai/cargo-ai/actions/runs/35552785215)
+[![Latest release: v0.4.3](https://img.shields.io/badge/release-v0.4.3-blue)](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.3)
+[![v0.4.3 Product Qualification](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/v0.4.3?nameFilter=Product%20qualification%20summary&label=v0.4.3%20Product%20Qualification)](https://github.com/cargo-ai/cargo-ai/actions/runs/35760660610)
+[![v0.4.3 Registry Installation](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/v0.4.3?nameFilter=Registry%20installation%20summary&label=v0.4.3%20Registry%20Installation)](https://github.com/cargo-ai/cargo-ai/actions/runs/35786303701)
 
 <details>
-<summary>Verified release checks — v0.4.2</summary>
+<summary>Verified release checks — v0.4.3</summary>
 
 | Check | Recorded result |
 |---|---|
 | Core CI | Passed on Linux, macOS and Windows, including packaged-source installation and installed CLI smoke |
 | Package Qualification | Source canary and enrolled official package passed on all three platforms |
 | Security | Audit and separate dependency policy checks passed on the released source |
-| Full Product Qualification | [Passed](https://github.com/cargo-ai/cargo-ai/actions/runs/35545290245); OpenAI, Anthropic, Gemini and xAI live checks passed; Mistral remains unverified after rate limiting |
-| Jev | Eight separate local live Choice/Score journey requests passed using `jev-1.13.0`; outside the GitHub provider aggregate |
-| Registry Installation | [Passed on Linux, macOS and Windows](https://github.com/cargo-ai/cargo-ai/actions/runs/35552785215); verified the published v0.4.2 crate and exact source |
+| Full Product Qualification | [Passed](https://github.com/cargo-ai/cargo-ai/actions/runs/35760660610); OpenAI, Anthropic, xAI and Jev live checks passed; Gemini and Mistral remain unverified after rate limiting |
+| Jev | Eight live Choice/Score journey cases passed using requested/returned `jev-1.13.0`, within the GitHub provider aggregate; eight requests, no retry |
+| Registry Installation | [Passed on Linux, macOS and Windows](https://github.com/cargo-ai/cargo-ai/actions/runs/35786303701); verified the published v0.4.3 crate and exact source |
 
 These checks describe the released commit and bounded scenarios. See [release evidence](./docs/testing-and-release-qualification.md#release-status) for source identities, provider limitations and historical results.
 
 </details>
 
-[Release notes](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.2) · [Documentation at v0.4.2](https://github.com/cargo-ai/cargo-ai/blob/v0.4.2/README.md) · [Release testing](./docs/testing-and-release-qualification.md#release-status)
+[Release notes](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.3) · [Documentation at v0.4.3](https://github.com/cargo-ai/cargo-ai/blob/v0.4.3/README.md) · [Release testing](./docs/testing-and-release-qualification.md#release-status)
 
 Development status: [![Development CI](https://github.com/cargo-ai/cargo-ai/actions/workflows/development-ci.yml/badge.svg?branch=develop&event=push)](https://github.com/cargo-ai/cargo-ai/actions/workflows/development-ci.yml?query=branch%3Adevelop)
 
