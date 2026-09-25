@@ -10,6 +10,9 @@ mod qualification_report;
 #[path = "support/typesafe_smoke.rs"]
 mod typesafe_smoke;
 
+#[path = "../templates/definition_validation.rs"]
+mod definition_validation;
+
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -2611,6 +2614,13 @@ fn live_media_bundle_uses_isolated_stdin_credentials() {
         );
     }
 
+    let selected_runtime = std::env::var("CARGO_AI_MEDIA_RUNTIME").ok();
+    assert!(
+        selected_runtime
+            .as_deref()
+            .is_none_or(|value| matches!(value, "current" | "hatched")),
+        "media runtime must be current or hatched"
+    );
     let fixture = Fixture::new();
     let reference = fixture.root.join("reference.png");
     let reference_result = Command::new("ffmpeg")
@@ -2643,6 +2653,11 @@ fn live_media_bundle_uses_isolated_stdin_credentials() {
     );
     media_live_profile(&fixture, "media-child", "openai", &child_model, &child_key);
     let definition = media_live_definition(&provider, &voice);
+    let child_definition = media_live_child_definition();
+    definition_validation::validate_definition(&definition)
+        .expect("media fixture must validate before provider calls");
+    definition_validation::validate_definition(&child_definition)
+        .expect("media child fixture must validate before provider calls");
     fs::write(
         &fixture.definition,
         serde_json::to_vec(&definition).unwrap(),
@@ -2650,27 +2665,25 @@ fn live_media_bundle_uses_isolated_stdin_credentials() {
     .unwrap();
     fs::write(
         fixture.root.join("child.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "agent_definition_schema_version":"2026-09-09.r1",
-            "inputs":[{"type":"text","text":"Read the supplied transcript and obey its verification instruction."}],
-            "agent_schema":{"type":"object","properties":{"status":{"type":"string","enum":["heard-blue-lantern-silver-compass"]}},"required":["status"],"additionalProperties":false},
-            "actions":[]
-        })).unwrap(),
-    ).unwrap();
+        serde_json::to_vec(&child_definition).unwrap(),
+    )
+    .unwrap();
     let output_dir = fixture.root.join("dist");
-    let hatch = fixture
-        .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
-        .args(["--no-update-check", "hatch", "live_media_proof", "--config"])
-        .arg(&fixture.definition)
-        .arg("--output-dir")
-        .arg(&output_dir)
-        .arg("--force")
-        .output()
-        .expect("media proof hatch should start");
-    assert!(
-        hatch.status.success(),
-        "media proof hatch failed before provider calls"
-    );
+    if selected_runtime.as_deref() != Some("current") {
+        let hatch = fixture
+            .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
+            .args(["--no-update-check", "hatch", "live_media_proof", "--config"])
+            .arg(&fixture.definition)
+            .arg("--output-dir")
+            .arg(&output_dir)
+            .arg("--force")
+            .output()
+            .expect("media proof hatch should start");
+        assert!(
+            hatch.status.success(),
+            "media proof hatch failed before provider calls"
+        );
+    }
     let generated = output_dir.join(if cfg!(windows) {
         "live_media_proof.exe"
     } else {
@@ -2680,7 +2693,13 @@ fn live_media_bundle_uses_isolated_stdin_credentials() {
     let cases = if provider == "gemini" {
         vec!["speech-wav", "chain", "image", "image-reference"]
     } else if provider == "openai" {
-        vec!["speech-wav", "chain", "speech-mp3"]
+        vec![
+            "speech-wav",
+            "chain",
+            "speech-mp3",
+            "image",
+            "image-reference",
+        ]
     } else if provider == "mistral" {
         vec!["speech-wav", "chain", "speech-mp3", "image"]
     } else {
@@ -2692,10 +2711,46 @@ fn live_media_bundle_uses_isolated_stdin_credentials() {
             "image-reference",
         ]
     };
+    let selected_case = std::env::var("CARGO_AI_MEDIA_CASE").ok();
+    assert!(
+        selected_case
+            .as_deref()
+            .is_none_or(|case| cases.contains(&case)),
+        "media case must be one of the selected provider's supported cases"
+    );
     for (runtime, executable) in [("current", current), ("hatched", generated.as_path())] {
+        if selected_runtime
+            .as_deref()
+            .is_some_and(|selected| selected != runtime)
+        {
+            continue;
+        }
+        if selected_case.as_deref() == Some("chain") {
+            let retry = proof_root.join(format!("{provider}-{runtime}-speech-wav-retry.wav"));
+            let source = if retry.exists() {
+                retry
+            } else {
+                proof_root.join(format!("{provider}-{runtime}-speech-wav.wav"))
+            };
+            fs::copy(source, fixture.root.join("speech.wav"))
+                .expect("a selected chain case requires its prior speech proof artifact");
+        }
         for case in &cases {
+            if selected_case
+                .as_deref()
+                .is_some_and(|selected| selected != *case)
+            {
+                continue;
+            }
             let calls = media_live_case_calls(&provider, case);
-            media_live_reserve(&proof_root, &provider, runtime, case, calls);
+            let stem = media_live_reserve(
+                &proof_root,
+                &provider,
+                runtime,
+                case,
+                calls,
+                std::env::var("CARGO_AI_MEDIA_RETRY_FAILED").as_deref() == Ok("1"),
+            );
             let mut command = media_command(&fixture, executable);
             if runtime == "current" {
                 command
@@ -2711,7 +2766,15 @@ fn live_media_bundle_uses_isolated_stdin_credentials() {
                 .env_remove("XAI_API_KEY")
                 .output()
                 .expect("media case process should start; reserved attempts remain charged if it cannot");
-            media_live_record(&proof_root, &fixture, &provider, runtime, case, &output);
+            media_live_record(
+                &proof_root,
+                &fixture,
+                &provider,
+                runtime,
+                case,
+                &stem,
+                &output,
+            );
             assert!(output.status.success(), "media proof case failed; inspect private result and ledger without blindly rerunning");
         }
     }
@@ -2768,6 +2831,27 @@ fn media_live_profile(fixture: &Fixture, name: &str, provider: &str, model: &str
     );
 }
 
+fn media_live_child_definition() -> Value {
+    serde_json::json!({
+        "agent_definition_schema_version":"2026-09-09.r1",
+        "inputs":[{"type":"text","text":"Read the supplied transcript and obey its verification instruction."}],
+        "agent_schema":{"type":"object","properties":{"status":{"type":"string","enum":["heard-blue-lantern-silver-compass"]}}},
+        "actions":[]
+    })
+}
+
+#[test]
+fn media_live_fixtures_validate_before_provider_requests() {
+    definition_validation::validate_definition(&media_live_child_definition()).unwrap();
+    for provider in ["openai", "gemini", "mistral", "xai"] {
+        definition_validation::validate_definition(&media_live_definition(
+            provider,
+            "fixture-voice",
+        ))
+        .unwrap();
+    }
+}
+
 fn media_live_definition(provider: &str, voice: &str) -> Value {
     let speech_model = match provider {
         "openai" => Some("gpt-4o-mini-tts"),
@@ -2782,6 +2866,7 @@ fn media_live_definition(provider: &str, voice: &str) -> Value {
         _ => "grok-voice-transcribe-2.0",
     };
     let image_model = match provider {
+        "openai" => "gpt-image-2",
         "gemini" => "gemini-3.1-flash-image",
         "mistral" => "mistral-small-latest",
         _ => "grok-imagine-image-2.0",
@@ -2827,7 +2912,14 @@ fn media_live_case_calls(provider: &str, case: &str) -> [u32; 5] {
     }
 }
 
-fn media_live_reserve(root: &Path, provider: &str, runtime: &str, case: &str, calls: [u32; 5]) {
+fn media_live_reserve(
+    root: &Path,
+    provider: &str,
+    runtime: &str,
+    case: &str,
+    calls: [u32; 5],
+    retry_failed: bool,
+) -> String {
     let ledger = root.join("attempts.json");
     let mut value: Value = if ledger.exists() {
         serde_json::from_slice(&fs::read(&ledger).unwrap())
@@ -2835,18 +2927,32 @@ fn media_live_reserve(root: &Path, provider: &str, runtime: &str, case: &str, ca
     } else {
         serde_json::json!({"tts":0,"stt":0,"image":0,"child":0,"mistral_image":0,"cases":[]})
     };
-    assert!(
-        !value["cases"]
-            .as_array()
-            .expect("valid attempt cases")
-            .iter()
-            .any(|entry| {
-                entry["provider"] == provider
-                    && entry["runtime"] == runtime
-                    && entry["case"] == case
-            }),
-        "media proof case already attempted; do not blindly rerun it"
-    );
+    let prior_attempts = value["cases"]
+        .as_array()
+        .expect("valid attempt cases")
+        .iter()
+        .filter(|entry| {
+            entry["provider"] == provider && entry["runtime"] == runtime && entry["case"] == case
+        })
+        .count();
+    let original_stem = format!("{provider}-{runtime}-{case}");
+    if prior_attempts != 0 {
+        assert!(prior_attempts == 1 && retry_failed, "media case requires an explicit single diagnosed retry; passed or uncertain cases cannot be replayed");
+        let previous: Value = serde_json::from_slice(
+            &fs::read(root.join(format!("{original_stem}.json")))
+                .expect("retry requires a recorded failed result"),
+        )
+        .unwrap();
+        assert!(
+            previous["exit_code"].as_i64().is_some_and(|code| code != 0),
+            "only a recorded failure can be retried"
+        );
+    }
+    let stem = if prior_attempts == 0 {
+        original_stem
+    } else {
+        format!("{original_stem}-retry")
+    };
     for (index, (name, limit)) in [
         ("tts", 16),
         ("stt", 12),
@@ -2873,10 +2979,61 @@ fn media_live_reserve(root: &Path, provider: &str, runtime: &str, case: &str, ca
         total <= 64,
         "media proof total budget exhausted before dispatch"
     );
-    value["cases"].as_array_mut().unwrap().push(serde_json::json!({"provider":provider,"runtime":runtime,"case":case,"reserved":calls,"state":"started_or_uncertain"}));
+    value["cases"].as_array_mut().unwrap().push(serde_json::json!({"provider":provider,"runtime":runtime,"case":case,"attempt":prior_attempts + 1,"evidence_stem":stem,"reserved":calls,"state":"started_or_uncertain"}));
     let temporary = root.join("attempts.json.tmp");
     fs::write(&temporary, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
     fs::rename(temporary, ledger).unwrap();
+    stem
+}
+
+#[test]
+fn media_live_retry_preserves_failure_and_allows_only_one_diagnosed_attempt() {
+    let fixture = Fixture::new();
+    let root = fixture.root.as_path();
+    let reserve = |retry| {
+        media_live_reserve(
+            root,
+            "openai",
+            "current",
+            "speech-wav",
+            [1, 0, 0, 0, 0],
+            retry,
+        )
+    };
+    assert_eq!(reserve(false), "openai-current-speech-wav");
+    let ledger_before = fs::read(root.join("attempts.json")).unwrap();
+    assert!(std::panic::catch_unwind(|| reserve(true)).is_err());
+    assert_eq!(fs::read(root.join("attempts.json")).unwrap(), ledger_before);
+    let report = root.join("openai-current-speech-wav.json");
+    fs::write(&report, br#"{"exit_code":0}"#).unwrap();
+    assert!(std::panic::catch_unwind(|| reserve(true)).is_err());
+    fs::write(&report, br#"{"exit_code":1}"#).unwrap();
+    assert!(std::panic::catch_unwind(|| reserve(false)).is_err());
+    assert_eq!(reserve(true), "openai-current-speech-wav-retry");
+    assert_eq!(fs::read(&report).unwrap(), br#"{"exit_code":1}"#);
+    assert!(std::panic::catch_unwind(|| reserve(true)).is_err());
+    let ledger: Value =
+        serde_json::from_slice(&fs::read(root.join("attempts.json")).unwrap()).unwrap();
+    assert_eq!(ledger["tts"], 2);
+    assert_eq!(ledger["cases"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn media_live_retry_cannot_reset_the_existing_request_budget() {
+    let fixture = Fixture::new();
+    let ledger = fixture.root.join("attempts.json");
+    let exhausted = br#"{"tts":16,"stt":0,"image":2,"child":0,"mistral_image":2,"cases":[]}"#;
+    fs::write(&ledger, exhausted).unwrap();
+    assert!(std::panic::catch_unwind(|| media_live_reserve(
+        &fixture.root,
+        "openai",
+        "current",
+        "speech-wav",
+        [1, 0, 0, 0, 0],
+        true
+    ))
+    .is_err());
+    assert_eq!(fs::read(&ledger).unwrap(), exhausted);
 }
 
 fn media_live_record(
@@ -2885,6 +3042,7 @@ fn media_live_record(
     provider: &str,
     runtime: &str,
     case: &str,
+    stem: &str,
     output: &Output,
 ) {
     let path = match case {
@@ -2908,7 +3066,7 @@ fn media_live_record(
         "models":match case {
             "speech-wav" | "speech-mp3" => if provider == "xai" { serde_json::json!([null]) } else { serde_json::json!([if provider == "openai" { "gpt-4o-mini-tts" } else if provider == "gemini" { "gemini-3.8-flash-tts" } else { "voxtral-mini-tts-2603" }]) },
             "chain" => serde_json::json!([match provider { "openai" => "gpt-transcribe", "gemini" => "gemini-3.5-transcribe", "mistral" => "voxtral-mini-latest", _ => "grok-voice-transcribe-2.0" }, std::env::var("OPENAI_MODEL").unwrap_or_default()]),
-            _ => serde_json::json!([if provider == "gemini" { "gemini-3.1-flash-image" } else if provider == "mistral" { "mistral-small-latest" } else { "grok-imagine-image-2.0" }]),
+            _ => serde_json::json!([if provider == "openai" { "gpt-image-2" } else if provider == "gemini" { "gemini-3.1-flash-image" } else if provider == "mistral" { "mistral-small-latest" } else { "grok-imagine-image-2.0" }]),
         },
         "time_unix_seconds":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
         "candidate":std::env::var("CARGO_AI_SHA").ok(),
@@ -2928,24 +3086,24 @@ fn media_live_record(
         std::env::var("CARGO_AI_MISTRAL_VOICE_ID").unwrap_or_default(),
     ];
     fs::write(
-        root.join(format!("{provider}-{runtime}-{case}.stdout.txt")),
+        root.join(format!("{stem}.stdout.txt")),
         media_live_private_diagnostic(&output.stdout, &secrets),
     )
     .expect("private sanitized stdout should be retained");
     fs::write(
-        root.join(format!("{provider}-{runtime}-{case}.stderr.txt")),
+        root.join(format!("{stem}.stderr.txt")),
         media_live_private_diagnostic(&output.stderr, &secrets),
     )
     .expect("private sanitized stderr should be retained");
     if output.status.success() {
         let bytes = fs::read(&path).expect("successful media case must write its file");
         let extension = path.extension().unwrap().to_string_lossy();
-        let private_copy = root.join(format!("{provider}-{runtime}-{case}.{extension}"));
+        let private_copy = root.join(format!("{stem}.{extension}"));
         fs::write(&private_copy, &bytes).expect("private media artifact should be retained");
         evidence["artifact_sha256"] = Value::String(format!("{:x}", Sha256::digest(&bytes)));
         evidence["artifact_bytes"] = Value::from(bytes.len());
         fs::write(
-            root.join(format!("{provider}-{runtime}-{case}.json")),
+            root.join(format!("{stem}.json")),
             serde_json::to_vec_pretty(&evidence).unwrap(),
         )
         .unwrap();
@@ -3088,7 +3246,7 @@ fn media_live_record(
         evidence["decoded_bytes"] = Value::from(decoded.stdout.len());
         evidence["probe"] = facts;
     }
-    let report = root.join(format!("{provider}-{runtime}-{case}.json"));
+    let report = root.join(format!("{stem}.json"));
     fs::write(report, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
 }
 
