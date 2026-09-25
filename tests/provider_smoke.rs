@@ -2132,26 +2132,47 @@ fn assert_hosted_timeout_and_capability_failures(provider: &str) {
         "unexpected {provider} file diagnostic:\n{file_text}"
     );
 
-    let image_action_definition = fixture.root.join("unsupported_image_action.json");
+    let image_action_definition = fixture.root.join("hosted_image_action.json");
+    let image_extension = if provider == "xai" { "jpg" } else { "png" };
+    let image_model = if provider == "xai" {
+        "grok-imagine-image-2.0"
+    } else {
+        "mistral-small-latest"
+    };
     fs::write(
         &image_action_definition,
-        r#"{
+        format!(
+            r#"{{
   "agent_definition_schema_version": "2026-03-03.r1",
-  "inputs": [{"name":"request","type":"text","text":"Create an image."}],
-  "agent_schema": {"type":"object","properties":{}},
-  "actions": [{
-    "name": "unsupported_image_generation",
-    "logic": {"==":[1,1]},
-    "run": [{
+  "inputs": [{{"name":"request","type":"text","text":"Create an image."}}],
+  "agent_schema": {{"type":"object","properties":{{}}}},
+  "actions": [{{
+    "name": "hosted_image_generation",
+    "logic": {{"==":[1,1]}},
+    "run": [{{
       "kind": "generate_image",
-      "model": "image-model",
+      "model": "{image_model}",
       "prompt": ["Create an image."],
-      "path": ["./output.png"]
-    }]
-  }]
-}"#,
+      "path": ["./output.{image_extension}"]
+    }}]
+  }}]
+}}"#
+        ),
     )
     .expect("image action definition should be written");
+    let image_path = if provider == "xai" {
+        "/v1/images/generations"
+    } else {
+        "/v1/chat/completions"
+    };
+    let image_rejection = "image model is unavailable";
+    let image_error = if provider == "xai" {
+        serde_json::json!({"error": {"message": image_rejection}})
+    } else {
+        serde_json::json!({"message": image_rejection})
+    };
+    let image_mock =
+        MockServer::respond_after_at(image_path, Duration::ZERO, 400, image_error.to_string());
     let generate_failure = fixture
         .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
         .args(["--no-update-check", "run", "--config"])
@@ -2161,6 +2182,8 @@ fn assert_hosted_timeout_and_capability_failures(provider: &str) {
             provider,
             "--model",
             model,
+            "--url",
+            &image_mock.url,
             "--token",
             token,
             "--render-mode",
@@ -2168,6 +2191,7 @@ fn assert_hosted_timeout_and_capability_failures(provider: &str) {
         ])
         .output()
         .expect("hosted generate_image capability smoke should start");
+    let image_request = image_mock.finish();
     let generate_text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&generate_failure.stdout),
@@ -2175,9 +2199,27 @@ fn assert_hosted_timeout_and_capability_failures(provider: &str) {
     );
     assert!(!generate_failure.status.success());
     assert!(
-        generate_text.contains("generate_image is not supported"),
+        generate_text.contains(image_rejection),
         "unexpected {provider} generate_image diagnostic:\n{generate_text}"
     );
+    assert!(
+        image_request.starts_with(&format!("POST {image_path} HTTP/1.1")),
+        "unexpected {provider} image request: {image_request}"
+    );
+    let image_body: Value = serde_json::from_str(image_request.split_once("\r\n\r\n").unwrap().1)
+        .expect("image request body should be JSON");
+    assert_eq!(image_body["model"], image_model);
+    if provider == "xai" {
+        assert_eq!(image_body["prompt"], "Create an image.");
+        assert_eq!(image_body["response_format"], "b64_json");
+    } else {
+        assert_eq!(image_body["messages"][0]["content"], "Create an image.");
+        assert_eq!(image_body["tools"][0]["type"], "image_generation");
+    }
+    assert!(!fixture
+        .root
+        .join(format!("output.{image_extension}"))
+        .exists());
 }
 
 #[test]
