@@ -38,7 +38,7 @@ cargo ai hatch my-agent --config ./agent.json
 
 - **Readable by design:** one JSON definition makes inputs, output, and side effects reviewable and diffable.
 - **Run or hatch:** iterate through the Cargo AI runtime, then export a native CLI executable from the same definition.
-- **Real workflow building blocks:** use text, URLs, images, files, conditions, local commands, tools, email, image generation, and child agents where supported.
+- **Real workflow building blocks:** use text, URLs, images, files, conditions, local commands, tools, email, image generation, speech generation, transcription, and child agents where supported.
 - **Provider choice:** connect to OpenAI, Anthropic, Gemini, xAI, Mistral, TypeSafe Jev, or a local Ollama server using compatible schemas and inputs.
 - **Project and package workflows:** assemble agents, Rust tools, and assets into inspectable local or hosted packages with explicit permission boundaries.
 - **Portable and auditable:** target macOS, Linux, and Windows while keeping generated source and shipped behavior visible.
@@ -157,7 +157,7 @@ Read [Agent definitions](./docs/agent-definitions.md) and [Actions and child age
 | --- | --- |
 | Inputs | Ordered text, URL, image, and file inputs; named bindings and runtime overrides |
 | Structured output | Typed JSON schema with scalar fields and a bounded structured-data lane for tools |
-| Actions | Local commands, Cargo AI tools, child agents, email, and image generation |
+| Actions | Local commands, Cargo AI tools, child agents, email, image generation, speech generation, and transcription |
 | Control flow | JSON Logic, per-step conditions, failure policies, platform selectors, and sequential/parallel action scheduling |
 | Runtime | Direct interpreted execution or generated native executables |
 | Projects | Explicit build profiles, project-local Rust tools, assets, and runtime defaults |
@@ -180,7 +180,7 @@ Provider capabilities differ. Unsupported input or action combinations fail expl
 
 TypeSafe Jev support is introduced in [0.4.2](./releases/0.4.2.md) for local and hatched Choice/Score workflows; see [release status](./docs/testing-and-release-qualification.md#release-status) for publication availability. New rubric definitions opt into `2026-09-19.r1`; hosted storage of that revision is deferred. Ordinary scaffolds retain `2026-09-09.r1`. See [TypeSafe setup](./docs/providers/typesafe.md) for the complete limits and profile-aware hatch checks.
 
-The [provider overview](./docs/providers/README.md) compares the current input and image-generation boundaries. Model availability belongs to each provider or account; Cargo AI does not maintain a model allowlist or certify every model/schema combination.
+The [provider overview](./docs/providers/README.md) compares current input, image, speech, and transcription boundaries. Model availability belongs to each provider or account; Cargo AI does not maintain a model allowlist or certify every model/schema combination.
 
 ## Build Beyond the First Agent
 

@@ -165,6 +165,8 @@ struct RunStep {
     program: Option<String>,
     model: Option<RunArg>,
     profile: Option<RunArg>,
+    voice: Option<RunArg>,
+    audio_path: Option<RunArg>,
     output_variable: Option<String>,
     status_variable: Option<String>,
     error_variable: Option<String>,
@@ -840,19 +842,29 @@ fn parse_actions(
                 &captured_variable_names,
             )?;
             let kind = get_required_string(run_obj, "kind", &run_path)?.to_string();
+            for (field, supported_kind) in
+                [("voice", "generate_audio"), ("audio", "transcribe_audio")]
+            {
+                if kind != supported_kind && run_obj.contains_key(field) {
+                    return Err(BuildError::config(
+                        format!("{run_path}.{field}"),
+                        format!("`{field}` is only supported for `{supported_kind}` actions"),
+                    ));
+                }
+            }
 
             let run_step = match kind.as_str() {
                 "exec" => {
                     if run_obj.contains_key("profile") {
                         return Err(BuildError::config(
                             format!("{run_path}.profile"),
-                            "`profile` is only supported for `agent` and `generate_image` actions",
+                            "`profile` is only supported for `agent`, `generate_image`, `generate_audio`, and `transcribe_audio` actions",
                         ));
                     }
                     if run_obj.contains_key("model") {
                         return Err(BuildError::config(
                             format!("{run_path}.model"),
-                            "`model` is only supported for `generate_image` actions",
+                            "`model` is only supported for `generate_image`, `generate_audio`, and `transcribe_audio` actions",
                         ));
                     }
                     if run_obj.contains_key("prompt") {
@@ -864,7 +876,7 @@ fn parse_actions(
                     if run_obj.contains_key("path") {
                         return Err(BuildError::config(
                             format!("{run_path}.path"),
-                            "`path` is only supported for `generate_image` actions",
+                            "`path` is only supported for `generate_image` and `generate_audio` actions",
                         ));
                     }
                     if run_obj.contains_key("subject") {
@@ -876,7 +888,7 @@ fn parse_actions(
                     if run_obj.contains_key("text") {
                         return Err(BuildError::config(
                             format!("{run_path}.text"),
-                            "`text` is only supported for `email_me` actions",
+                            "`text` is only supported for `email_me` and `generate_audio` actions",
                         ));
                     }
                     if run_obj.contains_key("artifact") {
@@ -949,6 +961,8 @@ fn parse_actions(
                         program: Some(program),
                         model: None,
                         profile: None,
+                        voice: None,
+                        audio_path: None,
                         output_variable,
                         status_variable,
                         error_variable,
@@ -976,13 +990,13 @@ fn parse_actions(
                     if run_obj.contains_key("profile") {
                         return Err(BuildError::config(
                             format!("{run_path}.profile"),
-                            "`profile` is only supported for `agent` and `generate_image` actions",
+                            "`profile` is only supported for `agent`, `generate_image`, `generate_audio`, and `transcribe_audio` actions",
                         ));
                     }
                     if run_obj.contains_key("model") {
                         return Err(BuildError::config(
                             format!("{run_path}.model"),
-                            "`model` is only supported for `generate_image` actions",
+                            "`model` is only supported for `generate_image`, `generate_audio`, and `transcribe_audio` actions",
                         ));
                     }
                     if run_obj.contains_key("prompt") {
@@ -994,7 +1008,7 @@ fn parse_actions(
                     if run_obj.contains_key("path") {
                         return Err(BuildError::config(
                             format!("{run_path}.path"),
-                            "`path` is only supported for `generate_image` actions",
+                            "`path` is only supported for `generate_image` and `generate_audio` actions",
                         ));
                     }
                     if run_obj.contains_key("program") {
@@ -1048,7 +1062,7 @@ fn parse_actions(
                     if run_obj.contains_key("output_variable") {
                         return Err(BuildError::config(
                             format!("{run_path}.output_variable"),
-                            "`output_variable` is only supported for `exec` actions",
+                            "`output_variable` is only supported for `exec`, `tool`, and `transcribe_audio` actions",
                         ));
                     }
                     if run_obj.contains_key("input_mode") {
@@ -1082,6 +1096,8 @@ fn parse_actions(
                         program: None,
                         model: None,
                         profile: None,
+                        voice: None,
+                        audio_path: None,
                         output_variable: None,
                         status_variable,
                         error_variable,
@@ -1109,7 +1125,7 @@ fn parse_actions(
                     if run_obj.contains_key("model") {
                         return Err(BuildError::config(
                             format!("{run_path}.model"),
-                            "`model` is only supported for `generate_image` actions",
+                            "`model` is only supported for `generate_image`, `generate_audio`, and `transcribe_audio` actions",
                         ));
                     }
                     if run_obj.contains_key("prompt") {
@@ -1121,7 +1137,7 @@ fn parse_actions(
                     if run_obj.contains_key("path") {
                         return Err(BuildError::config(
                             format!("{run_path}.path"),
-                            "`path` is only supported for `generate_image` actions",
+                            "`path` is only supported for `generate_image` and `generate_audio` actions",
                         ));
                     }
                     if run_obj.contains_key("program") {
@@ -1151,7 +1167,7 @@ fn parse_actions(
                     if run_obj.contains_key("output_variable") {
                         return Err(BuildError::config(
                             format!("{run_path}.output_variable"),
-                            "`output_variable` is only supported for `exec` and `tool` actions",
+                            "`output_variable` is only supported for `exec`, `tool`, and `transcribe_audio` actions",
                         ));
                     }
                     if run_obj.contains_key("name") {
@@ -1222,6 +1238,8 @@ fn parse_actions(
                         program: None,
                         model: None,
                         profile,
+                        voice: None,
+                        audio_path: None,
                         output_variable: None,
                         status_variable,
                         error_variable,
@@ -1249,13 +1267,13 @@ fn parse_actions(
                     if run_obj.contains_key("profile") {
                         return Err(BuildError::config(
                             format!("{run_path}.profile"),
-                            "`profile` is only supported for `agent` and `generate_image` actions",
+                            "`profile` is only supported for `agent`, `generate_image`, `generate_audio`, and `transcribe_audio` actions",
                         ));
                     }
                     if run_obj.contains_key("model") {
                         return Err(BuildError::config(
                             format!("{run_path}.model"),
-                            "`model` is only supported for `generate_image` actions",
+                            "`model` is only supported for `generate_image`, `generate_audio`, and `transcribe_audio` actions",
                         ));
                     }
                     if run_obj.contains_key("prompt") {
@@ -1267,7 +1285,7 @@ fn parse_actions(
                     if run_obj.contains_key("path") {
                         return Err(BuildError::config(
                             format!("{run_path}.path"),
-                            "`path` is only supported for `generate_image` actions",
+                            "`path` is only supported for `generate_image` and `generate_audio` actions",
                         ));
                     }
                     if run_obj.contains_key("subject") {
@@ -1279,7 +1297,7 @@ fn parse_actions(
                     if run_obj.contains_key("text") {
                         return Err(BuildError::config(
                             format!("{run_path}.text"),
-                            "`text` is only supported for `email_me` actions",
+                            "`text` is only supported for `email_me` and `generate_audio` actions",
                         ));
                     }
                     if run_obj.contains_key("program") {
@@ -1365,6 +1383,8 @@ fn parse_actions(
                         program: None,
                         model: None,
                         profile: None,
+                        voice: None,
+                        audio_path: None,
                         output_variable,
                         status_variable,
                         error_variable,
@@ -1446,7 +1466,7 @@ fn parse_actions(
                     if run_obj.contains_key("output_variable") {
                         return Err(BuildError::config(
                             format!("{run_path}.output_variable"),
-                            "`output_variable` is only supported for `exec` and `tool` actions",
+                            "`output_variable` is only supported for `exec`, `tool`, and `transcribe_audio` actions",
                         ));
                     }
                     if run_obj.contains_key("input_mode") {
@@ -1521,6 +1541,8 @@ fn parse_actions(
                         program: None,
                         model,
                         profile,
+                        voice: None,
+                        audio_path: None,
                         output_variable: None,
                         status_variable,
                         error_variable,
@@ -1544,11 +1566,146 @@ fn parse_actions(
                         platforms,
                     }
                 }
+                "generate_audio" => {
+                    reject_media_step_fields(
+                        run_obj,
+                        &run_path,
+                        &["text", "path", "voice", "profile", "model"],
+                    )?;
+                    let model = parse_optional_string_run_arg_field(
+                        run_obj,
+                        "model",
+                        &run_path,
+                        action_field_types,
+                        "generate_audio `model`",
+                    )?;
+                    let profile =
+                        parse_optional_profile_field(run_obj, &run_path, action_field_types)?;
+                    let voice = parse_required_string_run_arg_field(
+                        run_obj,
+                        "voice",
+                        &run_path,
+                        action_field_types,
+                    )?;
+                    let text = parse_string_parts_field(
+                        run_obj,
+                        "text",
+                        &run_path,
+                        &available_field_types,
+                    )?;
+                    let path = parse_string_parts_field(
+                        run_obj,
+                        "path",
+                        &run_path,
+                        &available_field_types,
+                    )?;
+                    if let Some(literal_path) = resolve_literal_run_args(&path) {
+                        validate_definition_owned_local_path(
+                            &literal_path,
+                            &format!("{run_path}.path"),
+                            "generated audio output",
+                        )?;
+                        validate_audio_extension(
+                            &literal_path,
+                            &format!("{run_path}.path"),
+                            "generated audio output",
+                        )?;
+                    }
+                    RunStep {
+                        kind,
+                        program: None,
+                        model,
+                        profile,
+                        voice: Some(voice),
+                        audio_path: None,
+                        output_variable: None,
+                        status_variable,
+                        error_variable,
+                        failure_mode,
+                        when,
+                        args: Vec::new(),
+                        prompt: None,
+                        path: Some(path),
+                        subject: None,
+                        text: Some(text),
+                        agent: None,
+                        usage_log: None,
+                        tool_name: None,
+                        tool_params: BTreeMap::new(),
+                        run_vars: None,
+                        input_overrides: None,
+                        inputs: None,
+                        reference_images: None,
+                        input_mode: None,
+                        ignore_tools: false,
+                        platforms,
+                    }
+                }
+                "transcribe_audio" => {
+                    reject_media_step_fields(
+                        run_obj,
+                        &run_path,
+                        &["audio", "output_variable", "profile", "model"],
+                    )?;
+                    let model = parse_optional_string_run_arg_field(
+                        run_obj,
+                        "model",
+                        &run_path,
+                        action_field_types,
+                        "transcribe_audio `model`",
+                    )?;
+                    let profile =
+                        parse_optional_profile_field(run_obj, &run_path, action_field_types)?;
+                    let audio_path =
+                        parse_audio_source_path(run_obj, &run_path, &available_field_types)?;
+                    let output_variable = parse_optional_capture_variable(
+                        run_obj,
+                        "output_variable",
+                        &run_path,
+                        schema_field_types,
+                        &captured_variable_names,
+                    )?
+                    .ok_or_else(|| {
+                        BuildError::config(
+                            format!("{run_path}.output_variable"),
+                            "required for `transcribe_audio` actions",
+                        )
+                    })?;
+                    RunStep {
+                        kind,
+                        program: None,
+                        model,
+                        profile,
+                        voice: None,
+                        audio_path: Some(audio_path),
+                        output_variable: Some(output_variable),
+                        status_variable,
+                        error_variable,
+                        failure_mode,
+                        when,
+                        args: Vec::new(),
+                        prompt: None,
+                        path: None,
+                        subject: None,
+                        text: None,
+                        agent: None,
+                        usage_log: None,
+                        tool_name: None,
+                        tool_params: BTreeMap::new(),
+                        run_vars: None,
+                        input_overrides: None,
+                        inputs: None,
+                        reference_images: None,
+                        input_mode: None,
+                        ignore_tools: false,
+                        platforms,
+                    }
+                }
                 _ => {
                     return Err(BuildError::config(
                         format!("{run_path}.kind"),
                         format!(
-                            "unsupported kind `{kind}` (supported: `exec`, `email_me`, `agent`, `tool`, `generate_image`)"
+                            "unsupported kind `{kind}` (supported: `exec`, `email_me`, `agent`, `tool`, `generate_image`, `generate_audio`, `transcribe_audio`)"
                         ),
                     ));
                 }
@@ -2056,6 +2213,72 @@ fn parse_generate_image_model_field(
         action_field_types,
         "generate_image `model`",
     )
+}
+
+fn parse_required_string_run_arg_field(
+    run_obj: &Map<String, Value>,
+    field_name: &str,
+    run_path: &str,
+    field_types: &BTreeMap<String, FieldType>,
+) -> Result<RunArg, BuildError> {
+    parse_optional_string_run_arg_field(run_obj, field_name, run_path, field_types, field_name)?
+        .ok_or_else(|| {
+            BuildError::config(
+                format!("{run_path}.{field_name}"),
+                "required field is missing",
+            )
+        })
+}
+
+fn parse_audio_source_path(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+    available_field_types: &BTreeMap<String, FieldType>,
+) -> Result<RunArg, BuildError> {
+    let audio_path = format!("{run_path}.audio");
+    let audio = get_required_field(run_obj, "audio", run_path)?;
+    let audio_obj = expect_object(audio, &audio_path)?;
+    if audio_obj.len() != 1 || !audio_obj.contains_key("path") {
+        return Err(BuildError::config(
+            &audio_path,
+            "expected an object with exactly one `path` field",
+        ));
+    }
+    let source =
+        parse_required_string_run_arg_field(audio_obj, "path", &audio_path, available_field_types)?;
+    if let RunArg::Literal(literal) = &source {
+        validate_definition_owned_local_path(
+            literal,
+            &format!("{audio_path}.path"),
+            "audio source",
+        )?;
+        validate_audio_extension(literal, &format!("{audio_path}.path"), "audio source")?;
+    }
+    Ok(source)
+}
+
+fn reject_media_step_fields(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+    kind_fields: &[&str],
+) -> Result<(), BuildError> {
+    const SHARED: &[&str] = &[
+        "kind",
+        "platform",
+        "when",
+        "failure_mode",
+        "status_variable",
+        "error_variable",
+    ];
+    for field in run_obj.keys() {
+        if !SHARED.contains(&field.as_str()) && !kind_fields.contains(&field.as_str()) {
+            return Err(BuildError::config(
+                format!("{run_path}.{field}"),
+                "field is not supported for this action kind",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_optional_profile_field(
@@ -2780,6 +3003,21 @@ fn validate_generated_image_output_extension(
                 "{label} path must use a supported extension: {SUPPORTED_GENERATED_IMAGE_EXTENSIONS_MESSAGE}"
             ),
         )),
+    }
+}
+
+fn validate_audio_extension(raw_path: &str, path: &str, label: &str) -> Result<(), BuildError> {
+    let extension = Path::new(raw_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    if matches!(extension.as_deref(), Some("wav" | "mp3")) {
+        Ok(())
+    } else {
+        Err(BuildError::config(
+            path,
+            format!("{label} path must use a supported extension: wav or mp3"),
+        ))
     }
 }
 
@@ -4170,6 +4408,16 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     .as_ref()
                     .map(|profile| format!("Some({})", render_run_arg(profile)))
                     .unwrap_or_else(|| "None".to_string());
+                let voice = run_step
+                    .voice
+                    .as_ref()
+                    .map(|voice| format!("Some({})", render_run_arg(voice)))
+                    .unwrap_or_else(|| "None".to_string());
+                let audio_path = run_step
+                    .audio_path
+                    .as_ref()
+                    .map(|path| format!("Some({})", render_run_arg(path)))
+                    .unwrap_or_else(|| "None".to_string());
                 let status_variable = run_step
                     .status_variable
                     .as_ref()
@@ -4322,6 +4570,8 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         program: {},
                         model: {},
                         profile: {},
+                        voice: {},
+                        audio_path: {},
                         output_variable: {},
                         status_variable: {},
                         error_variable: {},
@@ -4354,6 +4604,8 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         .unwrap_or_else(|| "None".to_string()),
                     model,
                     profile,
+                    voice,
+                    audio_path,
                     output_variable,
                     status_variable,
                     error_variable,
@@ -4625,6 +4877,8 @@ pub struct RunStep {{
     program: Option<String>,
     model: Option<RunArg>,
     profile: Option<RunArg>,
+    voice: Option<RunArg>,
+    audio_path: Option<RunArg>,
     output_variable: Option<String>,
     status_variable: Option<String>,
     error_variable: Option<String>,
@@ -5254,7 +5508,7 @@ mod tests {
         .to_string();
 
         assert!(
-            error.contains("`profile` is only supported for `agent` and `generate_image` actions")
+            error.contains("`profile` is only supported for `agent`, `generate_image`, `generate_audio`, and `transcribe_audio` actions")
         );
     }
 }

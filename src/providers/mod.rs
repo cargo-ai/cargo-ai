@@ -6,6 +6,8 @@ mod anthropic;
 mod compatibility;
 mod error;
 mod gemini;
+mod image;
+mod media;
 mod ollama;
 mod openai;
 mod openai_compatible;
@@ -19,11 +21,15 @@ pub(crate) use error::{
     provider_error_messages, provider_url_origin, validate_provider_content_parts,
     validate_provider_request, AuthenticationPolicy, ProviderError, ProviderKind,
 };
-pub(crate) use ollama::send_image_request as send_ollama_image_request;
-pub(crate) use openai::send_image_request as send_openai_image_request;
+pub(crate) use image::send_image_request;
+pub(crate) use media::{
+    send_speech_request, send_transcription_request, valid_mp3, ProviderSpeechRequest,
+    ProviderTranscriptionRequest,
+};
 pub(crate) use runtime::{
-    load_image_reference, resolve_inputs as resolve_provider_inputs, Cargo as AgentCargo,
-    ImageReference, ProviderTextRequest, ProviderUsage, ValidatedResponse,
+    load_image_reference, load_image_reference_with_limit,
+    resolve_inputs as resolve_provider_inputs, Cargo as AgentCargo, ImageReference,
+    ProviderTextRequest, ProviderUsage, ValidatedResponse,
 };
 
 pub(crate) async fn send_text_request(

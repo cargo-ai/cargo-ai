@@ -900,6 +900,13 @@ fn parse_run_step(
 ) -> Result<crate::RunStep, String> {
     let run_obj = expect_object(value, path)?;
     let kind = required_string(run_obj, "kind", path)?.to_string();
+    for (field, supported_kind) in [("voice", "generate_audio"), ("audio", "transcribe_audio")] {
+        if kind != supported_kind && run_obj.contains_key(field) {
+            return Err(format!(
+                "{path}.{field}: `{field}` is only supported for `{supported_kind}` actions"
+            ));
+        }
+    }
     let status_variable = optional_capture_name(run_obj, "status_variable", path)?;
     let error_variable = optional_capture_name(run_obj, "error_variable", path)?;
     let failure_mode = optional_failure_mode(run_obj, path)?;
@@ -914,6 +921,8 @@ fn parse_run_step(
                 program: Some(required_non_empty_string(run_obj, "program", path)?),
                 model: None,
                 profile: None,
+                voice: None,
+                audio_path: None,
                 output_variable: optional_capture_name(run_obj, "output_variable", path)?,
                 status_variable,
                 error_variable,
@@ -944,6 +953,8 @@ fn parse_run_step(
                 program: None,
                 model: None,
                 profile: None,
+                voice: None,
+                audio_path: None,
                 output_variable: None,
                 status_variable,
                 error_variable,
@@ -980,6 +991,8 @@ fn parse_run_step(
                 program: None,
                 model: None,
                 profile: optional_string_run_arg(run_obj, "profile", path)?,
+                voice: None,
+                audio_path: None,
                 output_variable: None,
                 status_variable,
                 error_variable,
@@ -1010,6 +1023,8 @@ fn parse_run_step(
                 program: None,
                 model: None,
                 profile: None,
+                voice: None,
+                audio_path: None,
                 output_variable: optional_capture_name(run_obj, "output_variable", path)?,
                 status_variable,
                 error_variable,
@@ -1053,6 +1068,8 @@ fn parse_run_step(
                 program: None,
                 model: optional_string_run_arg(run_obj, "model", path)?,
                 profile: optional_string_run_arg(run_obj, "profile", path)?,
+                voice: None,
+                audio_path: None,
                 output_variable: None,
                 status_variable,
                 error_variable,
@@ -1080,8 +1097,46 @@ fn parse_run_step(
                 platforms,
             })
         }
+        "generate_audio" => {
+            reject_media_step_fields(run_obj, path, &["text", "voice", "path", "profile", "model"])?;
+            let path_parts = parse_string_parts_field(run_obj, "path", path)?;
+            if let Some(literal_path) = resolve_literal_run_args(&path_parts) {
+                validate_definition_owned_local_path(&literal_path, format!("{path}.path").as_str(), "generated audio output")?;
+                validate_audio_extension(&literal_path, format!("{path}.path").as_str(), "generated audio output")?;
+            }
+            Ok(crate::RunStep {
+                kind, program: None,
+                model: optional_string_run_arg(run_obj, "model", path)?,
+                profile: optional_string_run_arg(run_obj, "profile", path)?,
+                voice: Some(required_string_run_arg(run_obj, "voice", path)?),
+                audio_path: None,
+                output_variable: None, status_variable, error_variable, failure_mode, when,
+                args: Vec::new(), prompt: None, path: Some(path_parts), subject: None,
+                text: Some(parse_string_parts_field(run_obj, "text", path)?),
+                agent: None, usage_log: None, tool_name: None, tool_params: BTreeMap::new(),
+                run_vars: None, input_overrides: None, inputs: None, reference_images: None,
+                input_mode: None, ignore_tools: false, platforms,
+            })
+        }
+        "transcribe_audio" => {
+            reject_media_step_fields(run_obj, path, &["audio", "output_variable", "profile", "model"])?;
+            let audio_path = parse_audio_source_path(run_obj, path)?;
+            let output_variable = optional_capture_name(run_obj, "output_variable", path)?
+                .ok_or_else(|| format!("{path}.output_variable: required for `transcribe_audio` actions"))?;
+            Ok(crate::RunStep {
+                kind, program: None,
+                model: optional_string_run_arg(run_obj, "model", path)?,
+                profile: optional_string_run_arg(run_obj, "profile", path)?,
+                voice: None, audio_path: Some(audio_path),
+                output_variable: Some(output_variable), status_variable, error_variable, failure_mode, when,
+                args: Vec::new(), prompt: None, path: None, subject: None, text: None,
+                agent: None, usage_log: None, tool_name: None, tool_params: BTreeMap::new(),
+                run_vars: None, input_overrides: None, inputs: None, reference_images: None,
+                input_mode: None, ignore_tools: false, platforms,
+            })
+        }
         other => Err(format!(
-            "{path}.kind: unsupported kind `{other}` (supported: `exec`, `email_me`, `agent`, `tool`, `generate_image`)"
+            "{path}.kind: unsupported kind `{other}` (supported: `exec`, `email_me`, `agent`, `tool`, `generate_image`, `generate_audio`, `transcribe_audio`)"
         )),
     }
 }
@@ -1247,6 +1302,65 @@ fn optional_string_run_arg(
         return Err(format!("{path}.{field_name}: must be a non-empty string"));
     }
     Ok(Some(parsed))
+}
+
+fn required_string_run_arg(
+    run_obj: &Map<String, Value>,
+    field_name: &str,
+    path: &str,
+) -> Result<crate::RunArg, String> {
+    optional_string_run_arg(run_obj, field_name, path)?
+        .ok_or_else(|| format!("{path}.{field_name}: required field is missing"))
+}
+
+fn reject_media_step_fields(
+    run_obj: &Map<String, Value>,
+    path: &str,
+    kind_fields: &[&str],
+) -> Result<(), String> {
+    const SHARED: &[&str] = &[
+        "kind",
+        "platform",
+        "when",
+        "failure_mode",
+        "status_variable",
+        "error_variable",
+    ];
+    for field in run_obj.keys() {
+        if !SHARED.contains(&field.as_str()) && !kind_fields.contains(&field.as_str()) {
+            return Err(format!(
+                "{path}.{field}: field is not supported for this action kind"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_audio_source_path(
+    run_obj: &Map<String, Value>,
+    path: &str,
+) -> Result<crate::RunArg, String> {
+    let audio_path = format!("{path}.audio");
+    let audio = expect_object(required_field(run_obj, "audio", path)?, &audio_path)?;
+    if audio.len() != 1 || !audio.contains_key("path") {
+        return Err(format!(
+            "{audio_path}: expected an object with exactly one `path` field"
+        ));
+    }
+    let source = required_string_run_arg(audio, "path", &audio_path)?;
+    if let crate::RunArg::Literal(literal) = &source {
+        validate_definition_owned_local_path(
+            literal,
+            format!("{audio_path}.path").as_str(),
+            "audio source",
+        )?;
+        validate_audio_extension(
+            literal,
+            format!("{audio_path}.path").as_str(),
+            "audio source",
+        )?;
+    }
+    Ok(source)
 }
 
 fn optional_failure_mode(
@@ -2013,6 +2127,20 @@ fn validate_generated_image_output_extension(raw_path: &str, path: &str) -> Resu
         _ => Err(format!(
             "{path}: generated image output path must use a supported extension"
         )),
+    }
+}
+
+fn validate_audio_extension(raw_path: &str, path: &str, label: &str) -> Result<(), String> {
+    let extension = Path::new(raw_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    if matches!(extension.as_deref(), Some("wav" | "mp3")) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{path}: {label} path must use a supported extension: wav or mp3"
+        ))
     }
 }
 
@@ -2849,6 +2977,30 @@ mod tests {
             .reference_images
             .as_ref()
             .is_some_and(|references| references.len() == 2));
+    }
+
+    #[test]
+    fn matches_codegen_for_audio_steps_and_same_action_capture() {
+        let cfg = config_with_optional_inputs(
+            r#""script": { "type": "string" }"#,
+            r#""source": { "type": "string" }"#,
+            r#"[{"name":"media","logic":{"==":[1,1]},"run":[
+                {"kind":"generate_audio","text":["Speak ",{"var":"script"}],"voice":"alloy","path":"./speech.wav"},
+                {"kind":"transcribe_audio","audio":{"path":{"var":"runtime.source"}},"output_variable":"transcript"},
+                {"kind":"agent","artifact":"./child.json","inputs":[{"type":"text","text":[{"var":"transcript"}]}]}
+            ]}]"#,
+            None,
+            None,
+        );
+        let definition = assert_runtime_and_codegen_accept(&cfg);
+        let steps = &definition.actions()[0].run;
+        assert!(
+            matches!(steps[0].voice.as_ref(), Some(crate::RunArg::Literal(voice)) if voice == "alloy")
+        );
+        assert!(
+            matches!(steps[1].audio_path.as_ref(), Some(crate::RunArg::Variable(path)) if path == "runtime.source")
+        );
+        assert_eq!(steps[1].output_variable.as_deref(), Some("transcript"));
     }
 
     #[test]

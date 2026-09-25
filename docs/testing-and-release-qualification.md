@@ -149,7 +149,7 @@ cargo test --locked --test provider_smoke typesafe_smoke::interpreted_typesafe_p
 
 ### Deterministic generated adapters
 
-Generated-provider parity cases hatch and run complete standalone executables against the same loopback assertions. They are ignored by the ordinary Rust invocation because they compile full binaries. **Core CI** runs one sequential batch containing all seven provider cases on Ubuntu, macOS, and Windows:
+Generated-provider parity cases hatch and run complete standalone executables against the same loopback assertions. They are ignored by the ordinary Rust invocation because they compile full binaries. **Core CI** runs one sequential batch containing all seven provider cases plus the speech-generation/transcription-to-child chain on Ubuntu, macOS, and Windows:
 
 ```bash
 cargo test --locked --test provider_smoke generated_provider_batch_isolated_and_deterministic -- --ignored --exact --nocapture

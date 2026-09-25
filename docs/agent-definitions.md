@@ -162,6 +162,26 @@ Pass values with repeatable `--run-var name=value` flags and reference them as `
 
 Runtime variable names are flat and must be declared. Undeclared or duplicate flags fail, and a variable without a default must be supplied if an executed path resolves it. Quote values when the shell would otherwise split or interpret them.
 
+A transcription step can use a declared string runtime variable to select a local audio source without changing the agent definition:
+
+```json
+{
+  "runtime_vars": { "audio_path": { "type": "string" } },
+  "actions": [{
+    "name": "transcribe",
+    "logic": { "==": [1, 1] },
+    "run": [{
+      "kind": "transcribe_audio",
+      "profile": "speech-transcription",
+      "audio": { "path": { "var": "runtime.audio_path" } },
+      "output_variable": "transcript"
+    }]
+  }]
+}
+```
+
+Pass `--run-var audio_path=./recordings/meeting.wav`. The source must be a portable relative WAV or MP3 path, and the existing file must fit the 10 MiB limit. `transcribe_audio` captures text only for subsequent steps of the same action; an action-only coordinator can forward that capture to a text child. It does not add audio to top-level `file` inputs. See [Actions and child agents](./actions-and-child-agents.md) for a complete chain and package path behavior.
+
 ## Secrets And Trusted Tools
 
 Runtime variables are ordinary typed values, not secret fields. `--run-var` values can enter process arguments, and action parameters, results, or errors may disclose them. Model-facing inputs (including files) are not a secret store. Use saved connection profiles for provider authentication.

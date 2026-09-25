@@ -58,7 +58,7 @@ For N levels and native score s in [0,N−1], Cargo AI maps to authored [a,b] us
 
 The adapter sends text parts in order and maps field descriptions and labels/rubrics to questions. Missing/extra answers, wrong primitive types, unknown labels, malformed responses or invalid scores fail before downstream actions. Native probabilities, confidence, distributions, Score legends and Noul are not exposed. An intentionally authored unknown option is an ordinary label, not calibrated abstention.
 
-An empty action-only root skips inference and its Jev certification. Children and image-generation steps use their own compatible effective profiles. TypeSafe does not support `generate_image`; select a supported OpenAI or Ollama step profile. A failed child cannot undo earlier successful actions.
+An empty action-only root skips inference and its Jev certification. Children and media steps use their own compatible effective profiles. TypeSafe does not support `generate_image`, `generate_audio`, or `transcribe_audio`; select a compatible step profile. A failed child cannot undo earlier successful actions.
 
 ## Limits And Failures
 

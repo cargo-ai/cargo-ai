@@ -73,6 +73,7 @@ OpenAI-compatible `/v1/images/generations` endpoint:
 - Cargo AI expects the documented `b64_json` response
 
 Ollama labels this image endpoint experimental, so it may change or disappear.
+Ollama does not currently provide Cargo AI `generate_audio` or `transcribe_audio` steps. Select an API-key profile for a provider with a native speech or transcription route when those actions are needed.
 See the official [OpenAI compatibility guide](https://docs.ollama.com/api/openai-compatibility).
 Verified: 2026-08-30.
 

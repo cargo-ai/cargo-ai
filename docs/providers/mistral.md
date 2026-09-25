@@ -40,8 +40,7 @@ The default endpoint is `https://api.mistral.ai/v1/chat/completions`, matching
 Mistral's official Chat Completions reference. When configured,
 `--max-output-tokens` maps to the Chat Completions `max_tokens` field.
 
-Use `--url` only for a complete compatible Chat Completions endpoint. Other
-native Mistral platform services do not match this adapter.
+Use `--url` for a complete compatible Chat Completions endpoint. Cargo AI derives its native media routes from that configured API origin.
 
 ## Capabilities And Boundaries
 
@@ -51,9 +50,9 @@ The current compatibility slice supports:
 - strict custom `json_schema` output and normalized usage
 - interpreted and hatched execution
 
-Image input, direct file input, native Mistral platform services, and Mistral
-`generate_image` are unsupported and fail explicitly. A Mistral parent can
-select an OpenAI or Ollama step-level profile for image generation.
+The following media adapters are implemented but awaiting live verification. Image input and generic direct file input remain unsupported for text inference. Mistral API-key profiles can use `generate_image` through the provider's image-generation tool, with `.png` output and no reference images. The tool creates a provider-hosted file before Cargo AI saves a local copy; a response without exactly one valid image fails. The returned image is limited to 20 MiB, and authenticated file retrieval is confined to the configured API origin and a validated file ID.
+
+The same profile can use `generate_audio` for `.wav` or `.mp3` speech with an existing saved voice ID accessible to the account; Cargo AI does not create or clone a voice. `transcribe_audio` accepts a local `.wav` or `.mp3` file up to 10 MiB and captures text for later steps. Each model-selecting route uses the explicit step model, then the step-profile model, then the invocation model. Provider access and model support remain account-specific.
 
 Cargo AI preserves the provider identity even though the wire format is
 OpenAI-compatible. It sends the complete authored return schema in strict mode

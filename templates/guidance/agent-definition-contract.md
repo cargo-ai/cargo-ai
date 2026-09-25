@@ -339,6 +339,8 @@ Required fields:
 
 ### `generate_image`
 
+Gemini, Mistral, and xAI image routes, plus OpenAI, Gemini, Mistral, and xAI audio routes below, are implemented adapters awaiting live provider verification. Their formats describe intended behavior, not yet established compatible support. Existing OpenAI and Ollama image behavior is unchanged.
+
 Required fields:
 - `kind`
 - `prompt`
@@ -352,8 +354,8 @@ Required fields:
 - If `profile` is present, Cargo AI resolves that profile at step runtime and uses it for the image step's provider/url/token context.
 - With `generate_image.profile`, explicit `model` still wins, then the step-profile model, then the parent invocation model.
 - `generate_image.profile` may point to a different provider from the parent invocation; for example, a parent may stay on OpenAI while one image step switches to an Ollama profile.
-- Anthropic profiles support text, URL-text, image input, and structured text output, but not direct file input or `generate_image` in the current release. An Anthropic parent may select an OpenAI or Ollama step profile for image generation.
-- Gemini profiles use the native Interactions API with `store = false` and support text, URL-text, image input, and structured text output, but not direct file input or `generate_image` in the current release. A Gemini parent may select an OpenAI or Ollama step profile for image generation.
+- Anthropic profiles support text, URL-text, image input, and structured text output, but not direct file input or media generation. An Anthropic parent may select a compatible step profile for media actions.
+- Gemini profiles use the native Interactions API with `store = false` and support text, URL-text, image input, structured text output, image generation, speech generation, and transcription. Direct generic file input remains unsupported.
 - If neither the step nor the invocation provides a model, the step fails clearly at runtime.
 - `model` may be:
   - a literal non-empty string
@@ -369,6 +371,7 @@ Required fields:
 - When using more than one reference image, label the roles in the prompt, such as "Image 1 is the source photo; Images 2 and 3 are style references only."
 - OpenAI API-key profiles send `reference_images` through the OpenAI image edit/reference-image path; OpenAI account profiles include them as Responses image input parts.
 - For Ollama's experimental OpenAI-compatible `/v1/images/generations` endpoint, use an Ollama image model on an Ollama profile. The current compatibility slice uses Ollama's documented `b64_json` response path, so Ollama-backed `generate_image` steps currently require a `.png` output path and do not support `reference_images`.
+- Gemini output uses `.png` and up to four PNG/JPEG references; xAI uses `.jpg`/`.jpeg` and up to five PNG/JPEG references; Mistral uses `.png` without references. References are capped at 10 MiB each and 20 MiB total. Mistral's image tool creates a provider-hosted file, and a response without exactly one valid image fails.
 - Current-at-ship-date note: official OpenAI docs list `gpt-image-2` for image generation and editing, including high-fidelity image inputs. Verified: 2026-05-22.
 
 Named reference image definition fragment:
@@ -413,6 +416,39 @@ Mixed reference image example:
 ]
 ```
 
+### `generate_audio`
+
+Required fields: `kind`, `text`, `voice`, and `path`. Optional fields: `profile` and `model`. This first audio contract generates speech from supplied text. `text` and `path` accept literal strings or ordered string/variable parts; `voice` accepts a nonempty literal or one string variable reference. A voice is provider-specific. A selected step profile supplies provider credentials and context, and model precedence is explicit step model, step-profile model, then invocation model. xAI's fixed speech service has no model selection and rejects an explicit step `model`.
+
+OpenAI API-key, Gemini, Mistral, and xAI API-key profiles support this step. Use `.wav` for all four; `.mp3` is additionally supported for OpenAI, Mistral, and xAI. Gemini accepts `.wav` only. Mistral needs an existing saved voice ID available to the selected account. Cargo AI does not create or clone voices. Generated audio is limited to 20 MiB. The adapter checks returned container bytes and writes one complete file through a staged replacement, preserving an existing target on failure. See [action rules](action-rules.md) for path roots and provider limits.
+
+```json
+{
+  "kind": "generate_audio",
+  "profile": "speech_profile",
+  "model": "speech-model",
+  "text": "The supplied script is spoken as written.",
+  "voice": "provider-voice-id",
+  "path": "./artifacts/script.wav"
+}
+```
+
+### `transcribe_audio`
+
+Required fields: `kind`, `audio` with exactly one `path`, and `output_variable`. Optional fields: `profile` and `model`. The path is a literal portable relative path or a single string variable reference such as `{ "var": "runtime.audio_path" }`; WAV and MP3 source files are limited to 10 MiB. The source is read by the step and sent to the selected native transcription provider. It is not a top-level `file` input.
+
+OpenAI API-key, Gemini, Mistral, and xAI API-key profiles support transcription. Empty or whitespace-only text fails. A successful transcript is captured as a string for later steps of the same action and is never inserted into the earlier root inference result. An action-only coordinator can transcribe and then pass that string to a text-compatible child agent. See [action rules](action-rules.md) for source confinement and package asset/data roots.
+
+```json
+{
+  "kind": "transcribe_audio",
+  "profile": "transcription_profile",
+  "model": "transcription-model",
+  "audio": { "path": { "var": "runtime.audio_path" } },
+  "output_variable": "transcript"
+}
+```
+
 ## Common Optional Step Fields
 
 These fields are available on every step kind:
@@ -422,7 +458,7 @@ These fields are available on every step kind:
 - `status_variable`
 - `error_variable`
 
-`exec` and `tool` also support:
+`exec`, `tool`, and `transcribe_audio` also support:
 - `output_variable`
 
 Only the common controls and the fields listed for a step's own kind are allowed. For example, `output_variable` is invalid on `agent`, and `program` is invalid on `tool`. String-part references have exactly one key, `var`; neighboring keys are rejected rather than ignored.
@@ -454,7 +490,7 @@ Example:
 
 - The top-level `agent_schema` fields are the agent's returned structured output.
 - Actions run only after the model's raw structured output passes the declared shape, type, enum, numeric-bound and resource checks. Missing properties and unknown properties, including unknown root fields, fail before actions.
-- `exec`, `agent`, `tool`, `email_me`, and `generate_image` steps are follow-up side effects or orchestration.
+- `exec`, `agent`, `tool`, `email_me`, `generate_image`, `generate_audio`, and `transcribe_audio` steps are follow-up side effects or orchestration.
 - Action steps do not mutate the returned top-level output object.
 - `output_variable`, `status_variable`, and `error_variable` are action-local only.
 
@@ -604,7 +640,7 @@ Expect `cargo ai hatch <agent-name> --config <config.json> --check` to reject at
 - invalid relative file or image paths
 - invalid generated-image output path extension
 - invalid `platform` value
-- `output_variable` on non-`exec` / non-`tool` steps
+- `output_variable` on steps other than `exec`, `tool`, or `transcribe_audio`
 - malformed or unknown tool `params`
 - tool `describe.result` that is not a nullable string schema
 - captured-variable collisions

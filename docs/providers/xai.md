@@ -37,8 +37,7 @@ The default endpoint is `https://api.x.ai/v1/responses`. Cargo AI sends
 `store = false`. When configured, `--max-output-tokens` maps to the Responses
 `max_output_tokens` field.
 
-Use `--url` only for a complete xAI Responses endpoint. Chat Completions is not
-the transport for Cargo AI's `xai` identity.
+Use `--url` for a complete xAI Responses endpoint. Cargo AI derives its native media routes from that configured API origin. Chat Completions is not the text transport for Cargo AI's `xai` identity.
 
 ## Capabilities And Boundaries
 
@@ -48,9 +47,9 @@ The current compatibility slice supports:
 - strict JSON-schema-directed output and normalized usage
 - interpreted and hatched execution
 
-Image input, direct file input, provider-hosted xAI tools, and xAI
-`generate_image` are unsupported and fail explicitly. An xAI parent can select
-an OpenAI or Ollama step-level profile for image generation.
+The following media adapters are implemented but awaiting live verification. Image input, generic direct file input, and provider-hosted xAI tools remain unsupported for text inference. xAI API-key profiles can use `generate_image` for `.jpg`/`.jpeg` output; JSON image edits accept up to five PNG/JPEG references. Each reference is limited to 10 MiB, all references to 20 MiB, and the returned image to 20 MiB.
+
+`generate_audio` produces `.wav` or `.mp3` speech with a provider voice ID. The xAI TTS route is a fixed service and rejects an explicit step `model`; Cargo AI sends the documented `language: auto` value. `transcribe_audio` accepts local `.wav` or `.mp3` files up to 10 MiB and requires a compatible transcription model. Media failures do not trigger provider fallback.
 
 Cargo AI sends the complete authored return schema with strict mode and
 validates the returned JSON locally before actions run. If a selected model

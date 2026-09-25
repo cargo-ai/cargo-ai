@@ -83,6 +83,8 @@ OpenAI also supports Cargo AI `generate_image` actions:
 - A step-level profile and explicit image model can keep image generation
   separate from the main inference model.
 
+The new audio adapters are implemented but awaiting live verification. OpenAI API-key profiles provide `generate_audio` for `.wav` or `.mp3` speech using a selected model and provider voice, and `transcribe_audio` for local `.wav` or `.mp3` files up to 10 MiB. A transcription result is captured as text for later steps in the same action. These two audio steps are unavailable through the OpenAI account transport; use an API-key step profile when an account-backed parent needs them.
+
 Model access and feature support remain model-specific. The recommended model
 above is a representative onboarding choice, not certification of every OpenAI
 model or guarantee of access in every workspace.

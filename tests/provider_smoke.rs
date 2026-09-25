@@ -11,6 +11,7 @@ mod qualification_report;
 mod typesafe_smoke;
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -196,6 +197,193 @@ fn openai_success_response(output: &str) -> String {
     .to_string()
 }
 
+fn media_responses(transcript: &str, include_child: bool) -> Vec<MediaResponse> {
+    let mut responses = vec![
+        MediaResponse {
+            path: "/v1/audio/speech",
+            content_type: "audio/wav",
+            body: MEDIA_WAV.to_vec(),
+        },
+        MediaResponse {
+            path: "/v1/audio/transcriptions",
+            content_type: "application/json",
+            body: serde_json::json!({"text": transcript})
+                .to_string()
+                .into_bytes(),
+        },
+    ];
+    if include_child {
+        responses.push(MediaResponse {
+            path: "/v1/chat/completions",
+            content_type: "application/json",
+            body: openai_success_response(r#"{"status":"ok"}"#).into_bytes(),
+        });
+    }
+    responses
+}
+
+fn write_media_definitions(fixture: &Fixture) {
+    let definition = serde_json::json!({
+        "agent_definition_schema_version": "2026-09-09.r1",
+        "agent_schema": {"type":"object","properties":{}},
+        "runtime_vars": {"audio_path":{"type":"string","default":"./speech.wav"}},
+        "actions": [{
+            "name":"speak_then_listen",
+            "logic":{"==":[1,1]},
+            "run":[
+                {"kind":"generate_audio","model":"tts-model","text":"The quarterly report is ready.","voice":"coral","path":"./speech.wav"},
+                {"kind":"transcribe_audio","model":"transcriber-model","audio":{"path":{"var":"runtime.audio_path"}},"output_variable":"transcript"},
+                {"kind":"agent","artifact":"./child.json","inputs":[{"type":"text","text":["Transcript: ",{"var":"transcript"}]}]}
+            ]
+        }]
+    });
+    fs::write(
+        &fixture.definition,
+        serde_json::to_vec(&definition).unwrap(),
+    )
+    .unwrap();
+    let child = serde_json::json!({
+        "agent_definition_schema_version": "2026-09-09.r1",
+        "agent_schema": {"type":"object","properties":{"status":{"type":"string"}}},
+        "actions": []
+    });
+    fs::write(
+        fixture.root.join("child.json"),
+        serde_json::to_vec(&child).unwrap(),
+    )
+    .unwrap();
+}
+
+fn configure_media_profile(fixture: &Fixture, url: &str) {
+    let cli = env!("CARGO_BIN_EXE_cargo-ai");
+    let added = fixture
+        .isolated_command(cli)
+        .args([
+            "--no-update-check",
+            "profile",
+            "add",
+            "media-child",
+            "--server",
+            "openai",
+            "--model",
+            "child-model",
+            "--url",
+            url,
+            "--auth",
+            "api_key",
+            "--default",
+        ])
+        .output()
+        .expect("isolated media profile add should start");
+    assert!(
+        added.status.success(),
+        "profile add failed: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let mut set = fixture.isolated_command(cli);
+    let mut child = set
+        .args([
+            "--no-update-check",
+            "profile",
+            "set",
+            "media-child",
+            "--stdin",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("isolated media profile set should start");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(OPENAI_TEST_TOKEN.as_bytes())
+        .unwrap();
+    let saved = child.wait_with_output().unwrap();
+    assert!(
+        saved.status.success(),
+        "profile set failed: {}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+}
+
+fn configure_media_fixture(fixture: &Fixture, url: &str) {
+    write_media_definitions(fixture);
+    configure_media_profile(fixture, url);
+}
+
+fn media_command(fixture: &Fixture, program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = fixture.isolated_command(program);
+    let cli_parent = Path::new(env!("CARGO_BIN_EXE_cargo-ai")).parent().unwrap();
+    let mut search_paths = vec![cli_parent.to_path_buf()];
+    search_paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    command.env("PATH", std::env::join_paths(search_paths).unwrap());
+    command
+}
+
+fn media_run_args(url: &str) -> [&str; 14] {
+    [
+        "--server",
+        "openai",
+        "--url",
+        url,
+        "--token",
+        OPENAI_TEST_TOKEN,
+        "--model",
+        "child-model",
+        "--max-output-tokens",
+        "128",
+        "--render-mode",
+        "append-only",
+        "--inference-timeout-in-sec",
+        "10",
+    ]
+}
+
+fn assert_media_chain(fixture: &Fixture, output: &Output, requests: &[String]) {
+    assert!(
+        output.status.success(),
+        "media chain failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(MEDIA_WAV.len(), 46);
+    assert_eq!(
+        fs::read(fixture.root.join("speech.wav")).unwrap(),
+        MEDIA_WAV
+    );
+    assert_eq!(
+        requests.len(),
+        3,
+        "expected speech, transcription and child inference only"
+    );
+    let speech: Value =
+        serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(speech["model"], "tts-model");
+    assert_eq!(speech["input"], MEDIA_TRANSCRIPT);
+    assert_eq!(speech["voice"], "coral");
+    assert_eq!(speech["response_format"], "wav");
+    assert!(requests[1].contains("name=\"model\"\r\n\r\ntranscriber-model"));
+    assert!(requests[1].contains("filename=\"speech.wav\""));
+    assert!(requests[1]
+        .as_bytes()
+        .windows(MEDIA_WAV.len())
+        .any(|window| window == MEDIA_WAV));
+    let child: Value = serde_json::from_str(requests[2].split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(child["model"], "child-model");
+    assert!(
+        child["messages"][0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|part| part["text"] == format!("Transcript: {MEDIA_TRANSCRIPT}")),
+        "child did not receive exact transcript: {child}"
+    );
+}
+
 fn ollama_success_response(output: &str) -> String {
     serde_json::json!({
         "choices": [{"message": {"role": "assistant", "content": output}}],
@@ -208,6 +396,79 @@ fn ollama_success_response(output: &str) -> String {
 struct MockServer {
     url: String,
     request: thread::JoinHandle<String>,
+}
+
+const MEDIA_WAV: &[u8] = b"RIFF\x26\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x40\x1f\x00\x00\x40\x1f\x00\x00\x01\x00\x08\x00data\x02\x00\x00\x00\x00\x00";
+const MEDIA_TRANSCRIPT: &str = "The quarterly report is ready.";
+
+struct MediaResponse {
+    path: &'static str,
+    content_type: &'static str,
+    body: Vec<u8>,
+}
+
+struct MediaServer {
+    url: String,
+    requests: thread::JoinHandle<Vec<String>>,
+}
+
+impl MediaServer {
+    fn new(responses: Vec<MediaResponse>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("media mock listener should bind");
+        listener
+            .set_nonblocking(true)
+            .expect("media mock should be nonblocking");
+        let address = listener
+            .local_addr()
+            .expect("media mock address should resolve");
+        let requests = thread::spawn(move || {
+            let mut requests = Vec::new();
+            'responses: for response in responses {
+                let started = Instant::now();
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && started.elapsed() < Duration::from_secs(30) =>
+                        {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            break 'responses
+                        }
+                        Err(error) => panic!("media mock expected another request: {error}"),
+                    }
+                };
+                let request = read_http_request(&mut stream);
+                assert!(
+                    request.starts_with(&format!("POST {} HTTP/1.1", response.path)),
+                    "unexpected media request: {request}"
+                );
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response.content_type,
+                    response.body.len()
+                );
+                stream
+                    .write_all(header.as_bytes())
+                    .expect("media response header should write");
+                stream
+                    .write_all(&response.body)
+                    .expect("media response body should write");
+                requests.push(request);
+            }
+            requests
+        });
+        Self {
+            url: format!("http://{address}/v1/chat/completions"),
+            requests,
+        }
+    }
+
+    fn finish(self) -> Vec<String> {
+        self.requests.join().expect("media mock should finish")
+    }
 }
 
 impl MockServer {
@@ -1149,6 +1410,108 @@ fn interpreted_anthropic_smoke_isolated_and_deterministic() {
 }
 
 #[test]
+fn interpreted_audio_chain_writes_transcribes_and_forwards_exact_capture() {
+    let fixture = Fixture::new();
+    let mock = MediaServer::new(media_responses(MEDIA_TRANSCRIPT, true));
+    configure_media_fixture(&fixture, &mock.url);
+    let output = media_command(&fixture, env!("CARGO_BIN_EXE_cargo-ai"))
+        .args(["--no-update-check", "run", "--config"])
+        .arg(&fixture.definition)
+        .args(media_run_args(&mock.url))
+        .output()
+        .expect("interpreted audio chain should start");
+    let requests = mock.finish();
+    assert_media_chain(&fixture, &output, &requests);
+}
+
+#[test]
+fn interpreted_audio_chain_does_not_forward_empty_transcript() {
+    let fixture = Fixture::new();
+    let mock = MediaServer::new(media_responses("   ", false));
+    configure_media_fixture(&fixture, &mock.url);
+    let output = media_command(&fixture, env!("CARGO_BIN_EXE_cargo-ai"))
+        .args(["--no-update-check", "run", "--config"])
+        .arg(&fixture.definition)
+        .args(media_run_args(&mock.url))
+        .output()
+        .expect("interpreted empty-transcript chain should start");
+    assert!(
+        !output.status.success(),
+        "empty transcript must fail the action"
+    );
+    let requests = mock.finish();
+    assert_eq!(
+        requests.len(),
+        2,
+        "child must not be invoked without a transcript capture"
+    );
+    assert_eq!(
+        fs::read(fixture.root.join("speech.wav")).unwrap(),
+        MEDIA_WAV
+    );
+    let diagnostic = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        diagnostic.contains("no transcript"),
+        "missing empty-transcript diagnostic: {diagnostic}"
+    );
+}
+
+#[test]
+#[ignore = "run explicitly in the provider smoke CI lane"]
+fn generated_audio_chain_writes_transcribes_and_forwards_exact_capture() {
+    generated_audio_chain_case(&Fixture::new());
+}
+
+fn generated_audio_chain_case(fixture: &Fixture) {
+    write_media_definitions(fixture);
+    let output_dir = fixture.root.join("dist");
+    let hatch = media_command(&fixture, env!("CARGO_BIN_EXE_cargo-ai"))
+        .args([
+            "--no-update-check",
+            "hatch",
+            "media_chain_smoke",
+            "--config",
+        ])
+        .arg(&fixture.definition)
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--force")
+        .output()
+        .expect("media chain hatch should start");
+    assert!(
+        hatch.status.success(),
+        "media hatch failed:\n{}\n{}",
+        String::from_utf8_lossy(&hatch.stdout),
+        String::from_utf8_lossy(&hatch.stderr)
+    );
+    if fixture.home.join("batch-seed-marker").exists() {
+        assert!(
+            String::from_utf8_lossy(&hatch.stdout).contains("Reused warmed template"),
+            "batch media case should reuse its copied seed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&hatch.stdout),
+            String::from_utf8_lossy(&hatch.stderr)
+        );
+    }
+    let executable = output_dir.join(if cfg!(windows) {
+        "media_chain_smoke.exe"
+    } else {
+        "media_chain_smoke"
+    });
+    let mock = MediaServer::new(media_responses(MEDIA_TRANSCRIPT, true));
+    configure_media_profile(&fixture, &mock.url);
+    let output = media_command(&fixture, &executable)
+        .args(media_run_args(&mock.url))
+        .output()
+        .expect("generated audio chain should start");
+    let requests = mock.finish();
+    assert_media_chain(&fixture, &output, &requests);
+}
+
+#[test]
 #[ignore = "run explicitly in the provider smoke CI lane"]
 fn generated_anthropic_smoke_isolated_and_deterministic() {
     generated_anthropic_case(&Fixture::new());
@@ -1424,7 +1787,7 @@ fn generated_provider_batch_isolated_and_deterministic() {
         "generated-provider neutral-seed: {:.2}s",
         started.elapsed().as_secs_f64()
     );
-    let cases: [(&str, fn(&Fixture)); 7] = [
+    let cases: [(&str, fn(&Fixture)); 8] = [
         ("anthropic", generated_anthropic_case),
         ("gemini", generated_gemini_case),
         ("mistral", generated_mistral_case),
@@ -1432,6 +1795,7 @@ fn generated_provider_batch_isolated_and_deterministic() {
         ("openai", generated_openai_case),
         ("ollama", generated_ollama_case),
         ("typesafe", typesafe_smoke::generated_typesafe_case),
+        ("media-chain", generated_audio_chain_case),
     ];
     let mut completed = Vec::new();
     for (provider, case) in cases {
@@ -1475,11 +1839,12 @@ fn generated_provider_batch_isolated_and_deterministic() {
             "xai",
             "openai",
             "ollama",
-            "typesafe"
+            "typesafe",
+            "media-chain"
         ]
     );
     eprintln!(
-        "generated-provider batch: 7/7 passed in {:.2}s",
+        "generated-provider batch: 8/8 passed in {:.2}s",
         started.elapsed().as_secs_f64()
     );
 }
@@ -2136,6 +2501,571 @@ fn live_xai_smoke_uses_isolated_stdin_credentials() {
 #[ignore = "requires OPENAI_API_KEY and OPENAI_MODEL"]
 fn live_openai_smoke_uses_isolated_stdin_credentials() {
     run_live_hosted_smoke("openai", "OPENAI_API_KEY", "OPENAI_MODEL");
+}
+
+// This selector is deliberately manual. Its proof directory is a private, persistent
+// attempt ledger; reruns against the same directory cannot silently reset the budget.
+#[test]
+#[ignore = "requires explicit isolated media proof directory and provider API keys"]
+fn live_media_bundle_uses_isolated_stdin_credentials() {
+    let provider = std::env::var("CARGO_AI_MEDIA_PROVIDER")
+        .expect("CARGO_AI_MEDIA_PROVIDER must select openai, gemini, mistral, or xai");
+    assert!(
+        matches!(provider.as_str(), "openai" | "gemini" | "mistral" | "xai"),
+        "unsupported media proof provider"
+    );
+    let proof_root = PathBuf::from(
+        std::env::var_os("CARGO_AI_MEDIA_PROOF_DIR")
+            .expect("CARGO_AI_MEDIA_PROOF_DIR must name an explicit private directory"),
+    );
+    assert!(
+        proof_root.is_absolute(),
+        "media proof directory must be absolute"
+    );
+    let metadata = fs::symlink_metadata(&proof_root).expect("media proof directory must exist");
+    assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            metadata.permissions().mode() & 0o077,
+            0,
+            "proof directory must be private (mode 0700)"
+        );
+    }
+    let key_name = match provider.as_str() {
+        "openai" => "OPENAI_API_KEY",
+        "gemini" => "GEMINI_API_KEY",
+        "mistral" => "MISTRAL_API_KEY",
+        _ => "XAI_API_KEY",
+    };
+    let key = std::env::var(key_name).expect("selected provider API key is required");
+    let child_key =
+        std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY is required for the text child");
+    let child_model =
+        std::env::var("OPENAI_MODEL").expect("OPENAI_MODEL is required for the text child");
+    assert!(
+        !key.trim().is_empty() && !child_key.trim().is_empty() && !child_model.trim().is_empty()
+    );
+    let voice = match provider.as_str() {
+        "openai" => "coral".to_string(),
+        "gemini" => "Kore".to_string(),
+        "xai" => "eve".to_string(),
+        _ => match std::env::var("CARGO_AI_MISTRAL_VOICE_ID") {
+            Ok(voice) if !voice.trim().is_empty() => voice,
+            _ => panic!("BLOCKED: an existing permitted CARGO_AI_MISTRAL_VOICE_ID is required; no Mistral request was started"),
+        },
+    };
+    for program in ["ffmpeg", "ffprobe"] {
+        let output = Command::new(program)
+            .arg("-version")
+            .output()
+            .expect("media decoder is required before provider calls");
+        assert!(output.status.success(), "media decoder preflight failed");
+        let version = String::from_utf8_lossy(&output.stdout);
+        eprintln!(
+            "media proof decoder: {}",
+            version.lines().next().unwrap_or(program)
+        );
+    }
+
+    let fixture = Fixture::new();
+    let reference = fixture.root.join("reference.png");
+    let reference_result = Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=64x64",
+            "-frames:v",
+            "1",
+            "-y",
+        ])
+        .arg(&reference)
+        .output()
+        .expect("reference image generator should start");
+    assert!(
+        reference_result.status.success(),
+        "reference image generation failed before provider calls"
+    );
+    let reference_bytes = fs::read(&reference).unwrap();
+    assert!(!reference_bytes.is_empty() && reference_bytes.len() <= 10 * 1024 * 1024);
+    media_live_profile(
+        &fixture,
+        "media-source",
+        &provider,
+        media_profile_model(&provider),
+        &key,
+    );
+    media_live_profile(&fixture, "media-child", "openai", &child_model, &child_key);
+    let definition = media_live_definition(&provider, &voice);
+    fs::write(
+        &fixture.definition,
+        serde_json::to_vec(&definition).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("child.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "agent_definition_schema_version":"2026-09-09.r1",
+            "inputs":[{"type":"text","text":"Read the supplied transcript and obey its verification instruction."}],
+            "agent_schema":{"type":"object","properties":{"status":{"type":"string","enum":["heard-blue-lantern-silver-compass"]}},"required":["status"],"additionalProperties":false},
+            "actions":[]
+        })).unwrap(),
+    ).unwrap();
+    let output_dir = fixture.root.join("dist");
+    let hatch = fixture
+        .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
+        .args(["--no-update-check", "hatch", "live_media_proof", "--config"])
+        .arg(&fixture.definition)
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--force")
+        .output()
+        .expect("media proof hatch should start");
+    assert!(
+        hatch.status.success(),
+        "media proof hatch failed before provider calls"
+    );
+    let generated = output_dir.join(if cfg!(windows) {
+        "live_media_proof.exe"
+    } else {
+        "live_media_proof"
+    });
+    let current = Path::new(env!("CARGO_BIN_EXE_cargo-ai"));
+    let cases = if provider == "gemini" {
+        vec!["speech-wav", "chain", "image", "image-reference"]
+    } else if provider == "openai" {
+        vec!["speech-wav", "chain", "speech-mp3"]
+    } else if provider == "mistral" {
+        vec!["speech-wav", "chain", "speech-mp3", "image"]
+    } else {
+        vec![
+            "speech-wav",
+            "chain",
+            "speech-mp3",
+            "image",
+            "image-reference",
+        ]
+    };
+    for (runtime, executable) in [("current", current), ("hatched", generated.as_path())] {
+        for case in &cases {
+            let calls = media_live_case_calls(&provider, case);
+            media_live_reserve(&proof_root, &provider, runtime, case, calls);
+            let mut command = media_command(&fixture, executable);
+            if runtime == "current" {
+                command
+                    .args(["--no-update-check", "run", "--config"])
+                    .arg(&fixture.definition);
+            }
+            let output = command
+                .args(["--profile", "media-child", "--run-var"])
+                .arg(format!("case={case}"))
+                .env_remove("OPENAI_API_KEY")
+                .env_remove("GEMINI_API_KEY")
+                .env_remove("MISTRAL_API_KEY")
+                .env_remove("XAI_API_KEY")
+                .output()
+                .expect("media case process should start; reserved attempts remain charged if it cannot");
+            media_live_record(&proof_root, &fixture, &provider, runtime, case, &output);
+            assert!(output.status.success(), "media proof case failed; inspect private result and ledger without blindly rerunning");
+        }
+    }
+}
+
+fn media_profile_model(provider: &str) -> &'static str {
+    match provider {
+        "openai" => "gpt-4o-mini-tts",
+        "gemini" => "gemini-3.8-flash-tts",
+        "mistral" => "mistral-small-latest",
+        _ => "grok-imagine-image-2.0",
+    }
+}
+
+fn media_live_profile(fixture: &Fixture, name: &str, provider: &str, model: &str, key: &str) {
+    let cli = env!("CARGO_BIN_EXE_cargo-ai");
+    let added = fixture
+        .isolated_command(cli)
+        .args([
+            "--no-update-check",
+            "profile",
+            "add",
+            name,
+            "--server",
+            provider,
+            "--model",
+            model,
+            "--auth",
+            "api_key",
+        ])
+        .output()
+        .expect("media profile add should start");
+    assert!(
+        added.status.success(),
+        "media profile add failed before provider calls"
+    );
+    let mut child = fixture
+        .isolated_command(cli)
+        .args(["--no-update-check", "profile", "set", name, "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("media profile credential setup should start");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(key.as_bytes())
+        .unwrap();
+    assert!(
+        child.wait().unwrap().success(),
+        "media profile credential setup failed before provider calls"
+    );
+}
+
+fn media_live_definition(provider: &str, voice: &str) -> Value {
+    let speech_model = match provider {
+        "openai" => Some("gpt-4o-mini-tts"),
+        "gemini" => Some("gemini-3.8-flash-tts"),
+        "mistral" => Some("voxtral-mini-tts-2603"),
+        _ => None,
+    };
+    let transcription_model = match provider {
+        "openai" => "gpt-transcribe",
+        "gemini" => "gemini-3.5-transcribe",
+        "mistral" => "voxtral-mini-latest",
+        _ => "grok-voice-transcribe-2.0",
+    };
+    let image_model = match provider {
+        "gemini" => "gemini-3.1-flash-image",
+        "mistral" => "mistral-small-latest",
+        _ => "grok-imagine-image-2.0",
+    };
+    let script = "The blue lantern rests beside the silver compass.";
+    let mut speech = serde_json::json!({"kind":"generate_audio","profile":"media-source","text":script,"voice":voice,"path":"./speech.wav"});
+    if let Some(model) = speech_model {
+        speech["model"] = Value::String(model.into());
+    }
+    let mut mp3 = speech.clone();
+    mp3["path"] = Value::String("./speech.mp3".into());
+    let chain = vec![
+        serde_json::json!({"kind":"transcribe_audio","profile":"media-source","model":transcription_model,"audio":{"path":"./speech.wav"},"output_variable":"transcript"}),
+        serde_json::json!({"kind":"exec","program":"printf","args":["TRANSCRIPT_PROOF=%s\\n",{"var":"transcript"}]}),
+        serde_json::json!({"kind":"agent","artifact":"./child.json","profile":"media-child","inputs":[{"type":"text","text":["Read the transcript after this colon. If and only if it says blue lantern and silver compass, return exactly {\"status\":\"heard-blue-lantern-silver-compass\"}; otherwise return {\"status\":\"missing-content\"}. Transcript: ",{"var":"transcript"}]}]}),
+    ];
+    let image_extension = if provider == "xai" { "jpg" } else { "png" };
+    let image = serde_json::json!({"kind":"generate_image","profile":"media-source","model":image_model,"prompt":"One prominent solid red circle centered on a plain white background.","path":format!("./image.{image_extension}")});
+    let mut image_reference = image.clone();
+    image_reference["path"] = Value::String(format!("./image-reference.{image_extension}"));
+    image_reference["reference_images"] = serde_json::json!([{"path":"./reference.png"}]);
+    serde_json::json!({
+        "agent_definition_schema_version":"2026-09-09.r1",
+        "agent_schema":{"type":"object","properties":{}},
+        "runtime_vars":{"case":{"type":"string","default":"chain"}},
+        "actions":[
+            {"name":"speech_wav","logic":{"==":[{"var":"runtime.case"},"speech-wav"]},"run":[speech]},
+            {"name":"chain","logic":{"==":[{"var":"runtime.case"},"chain"]},"run":chain},
+            {"name":"speech_mp3","logic":{"==":[{"var":"runtime.case"},"speech-mp3"]},"run":[mp3]},
+            {"name":"image","logic":{"==":[{"var":"runtime.case"},"image"]},"run":[image]},
+            {"name":"image_reference","logic":{"==":[{"var":"runtime.case"},"image-reference"]},"run":[image_reference]}
+        ]
+    })
+}
+
+fn media_live_case_calls(provider: &str, case: &str) -> [u32; 5] {
+    match case {
+        "speech-wav" => [1, 0, 0, 0, 0],
+        "chain" => [0, 1, 0, 1, 0],
+        "speech-mp3" => [1, 0, 0, 0, 0],
+        "image" | "image-reference" => [0, 0, 1, 0, u32::from(provider == "mistral")],
+        _ => unreachable!(),
+    }
+}
+
+fn media_live_reserve(root: &Path, provider: &str, runtime: &str, case: &str, calls: [u32; 5]) {
+    let ledger = root.join("attempts.json");
+    let mut value: Value = if ledger.exists() {
+        serde_json::from_slice(&fs::read(&ledger).unwrap())
+            .expect("valid persistent attempt ledger")
+    } else {
+        serde_json::json!({"tts":0,"stt":0,"image":0,"child":0,"mistral_image":0,"cases":[]})
+    };
+    assert!(
+        !value["cases"]
+            .as_array()
+            .expect("valid attempt cases")
+            .iter()
+            .any(|entry| {
+                entry["provider"] == provider
+                    && entry["runtime"] == runtime
+                    && entry["case"] == case
+            }),
+        "media proof case already attempted; do not blindly rerun it"
+    );
+    for (index, (name, limit)) in [
+        ("tts", 16),
+        ("stt", 12),
+        ("image", 24),
+        ("child", 12),
+        ("mistral_image", 6),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let prior = value[name].as_u64().expect("valid attempt counter");
+        let next = prior + u64::from(calls[index]);
+        assert!(
+            next <= *limit,
+            "media proof attempt budget exhausted before dispatch"
+        );
+        value[name] = Value::from(next);
+    }
+    let total = ["tts", "stt", "image", "child"]
+        .iter()
+        .map(|name| value[name].as_u64().unwrap())
+        .sum::<u64>();
+    assert!(
+        total <= 64,
+        "media proof total budget exhausted before dispatch"
+    );
+    value["cases"].as_array_mut().unwrap().push(serde_json::json!({"provider":provider,"runtime":runtime,"case":case,"reserved":calls,"state":"started_or_uncertain"}));
+    let temporary = root.join("attempts.json.tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    fs::rename(temporary, ledger).unwrap();
+}
+
+fn media_live_record(
+    root: &Path,
+    fixture: &Fixture,
+    provider: &str,
+    runtime: &str,
+    case: &str,
+    output: &Output,
+) {
+    let path = match case {
+        "chain" | "speech-wav" => fixture.root.join("speech.wav"),
+        "speech-mp3" => fixture.root.join("speech.mp3"),
+        "image" => fixture.root.join(if provider == "xai" {
+            "image.jpg"
+        } else {
+            "image.png"
+        }),
+        "image-reference" => fixture.root.join(if provider == "xai" {
+            "image-reference.jpg"
+        } else {
+            "image-reference.png"
+        }),
+        _ => unreachable!(),
+    };
+    let mut evidence = serde_json::json!({
+        "provider":provider,"runtime":runtime,"case":case,
+        "profile":"media-source",
+        "models":match case {
+            "speech-wav" | "speech-mp3" => if provider == "xai" { serde_json::json!([null]) } else { serde_json::json!([if provider == "openai" { "gpt-4o-mini-tts" } else if provider == "gemini" { "gemini-3.8-flash-tts" } else { "voxtral-mini-tts-2603" }]) },
+            "chain" => serde_json::json!([match provider { "openai" => "gpt-transcribe", "gemini" => "gemini-3.5-transcribe", "mistral" => "voxtral-mini-latest", _ => "grok-voice-transcribe-2.0" }, std::env::var("OPENAI_MODEL").unwrap_or_default()]),
+            _ => serde_json::json!([if provider == "gemini" { "gemini-3.1-flash-image" } else if provider == "mistral" { "mistral-small-latest" } else { "grok-imagine-image-2.0" }]),
+        },
+        "time_unix_seconds":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        "candidate":std::env::var("CARGO_AI_SHA").ok(),
+        "exit_code":output.status.code(),
+        "stdout_sha256":format!("{:x}", Sha256::digest(&output.stdout)),
+        "stderr_sha256":format!("{:x}", Sha256::digest(&output.stderr))
+    });
+    let selected_key = match provider {
+        "openai" => "OPENAI_API_KEY",
+        "gemini" => "GEMINI_API_KEY",
+        "mistral" => "MISTRAL_API_KEY",
+        _ => "XAI_API_KEY",
+    };
+    let secrets = [
+        std::env::var(selected_key).unwrap_or_default(),
+        std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+        std::env::var("CARGO_AI_MISTRAL_VOICE_ID").unwrap_or_default(),
+    ];
+    fs::write(
+        root.join(format!("{provider}-{runtime}-{case}.stdout.txt")),
+        media_live_private_diagnostic(&output.stdout, &secrets),
+    )
+    .expect("private sanitized stdout should be retained");
+    fs::write(
+        root.join(format!("{provider}-{runtime}-{case}.stderr.txt")),
+        media_live_private_diagnostic(&output.stderr, &secrets),
+    )
+    .expect("private sanitized stderr should be retained");
+    if output.status.success() {
+        let bytes = fs::read(&path).expect("successful media case must write its file");
+        let extension = path.extension().unwrap().to_string_lossy();
+        let private_copy = root.join(format!("{provider}-{runtime}-{case}.{extension}"));
+        fs::write(&private_copy, &bytes).expect("private media artifact should be retained");
+        evidence["artifact_sha256"] = Value::String(format!("{:x}", Sha256::digest(&bytes)));
+        evidence["artifact_bytes"] = Value::from(bytes.len());
+        fs::write(
+            root.join(format!("{provider}-{runtime}-{case}.json")),
+            serde_json::to_vec_pretty(&evidence).unwrap(),
+        )
+        .unwrap();
+        let stream = if matches!(case, "chain" | "speech-wav" | "speech-mp3") {
+            "a:0"
+        } else {
+            "v:0"
+        };
+        let probe = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                stream,
+                "-show_entries",
+                "stream=codec_name,width,height,duration:format=duration,format_name",
+                "-of",
+                "json",
+            ])
+            .arg(&path)
+            .output()
+            .expect("ffprobe should start");
+        assert!(probe.status.success(), "media file must be probeable");
+        let facts: Value = serde_json::from_slice(&probe.stdout).expect("valid ffprobe JSON");
+        let codec = facts["streams"][0]["codec_name"]
+            .as_str()
+            .expect("decoded codec must be identified");
+        match extension.as_ref() {
+            "wav" => assert!(
+                codec.starts_with("pcm_"),
+                "WAV must contain decoded PCM audio"
+            ),
+            "mp3" => assert_eq!(codec, "mp3", "MP3 must decode as MP3"),
+            "png" => assert_eq!(codec, "png", "PNG must decode as PNG"),
+            "jpg" => assert_eq!(codec, "mjpeg", "JPEG must decode as JPEG"),
+            _ => unreachable!(),
+        }
+        if matches!(case, "chain" | "speech-wav" | "speech-mp3") {
+            let duration = facts["format"]["duration"]
+                .as_str()
+                .or_else(|| facts["streams"][0]["duration"].as_str())
+                .and_then(|value| value.parse::<f64>().ok())
+                .expect("speech file must expose a finite duration");
+            assert!(
+                duration.is_finite() && duration > 0.0 && duration <= 20.0,
+                "speech proof audio must be at most 20 seconds"
+            );
+        }
+        let decoded = if matches!(case, "chain" | "speech-wav" | "speech-mp3") {
+            Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(&path)
+                .args([
+                    "-t",
+                    "21",
+                    "-f",
+                    "s16le",
+                    "-acodec",
+                    "pcm_s16le",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "8000",
+                    "-",
+                ])
+                .output()
+                .expect("audio decoder should start")
+        } else {
+            Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(&path)
+                .args([
+                    "-frames:v",
+                    "1",
+                    "-vf",
+                    "scale=256:256",
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "rgb24",
+                    "-",
+                ])
+                .output()
+                .expect("image decoder should start")
+        };
+        assert!(
+            decoded.status.success() && !decoded.stdout.is_empty(),
+            "media file must actually decode"
+        );
+        if matches!(case, "chain" | "speech-wav" | "speech-mp3") {
+            assert!(
+                decoded
+                    .stdout
+                    .chunks_exact(2)
+                    .any(|sample| sample != [0, 0]),
+                "speech file must not be silent"
+            );
+            assert!(
+                decoded.stdout.len() <= 20 * 8000 * 2,
+                "speech proof fixture must be at most 20 seconds"
+            );
+            assert!(
+                bytes.len() <= 10 * 1024 * 1024,
+                "transcription proof audio must be at most 10 MiB"
+            );
+        } else {
+            assert!(
+                decoded.stdout.chunks_exact(3).any(|pixel| pixel[0] > 150
+                    && pixel[0] > pixel[1].saturating_add(40)
+                    && pixel[0] > pixel[2].saturating_add(40)),
+                "decoded image must contain the requested prominent red content"
+            );
+        }
+        if case == "chain" {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let transcript = text.lines().find_map(|line| {
+                line.split_once("TRANSCRIPT_PROOF=")
+                    .map(|(_, value)| value.trim())
+            });
+            let transcript =
+                transcript.expect("captured transcript must be available as local proof");
+            let normalized = transcript.to_ascii_lowercase();
+            assert!(
+                normalized.contains("blue lantern") && normalized.contains("silver compass"),
+                "transcript must contain the supplied speech content"
+            );
+            assert!(
+                text.contains("child: completed successfully"),
+                "native text child must complete after transcript capture"
+            );
+            evidence["transcript_sha256"] =
+                Value::String(format!("{:x}", Sha256::digest(transcript.as_bytes())));
+        }
+        if case == "speech-mp3" {
+            evidence["spoken_content_manual_listen_pending"] = Value::Bool(true);
+        }
+        if matches!(case, "image" | "image-reference") {
+            evidence["visual_content_review_pending"] = Value::Bool(true);
+        }
+        evidence["decoded_bytes"] = Value::from(decoded.stdout.len());
+        evidence["probe"] = facts;
+    }
+    let report = root.join(format!("{provider}-{runtime}-{case}.json"));
+    fs::write(report, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+}
+
+fn media_live_private_diagnostic(raw: &[u8], secrets: &[String]) -> String {
+    let mut result = String::new();
+    for line in String::from_utf8_lossy(raw).lines() {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("://") || lower.contains("url") || lower.contains('?') {
+            result.push_str("[URL-bearing diagnostic omitted]\n");
+            continue;
+        }
+        let mut safe = line.to_string();
+        for secret in secrets.iter().filter(|secret| !secret.is_empty()) {
+            safe = safe.replace(secret, "[redacted]");
+        }
+        result.push_str(&safe);
+        result.push('\n');
+    }
+    result
 }
 
 #[test]
