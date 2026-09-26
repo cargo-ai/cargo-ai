@@ -4,6 +4,14 @@
 
 An agent definition is a JSON document that tells Cargo AI what input to send to a model, what structured result to require, and what actions may follow. Start with the smallest definition that proves the workflow, run it directly while editing, and hatch it only when validation succeeds.
 
+Inspect a local definition before choosing a model connection profile:
+
+```bash
+cargo ai requirements --config ./my_agent.json
+```
+
+The read-only report lists declared input kinds, output choices/bounds/rubrics and direct media steps with their constraints. It also lists file, tool and child-agent dependencies separately. Conditional steps and dynamic values remain unresolved. This is an inventory of declarations, not a provider compatibility check; `hatch --check` performs its own selected-profile checks.
+
 This guide is the human-oriented overview. The generated [agent definition contract](../templates/guidance/agent-definition-contract.md) is the version-matched offline assistant reference for definition validation.
 
 ## Choose A Definition Source

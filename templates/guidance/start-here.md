@@ -69,6 +69,7 @@ When the user says they need a reusable local tool or native helper:
 
 When the user wants to share, install, update, or roll back reusable agents/tools as a package:
 - use `package-workflow.md`
+- inspect one definition with `cargo ai requirements --config FILE`, or the explicit `[build.NAME]` agent selection with `cargo ai requirements --build-profile NAME`, before choosing model and support dependencies; these reports do not certify compatibility
 - keep the formal term `Cargo AI package`
 - make sure the project has `.cargo-ai/project.toml` `[project]` identity and an explicit `[build.<profile>]`
 - use `cargo ai package` for local package artifacts, `cargo ai packages install` for local machine installs, and `cargo ai packages publish|pull|list --account|update|rollback` for hosted package workflows

@@ -27,6 +27,7 @@ pub(crate) mod package_metadata;
 pub(crate) mod package_publication;
 pub mod packages;
 pub mod profile;
+pub mod requirements;
 pub mod run;
 pub mod runtime;
 pub mod runtime_actions;
