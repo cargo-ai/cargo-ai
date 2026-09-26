@@ -173,7 +173,11 @@ fn asset_only_profile_is_explicitly_unassessed_and_invalid_definition_is_actiona
     assert!(!invalid.status.success());
     let stderr = String::from_utf8_lossy(&invalid.stderr);
     assert!(stderr.contains("Invalid definition"), "{stderr}");
-    assert!(stderr.contains("agents/bad.json"), "{stderr}");
+    let bad_path = Path::new("agents").join("bad.json");
+    assert!(
+        stderr.contains(bad_path.to_string_lossy().as_ref()),
+        "{stderr}"
+    );
     assert!(!stderr.contains("broken json"));
     fixture.assert_no_state_change();
 }
