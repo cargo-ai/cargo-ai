@@ -3082,11 +3082,18 @@ fn media_live_definition(provider: &str, voice: &str) -> Value {
         serde_json::json!({"kind":"exec","program":"printf","args":["TRANSCRIPT_PROOF=%s\\n",{"var":"transcript"}]}),
         serde_json::json!({"kind":"agent","artifact":"./child.json","profile":"media-child","inputs":[{"type":"text","text":["Read the transcript after this colon. If and only if it says blue lantern and silver compass, return exactly {\"status\":\"heard-blue-lantern-silver-compass\"}; otherwise return {\"status\":\"missing-content\"}. Transcript: ",{"var":"transcript"}]}]}),
     ];
-    let image_extension = if provider == "xai" { "jpg" } else { "png" };
+    let image_extension = if matches!(provider, "gemini" | "xai") {
+        "jpg"
+    } else {
+        "png"
+    };
     let image = serde_json::json!({"kind":"generate_image","profile":"media-source","model":image_model,"prompt":"One prominent solid red circle centered on a plain white background.","path":format!("./image.{image_extension}")});
     let mut image_reference = image.clone();
     image_reference["path"] = Value::String(format!("./image-reference.{image_extension}"));
     image_reference["reference_images"] = serde_json::json!([{"path":"./reference.png"}]);
+    if provider == "gemini" {
+        image_reference["prompt"] = Value::String("Use the supplied blue reference image to add a small blue square in the upper-left corner, while keeping one prominent solid red circle centered on a plain white background.".into());
+    }
     serde_json::json!({
         "agent_definition_schema_version":"2026-09-09.r1",
         "agent_schema":{"type":"object","properties":{}},
@@ -3247,12 +3254,12 @@ fn media_live_record(
     let path = match case {
         "chain" | "speech-wav" => fixture.root.join("speech.wav"),
         "speech-mp3" => fixture.root.join("speech.mp3"),
-        "image" => fixture.root.join(if provider == "xai" {
+        "image" => fixture.root.join(if matches!(provider, "gemini" | "xai") {
             "image.jpg"
         } else {
             "image.png"
         }),
-        "image-reference" => fixture.root.join(if provider == "xai" {
+        "image-reference" => fixture.root.join(if matches!(provider, "gemini" | "xai") {
             "image-reference.jpg"
         } else {
             "image-reference.png"

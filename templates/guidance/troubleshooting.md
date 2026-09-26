@@ -145,7 +145,7 @@ Check for:
 - `transcribe_audio.audio.path` is one literal relative path or one string variable reference. The source must be a readable, confined, regular WAV/MP3 file no larger than 10 MiB. Packaged literal sources must be declared assets; runtime-selected sources belong in package data.
 - OpenAI account transport, Anthropic, Ollama, and TypeSafe have no speech or transcription adapter. Select a compatible API-key step profile; text model compatibility does not supply an audio route.
 - A transcription capture is visible only to later steps in the same action. Use an action-only coordinator to transcribe before forwarding text to a child; root inference has already happened.
-- Gemini image output must be PNG, xAI JPEG, and Mistral PNG without references. Returned image format, byte size, and image count are checked. Mistral may return no image when its model does not invoke the image tool.
+- Gemini image output must be JPEG, xAI JPEG, and Mistral PNG without references. Returned image format, byte size, and image count are checked. Mistral may return no image when its model does not invoke the image tool.
 
 ## TypeSafe Jev compatibility failures
 
@@ -190,7 +190,7 @@ Check for:
 - using a model ID that the selected Google AI project cannot access
 - pointing a custom URL at `generateContent` or an OpenAI-compatible facade; Cargo AI's `gemini` adapter expects the native Interactions request and response contract
 - expecting provider-side conversation storage; Cargo AI sends `store = false` for each Gemini request
-- sending generic direct file input to Gemini text inference or requesting a non-PNG Gemini generated image; its media actions use native Interactions routes
+- sending generic direct file input to Gemini text inference or requesting a non-JPEG Gemini generated image; its media actions use native Interactions routes
 - assuming Cargo AI silently simplifies an unsupported JSON Schema; provider schema errors are surfaced so the authored contract remains visible
 
 ### Portability drift

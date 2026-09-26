@@ -47,7 +47,7 @@ The current compatibility slice supports:
 - strict JSON-schema-directed output and normalized usage
 - interpreted and hatched execution
 
-The following media adapters are implemented but awaiting live verification. Image input, generic direct file input, and provider-hosted xAI tools remain unsupported for text inference. xAI API-key profiles can use `generate_image` for `.jpg`/`.jpeg` output; JSON image edits accept up to five PNG/JPEG references. Each reference is limited to 10 MiB, all references to 20 MiB, and the returned image to 20 MiB.
+Media actions require a compatible model or service and API-key profile. Image input, generic direct file input, and provider-hosted xAI tools remain unsupported for text inference. xAI API-key profiles can use `generate_image` for `.jpg`/`.jpeg` output; JSON image edits accept up to five PNG/JPEG references. Each reference is limited to 10 MiB, all references to 20 MiB, and the returned image to 20 MiB.
 
 `generate_audio` produces `.wav` or `.mp3` speech with a provider voice ID. The xAI TTS route is a fixed service and rejects an explicit step `model`; Cargo AI sends the documented `language: auto` value. `transcribe_audio` accepts local `.wav` or `.mp3` files up to 10 MiB and requires a compatible transcription model. Media failures do not trigger provider fallback.
 

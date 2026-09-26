@@ -127,7 +127,7 @@ Keep local file, image, child, and output paths relative and at the current leve
 
 Reference images may use a declared named image input (`{ "input": "source_photo" }`) or a definition-owned relative path. Their order is preserved; label each role in the prompt. Unsupported providers fail clearly instead of dropping the references or silently switching transports. See [Provider Setup](./providers/README.md) for provider capability boundaries.
 
-The OpenAI, Gemini, Mistral, and xAI audio routes and the Gemini, Mistral, and xAI image routes are implemented adapters awaiting live provider verification. The formats below describe intended behavior; provider compatibility is not yet established for these routes.
+Media actions require compatible models and API access for the selected capability. Mistral image generation and speech remain unverified; its transcription route has been exercised. See the provider guides for format and access limits.
 
 For `generate_audio`, supply `text`, a provider-specific `voice`, and a relative output `path`. WAV works with OpenAI API-key, Gemini, Mistral, and xAI API-key profiles; MP3 also works with OpenAI, Mistral, and xAI. Gemini supports WAV only. An existing saved Mistral voice ID must already be accessible through the selected account. Generated audio is limited to 20 MiB. Cargo AI checks the returned container and replaces the output only after a complete valid file is staged, so a failed request preserves an existing file.
 

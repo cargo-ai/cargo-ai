@@ -339,7 +339,7 @@ Required fields:
 
 ### `generate_image`
 
-Gemini, Mistral, and xAI image routes, plus OpenAI, Gemini, Mistral, and xAI audio routes below, are implemented adapters awaiting live provider verification. Their formats describe intended behavior, not yet established compatible support. Existing OpenAI and Ollama image behavior is unchanged.
+Media actions require a compatible model and API project with access to the selected capability. Mistral image generation and speech remain unverified; its transcription route has been exercised. Existing OpenAI and Ollama image behavior is unchanged.
 
 Required fields:
 - `kind`
@@ -371,7 +371,7 @@ Required fields:
 - When using more than one reference image, label the roles in the prompt, such as "Image 1 is the source photo; Images 2 and 3 are style references only."
 - OpenAI API-key profiles send `reference_images` through the OpenAI image edit/reference-image path; OpenAI account profiles include them as Responses image input parts.
 - For Ollama's experimental OpenAI-compatible `/v1/images/generations` endpoint, use an Ollama image model on an Ollama profile. The current compatibility slice uses Ollama's documented `b64_json` response path, so Ollama-backed `generate_image` steps currently require a `.png` output path and do not support `reference_images`.
-- Gemini output uses `.png` and up to four PNG/JPEG references; xAI uses `.jpg`/`.jpeg` and up to five PNG/JPEG references; Mistral uses `.png` without references. References are capped at 10 MiB each and 20 MiB total. Mistral's image tool creates a provider-hosted file, and a response without exactly one valid image fails.
+- Gemini output uses `.jpg`/`.jpeg` and up to four PNG/JPEG references; xAI uses `.jpg`/`.jpeg` and up to five PNG/JPEG references; Mistral uses `.png` without references. References are capped at 10 MiB each and 20 MiB total. Mistral's image tool creates a provider-hosted file, and a response without exactly one valid image fails.
 - Current-at-ship-date note: official OpenAI docs list `gpt-image-2` for image generation and editing, including high-fidelity image inputs. Verified: 2026-05-22.
 
 Named reference image definition fragment:

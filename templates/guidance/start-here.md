@@ -44,9 +44,9 @@ When selecting a model provider:
 - `openai` supports direct API-key profiles and the OpenAI-only account-session flow
 - `ollama` supports local no-token operation and optional API-key-compatible endpoints
 - `xai` uses xAI's Responses API for Grok models and requires an `api_key` profile or explicit token
-- The new audio steps and Gemini/Mistral/xAI image adapters are implemented but awaiting live verification; the media capabilities below describe implemented configuration, not verified live compatibility.
+- Media actions require compatible models and API access for the selected capability. Mistral image generation and speech remain unverified; its transcription route has been exercised.
 - Anthropic supports text, URL-text, image input, structured output, and normalized usage; it does not support direct file input or media run steps
-- Gemini supports text, URL-text, image input, structured output, normalized usage, PNG image generation, WAV speech generation, and WAV/MP3 transcription; it sends `store = false` and does not support generic direct file input
+- Gemini supports text, URL-text, image input, structured output, normalized usage, JPEG image generation, WAV speech generation, and WAV/MP3 transcription; it sends `store = false` and does not support generic direct file input
 - Mistral supports text, URL-text, strict structured output, normalized usage, PNG image generation through its image tool, WAV/MP3 speech with an existing saved voice ID, and WAV/MP3 transcription; it does not support image or generic file input for text inference
 - xAI supports text, URL-text, strict structured output, normalized usage, JPEG image generation/editing, WAV/MP3 speech, and WAV/MP3 transcription; it sends `store = false` for text inference and does not support image or generic file input for that inference route
 - for real Anthropic credentials, create the profile first and pipe the key to `cargo ai profile set <name> --stdin`; never put a key in agent JSON or guidance

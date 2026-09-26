@@ -49,7 +49,7 @@ Each `logic` or `when` object contains one supported operator. Use the exhaustiv
 
 These documented step kinds and helper fields are exhaustive for this contract.
 
-OpenAI, Gemini, Mistral, and xAI audio routes and Gemini, Mistral, and xAI image routes are implemented adapters awaiting live provider verification. The formats below are intended behavior, not yet established compatible support for those routes. Existing OpenAI and Ollama image behavior is unchanged.
+Media actions require a compatible model and API project with access to the selected capability. Mistral image generation and speech remain unverified; its transcription route has been exercised. Existing OpenAI and Ollama image behavior is unchanged.
 
 - `exec`
   - Required: `kind`, `program`, `args`
@@ -91,7 +91,7 @@ OpenAI, Gemini, Mistral, and xAI audio routes and Gemini, Mistral, and xAI image
   - OpenAI API-key profiles send `reference_images` through the OpenAI image edit/reference-image path; OpenAI account profiles include them as Responses image input parts
   - For Ollama's experimental OpenAI-compatible `/v1/images/generations` endpoint, use an Ollama image model on an Ollama profile such as `x/flux2-klein:4b`
   - The current Ollama compatibility slice uses Ollama's documented `b64_json` response path, so Ollama-backed `generate_image` steps currently require a `.png` output path and do not support `reference_images`
-  - Gemini writes `.png`; it accepts up to four PNG/JPEG references. xAI writes `.jpg` or `.jpeg`; it accepts up to five PNG/JPEG references. Each reference is at most 10 MiB and all references together at most 20 MiB. Mistral writes `.png` and does not accept references. New adapter responses and retrieved images are capped at 20 MiB; invalid or multiple images fail.
+  - Gemini writes `.jpg` or `.jpeg`; it accepts up to four PNG/JPEG references. xAI writes `.jpg` or `.jpeg`; it accepts up to five PNG/JPEG references. Each reference is at most 10 MiB and all references together at most 20 MiB. Mistral writes `.png` and does not accept references. New adapter responses and retrieved images are capped at 20 MiB; invalid or multiple images fail.
   - Mistral uses its image-generation tool, which creates a provider-hosted file before Cargo AI saves the local image. The tool can return no image; that is a failure, not a text-only success.
   - Current-at-ship-date note: official OpenAI docs list `gpt-image-2` for image generation and editing, including high-fidelity image inputs. Verified: 2026-05-22.
 

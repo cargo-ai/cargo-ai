@@ -68,10 +68,10 @@ pub(crate) async fn send_image_request(
             .await;
         }
         ProviderKind::Gemini => {
-            if format != "png" || reference_images.len() > 4 {
+            if !matches!(format, "jpg" | "jpeg") || reference_images.len() > 4 {
                 return Err(ProviderError::invalid_request(
                     provider,
-                    "Gemini image generation supports PNG output and at most four references.",
+                    "Gemini image generation supports JPEG output and at most four references.",
                 ));
             }
         }
@@ -121,7 +121,7 @@ pub(crate) async fn send_image_request(
             }
             (
                 endpoint(provider, url, "/v1beta/interactions")?,
-                json!({"model":model,"input":input,"response_format":{"type":"image"},"store":false}),
+                json!({"model":model,"input":input,"response_format":{"type":"image","mime_type":"image/jpeg"},"store":false}),
             )
         }
         ProviderKind::Xai => {
@@ -179,10 +179,7 @@ pub(crate) async fn send_image_request(
                     "Gemini did not return exactly one image.",
                 )));
             }
-            if images[0]["mime_type"]
-                .as_str()
-                .is_some_and(|mime| mime != "image/png")
-            {
+            if images[0]["mime_type"].as_str() != Some("image/jpeg") {
                 return Err(facts.error(ProviderError::invalid_response(
                     provider,
                     "Gemini returned an unexpected image MIME type.",
@@ -619,9 +616,9 @@ mod tests {
             let (path, body, format, expected) = match provider {
                 ProviderKind::Gemini => (
                     "/v1beta/interactions",
-                    json!({"steps":[{"type":"model_output","content":[{"type":"image","mime_type":"image/png","data":BASE64_STANDARD.encode(&png)}]}]}),
-                    "png",
-                    png.as_slice(),
+                    json!({"steps":[{"type":"model_output","content":[{"type":"image","mime_type":"image/jpeg","data":BASE64_STANDARD.encode(&jpeg)}]}]}),
+                    "jpg",
+                    jpeg.as_slice(),
                 ),
                 ProviderKind::Xai => (
                     "/v1/images/generations",
@@ -639,7 +636,7 @@ mod tests {
             };
             let expected_request = if provider == ProviderKind::Gemini {
                 Matcher::Json(
-                    json!({"model":"image-model","input":[{"type":"text","text":"draw a square"}],"response_format":{"type":"image"},"store":false}),
+                    json!({"model":"image-model","input":[{"type":"text","text":"draw a square"}],"response_format":{"type":"image","mime_type":"image/jpeg"},"store":false}),
                 )
             } else {
                 Matcher::Regex("draw a square".into())
@@ -681,6 +678,138 @@ mod tests {
             if let Some(fetched) = fetched {
                 fetched.assert_async().await;
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn gemini_jpeg_request_preserves_mixed_reference_images() {
+        let png = BASE64_STANDARD.decode(PNG_B64).unwrap();
+        let jpeg = BASE64_STANDARD.decode(JPEG_B64).unwrap();
+        let references = [
+            ("image/png", &png),
+            ("image/jpeg", &jpeg),
+            ("image/png", &png),
+            ("image/jpeg", &jpeg),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (media_type, bytes))| ImageReference {
+            source: format!("reference-{index}"),
+            filename: format!("reference-{index}"),
+            media_type: media_type.into(),
+            data_url: format!("data:{media_type};base64,{}", BASE64_STANDARD.encode(bytes)),
+            bytes: bytes.clone(),
+        })
+        .collect::<Vec<_>>();
+        let mut input = vec![json!({"type":"text","text":"edit the picture"})];
+        for reference in &references {
+            input.push(json!({"type":"image","data":BASE64_STANDARD.encode(&reference.bytes),"mime_type":reference.media_type}));
+        }
+        let mut server = Server::new_async().await;
+        let fixture = server
+            .mock("POST", "/v1beta/interactions")
+            .match_body(Matcher::Json(json!({
+                "model":"image-model",
+                "input":input,
+                "response_format":{"type":"image","mime_type":"image/jpeg"},
+                "store":false
+            })))
+            .with_status(200)
+            .with_body(json!({"steps":[{"type":"model_output","content":[{"type":"image","mime_type":"image/jpeg","data":JPEG_B64}]}]}).to_string())
+            .create_async()
+            .await;
+        let response = send_image_request(
+            ProviderKind::Gemini,
+            &server.url(),
+            "image-model",
+            "edit the picture",
+            5,
+            "token",
+            "jpeg",
+            &references,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.bytes, jpeg);
+        fixture.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn gemini_rejects_png_and_excess_references_before_dispatch() {
+        let mut server = Server::new_async().await;
+        let no_request = server
+            .mock("POST", "/v1beta/interactions")
+            .expect(0)
+            .create_async()
+            .await;
+        let error = send_image_request(
+            ProviderKind::Gemini,
+            &server.url(),
+            "image-model",
+            "draw",
+            5,
+            "token",
+            "png",
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert!(error.message().contains("JPEG output"));
+        let reference = ImageReference {
+            source: "reference.png".into(),
+            filename: "reference.png".into(),
+            media_type: "image/png".into(),
+            data_url: format!("data:image/png;base64,{PNG_B64}"),
+            bytes: BASE64_STANDARD.decode(PNG_B64).unwrap(),
+        };
+        let error = send_image_request(
+            ProviderKind::Gemini,
+            &server.url(),
+            "image-model",
+            "edit",
+            5,
+            "token",
+            "jpg",
+            &vec![reference; 5],
+        )
+        .await
+        .unwrap_err();
+        assert!(error.message().contains("at most four references"));
+        no_request.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn gemini_rejects_response_mime_and_bytes_that_are_not_jpeg() {
+        for (mime_type, data, expected_error) in [
+            (Some("image/png"), JPEG_B64, "MIME type"),
+            (None, JPEG_B64, "MIME type"),
+            (Some("image/jpeg"), PNG_B64, "requested file format"),
+        ] {
+            let mut server = Server::new_async().await;
+            let fixture = server
+                .mock("POST", "/v1beta/interactions")
+                .with_status(200)
+                .with_body(json!({"steps":[{"type":"model_output","content":[{"type":"image","mime_type":mime_type,"data":data}]}]}).to_string())
+                .create_async()
+                .await;
+            let error = send_image_request(
+                ProviderKind::Gemini,
+                &server.url(),
+                "image-model",
+                "draw",
+                5,
+                "token",
+                "jpg",
+                &[],
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error.message().contains(expected_error),
+                "{}",
+                error.message()
+            );
+            fixture.assert_async().await;
         }
     }
 
