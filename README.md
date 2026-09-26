@@ -223,7 +223,7 @@ Runnable repository examples include [adder_test.json](./adder_test.json) and [w
 
 ## Releases
 
-The [release history](./releases/README.md) collects changes and upgrade guidance by version. [0.4.3](./releases/0.4.3.md) adds automatic local usage history and explicitly enabled account backup/restore; its notes explain collection opt-out and rebuilding existing generated agents. [0.4.2](./releases/0.4.2.md) introduced TypeSafe Jev support. Check [release status and verification](./docs/testing-and-release-qualification.md#release-status) for the published version and its recorded checks; source notes can precede publication.
+The [release history](./releases/README.md) collects changes and upgrade guidance by version. [0.4.4 source notes](./releases/0.4.4.md) describe speech generation, expanded image providers, audio transcription and declaration inspection. [0.4.3](./releases/0.4.3.md) remains the latest verified release shown above; its notes explain usage-history collection, backup consent and rebuilding existing generated agents. Check [release status and verification](./docs/testing-and-release-qualification.md#release-status) before installing a version described in source notes.
 
 ## Project Status
 

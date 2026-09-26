@@ -68,6 +68,8 @@ Artifacts retain compiler-reported dependency identities/features, installation 
 
 ## Release status
 
+[0.4.4 source notes](../releases/0.4.4.md) describe the prepared audio, image and requirements-inspection release. They do not establish publication or qualification. The latest verified release recorded here remains 0.4.3 until exact-candidate and registry results are added.
+
 ### 0.4.3 recorded results
 
 Verified: 2026-09-22. [0.4.3](../releases/0.4.3.md) adds automatic local usage history and optional account backup/restore. The published, non-yanked crates.io archive embeds clean source `25bbe4705a771a612f0b3bd0ee2d019489bd5a20`, matching tag `v0.4.3`. Its SHA-256 is `c51b4a3f03ae82da92d7cbfb0e24204242064021dd40ec7162ce83d2b6d0ae54`, identical to the reviewed package. Later documentation commits do not change that released candidate.
