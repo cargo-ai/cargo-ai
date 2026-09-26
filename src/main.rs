@@ -54,6 +54,14 @@ async fn main() {
         }
         return;
     }
+    // Requirements inspection reads only explicit local declarations and must
+    // run before home initialization, credential migration and update checks.
+    if let Some(requirements) = cmd_args.subcommand_matches("requirements") {
+        if !commands::requirements::run(requirements) {
+            process::exit(1);
+        }
+        return;
+    }
     // Installed guidance operates only on the selected project. Dispatch it
     // before home initialization, credential migration or network checks.
     let guidance_result = if let Some(sub_m) = cmd_args.subcommand_matches("guidance") {

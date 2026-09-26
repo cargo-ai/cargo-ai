@@ -187,8 +187,30 @@ fn capabilities_follow_declared_definitions_instead_of_asset_extensions() {
         serde_json::to_vec(&generation).unwrap(),
     )
     .unwrap();
+    let audio = json!({"agent_definition_schema_version":"2026-09-09.r1",
+    "agent_schema":{"type":"object","properties":{}},
+    "actions":[{"name":"speech","logic":{"==":[1,1]},"run":[
+        {"kind":"generate_audio","text":"Hello","voice":"coral","path":"speech.wav"},
+        {"kind":"transcribe_audio","audio":{"path":"speech.wav"},"output_variable":"transcript"}
+    ]}]});
+    fs::write(
+        project.join("audio.json"),
+        serde_json::to_vec(&audio).unwrap(),
+    )
+    .unwrap();
+    fs::write(project.join("recording.wav"), b"declared audio asset").unwrap();
+    fs::write(
+        project.join("runtime-recording.wav"),
+        b"private runtime data",
+    )
+    .unwrap();
     for (label, declarations, expected) in [
         ("assets", "", Vec::<Value>::new()),
+        (
+            "audio",
+            "agent_definitions = [\"audio.json\"]",
+            vec![json!("audio_generation"), json!("audio_transcription")],
+        ),
         (
             "generation",
             "agent_definitions = [\"generation.json\"]",
@@ -205,7 +227,7 @@ fn capabilities_follow_declared_definitions_instead_of_asset_extensions() {
             vec![json!("image"), json!("structured_output"), json!("text")],
         ),
     ] {
-        fs::write(project.join(".cargo-ai/project.toml"), format!("format_version = 1\n[project]\nname = \"capability_fixture\"\nversion = \"1.0.0\"\n[build.default]\nassets = [\"inert.json\"]\n{declarations}\n")).unwrap();
+        fs::write(project.join(".cargo-ai/project.toml"), format!("format_version = 1\n[project]\nname = \"capability_fixture\"\nversion = \"1.0.0\"\n[build.default]\nassets = [\"inert.json\", \"recording.wav\"]\n{declarations}\n")).unwrap();
         let assembled = fixture.root.join(label);
         let output = fixture
             .cargo_ai_command(&project)
@@ -214,6 +236,11 @@ fn capabilities_follow_declared_definitions_instead_of_asset_extensions() {
             .output()
             .unwrap();
         assert_success(&output, label);
+        assert_eq!(
+            fs::read(assembled.join("recording.wav")).unwrap(),
+            b"declared audio asset"
+        );
+        assert!(!assembled.join("runtime-recording.wav").exists());
         let manifest: Value =
             toml::from_str(&fs::read_to_string(assembled.join("cargo-ai-package.toml")).unwrap())
                 .unwrap();

@@ -669,6 +669,77 @@ fn accepts_generate_image_step_with_prompt_and_path_parts() {
 }
 
 #[test]
+fn accepts_generate_audio_text_voice_and_path_parts() {
+    let cfg = config_with_runtime_vars(
+        r#""script": { "type": "string" }"#,
+        r#""voice_id": { "type": "string" }, "slug": { "type": "string" }"#,
+        r#"[{"name":"speak","logic":{"==":[1,1]},"run":[{
+            "kind":"generate_audio","profile":"speech","model":"tts-model",
+            "text":["Read: ",{"var":"script"}],
+            "voice":{"var":"runtime.voice_id"},
+            "path":["./audio/",{"var":"runtime.slug"},".wav"]
+        }]}]"#,
+    );
+    let generated = generate_with_strict_parity(&cfg).unwrap();
+    assert!(generated.contains("kind: \"generate_audio\".to_string()"));
+    assert!(generated.contains("voice: Some(RunArg::Variable(\"runtime.voice_id\".to_string()))"));
+    assert!(generated.contains("text: Some(vec![RunArg::Literal(\"Read: \".to_string()), RunArg::Variable(\"script\".to_string())])"));
+    assert!(generated.contains("path: Some(vec![RunArg::Literal(\"./audio/\".to_string()), RunArg::Variable(\"runtime.slug\".to_string()), RunArg::Literal(\".wav\".to_string())])"));
+}
+
+#[test]
+fn accepts_transcribe_audio_capture_for_following_child() {
+    let cfg = config_with_runtime_vars(
+        r#""summary": { "type": "string" }"#,
+        r#""source": { "type": "string" }"#,
+        r#"[{"name":"listen","logic":{"==":[1,1]},"run":[
+            {"kind":"transcribe_audio","profile":"speech","audio":{"path":{"var":"runtime.source"}},"output_variable":"transcript"},
+            {"kind":"agent","artifact":"./child.json","inputs":[{"type":"text","text":[{"var":"transcript"}]}]}
+        ]}]"#,
+    );
+    let generated = generate_with_strict_parity(&cfg).unwrap();
+    assert!(generated.contains("kind: \"transcribe_audio\".to_string()"));
+    assert!(
+        generated.contains("audio_path: Some(RunArg::Variable(\"runtime.source\".to_string()))")
+    );
+    assert!(generated.contains("output_variable: Some(\"transcript\".to_string())"));
+}
+
+#[test]
+fn rejects_invalid_audio_contract_shapes() {
+    let cases = [
+        (
+            r#"{"kind":"generate_audio","text":"hello","path":"./hello.wav"}"#,
+            ".voice",
+        ),
+        (
+            r#"{"kind":"generate_audio","text":"hello","voice":"alloy","path":"./hello.flac"}"#,
+            ".path",
+        ),
+        (
+            r#"{"kind":"transcribe_audio","audio":{"path":"./source.wav"}}"#,
+            ".output_variable",
+        ),
+        (
+            r#"{"kind":"transcribe_audio","audio":{"path":["./source.wav"]},"output_variable":"transcript"}"#,
+            ".audio.path",
+        ),
+        (
+            r#"{"kind":"transcribe_audio","audio":{"path":"../source.wav"},"output_variable":"transcript"}"#,
+            ".audio.path",
+        ),
+    ];
+    for (step, path) in cases {
+        let cfg = config_with(
+            r#""dummy": { "type": "string" }"#,
+            &format!(r#"[{{"name":"audio","logic":{{"==":[1,1]}},"run":[{step}]}}]"#),
+        );
+        let err = generate_with_strict_parity(&cfg).unwrap_err().to_string();
+        assert!(err.contains(path), "{err}");
+    }
+}
+
+#[test]
 fn rejects_generate_image_output_variable() {
     let cfg = config_with(
         r#""product_name": { "type": "string" }"#,
@@ -692,7 +763,9 @@ fn rejects_generate_image_output_variable() {
     let err = generate_with_strict_parity(&cfg).unwrap_err().to_string();
 
     assert!(err.contains("$.actions[0].run[0].output_variable"));
-    assert!(err.contains("`output_variable` is only supported for `exec` and `tool` actions"));
+    assert!(err.contains(
+        "`output_variable` is only supported for `exec`, `tool`, and `transcribe_audio` actions"
+    ));
 }
 
 #[test]

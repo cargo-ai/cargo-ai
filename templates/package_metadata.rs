@@ -104,6 +104,8 @@ impl InspectionMetadata {
                     "structured_output",
                     "image",
                     "image_generation",
+                    "audio_generation",
+                    "audio_transcription",
                     "text",
                     "unknown",
                 ]

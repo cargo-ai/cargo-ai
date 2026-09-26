@@ -231,6 +231,17 @@ impl UsageLogContext {
         model: &str,
         step: UsageStep,
     ) -> UsageProviderAttempt {
+        self.start_provider_request_with_model(provider, profile_name, auth_mode, Some(model), step)
+    }
+
+    pub(crate) fn start_provider_request_with_model(
+        &self,
+        provider: ProviderKind,
+        profile_name: Option<&str>,
+        auth_mode: &str,
+        model: Option<&str>,
+        step: UsageStep,
+    ) -> UsageProviderAttempt {
         let mut attempt = UsageProviderAttempt {
             operation_id: format!("cai_operation_{}", Uuid::now_v7()),
             attempt_id: format!("cai_attempt_{}", Uuid::now_v7()),
@@ -241,7 +252,9 @@ impl UsageLogContext {
         event["timestamp"] = json!(attempt.started_at);
         event["started_at"] = json!(attempt.started_at);
         event["step"] = step.to_json();
-        event["provider"] = provider_json(provider, profile_name, auth_mode, model);
+        event["provider"] =
+            provider_json(provider, profile_name, auth_mode, model.unwrap_or_default());
+        event["provider"]["model"] = json!(model);
         event["provider"]["requested_model"] = json!(model);
         event["provider"]["resolved_model"] = Value::Null;
         event["operation_id"] = json!(attempt.operation_id);
@@ -276,6 +289,15 @@ impl UsageLogContext {
     }
 
     pub(crate) fn record_provider_request(&self, request: UsageProviderRequest<'_>) {
+        let model = request.model;
+        self.record_provider_request_with_model(request, Some(model));
+    }
+
+    pub(crate) fn record_provider_request_with_model(
+        &self,
+        request: UsageProviderRequest<'_>,
+        model: Option<&str>,
+    ) {
         let mut event = self.agent_event_base("provider_request_completed");
         event["step"] = request.step.to_json();
         event["provider"] = provider_json(
@@ -284,7 +306,8 @@ impl UsageLogContext {
             request.auth_mode,
             request.model,
         );
-        event["provider"]["requested_model"] = json!(request.model);
+        event["provider"]["model"] = json!(model);
+        event["provider"]["requested_model"] = json!(model);
         event["provider"]["resolved_model"] = json!(request.resolved_model);
         event["provider_request_id"] = json!(request.provider_request_id);
         event["finish_reason"] = json!(request.finish_reason);
@@ -741,6 +764,62 @@ fn non_empty_string(value: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::providers::ProviderUsage;
+
+    #[test]
+    fn fixed_service_usage_preserves_absent_model_in_start_and_completion() {
+        let path =
+            std::env::temp_dir().join(format!("cargo-ai-model-less-{}.ndjson", Uuid::now_v7()));
+        let (context, mut guard) =
+            UsageLogContext::from_runtime(Some(path.to_str().unwrap()), 0, None)
+                .unwrap()
+                .unwrap();
+        let step = UsageStep {
+            kind: "generate_audio",
+            action: Some("speak".into()),
+            step_index: Some(1),
+        };
+        let attempt = context.start_provider_request_with_model(
+            ProviderKind::Xai,
+            Some("speech"),
+            "api_key",
+            None,
+            step.clone(),
+        );
+        assert!(attempt.start_event["provider"]["model"].is_null());
+        assert!(attempt.start_event["provider"]["requested_model"].is_null());
+        context.record_provider_request_with_model(
+            UsageProviderRequest {
+                attempt: &attempt,
+                provider: ProviderKind::Xai,
+                profile_name: Some("speech"),
+                auth_mode: "api_key",
+                model: "",
+                resolved_model: None,
+                provider_request_id: None,
+                finish_reason: None,
+                step,
+                usage: None,
+                duration: Duration::from_millis(1),
+                status: UsageStatus::Success,
+                error: None,
+            },
+            None,
+        );
+        guard.finish_success();
+        let records: Vec<Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let completed = records
+            .iter()
+            .find(|event| event["event_type"] == "provider_request_completed")
+            .unwrap();
+        assert!(completed["provider"]["model"].is_null());
+        assert!(completed["provider"]["requested_model"].is_null());
+        assert!(completed["provider"]["resolved_model"].is_null());
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn usage_log_writes_one_json_object_per_line() {

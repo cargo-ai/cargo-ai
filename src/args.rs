@@ -22,6 +22,7 @@ mod new;
 mod package;
 mod packages;
 mod profile;
+mod requirements;
 mod run;
 pub(crate) mod runtime_common;
 mod tools;
@@ -62,6 +63,7 @@ fn cli_command(bin_name: &'static str) -> Command {
         .subcommand(mail::command())
         .subcommand(tools::command())
         .subcommand(profile::command())
+        .subcommand(requirements::command())
         .subcommand(auth::command())
         .subcommand(credentials::command())
         .subcommand(account::command())

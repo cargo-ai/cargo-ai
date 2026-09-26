@@ -38,6 +38,8 @@ Cargo AI build profiles select inputs; a profile named `release` does not select
 
 Keep build lists explicit. `cargo ai package` and `cargo ai build` do not infer tools or agents from JSON references.
 
+Before building, use `cargo ai requirements --build-profile release` to inspect the agents explicitly selected by `[build.release]`. The command reads local definitions without building, running agents/tools, or choosing a model. It shows per-agent and direct-step requirements, a selected-agent summary, and separate declared tools/assets. Dynamic values, conditional steps and unselected child agents remain unresolved. A tools/assets-only profile has no assessed agent workload. Use `cargo ai requirements --config ./agents/example.json` for one local definition. Neither command replaces a selected-profile `hatch --check` or establishes vendor compatibility.
+
 The package permission request is also explicit. Omit `[package.permissions]` when subprocess execution is not needed; Cargo AI keeps it blocked by default. Unsupported permission keys or values fail during packaging. A hosted install or version transition still requires the user to review and accept an `allowed` subprocess request. Treat that acceptance as a publisher-trust decision: hosted Rust tool materialization may execute build scripts, procedural macros, and related Cargo build-time code without an operating-system sandbox, using the current user's ambient filesystem, environment, and network authority.
 
 ## Build And Local Install

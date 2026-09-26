@@ -54,9 +54,7 @@ Cargo AI supports:
 - JSON-schema-directed text output and normalized usage
 - interpreted and hatched execution
 
-Direct file input and Gemini `generate_image` are unsupported and fail
-explicitly. A Gemini parent can select an OpenAI or Ollama step-level profile
-for image generation.
+Media actions require compatible models and an API project with access to the selected capability. Image generation uses the native Interactions JPEG contract. Direct generic file input remains unsupported. Gemini API-key profiles can select native `generate_image` with `.jpg` or `.jpeg` output and up to four PNG/JPEG reference images, `generate_audio` with `.wav` speech output and a provider voice, and `transcribe_audio` from a local `.wav` or `.mp3` file. Image references are limited to 10 MiB each and 20 MiB total; transcription files are limited to 10 MiB. Speech and transcription require a compatible model selected by the step, step profile, or invocation. Gemini image output must actually be JPEG; a different returned format fails rather than changing the extension.
 
 Cargo AI checks Gemini's known schema restrictions before sending a request. It
 reports an unsupported keyword instead of removing or weakening it, and it

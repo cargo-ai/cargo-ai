@@ -41,6 +41,8 @@ Cargo AI supports these step kinds:
 - `tool` invokes a Cargo AI-managed project-local tool.
 - `email_me` sends an account-backed email action.
 - `generate_image` writes one local image artifact through a supported provider/profile.
+- `generate_audio` speaks supplied text into one local WAV or MP3 file through a supported provider/profile.
+- `transcribe_audio` sends one local WAV or MP3 file to a transcription provider and captures text for later steps in that action.
 
 Each kind has a different required field set and substitution boundary. Use the [action rules](../templates/guidance/action-rules.md) instead of copying a field matrix into your project. For tool creation and parameter contracts, read [Projects And Local Tools](./projects-and-tools.md).
 
@@ -66,7 +68,7 @@ Use optional outcome variables when a later step must react:
 
 - `status_variable` stores `succeeded` or `failed`
 - `error_variable` stores a human-readable failure
-- `output_variable` stores `exec` stdout or a non-null string result from `tool`
+- `output_variable` stores `exec` stdout, a non-null string result from `tool`, or nonempty transcript text from `transcribe_audio`
 
 ```json
 {
@@ -111,19 +113,54 @@ An omitted platform makes the step eligible everywhere. Prefer portable tools an
 
 ## Resolve Profiles, Models, And Paths
 
-Child `agent` and `generate_image` steps may select a step-level `profile`. The child receives that resolved profile as its runtime profile.
+Child `agent`, `generate_image`, `generate_audio`, and `transcribe_audio` steps may select a step-level `profile`. The child receives that resolved profile as its runtime profile.
 
-For `generate_image`, model precedence is:
+For provider-backed media steps with model selection, precedence is:
 
 1. explicit step `model`
 2. model from the step-level profile
 3. effective model from the parent invocation
 
-The image step fails rather than guessing if none is available. Its model can be a literal, a declared runtime string, or a top-level string output field; it cannot read a captured step variable.
+The step fails rather than guessing if none is available. Image models can be literals, declared runtime strings, or top-level string output fields; they cannot read captured step variables. xAI `generate_audio` is a fixed service: it skips inherited model resolution and rejects an explicit step `model`.
 
 Keep local file, image, child, and output paths relative and at the current level or below. Parent traversal (`..`) is rejected. Local child targets should use explicit same-level paths such as `./child_reporter` or `./child_reporter.json`. Installed package exports may use `alias::entrypoint`; see [package identity and selection](./packages.md). Image output supports `.png`, `.jpg`, `.jpeg`, and `.webp`, subject to the selected provider's narrower limits.
 
 Reference images may use a declared named image input (`{ "input": "source_photo" }`) or a definition-owned relative path. Their order is preserved; label each role in the prompt. Unsupported providers fail clearly instead of dropping the references or silently switching transports. See [Provider Setup](./providers/README.md) for provider capability boundaries.
+
+Media actions require compatible models and API access for the selected capability. Mistral image generation and speech remain unverified; its transcription route has been exercised. See the provider guides for format and access limits.
+
+For `generate_audio`, supply `text`, a provider-specific `voice`, and a relative output `path`. WAV works with OpenAI API-key, Gemini, Mistral, and xAI API-key profiles; MP3 also works with OpenAI, Mistral, and xAI. Gemini supports WAV only. An existing saved Mistral voice ID must already be accessible through the selected account. Generated audio is limited to 20 MiB. Cargo AI checks the returned container and replaces the output only after a complete valid file is staged, so a failed request preserves an existing file.
+
+For `transcribe_audio`, set `audio.path` to a literal relative path or one string variable reference, and set `output_variable` to the transcript capture name. The source must be a local WAV or MP3 file no larger than 10 MiB. It is a run-step source, separate from generic model-facing `file` input. Cargo AI canonicalizes the existing regular file under the selected root before upload: package literals use declared payload assets, package variable paths use package data, project variable paths use its DataRoot, and ordinary local paths use the working directory. Speech output uses package data, project DataRoot when present, or the working directory. Portable relative paths with no parent traversal are required.
+
+OpenAI API-key, Gemini, Mistral, and xAI API-key profiles have native speech and transcription routes. OpenAI account transport, Anthropic, Ollama, and TypeSafe are unsupported for these two steps. A successful transcription puts nonempty text into the action-local variable for later steps; an empty transcript fails without a capture. The root inference pass happens before actions, so use an action-only coordinator when the transcript must reach a child agent:
+
+```json
+{
+  "agent_definition_schema_version": "2026-09-09.r1",
+  "inputs": [],
+  "agent_schema": { "type": "object", "properties": {} },
+  "runtime_vars": { "audio_path": { "type": "string" } },
+  "actions": [{
+    "name": "transcribe_and_analyze",
+    "logic": { "==": [1, 1] },
+    "run": [{
+      "kind": "transcribe_audio",
+      "profile": "speech-transcription",
+      "audio": { "path": { "var": "runtime.audio_path" } },
+      "output_variable": "transcript"
+    }, {
+      "kind": "agent",
+      "artifact": "./text-analyst.json",
+      "profile": "text-analysis",
+      "inputs": [{ "type": "text", "text": ["Analyze this transcript:\n", { "var": "transcript" }] }],
+      "input_mode": "append"
+    }]
+  }]
+}
+```
+
+Run it with `--run-var audio_path=./recordings/meeting.wav` after creating the two named compatible profiles and the child definition. A packaged literal recording must be explicitly declared as a package asset; runtime-variable recordings belong in runtime data, not the package payload. Avoid putting credentials or mutable recordings in package assets.
 
 Package child paths and permissions have additional rules. See [Packages](./packages.md) before invoking an `alias::entrypoint` target.
 

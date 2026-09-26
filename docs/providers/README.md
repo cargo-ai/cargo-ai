@@ -26,9 +26,21 @@ providers use JSON-schema-directed output. Compatible wire formats do not collap
 diagnostics and usage continue to report `mistral`, `ollama`, or `xai` as
 selected.
 
-OpenAI and Ollama also support Cargo AI `generate_image` actions. Anthropic,
-Gemini, Mistral, TypeSafe, and xAI do not; select an OpenAI or Ollama step-level profile
-when an otherwise different parent provider needs image generation.
+Media actions use a compatible step profile and the provider's native route; text wire compatibility does not imply media support.
+
+| Provider | `generate_image` | `generate_audio` speech | `transcribe_audio` |
+| --- | --- | --- | --- |
+| OpenAI API key | image generation and reference edits | WAV or MP3 | WAV or MP3 source |
+| OpenAI account | Responses image tool | unsupported | unsupported |
+| Gemini API key | JPEG output; up to four PNG/JPEG references | WAV | WAV or MP3 source |
+| Mistral API key | PNG via image tool; no references | WAV or MP3; existing saved voice ID required | WAV or MP3 source |
+| xAI API key | JPEG output; up to five PNG/JPEG references | WAV or MP3; fixed service with no step model | WAV or MP3 source |
+| Ollama | experimental PNG output without references | unsupported | unsupported |
+| Anthropic, TypeSafe | unsupported | unsupported | unsupported |
+
+Media actions require a compatible model and API project with access to the selected capability. Mistral image generation and speech remain unverified; its transcription route has been exercised. Existing OpenAI and Ollama image behavior is unchanged.
+
+New image adapters cap each reference at 10 MiB, all references at 20 MiB, and returned image bytes at 20 MiB. Transcription source files are limited to 10 MiB. Unsupported formats, providers, account transports, and models fail explicitly. A parent may select a different saved step profile for a media action. See [Actions and child agents](../actions-and-child-agents.md) for audio path and capture behavior.
 
 ## Create A Profile
 

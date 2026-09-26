@@ -1283,10 +1283,12 @@ fn run_step(
         ],
         "tool" => &["name", "params", "output_variable"],
         "generate_image" => &["prompt", "path", "model", "profile", "reference_images"],
+        "generate_audio" => &["text", "voice", "path", "model", "profile"],
+        "transcribe_audio" => &["audio", "output_variable", "model", "profile"],
         _ => {
             return Err(invalid(
                 &kp,
-                "Supported kinds are exec, email_me, agent, tool and generate_image.",
+                "Supported kinds are exec, email_me, agent, tool, generate_image, generate_audio and transcribe_audio.",
             ))
         }
     });
@@ -1504,6 +1506,58 @@ fn run_step(
                             owned_path(&s, &pp, false)?;
                         }
                     }
+                }
+            }
+        }
+        "generate_audio" => {
+            parts(
+                required(map, "text", path)?,
+                &field_path(path, "text"),
+                available,
+                budget,
+            )?;
+            scalar_or_reference(
+                required(map, "voice", path)?,
+                &field_path(path, "voice"),
+                fields,
+                true,
+            )?;
+            let p = field_path(path, "path");
+            if let Some(s) = parts(required(map, "path", path)?, &p, available, budget)? {
+                owned_path(&s, &p, false)?;
+                if !["wav", "mp3"].contains(&path_extension(&s).as_str()) {
+                    return Err(invalid(
+                        &p,
+                        "Generated audio paths require wav or mp3 extension.",
+                    ));
+                }
+            }
+            for name in ["profile", "model"] {
+                if let Some(v) = map.get(name) {
+                    scalar_or_reference(v, &field_path(path, name), fields, true)?;
+                }
+            }
+        }
+        "transcribe_audio" => {
+            let ap = field_path(path, "audio");
+            let audio = object(required(map, "audio", path)?, &ap)?;
+            keys(audio, &["path"], &ap, false)?;
+            let pp = field_path(&ap, "path");
+            let source = required(audio, "path", &ap)?;
+            scalar_or_reference(source, &pp, available, true)?;
+            if let Some(raw) = source.as_str() {
+                owned_path(raw, &pp, false)?;
+                if !["wav", "mp3"].contains(&path_extension(raw).as_str()) {
+                    return Err(invalid(
+                        &pp,
+                        "Audio source paths require wav or mp3 extension.",
+                    ));
+                }
+            }
+            required(map, "output_variable", path)?;
+            for name in ["profile", "model"] {
+                if let Some(v) = map.get(name) {
+                    scalar_or_reference(v, &field_path(path, name), fields, true)?;
                 }
             }
         }

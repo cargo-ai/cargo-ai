@@ -505,7 +505,7 @@ fn run_inspect(inspect_m: &ArgMatches) -> bool {
                 installed_package_data_root(package.alias.as_str()).display()
             );
             println!("Entrypoints:");
-            for entrypoint in package.entrypoints {
+            for entrypoint in &package.entrypoints {
                 let mut capabilities = Vec::new();
                 if entrypoint.runnable {
                     capabilities.push("run");
@@ -519,6 +519,35 @@ fn run_inspect(inspect_m: &ArgMatches) -> bool {
                     capabilities.join(","),
                     entrypoint.path
                 );
+            }
+            println!("Declared requirements:");
+            let manifest_relative =
+                Path::new(INSTALLED_PACKAGE_DIR_NAME).join(PACKAGE_MANIFEST_FILE_NAME);
+            let manifest = resolve_existing_path_under_root(
+                &installed_package_root(alias),
+                &manifest_relative,
+                "Installed package manifest",
+            )
+            .and_then(|path| load_package_manifest(&path));
+            match manifest {
+                Ok(manifest) => {
+                    let payload_root = installed_package_root(alias).join(INSTALLED_PACKAGE_DIR_NAME);
+                    let selection = super::requirements::BuildSelection {
+                        agent_definitions: manifest.agent_definitions,
+                        hatched_agents: manifest.hatched_agents,
+                        tools: manifest.tools,
+                        assets: manifest.assets,
+                    };
+                    match super::requirements::render_selection(
+                        &payload_root,
+                        &format!("installed package {alias}"),
+                        &selection,
+                    ) {
+                        Ok(report) => print!("{report}"),
+                        Err(error) => println!("  Unavailable: {error}. Declared agent requirements remain unassessed."),
+                    }
+                }
+                Err(_) => println!("  Unavailable in this installed payload; declared agent requirements remain unassessed."),
             }
             true
         }

@@ -8,6 +8,8 @@ The generated [package workflow](../templates/guidance/package-workflow.md) is t
 
 ## Select package contents explicitly
 
+Inspect the declared agents in one build selection with `cargo ai requirements --build-profile release`. It reads `[build.release]` from the current project's `.cargo-ai/project.toml` and reports only agents named in `agent_definitions` or `hatched_agents`, with duplicate paths shown once. Tools and assets remain separate dependencies. A build profile selects package contents, not a model connection profile. The summary combines selected-agent requirements without claiming that one model satisfies them all. `cargo ai packages inspect ALIAS` includes the same report when its installed payload has readable agent definitions; legacy or unavailable declarations remain unassessed.
+
 Project identity, permissions, hosted dependencies, and build profiles live in `.cargo-ai/project.toml`:
 
 ```toml

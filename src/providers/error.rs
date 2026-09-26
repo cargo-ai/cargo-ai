@@ -39,6 +39,8 @@ pub(crate) struct ProviderCapabilities {
     pub(crate) supports_image_input: bool,
     pub(crate) supports_file_input: bool,
     pub(crate) supports_generate_image: bool,
+    pub(crate) supports_generate_audio: bool,
+    pub(crate) supports_transcribe_audio: bool,
 }
 
 impl ProviderKind {
@@ -97,36 +99,56 @@ impl ProviderKind {
                 supports_image_input: true,
                 supports_file_input: false,
                 supports_generate_image: false,
+                supports_generate_audio: false,
+                supports_transcribe_audio: false,
             },
             Self::Gemini => ProviderCapabilities {
                 authentication: AuthenticationPolicy::RequiredApiKey,
                 supports_image_input: true,
                 supports_file_input: false,
-                supports_generate_image: false,
+                supports_generate_image: true,
+                supports_generate_audio: true,
+                supports_transcribe_audio: true,
             },
-            Self::Mistral | Self::TypeSafe => ProviderCapabilities {
+            Self::Mistral => ProviderCapabilities {
+                authentication: AuthenticationPolicy::RequiredApiKey,
+                supports_image_input: false,
+                supports_file_input: false,
+                supports_generate_image: true,
+                supports_generate_audio: true,
+                supports_transcribe_audio: true,
+            },
+            Self::TypeSafe => ProviderCapabilities {
                 authentication: AuthenticationPolicy::RequiredApiKey,
                 supports_image_input: false,
                 supports_file_input: false,
                 supports_generate_image: false,
+                supports_generate_audio: false,
+                supports_transcribe_audio: false,
             },
             Self::Ollama => ProviderCapabilities {
                 authentication: AuthenticationPolicy::OptionalApiKey,
                 supports_image_input: true,
                 supports_file_input: true,
                 supports_generate_image: true,
+                supports_generate_audio: false,
+                supports_transcribe_audio: false,
             },
             Self::OpenAi => ProviderCapabilities {
                 authentication: AuthenticationPolicy::RequiredApiKey,
                 supports_image_input: true,
                 supports_file_input: true,
                 supports_generate_image: true,
+                supports_generate_audio: true,
+                supports_transcribe_audio: true,
             },
             Self::Xai => ProviderCapabilities {
                 authentication: AuthenticationPolicy::RequiredApiKey,
                 supports_image_input: false,
                 supports_file_input: false,
-                supports_generate_image: false,
+                supports_generate_image: true,
+                supports_generate_audio: true,
+                supports_transcribe_audio: true,
             },
         }
     }
@@ -642,7 +664,17 @@ mod tests {
         assert!(!ProviderKind::Anthropic.capabilities().supports_file_input);
         assert!(ProviderKind::Gemini.capabilities().supports_image_input);
         assert!(!ProviderKind::Gemini.capabilities().supports_file_input);
-        assert!(!ProviderKind::Gemini.capabilities().supports_generate_image);
+        assert!(ProviderKind::Gemini.capabilities().supports_generate_image);
+        for provider in [
+            ProviderKind::Gemini,
+            ProviderKind::Mistral,
+            ProviderKind::OpenAi,
+            ProviderKind::Xai,
+        ] {
+            assert!(provider.capabilities().supports_generate_image);
+            assert!(provider.capabilities().supports_generate_audio);
+            assert!(provider.capabilities().supports_transcribe_audio);
+        }
         assert_eq!(
             ProviderKind::Mistral.capabilities().authentication,
             super::AuthenticationPolicy::RequiredApiKey

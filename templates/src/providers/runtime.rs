@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize}; // Data format (e.g.,JSON, TOML) (de)serialization
 use serde_json;
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, fs, io::Read, path::Path};
 
 const SUPPORTED_FILE_EXTENSIONS_MESSAGE: &str =
     "pdf, docx, csv, xla, xlb, xlc, xlm, xls, xlsx, xlt, xlw, tsv, iif, doc, dot, odt, rtf, pot, ppa, pps, ppt, pptx, pwz, wiz";
@@ -243,6 +243,67 @@ pub(crate) fn load_image_reference(path: &str) -> Result<ImageReference, String>
             image_path.display()
         )
     })?;
+    image_reference_from_bytes(image_path, image_bytes)
+}
+
+pub(crate) fn load_image_reference_with_limit(
+    path: &str,
+    max_bytes: usize,
+) -> Result<ImageReference, String> {
+    let image_path = Path::new(path);
+    let before_open = fs::metadata(image_path).map_err(|error| {
+        format!(
+            "Failed to inspect reference image '{}': {error}",
+            image_path.display()
+        )
+    })?;
+    if !before_open.is_file() || before_open.len() > max_bytes as u64 {
+        return Err(format!(
+            "Reference image '{}' must be a regular file no larger than {max_bytes} bytes.",
+            image_path.display()
+        ));
+    }
+    let mut file = fs::File::open(image_path).map_err(|error| {
+        format!(
+            "Failed to open reference image '{}': {error}",
+            image_path.display()
+        )
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        format!(
+            "Failed to inspect reference image '{}': {error}",
+            image_path.display()
+        )
+    })?;
+    if !metadata.is_file() || metadata.len() > max_bytes as u64 {
+        return Err(format!(
+            "Reference image '{}' must be a regular file no larger than {max_bytes} bytes.",
+            image_path.display()
+        ));
+    }
+    let mut image_bytes = Vec::new();
+    (&mut file)
+        .take(max_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut image_bytes)
+        .map_err(|error| {
+            format!(
+                "Failed to read reference image '{}': {error}",
+                image_path.display()
+            )
+        })?;
+    if image_bytes.len() > max_bytes {
+        return Err(format!(
+            "Reference image '{}' exceeds the {max_bytes}-byte limit.",
+            image_path.display()
+        ));
+    }
+    image_reference_from_bytes(image_path, image_bytes)
+}
+
+fn image_reference_from_bytes(
+    image_path: &Path,
+    image_bytes: Vec<u8>,
+) -> Result<ImageReference, String> {
     let media_type = image_media_type(image_path)?;
     let encoded = BASE64_STANDARD.encode(&image_bytes);
     let filename = image_path
@@ -382,6 +443,47 @@ mod tests {
     use base64::Engine as _;
     use serde::{Deserialize, Serialize};
     use std::path::Path;
+
+    #[test]
+    fn bounded_image_reference_rejects_bytes_before_encoding() {
+        let path =
+            std::env::temp_dir().join(format!("cargo-ai-reference-{}.png", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"12345").unwrap();
+        let path = path.to_str().unwrap();
+        let error = super::load_image_reference_with_limit(path, 4).unwrap_err();
+        assert!(error.contains("no larger than 4 bytes"));
+        let reference = super::load_image_reference_with_limit(path, 5).unwrap();
+        assert_eq!(reference.bytes, b"12345");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_image_reference_rejects_fifo_without_blocking() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let path =
+            std::env::temp_dir().join(format!("cargo-ai-reference-{}.png", uuid::Uuid::new_v4()));
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("mkfifo must be available on Unix");
+        assert!(status.success());
+
+        let (sender, receiver) = mpsc::channel();
+        let worker_path = path.clone();
+        std::thread::spawn(move || {
+            let result = super::load_image_reference_with_limit(worker_path.to_str().unwrap(), 4);
+            let _ = sender.send(result);
+        });
+        let result = receiver.recv_timeout(Duration::from_secs(2));
+        std::fs::remove_file(&path).unwrap();
+        let error = result
+            .expect("FIFO rejection must finish before the timeout")
+            .unwrap_err();
+        assert!(error.contains("must be a regular file"));
+    }
 
     #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
     struct SampleOutput {
@@ -647,9 +749,9 @@ mod tests {
 /// Allowlisted provider metadata retained even when output decoding fails later.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProviderFacts {
-    usage: Option<ProviderUsage>,
-    resolved_model: Option<String>,
-    provider_request_id: Option<String>,
+    pub(crate) usage: Option<ProviderUsage>,
+    pub(crate) resolved_model: Option<String>,
+    pub(crate) provider_request_id: Option<String>,
     finish_reason: Option<String>,
 }
 impl ProviderFacts {

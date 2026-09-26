@@ -58,9 +58,10 @@ Cargo AI supports:
 - JSON-schema-directed text output and normalized usage
 - interpreted and hatched execution
 
-Direct file input and Anthropic `generate_image` are unsupported and fail
-explicitly. An Anthropic parent can select an OpenAI or Ollama step-level
-profile for image generation.
+Direct file input and Anthropic media run steps are unsupported and fail
+explicitly. An Anthropic parent can select a compatible step-level profile
+for image generation, speech generation, or transcription.
+Anthropic does not currently provide Cargo AI `generate_audio` or `transcribe_audio` steps. A parent using Anthropic can choose a compatible API-key step profile for speech or transcription.
 
 Cargo AI checks Anthropic's known schema restrictions before sending a request.
 It reports an unsupported keyword instead of removing or weakening it, and it
