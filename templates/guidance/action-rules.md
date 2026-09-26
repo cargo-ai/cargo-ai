@@ -47,7 +47,9 @@ Each `logic` or `when` object contains one supported operator. Use the exhaustiv
 
 ## Supported Step Kinds
 
-These documented step kinds and helper fields are exhaustive for the current MVP.
+These documented step kinds and helper fields are exhaustive for this contract.
+
+Media actions require a compatible model and API project with access to the selected capability. Mistral image generation and speech remain unverified; its transcription route has been exercised. Existing OpenAI and Ollama image behavior is unchanged.
 
 - `exec`
   - Required: `kind`, `program`, `args`
@@ -67,13 +69,12 @@ These documented step kinds and helper fields are exhaustive for the current MVP
 - `generate_image`
   - Required: `kind`, `prompt`, `path`
   - Optional: `model`, `profile`, `reference_images`
-  - First slice: direct OpenAI image transport, OpenAI account transport, and Ollama's experimental OpenAI-compatible image transport
+  - OpenAI image transport (API key or account), Gemini, Mistral, xAI, and Ollama's experimental image transport have provider-specific formats and reference limits.
   - If `model` is omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override.
   - If `profile` is present, Cargo AI resolves that profile at step runtime and uses it for the image step's provider/url/token context.
   - With `generate_image.profile`, explicit `model` still wins, then the step-profile model, then the parent invocation model.
   - `generate_image.profile` may switch providers; for example, a parent may stay on OpenAI while one image step uses an Ollama profile.
-  - Anthropic does not implement `generate_image` in the current release; an Anthropic parent must select an OpenAI or Ollama step profile for this step kind.
-  - Gemini does not implement `generate_image` in the current release; a Gemini parent must select an OpenAI or Ollama step profile for this step kind.
+  - Anthropic and TypeSafe do not implement `generate_image`; select a compatible step profile when using either as the parent.
   - If neither the step nor the invocation provides a model, the step fails clearly at runtime.
   - `model` may be:
     - a literal non-empty string
@@ -90,6 +91,8 @@ These documented step kinds and helper fields are exhaustive for the current MVP
   - OpenAI API-key profiles send `reference_images` through the OpenAI image edit/reference-image path; OpenAI account profiles include them as Responses image input parts
   - For Ollama's experimental OpenAI-compatible `/v1/images/generations` endpoint, use an Ollama image model on an Ollama profile such as `x/flux2-klein:4b`
   - The current Ollama compatibility slice uses Ollama's documented `b64_json` response path, so Ollama-backed `generate_image` steps currently require a `.png` output path and do not support `reference_images`
+  - Gemini writes `.jpg` or `.jpeg`; it accepts up to four PNG/JPEG references. xAI writes `.jpg` or `.jpeg`; it accepts up to five PNG/JPEG references. Each reference is at most 10 MiB and all references together at most 20 MiB. Mistral writes `.png` and does not accept references. New adapter responses and retrieved images are capped at 20 MiB; invalid or multiple images fail.
+  - Mistral uses its image-generation tool, which creates a provider-hosted file before Cargo AI saves the local image. The tool can return no image; that is a failure, not a text-only success.
   - Current-at-ship-date note: official OpenAI docs list `gpt-image-2` for image generation and editing, including high-fidelity image inputs. Verified: 2026-05-22.
 
   Example reference-image step:
@@ -107,6 +110,22 @@ These documented step kinds and helper fields are exhaustive for the current MVP
     "path": "./artifacts/edited.png"
   }
   ```
+
+- `generate_audio` (speech from supplied text)
+  - Required: `kind`, `text`, `voice`, `path`; optional: `profile`, `model` except for xAI's fixed speech service.
+  - `text` and `path` accept a literal string or ordered string/variable parts. `voice` accepts a nonempty literal or one string variable reference. Voice IDs belong to the selected provider; there is no cross-provider voice mapping.
+  - A model-selecting route uses explicit step `model`, then the selected step-profile model, then the invocation model. An incompatible inherited model fails; Cargo AI does not choose another speech model.
+  - OpenAI API-key, Gemini, Mistral, and xAI API-key profiles are supported. Anthropic, Ollama, TypeSafe, and OpenAI account transport are unsupported for this step.
+  - Use `.wav` for any supported provider or `.mp3` for OpenAI, Mistral, and xAI. Gemini speech outputs WAV only. Returned bytes must match the extension.
+  - Mistral requires an existing saved voice ID accessible to the selected account. Cargo AI does not create, clone, or upload a voice. xAI accepts no step `model`; its fixed speech service uses the adapter's `language: auto` value.
+  - Generated audio is limited to 20 MiB. A successful step writes one complete local file. The destination is staged and replaced only after generation and validation succeed; an existing file survives a provider or write failure.
+- `transcribe_audio` (local speech file to text)
+  - Required: `kind`, `audio: { "path": ... }`, `output_variable`; optional: `profile`, `model`.
+  - `audio.path` is a literal relative path or a single `{ "var": "runtime.audio_path" }` reference to a string. It accepts `.wav` and `.mp3` files up to 10 MiB. It is a step-owned source, not a generic parent `file` input.
+  - Its model precedence is explicit step `model`, selected step-profile model, then invocation model. The effective model must support the provider's native transcription route.
+  - OpenAI API-key, Gemini, Mistral, and xAI API-key profiles use native transcription routes. Anthropic, Ollama, TypeSafe, and OpenAI account transport are unsupported.
+  - A nonempty transcript is captured as text in `output_variable` for later steps in the same action. An empty or whitespace-only transcript fails without setting the capture. Transcription does not feed an earlier root inference pass.
+  - For a transcript-to-child workflow, use an action-only coordinator with empty `agent_schema.properties`, then pass the captured variable to a text-compatible child `agent` step.
 
 ## Optional Control Fields
 
@@ -127,9 +146,10 @@ Every step allows its own kind-specific fields and the common controls below; ex
 - `error_variable`
   - Stores a human-readable error string when the step fails.
 - `output_variable`
-  - `exec` and `tool` only
+  - `exec`, `tool`, and `transcribe_audio` only
   - For `exec`, stores captured stdout.
   - For `tool`, stores the non-null string returned by the tool `invoke` response.
+  - For `transcribe_audio`, stores the nonempty transcript text.
 
 ## Step Outcome Rules
 - Steps stop the action by default when they fail.
@@ -146,7 +166,7 @@ Every step allows its own kind-specific fields and the common controls below; ex
 - Top-level `agent_schema` fields are the returned output of the agent.
 - Raw structured model output must pass declared shape, type, enum, numeric-bound and resource checks before any action starts; missing or unknown fields cause rejection.
 - Action steps are side effects or follow-up orchestration after that output exists.
-- `output_variable` captures step-local text from `exec` or a non-null string result from `tool`. It does not change the returned top-level output object.
+- `output_variable` captures step-local text from `exec`, a non-null string result from `tool`, or a nonempty transcript from `transcribe_audio`. It does not change the returned top-level output object.
 - If `agent_schema.properties` is empty, Cargo AI skips the initial model call and starts directly at the action layer.
 - In that structural action-only shape, top-level `inputs` are allowed only as named reusable parent-owned inputs.
 - In that structural action-only shape, anonymous runtime `--input-*` flags remain invalid.
@@ -180,6 +200,9 @@ Every step allows its own kind-specific fields and the common controls below; ex
 - Parent-directory traversal such as `../` is invalid.
 - `generate_image` output paths must use one of: `.png`, `.jpg`, `.jpeg`, `.webp`.
 - For the current Ollama-backed `generate_image` compatibility path, use `.png`.
+- `generate_audio` output paths use `.wav` or `.mp3`, subject to provider format support. `transcribe_audio.audio.path` uses a local `.wav` or `.mp3` source.
+- Audio paths are portable relative paths without `..`. Packaged literal transcription sources resolve under declared package payload assets; packaged variable sources resolve under package data. Project variable sources resolve under its DataRoot. Other local sources resolve under the process working directory. The existing regular file is canonicalized inside its selected root before upload.
+- Speech output uses package data for installed packages, project DataRoot when present, and otherwise the working directory.
 
 ## Child-Agent Data Flow
 

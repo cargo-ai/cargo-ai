@@ -149,7 +149,7 @@ cargo test --locked --test provider_smoke typesafe_smoke::interpreted_typesafe_p
 
 ### Deterministic generated adapters
 
-Generated-provider parity cases hatch and run complete standalone executables against the same loopback assertions. They are ignored by the ordinary Rust invocation because they compile full binaries. **Core CI** runs one sequential batch containing all seven provider cases on Ubuntu, macOS, and Windows:
+Generated-provider parity cases hatch and run complete standalone executables against the same loopback assertions. They are ignored by the ordinary Rust invocation because they compile full binaries. **Core CI** runs one sequential batch containing all seven provider cases plus the speech-generation/transcription-to-child chain on Ubuntu, macOS, and Windows:
 
 ```bash
 cargo test --locked --test provider_smoke generated_provider_batch_isolated_and_deterministic -- --ignored --exact --nocapture
@@ -183,6 +183,12 @@ Live cases are separately ignored and must be intentional. Load the matching key
 | TypeSafe Jev | `TYPESAFE_API_KEY`, `TYPESAFE_MODEL` | `typesafe_smoke::live_typesafe_journey_uses_isolated_stdin_credentials` |
 
 The TypeSafe journey makes at most eight inference requests with no automatic retries: three labeled Choice/Score messages interpreted and standalone, one fetched URL-text case and one live parent with a mocked child. It uses the existing isolated stdin credential store, omits unsupported generation settings and checks local marker behavior. It also asserts automatic history through `usage runs --json`, `usage show <run-id> --json` and `usage summary --json`, without `--usage-log` or `CARGO_AI_USAGE_LOG`. The standalone and Product Qualification workflows use this same journey when Jev is explicitly enrolled.
+
+The separately ignored `live_media_bundle_uses_isolated_stdin_credentials` checkpoint exercises speech, transcription-to-child handoff and applicable image routes. Select `CARGO_AI_MEDIA_PROVIDER` (`openai`, `gemini`, `mistral` or `xai`), the corresponding API key, `OPENAI_API_KEY` and `OPENAI_MODEL` for the text child, and an existing private `CARGO_AI_MEDIA_PROOF_DIR` outside repositories. It requires `ffmpeg` and `ffprobe`; Mistral speech additionally requires an existing permitted `CARGO_AI_MISTRAL_VOICE_ID`. The directory retains attempt counts, sanitized diagnostics and media for content review. Preserve its ledger across runs, including earlier failed requests.
+
+Optional `CARGO_AI_MEDIA_RUNTIME=current|hatched` and `CARGO_AI_MEDIA_CASE` select a narrower checkpoint. Cases are `speech-wav`, `chain`, `speech-mp3`, `image` and `image-reference`, subject to the provider's format/reference support. A selected `chain` reuses that runtime's prior WAV artifact. After diagnosing and correcting a recorded nonzero process result, `CARGO_AI_MEDIA_RETRY_FAILED=1` permits one retry of that failed case; successful or uncertain cases cannot be replayed. Retry evidence uses separate filenames and consumes the same finite request budget. These controls do not authorize provider calls or establish support without successful applicable evidence.
+
+For Mistral transcription and image proof when no permitted saved voice exists, set `CARGO_AI_MEDIA_SKIP_SPEECH=1`. This runs only `chain` and `image` in the selected runtime, without requiring `CARGO_AI_MISTRAL_VOICE_ID`; a selected speech case is rejected. Set `CARGO_AI_MEDIA_INPUT_WAV` to an absolute path to an existing WAV inside `CARGO_AI_MEDIA_PROOF_DIR` for the `chain` case (for example, a retained synthetic speech artifact from another provider). The fixture copies that file into its isolated run directory and verifies a PCM codec, non-silent decoding, duration at most 20 seconds and size at most 10 MiB before reserving or sending the transcription request. The recorded chain artifact hash identifies the submitted WAV. The spoken content must contain the fixture's “blue lantern” and “silver compass” phrases for transcript and child checks to pass. An image-only selection needs no input WAV. The default Mistral bundle still requires a permitted voice and runs its speech cases.
 
 After the selected provider's variables are already present, run its exact checkpoint:
 

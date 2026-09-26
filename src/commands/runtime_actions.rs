@@ -1,4 +1,6 @@
 //! Action execution helpers for interpreted runtime flows.
+#[path = "../../templates/src/runtime_media.rs"]
+mod runtime_media;
 use crate::config::adder::set_account_tokens;
 use crate::config::loader::{config_path, find_profile, load_config};
 use crate::config::schema::ProfileAuthMode;
@@ -1378,6 +1380,20 @@ async fn run_matching_action_steps(
             )
             .await
             .map(|captured_output| (StepExecutionOutcome::Completed, captured_output))
+        } else if step.kind.eq_ignore_ascii_case("generate_audio")
+            || step.kind.eq_ignore_ascii_case("transcribe_audio")
+        {
+            runtime_media::run_audio_step(
+                step,
+                &action_data,
+                action_index,
+                &action.name,
+                step_index + 1,
+                provider_context,
+                runtime_budget,
+            )
+            .await
+            .map(|capture| (StepExecutionOutcome::Completed, capture))
         } else if step.kind.eq_ignore_ascii_case("generate_image") {
             run_generate_image_step(
                 step,
@@ -2056,6 +2072,40 @@ async fn run_email_me_step(
     })
 }
 
+fn audio_relative_path(path: &Path) -> Result<PathBuf, String> {
+    super::runtime_data::portable_relative_path(path, "Audio path")
+}
+
+fn audio_source_root(context: &ActionProviderContext, dynamic: bool) -> Result<PathBuf, String> {
+    if let Some(package) = &context.package_context {
+        return Ok(if dynamic {
+            package.package_data_root.clone()
+        } else {
+            package.package_payload_root.clone()
+        });
+    }
+    if dynamic {
+        if let Some(root) = &context.project_data {
+            return root.path();
+        }
+    }
+    std::env::current_dir()
+        .map_err(|error| format!("Cannot resolve audio working directory: {error}"))
+}
+
+fn audio_output_path(context: &ActionProviderContext, relative: &Path) -> Result<PathBuf, String> {
+    let relative = audio_relative_path(relative)?;
+    if let Some(package) = &context.package_context {
+        return crate::commands::local_packages::resolve_package_data_path(package, &relative);
+    }
+    if let Some(root) = &context.project_data {
+        return root.resolve(&relative);
+    }
+    let root = std::env::current_dir()
+        .map_err(|error| format!("Cannot resolve audio working directory: {error}"))?;
+    super::runtime_data::confined_path(&root, &relative, "Audio output")
+}
+
 async fn run_generate_image_step(
     step: &crate::RunStep,
     data: &serde_json::Value,
@@ -2124,7 +2174,7 @@ async fn run_generate_image_step(
         .supports_generate_image
     {
         return Err(format!(
-            "Action '{}' generate_image is not supported by the {} adapter. Select an OpenAI or Ollama step profile.",
+            "Action '{}' generate_image is not supported by the {} adapter. Select a compatible image-generation step profile.",
             action_name,
             effective_provider_context.provider.display_name()
         ));
@@ -2146,6 +2196,12 @@ async fn run_generate_image_step(
         named_inputs,
         provider_context.package_context.as_ref(),
         provider_context.project_data.as_ref(),
+        matches!(
+            effective_provider_context.provider,
+            crate::providers::ProviderKind::Gemini
+                | crate::providers::ProviderKind::Mistral
+                | crate::providers::ProviderKind::Xai
+        ),
     )?;
 
     let _remaining = remaining_runtime_duration(
@@ -2184,65 +2240,24 @@ async fn run_generate_image_step(
 
     let provider_started_at = Instant::now();
     let image_response = match tokio::time::timeout(remaining, async {
-        match effective_provider_context.provider {
-            crate::providers::ProviderKind::TypeSafe => {
-                Err(crate::providers::ProviderError::invalid_request(
-                    crate::providers::ProviderKind::TypeSafe,
-                    "Jev does not generate images. Select a compatible image-generation profile for this step.",
-                ))
-            }
-            crate::providers::ProviderKind::Anthropic => {
-                Err(crate::providers::ProviderError::invalid_request(
-                    crate::providers::ProviderKind::Anthropic,
-                    "Anthropic image generation is not supported.",
-                ))
-            }
-            crate::providers::ProviderKind::Gemini => {
-                Err(crate::providers::ProviderError::invalid_request(
-                    crate::providers::ProviderKind::Gemini,
-                    "Gemini image generation is not supported.",
-                ))
-            }
-            crate::providers::ProviderKind::Mistral => {
-                Err(crate::providers::ProviderError::invalid_request(
-                    crate::providers::ProviderKind::Mistral,
-                    "Mistral image generation is not supported.",
-                ))
-            }
-            crate::providers::ProviderKind::OpenAi => {
-                crate::providers::send_openai_image_request(
-                    &effective_provider_context.url,
-                    &model,
-                    prompt.as_str(),
-                    effective_provider_context.inference_timeout_in_sec,
-                    &effective_provider_context.token,
-                    output_format,
-                    &reference_images,
-                )
-                .await
-            }
-            crate::providers::ProviderKind::Ollama => {
-                crate::providers::send_ollama_image_request(
-                    &effective_provider_context.url,
-                    &model,
-                    prompt.as_str(),
-                    effective_provider_context.inference_timeout_in_sec,
-                    &effective_provider_context.token,
-                )
-                .await
-            }
-            crate::providers::ProviderKind::Xai => {
-                Err(crate::providers::ProviderError::invalid_request(
-                    crate::providers::ProviderKind::Xai,
-                    "xAI image generation is not supported.",
-                ))
-            }
-        }
+        crate::providers::send_image_request(
+            effective_provider_context.provider,
+            &effective_provider_context.url,
+            &model,
+            &prompt,
+            effective_provider_context.inference_timeout_in_sec,
+            &effective_provider_context.token,
+            output_format,
+            &reference_images,
+        )
+        .await
     })
     .await
     {
         Ok(Ok(response)) => {
-            if let (Some(usage_log), Some(attempt)) = (provider_context.usage_log.as_ref(), usage_attempt.as_ref()) {
+            if let (Some(usage_log), Some(attempt)) =
+                (provider_context.usage_log.as_ref(), usage_attempt.as_ref())
+            {
                 usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
                     attempt,
                     provider: effective_provider_context.provider,
@@ -2266,7 +2281,9 @@ async fn run_generate_image_step(
             response
         }
         Ok(Err(error)) => {
-            if let (Some(usage_log), Some(attempt)) = (provider_context.usage_log.as_ref(), usage_attempt.as_ref()) {
+            if let (Some(usage_log), Some(attempt)) =
+                (provider_context.usage_log.as_ref(), usage_attempt.as_ref())
+            {
                 usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
                     attempt,
                     provider: effective_provider_context.provider,
@@ -2295,7 +2312,9 @@ async fn run_generate_image_step(
             return Err(lines.join("\n"));
         }
         Err(_) => {
-            if let (Some(usage_log), Some(attempt)) = (provider_context.usage_log.as_ref(), usage_attempt.as_ref()) {
+            if let (Some(usage_log), Some(attempt)) =
+                (provider_context.usage_log.as_ref(), usage_attempt.as_ref())
+            {
                 usage_log.record_provider_request(crate::usage_log::UsageProviderRequest {
                     attempt,
                     provider: effective_provider_context.provider,
@@ -2457,8 +2476,24 @@ async fn resolve_generate_image_step_profile_context(
     action_name: &str,
     invocation_timeout_in_sec: u64,
 ) -> Result<Option<ActionProviderContext>, String> {
-    let Some(profile_name) =
-        resolve_step_profile_name(profile, data, action_name, "generate_image")?
+    resolve_media_step_profile_context(
+        profile,
+        data,
+        action_name,
+        invocation_timeout_in_sec,
+        "generate_image",
+    )
+    .await
+}
+
+async fn resolve_media_step_profile_context(
+    profile: Option<&crate::RunArg>,
+    data: &serde_json::Value,
+    action_name: &str,
+    invocation_timeout_in_sec: u64,
+    step_kind: &str,
+) -> Result<Option<ActionProviderContext>, String> {
+    let Some(profile_name) = resolve_step_profile_name(profile, data, action_name, step_kind)?
     else {
         return Ok(None);
     };
@@ -2466,7 +2501,7 @@ async fn resolve_generate_image_step_profile_context(
     let config_file = config_path();
     let Some(config) = load_config() else {
         return Err(format!(
-            "Action '{}' generate_image step references profile '{}', but no Cargo AI config was found at '{}'.",
+            "Action '{}' {step_kind} step references profile '{}', but no Cargo AI config was found at '{}'.",
             action_name,
             profile_name,
             config_file.display()
@@ -2475,7 +2510,7 @@ async fn resolve_generate_image_step_profile_context(
 
     let Some(profile) = find_profile(&config, &profile_name) else {
         return Err(format!(
-            "Action '{}' generate_image step references unknown profile '{}'.",
+            "Action '{}' {step_kind} step references unknown profile '{}'.",
             action_name, profile_name
         ));
     };
@@ -2483,18 +2518,23 @@ async fn resolve_generate_image_step_profile_context(
     let provider = crate::providers::ProviderKind::from_server_value(profile.server.as_str())
         .ok_or_else(|| {
             format!(
-                "Action '{}' generate_image step profile '{}' uses unsupported server '{}'.",
+                "Action '{}' {step_kind} step profile '{}' uses unsupported server '{}'.",
                 action_name, profile.name, profile.server
             )
         })?;
 
+    if step_kind != "generate_image" && profile.auth_mode != ProfileAuthMode::ApiKey {
+        return Err(format!(
+            "Action '{action_name}' {step_kind} requires an API-key profile."
+        ));
+    }
     let mut url = profile.url.clone().unwrap_or_default();
     let token = match profile.auth_mode {
         ProfileAuthMode::ApiKey => resolve_profile_api_token_for_action_step(profile)?,
         ProfileAuthMode::OpenaiAccount => {
             if provider != crate::providers::ProviderKind::OpenAi {
                 return Err(format!(
-                    "Action '{}' generate_image step profile '{}' uses auth mode '{}', but server '{}' supports only '{}' or '{}'.",
+                    "Action '{}' {step_kind} step profile '{}' uses auth mode '{}', but server '{}' supports only '{}' or '{}'.",
                     action_name,
                     profile.name,
                     ProfileAuthMode::OpenaiAccount.as_str(),
@@ -2511,13 +2551,13 @@ async fn resolve_generate_image_step_profile_context(
         ProfileAuthMode::None => match provider {
             crate::providers::ProviderKind::TypeSafe => {
                 return Err(format!(
-                    "Action '{}' generate_image step profile '{}' selects Jev, which does not generate images. Select a compatible image-generation profile.",
+                    "Action '{}' {step_kind} step profile '{}' selects Jev, which does not generate images. Select a compatible image-generation profile.",
                     action_name, profile.name
                 ));
             }
             crate::providers::ProviderKind::Anthropic => {
                 return Err(format!(
-                    "Action '{}' generate_image step profile '{}' auth mode is '{}'. Anthropic requires '{}'.",
+                    "Action '{}' {step_kind} step profile '{}' auth mode is '{}'. Anthropic requires '{}'.",
                     action_name,
                     profile.name,
                     ProfileAuthMode::None.as_str(),
@@ -2526,7 +2566,7 @@ async fn resolve_generate_image_step_profile_context(
             }
             crate::providers::ProviderKind::Gemini => {
                 return Err(format!(
-                    "Action '{}' generate_image step profile '{}' auth mode is '{}'. Gemini requires '{}'.",
+                    "Action '{}' {step_kind} step profile '{}' auth mode is '{}'. Gemini requires '{}'.",
                     action_name,
                     profile.name,
                     ProfileAuthMode::None.as_str(),
@@ -2535,7 +2575,7 @@ async fn resolve_generate_image_step_profile_context(
             }
             crate::providers::ProviderKind::Mistral => {
                 return Err(format!(
-                    "Action '{}' generate_image step profile '{}' auth mode is '{}'. Mistral requires '{}'.",
+                    "Action '{}' {step_kind} step profile '{}' auth mode is '{}'. Mistral requires '{}'.",
                     action_name,
                     profile.name,
                     ProfileAuthMode::None.as_str(),
@@ -2545,7 +2585,7 @@ async fn resolve_generate_image_step_profile_context(
             crate::providers::ProviderKind::Ollama => String::new(),
             crate::providers::ProviderKind::OpenAi => {
                 return Err(format!(
-                    "Action '{}' generate_image step profile '{}' auth mode is '{}'. Set it to '{}' or '{}' before using it here.",
+                    "Action '{}' {step_kind} step profile '{}' auth mode is '{}'. Set it to '{}' or '{}' before using it here.",
                     action_name,
                     profile.name,
                     ProfileAuthMode::None.as_str(),
@@ -2555,7 +2595,7 @@ async fn resolve_generate_image_step_profile_context(
             }
             crate::providers::ProviderKind::Xai => {
                 return Err(format!(
-                    "Action '{}' generate_image step profile '{}' auth mode is '{}'. xAI requires '{}'.",
+                    "Action '{}' {step_kind} step profile '{}' auth mode is '{}'. xAI requires '{}'.",
                     action_name,
                     profile.name,
                     ProfileAuthMode::None.as_str(),
@@ -2570,7 +2610,7 @@ async fn resolve_generate_image_step_profile_context(
     }
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(format!(
-            "Action '{}' generate_image step profile '{}' produced an invalid URL. Use an absolute URL beginning with `http://` or `https://`.",
+            "Action '{}' {step_kind} step profile '{}' produced an invalid URL. Use an absolute URL beginning with `http://` or `https://`.",
             action_name, profile.name
         ));
     }
@@ -4529,6 +4569,7 @@ fn resolve_generate_image_reference_images(
         named_inputs,
         package_context,
         None,
+        false,
     )
 }
 
@@ -4539,12 +4580,13 @@ fn resolve_generate_image_reference_images_with_data(
     named_inputs: &BTreeMap<String, crate::Input>,
     package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
     project_data: Option<&super::runtime_data::DataRoot>,
+    bounded: bool,
 ) -> Result<Vec<crate::providers::ImageReference>, String> {
     let Some(references) = references else {
         return Ok(Vec::new());
     };
 
-    let mut resolved = Vec::with_capacity(references.len());
+    let mut resolved: Vec<crate::providers::ImageReference> = Vec::with_capacity(references.len());
     for (index, reference) in references.iter().enumerate() {
         let path = match reference {
             crate::GenerateImageReference::Path { path } => {
@@ -4609,16 +4651,24 @@ fn resolve_generate_image_reference_images_with_data(
             }
         };
 
-        resolved.push(
-            crate::providers::load_image_reference(path.as_str()).map_err(|error| {
-                format!(
-                    "Action '{}' generate_image reference image {} could not be loaded: {}",
-                    action_name,
-                    index + 1,
-                    error
-                )
-            })?,
-        );
+        let loaded = if bounded {
+            let used: usize = resolved.iter().map(|image| image.bytes.len()).sum();
+            let remaining = (20usize * 1024 * 1024).saturating_sub(used);
+            crate::providers::load_image_reference_with_limit(
+                &path,
+                remaining.min(10 * 1024 * 1024),
+            )
+        } else {
+            crate::providers::load_image_reference(&path)
+        };
+        resolved.push(loaded.map_err(|error| {
+            format!(
+                "Action '{}' generate_image reference image {} could not be loaded: {}",
+                action_name,
+                index + 1,
+                error
+            )
+        })?);
     }
 
     Ok(resolved)
@@ -4629,6 +4679,18 @@ fn validate_generate_image_reference_support_for_provider(
     reference_images: Option<&[crate::GenerateImageReference]>,
     action_name: &str,
 ) -> Result<(), String> {
+    let count = reference_images.map_or(0, |images| images.len());
+    let cap = match provider {
+        crate::providers::ProviderKind::Gemini => 4,
+        crate::providers::ProviderKind::Xai => 5,
+        crate::providers::ProviderKind::Mistral => 0,
+        _ => usize::MAX,
+    };
+    if count > cap {
+        return Err(format!(
+            "Action '{action_name}' image profile permits at most {cap} reference images."
+        ));
+    }
     if provider == crate::providers::ProviderKind::Ollama
         && reference_images.is_some_and(|images| !images.is_empty())
     {
@@ -5050,6 +5112,8 @@ mod tests {
         args: Vec<crate::RunArg>,
     ) -> crate::RunStep {
         crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -5097,6 +5161,29 @@ mod tests {
             package_context: None,
             usage_log: None,
         }
+    }
+
+    #[test]
+    fn audio_package_sources_separate_declared_payload_from_runtime_data() {
+        let root =
+            std::env::temp_dir().join(format!("cargo-ai-audio-roots-{}", uuid::Uuid::new_v4()));
+        let package = hosted_package_context(&root, "deny");
+        let mut context = provider_context();
+        context.package_context = Some(package.clone());
+        assert_eq!(
+            super::audio_source_root(&context, false).unwrap(),
+            package.package_payload_root
+        );
+        assert_eq!(
+            super::audio_source_root(&context, true).unwrap(),
+            package.package_data_root
+        );
+        assert_eq!(
+            super::audio_output_path(&context, Path::new("speech.wav")).unwrap(),
+            package.package_data_root.join("speech.wav")
+        );
+        assert!(super::audio_output_path(&context, Path::new("../outside.wav")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn hosted_package_context(
@@ -6272,6 +6359,8 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn exec_step_captures_output_variable_on_success() {
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -6318,6 +6407,8 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn exec_step_buckets_raw_output_into_live_lane() {
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -6397,6 +6488,8 @@ auth_mode = "{auth_mode}"
 
         let output_name = format!(".tmp-cai2054-generated-image-{}.png", std::process::id());
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -6524,6 +6617,8 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -6606,6 +6701,8 @@ auth_mode = "{auth_mode}"
         let missing_reference =
             format!(".tmp-cai2097-missing-reference-{}.png", std::process::id());
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -6683,6 +6780,8 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -6779,6 +6878,8 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -6848,6 +6949,8 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn generate_image_step_requires_model_when_step_and_invocation_omit_it() {
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -6943,6 +7046,8 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -7143,6 +7248,8 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -7205,6 +7312,8 @@ auth_mode = "{auth_mode}"
         let _test_env = TestCargoHome::new(&config);
 
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -7255,6 +7364,8 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn generate_image_step_rejects_reference_images_for_ollama() {
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -7333,6 +7444,8 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -7420,6 +7533,8 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -7476,6 +7591,8 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn generate_image_step_rejects_non_png_output_for_ollama() {
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -7806,6 +7923,8 @@ auth_mode = "{auth_mode}"
         provider.profile_name = None;
         provider.package_context = Some(context.clone());
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -8076,6 +8195,8 @@ auth_mode = "{auth_mode}"
         let mut provider = provider_context();
         provider.package_context = Some(context.clone());
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -8158,6 +8279,8 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -8275,6 +8398,8 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -8388,6 +8513,8 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -8478,6 +8605,8 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -8570,6 +8699,8 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let exec_step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -8600,6 +8731,8 @@ auth_mode = "{auth_mode}"
             platforms: None,
         };
         let agent_step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -8701,6 +8834,8 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -8814,6 +8949,8 @@ auth_mode = "{auth_mode}"
         .expect("tool manifest should be written");
 
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: Some("bridge_tool".to_string()),
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -8911,6 +9048,8 @@ auth_mode = "{auth_mode}"
         fs::write(&artifact_path, "{}").expect("json child artifact should be written");
 
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -8997,6 +9136,8 @@ auth_mode = "{auth_mode}"
         fs::write(&artifact_path, "{}").expect("json child artifact should be written");
 
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -9070,6 +9211,8 @@ auth_mode = "{auth_mode}"
         fs::write(&artifact_path, "{}").expect("json child artifact should be written");
 
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -9120,6 +9263,8 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn agent_step_rejects_bare_child_name() {
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -9167,6 +9312,8 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn agent_step_rejects_parent_traversal_path() {
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -9214,6 +9361,8 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn agent_step_rejects_nested_child_path() {
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -9278,6 +9427,8 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -9346,6 +9497,8 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let failing_step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -9376,6 +9529,8 @@ auth_mode = "{auth_mode}"
             platforms: None,
         };
         let second_step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -9453,6 +9608,8 @@ auth_mode = "{auth_mode}"
             name: "first_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                voice: None,
+                audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
                 ignore_tools: false,
@@ -9487,6 +9644,8 @@ auth_mode = "{auth_mode}"
             name: "second_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                voice: None,
+                audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
                 ignore_tools: false,
@@ -9558,6 +9717,8 @@ auth_mode = "{auth_mode}"
             name: "first_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                voice: None,
+                audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
                 ignore_tools: false,
@@ -9595,6 +9756,8 @@ auth_mode = "{auth_mode}"
             name: "second_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                voice: None,
+                audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
                 ignore_tools: false,
@@ -9685,6 +9848,8 @@ auth_mode = "{auth_mode}"
             name: "first_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                voice: None,
+                audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
                 ignore_tools: false,
@@ -9719,6 +9884,8 @@ auth_mode = "{auth_mode}"
             name: "second_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                voice: None,
+                audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
                 ignore_tools: false,
@@ -9805,6 +9972,8 @@ auth_mode = "{auth_mode}"
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![
                 crate::RunStep {
+                    voice: None,
+                    audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
                     ignore_tools: false,
@@ -9835,6 +10004,8 @@ auth_mode = "{auth_mode}"
                     platforms: None,
                 },
                 crate::RunStep {
+                    voice: None,
+                    audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
                     ignore_tools: false,
@@ -9867,6 +10038,8 @@ auth_mode = "{auth_mode}"
             name: "second_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                voice: None,
+                audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
                 ignore_tools: false,
@@ -9938,6 +10111,8 @@ auth_mode = "{auth_mode}"
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![
                 crate::RunStep {
+                    voice: None,
+                    audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
                     ignore_tools: false,
@@ -9968,6 +10143,8 @@ auth_mode = "{auth_mode}"
                     platforms: None,
                 },
                 crate::RunStep {
+                    voice: None,
+                    audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
                     ignore_tools: false,
@@ -10004,6 +10181,8 @@ auth_mode = "{auth_mode}"
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![
                 crate::RunStep {
+                    voice: None,
+                    audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
                     ignore_tools: false,
@@ -10034,6 +10213,8 @@ auth_mode = "{auth_mode}"
                     platforms: None,
                 },
                 crate::RunStep {
+                    voice: None,
+                    audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
                     ignore_tools: false,
@@ -10119,6 +10300,8 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let failing_step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -10149,6 +10332,8 @@ auth_mode = "{auth_mode}"
             platforms: None,
         };
         let second_step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -10226,6 +10411,8 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
@@ -10306,6 +10493,8 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            voice: None,
+            audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,

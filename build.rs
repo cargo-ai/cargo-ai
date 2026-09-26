@@ -64,6 +64,18 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
         source: "Targo.toml",
     },
     TemplateSource {
+        destination: "src/runtime_media.rs",
+        source: "src/runtime_media.rs",
+    },
+    TemplateSource {
+        destination: "src/providers/media.rs",
+        source: "../src/providers/media.rs",
+    },
+    TemplateSource {
+        destination: "src/providers/image.rs",
+        source: "../src/providers/image.rs",
+    },
+    TemplateSource {
         destination: "src/runtime_data.rs",
         source: "src/runtime_data.rs",
     },

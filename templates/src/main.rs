@@ -5,6 +5,7 @@ mod credentials;
 mod definition_validation;
 mod providers;
 mod runtime_data;
+mod runtime_media;
 mod usage_backup;
 mod usage_backup_host;
 mod usage_log;
@@ -28,8 +29,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use config::loader::{config_path, find_profile, load_config};
 use config::schema::{Profile, ProfileAuthMode, SecretStoreMode};
 use providers::{
-    AuthenticationPolicy, ProviderError, ProviderKind, provider_error_messages,
-    validate_provider_content_parts, validate_provider_request,
+    provider_error_messages, validate_provider_content_parts, validate_provider_request,
+    AuthenticationPolicy, ProviderError, ProviderKind,
 };
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
@@ -3732,9 +3733,9 @@ mod tests {
         assert!(error.contains("string_bytes"));
     }
     use super::{
-        ActionOutputMode, LoadedProfileKind, RequestedActionRenderMode,
         package_child_project_root_from, resolve_action_render_mode_for_capability,
-        resolve_loaded_profile, validate_agent_step_target,
+        resolve_loaded_profile, validate_agent_step_target, ActionOutputMode, LoadedProfileKind,
+        RequestedActionRenderMode,
     };
     use crate::config::schema::{Config, OpenAiAuth, Profile, ProfileAuthMode, WebResources};
     use std::fs;
@@ -4333,6 +4334,20 @@ async fn run_matching_action_steps(
             )
             .await
             .map(|captured_output| (StepExecutionOutcome::Completed, captured_output))
+        } else if step.kind.eq_ignore_ascii_case("generate_audio")
+            || step.kind.eq_ignore_ascii_case("transcribe_audio")
+        {
+            runtime_media::run_audio_step(
+                step,
+                &action_data,
+                action_index,
+                &action.name,
+                step_index + 1,
+                provider_context,
+                runtime_budget,
+            )
+            .await
+            .map(|capture| (StepExecutionOutcome::Completed, capture))
         } else if step.kind.eq_ignore_ascii_case("generate_image") {
             run_generate_image_step(
                 step,
@@ -4875,6 +4890,31 @@ async fn run_email_me_step(
     })
 }
 
+fn audio_relative_path(path: &Path) -> Result<PathBuf, String> {
+    runtime_data::portable_relative_path(path, "Audio path")
+}
+
+fn audio_source_root(context: &ActionProviderContext, dynamic: bool) -> Result<PathBuf, String> {
+    if dynamic {
+        if let Some(root) = &context.project_data {
+            return root.path();
+        }
+    }
+    std::env::current_dir()
+        .map_err(|error| format!("Cannot resolve audio working directory: {error}"))
+}
+
+fn audio_output_path(context: &ActionProviderContext, relative: &Path) -> Result<PathBuf, String> {
+    let relative = audio_relative_path(relative)?;
+
+    if let Some(root) = &context.project_data {
+        return root.resolve(&relative);
+    }
+    let root = std::env::current_dir()
+        .map_err(|error| format!("Cannot resolve audio working directory: {error}"))?;
+    runtime_data::confined_path(&root, &relative, "Audio output")
+}
+
 async fn run_generate_image_step(
     step: &RunStep,
     data: &serde_json::Value,
@@ -4943,7 +4983,7 @@ async fn run_generate_image_step(
         .supports_generate_image
     {
         return Err(format!(
-            "Action '{}' generate_image is not supported by the {} adapter. Select an OpenAI or Ollama step profile.",
+            "Action '{}' generate_image is not supported by the {} adapter. Select a compatible image-generation step profile.",
             action_name,
             effective_provider_context.provider.display_name()
         ));
@@ -4964,6 +5004,12 @@ async fn run_generate_image_step(
         action_name,
         named_inputs,
         provider_context.project_data.as_ref(),
+        matches!(
+            effective_provider_context.provider,
+            crate::providers::ProviderKind::Gemini
+                | crate::providers::ProviderKind::Mistral
+                | crate::providers::ProviderKind::Xai
+        ),
     )?;
 
     let _remaining = remaining_runtime_duration(
@@ -5001,59 +5047,25 @@ async fn run_generate_image_step(
     })?;
 
     let provider_started_at = Instant::now();
-    let image_response = match tokio::time::timeout(
-        remaining,
-        async {
-            match effective_provider_context.provider {
-                ProviderKind::Anthropic => Err(ProviderError::invalid_request(
-                    ProviderKind::Anthropic,
-                    "Anthropic image generation is not supported.",
-                )),
-                ProviderKind::Gemini => Err(ProviderError::invalid_request(
-                    ProviderKind::Gemini,
-                    "Gemini image generation is not supported.",
-                )),
-                ProviderKind::Mistral => Err(ProviderError::invalid_request(
-                    ProviderKind::Mistral,
-                    "Mistral image generation is not supported.",
-                )),
-                ProviderKind::OpenAi => {
-                    crate::providers::send_openai_image_request(
-                        &effective_provider_context.url,
-                        &model,
-                        prompt.as_str(),
-                        effective_provider_context.inference_timeout_in_sec,
-                        &effective_provider_context.token,
-                        output_format,
-                        &reference_images,
-                    )
-                    .await
-                }
-                ProviderKind::Ollama => {
-                    crate::providers::send_ollama_image_request(
-                        &effective_provider_context.url,
-                        &model,
-                        prompt.as_str(),
-                        effective_provider_context.inference_timeout_in_sec,
-                        &effective_provider_context.token,
-                    )
-                    .await
-                }
-                ProviderKind::TypeSafe => Err(ProviderError::invalid_request(
-                    ProviderKind::TypeSafe,
-                    "Jev does not generate images. Select a compatible image-generation profile for this step.",
-                )),
-                ProviderKind::Xai => Err(ProviderError::invalid_request(
-                    ProviderKind::Xai,
-                    "xAI image generation is not supported.",
-                )),
-            }
-        },
-    )
+    let image_response = match tokio::time::timeout(remaining, async {
+        crate::providers::send_image_request(
+            effective_provider_context.provider,
+            &effective_provider_context.url,
+            &model,
+            &prompt,
+            effective_provider_context.inference_timeout_in_sec,
+            &effective_provider_context.token,
+            output_format,
+            &reference_images,
+        )
+        .await
+    })
     .await
     {
         Ok(Ok(response)) => {
-            if let (Some(usage_log), Some(attempt)) = (provider_context.usage_log.as_ref(), usage_attempt.as_ref()) {
+            if let (Some(usage_log), Some(attempt)) =
+                (provider_context.usage_log.as_ref(), usage_attempt.as_ref())
+            {
                 usage_log.record_provider_request(usage_log::UsageProviderRequest {
                     attempt,
                     provider: effective_provider_context.provider,
@@ -5077,7 +5089,9 @@ async fn run_generate_image_step(
             response
         }
         Ok(Err(error)) => {
-            if let (Some(usage_log), Some(attempt)) = (provider_context.usage_log.as_ref(), usage_attempt.as_ref()) {
+            if let (Some(usage_log), Some(attempt)) =
+                (provider_context.usage_log.as_ref(), usage_attempt.as_ref())
+            {
                 usage_log.record_provider_request(usage_log::UsageProviderRequest {
                     attempt,
                     provider: effective_provider_context.provider,
@@ -5098,13 +5112,17 @@ async fn run_generate_image_step(
                     error: Some(usage_provider_error(&error)),
                 });
             }
-            let mut lines =
-                vec![format!("Action '{}' generate_image step failed.", action_name)];
+            let mut lines = vec![format!(
+                "Action '{}' generate_image step failed.",
+                action_name
+            )];
             lines.extend(provider_error_messages(&error));
             return Err(lines.join("\n"));
         }
         Err(_) => {
-            if let (Some(usage_log), Some(attempt)) = (provider_context.usage_log.as_ref(), usage_attempt.as_ref()) {
+            if let (Some(usage_log), Some(attempt)) =
+                (provider_context.usage_log.as_ref(), usage_attempt.as_ref())
+            {
                 usage_log.record_provider_request(usage_log::UsageProviderRequest {
                     attempt,
                     provider: effective_provider_context.provider,
@@ -5242,8 +5260,24 @@ async fn resolve_generate_image_step_profile_context(
     action_name: &str,
     invocation_timeout_in_sec: u64,
 ) -> Result<Option<ActionProviderContext>, String> {
-    let Some(profile_name) =
-        resolve_step_profile_name(profile, data, action_name, "generate_image")?
+    resolve_media_step_profile_context(
+        profile,
+        data,
+        action_name,
+        invocation_timeout_in_sec,
+        "generate_image",
+    )
+    .await
+}
+
+async fn resolve_media_step_profile_context(
+    profile: Option<&RunArg>,
+    data: &serde_json::Value,
+    action_name: &str,
+    invocation_timeout_in_sec: u64,
+    step_kind: &str,
+) -> Result<Option<ActionProviderContext>, String> {
+    let Some(profile_name) = resolve_step_profile_name(profile, data, action_name, step_kind)?
     else {
         return Ok(None);
     };
@@ -5251,7 +5285,7 @@ async fn resolve_generate_image_step_profile_context(
     let config_file = config_path();
     let Some(config) = load_config() else {
         return Err(format!(
-            "Action '{}' generate_image step references profile '{}', but no Cargo AI config was found at '{}'.",
+            "Action '{}' {step_kind} step references profile '{}', but no Cargo AI config was found at '{}'.",
             action_name,
             profile_name,
             config_file.display()
@@ -5260,18 +5294,23 @@ async fn resolve_generate_image_step_profile_context(
 
     let Some(profile) = find_profile(&config, &profile_name) else {
         return Err(format!(
-            "Action '{}' generate_image step references unknown profile '{}'.",
+            "Action '{}' {step_kind} step references unknown profile '{}'.",
             action_name, profile_name
         ));
     };
 
     let provider = ProviderKind::from_server_value(profile.server.as_str()).ok_or_else(|| {
         format!(
-            "Action '{}' generate_image step profile '{}' uses unsupported server '{}'.",
+            "Action '{}' {step_kind} step profile '{}' uses unsupported server '{}'.",
             action_name, profile.name, profile.server
         )
     })?;
 
+    if step_kind != "generate_image" && profile.auth_mode != ProfileAuthMode::ApiKey {
+        return Err(format!(
+            "Action '{action_name}' {step_kind} requires an API-key profile."
+        ));
+    }
     let mut server = String::new();
     let mut model = String::new();
     let mut profile_timeout_in_sec = 60;
@@ -5311,7 +5350,7 @@ async fn resolve_generate_image_step_profile_context(
             },
             ProfileAuthMode::OpenaiAccount => {
                 return Err(format!(
-                    "Action '{}' generate_image step profile '{}' uses auth mode '{}', but server '{}' supports only '{}' or '{}'.",
+                    "Action '{}' {step_kind} step profile '{}' uses auth mode '{}', but server '{}' supports only '{}' or '{}'.",
                     action_name,
                     profile.name,
                     ProfileAuthMode::OpenaiAccount.as_str(),
@@ -5331,7 +5370,7 @@ async fn resolve_generate_image_step_profile_context(
     }
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(format!(
-            "Action '{}' generate_image step profile '{}' produced an invalid URL. Use an absolute URL beginning with `http://` or `https://`.",
+            "Action '{}' {step_kind} step profile '{}' produced an invalid URL. Use an absolute URL beginning with `http://` or `https://`.",
             action_name, profile.name
         ));
     }
@@ -6655,6 +6694,7 @@ fn resolve_generate_image_reference_images(
         action_name,
         named_inputs,
         None,
+        false,
     )
 }
 
@@ -6664,12 +6704,13 @@ fn resolve_generate_image_reference_images_with_data(
     action_name: &str,
     named_inputs: &BTreeMap<String, Input>,
     project_data: Option<&runtime_data::DataRoot>,
+    bounded: bool,
 ) -> Result<Vec<providers::ImageReference>, String> {
     let Some(references) = references else {
         return Ok(Vec::new());
     };
 
-    let mut resolved = Vec::with_capacity(references.len());
+    let mut resolved: Vec<crate::providers::ImageReference> = Vec::with_capacity(references.len());
     for (index, reference) in references.iter().enumerate() {
         let path = match reference {
             GenerateImageReference::Path { path } => {
@@ -6725,16 +6766,24 @@ fn resolve_generate_image_reference_images_with_data(
             }
             _ => path,
         };
-        resolved.push(
-            providers::load_image_reference(path.as_str()).map_err(|error| {
-                format!(
-                    "Action '{}' generate_image reference image {} could not be loaded: {}",
-                    action_name,
-                    index + 1,
-                    error
-                )
-            })?,
-        );
+        let loaded = if bounded {
+            let used: usize = resolved.iter().map(|image| image.bytes.len()).sum();
+            let remaining = (20usize * 1024 * 1024).saturating_sub(used);
+            crate::providers::load_image_reference_with_limit(
+                &path,
+                remaining.min(10 * 1024 * 1024),
+            )
+        } else {
+            crate::providers::load_image_reference(&path)
+        };
+        resolved.push(loaded.map_err(|error| {
+            format!(
+                "Action '{}' generate_image reference image {} could not be loaded: {}",
+                action_name,
+                index + 1,
+                error
+            )
+        })?);
     }
 
     Ok(resolved)
@@ -6745,6 +6794,18 @@ fn validate_generate_image_reference_support_for_provider(
     reference_images: Option<&[GenerateImageReference]>,
     action_name: &str,
 ) -> Result<(), String> {
+    let count = reference_images.map_or(0, |images| images.len());
+    let cap = match provider {
+        crate::providers::ProviderKind::Gemini => 4,
+        crate::providers::ProviderKind::Xai => 5,
+        crate::providers::ProviderKind::Mistral => 0,
+        _ => usize::MAX,
+    };
+    if count > cap {
+        return Err(format!(
+            "Action '{action_name}' image profile permits at most {cap} reference images."
+        ));
+    }
     if provider == ProviderKind::Ollama && reference_images.is_some_and(|images| !images.is_empty())
     {
         return Err(format!(

@@ -4,6 +4,14 @@
 
 An agent definition is a JSON document that tells Cargo AI what input to send to a model, what structured result to require, and what actions may follow. Start with the smallest definition that proves the workflow, run it directly while editing, and hatch it only when validation succeeds.
 
+Inspect a local definition before choosing a model connection profile:
+
+```bash
+cargo ai requirements --config ./my_agent.json
+```
+
+The read-only report lists declared input kinds, output choices/bounds/rubrics and direct media steps with their constraints. It also lists file, tool and child-agent dependencies separately. Conditional steps and dynamic values remain unresolved. This is an inventory of declarations, not a provider compatibility check; `hatch --check` performs its own selected-profile checks.
+
 This guide is the human-oriented overview. The generated [agent definition contract](../templates/guidance/agent-definition-contract.md) is the version-matched offline assistant reference for definition validation.
 
 ## Choose A Definition Source
@@ -161,6 +169,26 @@ Pass values with repeatable `--run-var name=value` flags and reference them as `
 ```
 
 Runtime variable names are flat and must be declared. Undeclared or duplicate flags fail, and a variable without a default must be supplied if an executed path resolves it. Quote values when the shell would otherwise split or interpret them.
+
+A transcription step can use a declared string runtime variable to select a local audio source without changing the agent definition:
+
+```json
+{
+  "runtime_vars": { "audio_path": { "type": "string" } },
+  "actions": [{
+    "name": "transcribe",
+    "logic": { "==": [1, 1] },
+    "run": [{
+      "kind": "transcribe_audio",
+      "profile": "speech-transcription",
+      "audio": { "path": { "var": "runtime.audio_path" } },
+      "output_variable": "transcript"
+    }]
+  }]
+}
+```
+
+Pass `--run-var audio_path=./recordings/meeting.wav`. The source must be a portable relative WAV or MP3 path, and the existing file must fit the 10 MiB limit. `transcribe_audio` captures text only for subsequent steps of the same action; an action-only coordinator can forward that capture to a text child. It does not add audio to top-level `file` inputs. See [Actions and child agents](./actions-and-child-agents.md) for a complete chain and package path behavior.
 
 ## Secrets And Trusted Tools
 

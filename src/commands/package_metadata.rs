@@ -51,21 +51,28 @@ pub(crate) fn generate(
                     capabilities.insert("image".to_string());
                 }
             }
-            if value
+            for step in value
                 .get("actions")
                 .and_then(serde_json::Value::as_array)
-                .is_some_and(|actions| {
-                    actions.iter().any(|action| {
-                        action
-                            .get("run")
-                            .and_then(serde_json::Value::as_array)
-                            .is_some_and(|steps| {
-                                steps.iter().any(|step| step["kind"] == "generate_image")
-                            })
-                    })
+                .into_iter()
+                .flatten()
+                .flat_map(|action| {
+                    action
+                        .get("run")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
                 })
             {
-                capabilities.insert("image_generation".to_string());
+                let capability = match step.get("kind").and_then(serde_json::Value::as_str) {
+                    Some("generate_image") => Some("image_generation"),
+                    Some("generate_audio") => Some("audio_generation"),
+                    Some("transcribe_audio") => Some("audio_transcription"),
+                    _ => None,
+                };
+                if let Some(capability) = capability {
+                    capabilities.insert(capability.to_string());
+                }
             }
         }
     }
@@ -79,7 +86,7 @@ pub(crate) fn generate(
             network:"Runtime provider destination depends on the selected profile. Dynamic tool destinations are unknown; inspect source.".into(),
             subprocess:format!("Cargo AI subprocess control: {subprocess}. Source tools can have open-world effects when execution is granted."),
             secrets:"Cargo AI does not collect runtime credentials into this metadata. Arbitrary asset contents, credential names and tool requirements still need source/profile review.".into(),
-            transmitted_data:"Declared text/image inputs and runtime context may be sent to the selected provider. Additional dynamic tool data flows are unknown.".into(),
+            transmitted_data:"Declared text/image inputs, speech text, selected transcription audio files and runtime context may be sent to the selected provider. Image generation may create provider-hosted files; provider retention policies apply. Additional dynamic tool data flows are unknown.".into(),
             destructive_actions:"Unknown for arbitrary tools; review editable source. Metadata is not a safety certification or operating-system sandbox.".into(),
         },
     };

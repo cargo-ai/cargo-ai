@@ -136,8 +136,16 @@ Check for:
 - using a model ID that the selected Anthropic Console organization cannot access
 - setting `max_output_tokens` unusually low for a model with adaptive thinking; the cap includes thinking plus final text, so raise it if the provider returns no text block
 - pointing a custom URL at an OpenAI-compatible facade; Cargo AI's `anthropic` adapter expects the native Messages request and response contract
-- sending direct file input or selecting an Anthropic profile for `generate_image`; use text, URL-text, or image input, or select an OpenAI/Ollama step profile for image generation
+- sending direct file input or selecting an Anthropic profile for a media run step; use a compatible media step profile
 - assuming Cargo AI silently simplifies an unsupported JSON Schema; provider schema errors are surfaced so the authored contract remains visible
+
+### Media run-step failures
+
+- `generate_audio` needs speech text, a provider-specific voice ID, a supported WAV/MP3 output path, and an API-key profile. Gemini speech uses WAV only; Mistral needs an existing saved voice ID. xAI speech is a fixed service and rejects an explicit step model.
+- `transcribe_audio.audio.path` is one literal relative path or one string variable reference. The source must be a readable, confined, regular WAV/MP3 file no larger than 10 MiB. Packaged literal sources must be declared assets; runtime-selected sources belong in package data.
+- OpenAI account transport, Anthropic, Ollama, and TypeSafe have no speech or transcription adapter. Select a compatible API-key step profile; text model compatibility does not supply an audio route.
+- A transcription capture is visible only to later steps in the same action. Use an action-only coordinator to transcribe before forwarding text to a child; root inference has already happened.
+- Gemini image output must be JPEG, xAI JPEG, and Mistral PNG without references. Returned image format, byte size, and image count are checked. Mistral may return no image when its model does not invoke the image tool.
 
 ## TypeSafe Jev compatibility failures
 
@@ -158,8 +166,8 @@ A valid score is not a calibrated confidence/probability. Check representative l
 Check for:
 - selecting `server = "mistral"` with `auth = "none"` or `auth = "openai_account"`; use `auth = "api_key"`
 - exhausting Mistral Studio Free-mode usage or rate limits, selecting a model the account cannot access, or using the Scale API Plan before its billing is active; check the organization's API Plan plus Usage and limits pages
-- pointing a custom URL at a native Mistral service other than Chat Completions; the adapter expects the `/v1/chat/completions` contract
-- sending image/file input or selecting a Mistral profile for `generate_image`; this compatibility slice supports text and URL-text only
+- pointing a custom text-inference URL at a native Mistral service other than Chat Completions; text inference expects `/v1/chat/completions`, while media routes derive from that configured API origin
+- sending image/file input to Mistral text inference, or asking its image tool for references; its media actions have separate native routes and limitations
 - assuming OpenAI-compatible transport changes the provider identity; diagnostics and usage must still report `mistral`
 - treating a representative smoke model as certification of every Mistral model; model selection and model capabilities remain operator-controlled
 - retrying with weakened JSON or another model after a schema rejection; Cargo AI preserves the authored schema and fails closed
@@ -170,7 +178,7 @@ Check for:
 - selecting `server = "xai"` with `auth = "none"` or `auth = "openai_account"`; use `auth = "api_key"`
 - using `server = "grok"`; `xai` is the provider value and Grok is the model family
 - pointing a custom URL at Chat Completions; this adapter expects xAI Responses and sends `store = false`
-- sending image/file input, enabling provider-hosted tools, or selecting an xAI profile for `generate_image`; this compatibility slice supports text and URL-text only
+- sending image/file input to xAI text inference, enabling provider-hosted text tools, or requesting a non-JPEG xAI image output; its media actions use separate native routes
 - treating a representative smoke model as certification of every Grok model; model selection and model capabilities remain operator-controlled
 - retrying with weakened JSON, another model, or another provider after a schema rejection; Cargo AI preserves the authored schema and fails closed before actions
 
@@ -182,7 +190,7 @@ Check for:
 - using a model ID that the selected Google AI project cannot access
 - pointing a custom URL at `generateContent` or an OpenAI-compatible facade; Cargo AI's `gemini` adapter expects the native Interactions request and response contract
 - expecting provider-side conversation storage; Cargo AI sends `store = false` for each Gemini request
-- sending direct file input or selecting a Gemini profile for `generate_image`; use text, URL-text, or image input, or select an OpenAI/Ollama step profile for image generation
+- sending generic direct file input to Gemini text inference or requesting a non-JPEG Gemini generated image; its media actions use native Interactions routes
 - assuming Cargo AI silently simplifies an unsupported JSON Schema; provider schema errors are surfaced so the authored contract remains visible
 
 ### Portability drift
