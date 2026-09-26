@@ -121,7 +121,7 @@ pub(crate) async fn send_image_request(
             }
             (
                 endpoint(provider, url, "/v1beta/interactions")?,
-                json!({"model":model,"input":input,"response_format":{"type":"image","delivery":"inline"},"store":false}),
+                json!({"model":model,"input":input,"response_format":{"type":"image"},"store":false}),
             )
         }
         ProviderKind::Xai => {
@@ -637,9 +637,16 @@ mod tests {
                 ),
                 _ => unreachable!(),
             };
+            let expected_request = if provider == ProviderKind::Gemini {
+                Matcher::Json(
+                    json!({"model":"image-model","input":[{"type":"text","text":"draw a square"}],"response_format":{"type":"image"},"store":false}),
+                )
+            } else {
+                Matcher::Regex("draw a square".into())
+            };
             let fixture = server
                 .mock("POST", path)
-                .match_body(Matcher::Regex("draw a square".into()))
+                .match_body(expected_request)
                 .with_status(200)
                 .with_body(body.to_string())
                 .create_async()

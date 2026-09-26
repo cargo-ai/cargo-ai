@@ -271,27 +271,42 @@ fn check_audio(provider: ProviderKind, bytes: &[u8], format: &str) -> Result<(),
     }
 }
 
-fn normalize_openai_streaming_wav(mut bytes: Vec<u8>) -> Result<Vec<u8>, ProviderError> {
+fn normalize_streaming_wav(
+    provider: ProviderKind,
+    mut bytes: Vec<u8>,
+) -> Result<Vec<u8>, ProviderError> {
     if bytes.len() < 12 || !bytes.starts_with(b"RIFF") || bytes.get(8..12) != Some(b"WAVE") {
         return Ok(bytes);
     }
-    if bytes[4..8] != u32::MAX.to_le_bytes() {
+    let (riff_sentinel, data_sentinel) = if provider == ProviderKind::Xai {
+        (i32::MAX as u32 + 36, i32::MAX as u32)
+    } else {
+        (u32::MAX, u32::MAX)
+    };
+    if bytes[4..8] != riff_sentinel.to_le_bytes() {
         return Ok(bytes);
     }
 
     let invalid = || {
         ProviderError::invalid_response(
-            ProviderKind::OpenAi,
-            "OpenAI returned an invalid streaming WAV response.",
+            provider,
+            "Provider returned an invalid streaming WAV response.",
         )
     };
+    if provider == ProviderKind::Xai
+        && (bytes.len() < 44
+            || &bytes[12..20] != b"fmt \x10\x00\x00\x00"
+            || &bytes[36..40] != b"data")
+    {
+        return Err(invalid());
+    }
     let mut offset = 12usize;
     let mut block_align = None;
     while offset + 8 <= bytes.len() {
         let chunk_start = offset + 8;
         let length = u32::from_le_bytes(bytes[offset + 4..chunk_start].try_into().unwrap());
         if &bytes[offset..offset + 4] == b"data" {
-            if length != u32::MAX || block_align.is_none() {
+            if length != data_sentinel || block_align.is_none() {
                 return Err(invalid());
             }
             let sample_len = bytes.len() - chunk_start;
@@ -466,8 +481,8 @@ pub(crate) async fn send_speech_request(
         .map_err(|error| ProviderError::from_reqwest(provider, error))?;
     let (body, facts) = checked_body(provider, response, request.token, MAX_RESPONSE_BYTES).await?;
     let bytes = match provider {
-        ProviderKind::OpenAi if request.format == "wav" => {
-            normalize_openai_streaming_wav(body).map_err(|error| facts.error(error))?
+        ProviderKind::OpenAi | ProviderKind::Xai if request.format == "wav" => {
+            normalize_streaming_wav(provider, body).map_err(|error| facts.error(error))?
         }
         ProviderKind::OpenAi | ProviderKind::Xai => body,
         ProviderKind::Mistral => {
@@ -667,17 +682,24 @@ mod tests {
         bytes
     }
 
+    fn xai_streaming_wave() -> Vec<u8> {
+        let mut bytes = pcm_wave(false);
+        bytes[4..8].copy_from_slice(&(i32::MAX as u32 + 36).to_le_bytes());
+        bytes[40..44].copy_from_slice(&(i32::MAX as u32).to_le_bytes());
+        bytes
+    }
+
     #[test]
     fn openai_streaming_wav_lengths_are_finite_and_samples_are_preserved() {
         let streamed = pcm_wave(true);
-        let normalized = normalize_openai_streaming_wav(streamed.clone()).unwrap();
+        let normalized = normalize_streaming_wav(ProviderKind::OpenAi, streamed.clone()).unwrap();
         assert_eq!(&normalized[4..8], &40u32.to_le_bytes());
         assert_eq!(&normalized[40..44], &4u32.to_le_bytes());
         assert_eq!(&normalized[8..40], &streamed[8..40]);
         assert_eq!(&normalized[44..], &streamed[44..]);
         let ordinary = pcm_wave(false);
         assert_eq!(
-            normalize_openai_streaming_wav(ordinary.clone()).unwrap(),
+            normalize_streaming_wav(ProviderKind::OpenAi, ordinary.clone()).unwrap(),
             ordinary
         );
     }
@@ -686,23 +708,23 @@ mod tests {
     fn openai_streaming_wav_rejects_malformed_or_incomplete_pcm() {
         let mut empty = pcm_wave(true);
         empty.truncate(44);
-        assert!(normalize_openai_streaming_wav(empty).is_err());
+        assert!(normalize_streaming_wav(ProviderKind::OpenAi, empty).is_err());
 
         let mut nonaligned = pcm_wave(true);
         nonaligned.pop();
-        assert!(normalize_openai_streaming_wav(nonaligned).is_err());
+        assert!(normalize_streaming_wav(ProviderKind::OpenAi, nonaligned).is_err());
 
         let mut incomplete_chunk = pcm_wave(true);
         incomplete_chunk[16..20].copy_from_slice(&32u32.to_le_bytes());
-        assert!(normalize_openai_streaming_wav(incomplete_chunk).is_err());
+        assert!(normalize_streaming_wav(ProviderKind::OpenAi, incomplete_chunk).is_err());
 
         let mut finite_data_claim = pcm_wave(true);
         finite_data_claim[40..44].copy_from_slice(&4u32.to_le_bytes());
-        assert!(normalize_openai_streaming_wav(finite_data_claim).is_err());
+        assert!(normalize_streaming_wav(ProviderKind::OpenAi, finite_data_claim).is_err());
 
         let mut invalid_pcm = pcm_wave(true);
         invalid_pcm[34..36].copy_from_slice(&0u16.to_le_bytes());
-        assert!(normalize_openai_streaming_wav(invalid_pcm).is_err());
+        assert!(normalize_streaming_wav(ProviderKind::OpenAi, invalid_pcm).is_err());
     }
 
     #[tokio::test]
@@ -730,6 +752,61 @@ mod tests {
         .unwrap();
         assert_eq!(result.bytes, pcm_wave(false));
         fixture.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn xai_streaming_wav_response_is_normalized_after_download() {
+        let mut server = Server::new_async().await;
+        let fixture = server
+            .mock("POST", "/v1/tts")
+            .match_body(Matcher::Json(json!({"text":"hello","voice_id":"eve","language":"auto","output_format":{"codec":"wav"}})))
+            .with_status(200)
+            .with_body(xai_streaming_wave())
+            .create_async()
+            .await;
+        let result = send_speech_request(
+            ProviderKind::Xai,
+            &server.url(),
+            ProviderSpeechRequest {
+                model: None,
+                text: "hello",
+                voice: "eve",
+                format: "wav",
+                timeout_in_sec: 5,
+                token: "token",
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.bytes, pcm_wave(false));
+        fixture.assert_async().await;
+    }
+
+    #[test]
+    fn xai_streaming_wav_normalization_preserves_finite_bytes_and_rejects_malformed_pairs() {
+        let finite = pcm_wave(false);
+        assert_eq!(
+            normalize_streaming_wav(ProviderKind::Xai, finite.clone()).unwrap(),
+            finite
+        );
+        let mut wrong_data_length = xai_streaming_wave();
+        wrong_data_length[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(normalize_streaming_wav(ProviderKind::Xai, wrong_data_length).is_err());
+
+        let mut wrong_layout = xai_streaming_wave();
+        wrong_layout[12..16].copy_from_slice(b"JUNK");
+        assert!(normalize_streaming_wav(ProviderKind::Xai, wrong_layout).is_err());
+
+        let mut nonaligned = xai_streaming_wave();
+        nonaligned.pop();
+        assert!(normalize_streaming_wav(ProviderKind::Xai, nonaligned).is_err());
+
+        let mut wrong_riff_length = xai_streaming_wave();
+        wrong_riff_length[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            normalize_streaming_wav(ProviderKind::Xai, wrong_riff_length.clone()).unwrap(),
+            wrong_riff_length
+        );
     }
 
     #[tokio::test]

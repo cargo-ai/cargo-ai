@@ -2592,15 +2592,55 @@ fn live_media_bundle_uses_isolated_stdin_credentials() {
     assert!(
         !key.trim().is_empty() && !child_key.trim().is_empty() && !child_model.trim().is_empty()
     );
-    let voice = match provider.as_str() {
-        "openai" => "coral".to_string(),
-        "gemini" => "Kore".to_string(),
-        "xai" => "eve".to_string(),
-        _ => match std::env::var("CARGO_AI_MISTRAL_VOICE_ID") {
-            Ok(voice) if !voice.trim().is_empty() => voice,
-            _ => panic!("BLOCKED: an existing permitted CARGO_AI_MISTRAL_VOICE_ID is required; no Mistral request was started"),
-        },
+    let cases = if provider == "gemini" {
+        vec!["speech-wav", "chain", "image", "image-reference"]
+    } else if provider == "openai" {
+        vec![
+            "speech-wav",
+            "chain",
+            "speech-mp3",
+            "image",
+            "image-reference",
+        ]
+    } else if provider == "mistral" {
+        vec!["speech-wav", "chain", "speech-mp3", "image"]
+    } else {
+        vec![
+            "speech-wav",
+            "chain",
+            "speech-mp3",
+            "image",
+            "image-reference",
+        ]
     };
+    let selected_case = std::env::var("CARGO_AI_MEDIA_CASE").ok();
+    assert!(
+        selected_case
+            .as_deref()
+            .is_none_or(|case| cases.contains(&case)),
+        "media case must be one of the selected provider's supported cases"
+    );
+    let skip_speech = std::env::var("CARGO_AI_MEDIA_SKIP_SPEECH").as_deref() == Ok("1");
+    assert!(
+        !skip_speech || provider == "mistral",
+        "speech skipping is only supported for the Mistral media checkpoint"
+    );
+    assert!(
+        !skip_speech || !matches!(selected_case.as_deref(), Some("speech-wav" | "speech-mp3")),
+        "a speech case cannot be selected while Mistral speech is skipped"
+    );
+    if skip_speech && selected_case.as_deref() != Some("image") {
+        assert!(
+            std::env::var_os("CARGO_AI_MEDIA_INPUT_WAV").is_some(),
+            "Mistral transcription without speech requires CARGO_AI_MEDIA_INPUT_WAV"
+        );
+    }
+    let voice = media_live_voice(
+        &provider,
+        selected_case.as_deref(),
+        skip_speech,
+        std::env::var("CARGO_AI_MISTRAL_VOICE_ID").ok().as_deref(),
+    );
     for program in ["ffmpeg", "ffprobe"] {
         let output = Command::new(program)
             .arg("-version")
@@ -2690,34 +2730,6 @@ fn live_media_bundle_uses_isolated_stdin_credentials() {
         "live_media_proof"
     });
     let current = Path::new(env!("CARGO_BIN_EXE_cargo-ai"));
-    let cases = if provider == "gemini" {
-        vec!["speech-wav", "chain", "image", "image-reference"]
-    } else if provider == "openai" {
-        vec![
-            "speech-wav",
-            "chain",
-            "speech-mp3",
-            "image",
-            "image-reference",
-        ]
-    } else if provider == "mistral" {
-        vec!["speech-wav", "chain", "speech-mp3", "image"]
-    } else {
-        vec![
-            "speech-wav",
-            "chain",
-            "speech-mp3",
-            "image",
-            "image-reference",
-        ]
-    };
-    let selected_case = std::env::var("CARGO_AI_MEDIA_CASE").ok();
-    assert!(
-        selected_case
-            .as_deref()
-            .is_none_or(|case| cases.contains(&case)),
-        "media case must be one of the selected provider's supported cases"
-    );
     for (runtime, executable) in [("current", current), ("hatched", generated.as_path())] {
         if selected_runtime
             .as_deref()
@@ -2725,17 +2737,28 @@ fn live_media_bundle_uses_isolated_stdin_credentials() {
         {
             continue;
         }
-        if selected_case.as_deref() == Some("chain") {
-            let retry = proof_root.join(format!("{provider}-{runtime}-speech-wav-retry.wav"));
-            let source = if retry.exists() {
-                retry
+        if selected_case.as_deref() == Some("chain") || (skip_speech && selected_case.is_none()) {
+            let source = if let Some(explicit) = std::env::var_os("CARGO_AI_MEDIA_INPUT_WAV") {
+                media_live_explicit_wav(&proof_root, Path::new(&explicit))
             } else {
-                proof_root.join(format!("{provider}-{runtime}-speech-wav.wav"))
+                let retry = proof_root.join(format!("{provider}-{runtime}-speech-wav-retry.wav"));
+                if retry.exists() {
+                    retry
+                } else {
+                    proof_root.join(format!("{provider}-{runtime}-speech-wav.wav"))
+                }
             };
-            fs::copy(source, fixture.root.join("speech.wav"))
-                .expect("a selected chain case requires its prior speech proof artifact");
+            let input = fixture.root.join("speech.wav");
+            fs::copy(source, &input)
+                .expect("a selected chain case requires a private WAV proof artifact");
+            if std::env::var_os("CARGO_AI_MEDIA_INPUT_WAV").is_some() {
+                media_live_verify_input_wav(&input);
+            }
         }
         for case in &cases {
+            if skip_speech && matches!(*case, "speech-wav" | "speech-mp3") {
+                continue;
+            }
             if selected_case
                 .as_deref()
                 .is_some_and(|selected| selected != *case)
@@ -2775,9 +2798,185 @@ fn live_media_bundle_uses_isolated_stdin_credentials() {
                 &stem,
                 &output,
             );
-            assert!(output.status.success(), "media proof case failed; inspect private result and ledger without blindly rerunning");
+            assert!(
+                output.status.success(),
+                "media proof case failed; inspect private result and ledger without blindly rerunning"
+            );
         }
     }
+}
+
+fn media_live_voice(
+    provider: &str,
+    selected_case: Option<&str>,
+    skip_speech: bool,
+    mistral_voice: Option<&str>,
+) -> String {
+    match provider {
+        "openai" => "coral".into(),
+        "gemini" => "Kore".into(),
+        "xai" => "eve".into(),
+        "mistral" if skip_speech || matches!(selected_case, Some("chain" | "image")) => "fixture-voice".into(),
+        "mistral" => mistral_voice
+            .filter(|voice| !voice.trim().is_empty())
+            .expect("BLOCKED: an existing permitted CARGO_AI_MISTRAL_VOICE_ID is required for Mistral speech; no Mistral request was started")
+            .into(),
+        _ => unreachable!(),
+    }
+}
+
+fn media_live_explicit_wav(proof_root: &Path, source: &Path) -> PathBuf {
+    assert!(
+        source.is_absolute(),
+        "explicit media input WAV must be absolute"
+    );
+    let source_metadata =
+        fs::symlink_metadata(source).expect("explicit media input WAV must exist");
+    assert!(
+        source_metadata.is_file() && !source_metadata.file_type().is_symlink(),
+        "explicit media input WAV must be a regular file, not a symlink"
+    );
+    assert!(
+        source
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("wav")),
+        "explicit media input must be a WAV file"
+    );
+    assert!(
+        source_metadata.len() > 0 && source_metadata.len() <= 10 * 1024 * 1024,
+        "explicit media input WAV must be at most 10 MiB"
+    );
+    let canonical_root = proof_root
+        .canonicalize()
+        .expect("private proof root must exist");
+    let canonical_source = source
+        .canonicalize()
+        .expect("explicit media input WAV must resolve");
+    assert!(
+        canonical_source.starts_with(&canonical_root),
+        "explicit media input WAV must belong to the private proof directory"
+    );
+    canonical_source
+}
+
+#[test]
+fn media_live_mistral_voice_is_required_only_for_selected_speech() {
+    assert_eq!(
+        media_live_voice("mistral", Some("image"), false, None),
+        "fixture-voice"
+    );
+    assert_eq!(
+        media_live_voice("mistral", Some("chain"), false, None),
+        "fixture-voice"
+    );
+    assert_eq!(
+        media_live_voice("mistral", None, true, None),
+        "fixture-voice"
+    );
+    assert_eq!(
+        media_live_voice("mistral", None, false, Some("saved-voice")),
+        "saved-voice"
+    );
+    assert!(std::panic::catch_unwind(|| media_live_voice("mistral", None, false, None)).is_err());
+    assert!(std::panic::catch_unwind(|| media_live_voice(
+        "mistral",
+        Some("speech-wav"),
+        false,
+        None
+    ))
+    .is_err());
+}
+
+#[test]
+fn media_live_explicit_wav_must_be_a_regular_file_in_private_proof_root() {
+    let fixture = Fixture::new();
+    let proof_root = fixture.root.join("private-proof");
+    fs::create_dir(&proof_root).unwrap();
+    let input = proof_root.join("input.wav");
+    fs::write(&input, b"RIFFfixture").unwrap();
+    assert_eq!(
+        media_live_explicit_wav(&proof_root, &input),
+        input.canonicalize().unwrap()
+    );
+    assert!(std::panic::catch_unwind(|| media_live_explicit_wav(
+        &proof_root,
+        Path::new("input.wav")
+    ))
+    .is_err());
+    let outside = fixture.root.join("outside.wav");
+    fs::write(&outside, b"RIFFfixture").unwrap();
+    assert!(std::panic::catch_unwind(|| media_live_explicit_wav(&proof_root, &outside)).is_err());
+    #[cfg(unix)]
+    {
+        let link = proof_root.join("link.wav");
+        std::os::unix::fs::symlink(&input, &link).unwrap();
+        assert!(std::panic::catch_unwind(|| media_live_explicit_wav(&proof_root, &link)).is_err());
+    }
+}
+
+fn media_live_verify_input_wav(input: &Path) {
+    let probe = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name,duration:format=duration",
+            "-of",
+            "json",
+        ])
+        .arg(input)
+        .output()
+        .expect("explicit media input WAV probe should start");
+    assert!(
+        probe.status.success(),
+        "explicit media input WAV must be probeable"
+    );
+    let facts: Value = serde_json::from_slice(&probe.stdout).expect("valid WAV probe JSON");
+    assert!(
+        facts["streams"][0]["codec_name"]
+            .as_str()
+            .is_some_and(|codec| codec.starts_with("pcm_")),
+        "explicit media input WAV must contain PCM audio"
+    );
+    let duration = facts["format"]["duration"]
+        .as_str()
+        .or_else(|| facts["streams"][0]["duration"].as_str())
+        .and_then(|value| value.parse::<f64>().ok())
+        .expect("explicit media input WAV must expose a duration");
+    assert!(
+        duration.is_finite() && duration > 0.0 && duration <= 20.0,
+        "explicit media input WAV must be at most 20 seconds"
+    );
+    let decoded = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(input)
+        .args([
+            "-t",
+            "21",
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-ac",
+            "1",
+            "-ar",
+            "8000",
+            "-",
+        ])
+        .output()
+        .expect("explicit media input WAV decoder should start");
+    assert!(
+        decoded.status.success()
+            && !decoded.stdout.is_empty()
+            && decoded.stdout.len() <= 20 * 8000 * 2
+            && decoded
+                .stdout
+                .chunks_exact(2)
+                .any(|sample| sample != [0, 0]),
+        "explicit media input WAV must decode to bounded non-silent audio"
+    );
 }
 
 fn media_profile_model(provider: &str) -> &'static str {
