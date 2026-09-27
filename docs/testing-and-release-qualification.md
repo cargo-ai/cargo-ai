@@ -68,7 +68,15 @@ Artifacts retain compiler-reported dependency identities/features, installation 
 
 ## Release status
 
-[0.4.4 source notes](../releases/0.4.4.md) describe the prepared audio, image and requirements-inspection release. They do not establish publication or qualification. The latest verified release recorded here remains 0.4.3 until exact-candidate and registry results are added.
+### 0.4.4 recorded results
+
+Verified: 2026-09-27. [0.4.4](../releases/0.4.4.md) adds speech generation, expanded image providers, audio transcription and offline declaration inspection. The published, non-yanked crates.io archive embeds clean source `c429d72c4424994844414d34256865d9ab88d8da`, matching tag `v0.4.4`. Its SHA-256 is `dc37ea10e3bb37c78f17f086c22fdb9b1d7422df4b7e7668780e1fb6903171f0`, byte-identical to the reviewed package. Later documentation updates do not change that released source.
+
+[Product Qualification 36331373367](https://github.com/cargo-ai/cargo-ai/actions/runs/36331373367), attempt 1, passed on exact source and workflow revision `c429d72`: all nine native stages, six source-canary/official-package cells, security and the required aggregate. OpenAI, Anthropic, Gemini and xAI representative live probes passed on their first attempts. TypeSafe Jev completed all eight interpreted/generated journey cases with eight requests and no retry; requested and returned model were `jev-1.13.0`. Mistral returned three rate limits and remains supplemental **unverified**, not a live-success pass. The full run used 15 application request starts. Representative text probes do not establish fresh live success for every media route: Mistral speech/image remain unverified, while bounded historical transcription and other media proof retain their recorded models and source limitations.
+
+Security audit passed with cargo-audit 0.22.1 and its freshly fetched advisory database. Separate `cargo deny --locked --offline check` passed advisory, license, source and ban policy against freshly verified RustSec revision `e2111519ba6d14a5da59a7b2e5c8083ae8a37c01`, retaining existing duplicate-version warnings. The remote audit log does not expose its exact advisory revision; equality with the separately verified deny database is not inferred. These are dated observations, not future security guarantees.
+
+[Registry Installation 36340496999](https://github.com/cargo-ai/cargo-ai/actions/runs/36340496999), attempt 1, passed plain fresh registry installation on Linux, macOS and Windows against published source `c429d72c4424994844414d34256865d9ab88d8da`; its workflow revision is separately recorded as the same commit. Each lane verified the downloaded archive checksum and clean source, version 0.4.4, direct/Cargo CLI dispatch and a local action. The aggregate `Registry installation summary` passed on that same commit. The matching [GitHub release](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.4) is published as Latest. These results describe the selected release and do not change the limitations of historical media proof.
 
 ### 0.4.3 recorded results
 
