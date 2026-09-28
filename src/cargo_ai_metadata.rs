@@ -105,27 +105,51 @@ fn persist_metadata_in_config(
     metadata.cargo_ai_binary_sha256 = Some(cargo_ai_binary_sha256.to_string());
 }
 
-fn persist_metadata_values(
-    cargo_ai_version: &str,
-    template_schema_version: &str,
-    cargo_ai_build_target: &str,
-    cargo_ai_binary_sha256: &str,
-) -> Result<(), String> {
-    persist_metadata_values_at(
-        &config_path(),
-        cargo_ai_version,
-        template_schema_version,
-        cargo_ai_build_target,
-        cargo_ai_binary_sha256,
-    )
-}
-
+#[cfg(test)]
 fn persist_metadata_values_at(
     path: &Path,
     cargo_ai_version: &str,
     template_schema_version: &str,
     cargo_ai_build_target: &str,
     cargo_ai_binary_sha256: &str,
+) -> Result<(), String> {
+    persist_metadata_values_at_with_options(
+        path,
+        cargo_ai_version,
+        template_schema_version,
+        cargo_ai_build_target,
+        cargo_ai_binary_sha256,
+        false,
+    )
+}
+
+fn persist_metadata_values_at_with_options(
+    path: &Path,
+    cargo_ai_version: &str,
+    template_schema_version: &str,
+    cargo_ai_build_target: &str,
+    cargo_ai_binary_sha256: &str,
+    suppress_missing_install_id: bool,
+) -> Result<(), String> {
+    crate::usage_attribution::with_environment_lock(path, || {
+        persist_metadata_values_unlocked(
+            path,
+            cargo_ai_version,
+            template_schema_version,
+            cargo_ai_build_target,
+            cargo_ai_binary_sha256,
+            suppress_missing_install_id,
+        )
+    })
+}
+
+fn persist_metadata_values_unlocked(
+    path: &Path,
+    cargo_ai_version: &str,
+    template_schema_version: &str,
+    cargo_ai_build_target: &str,
+    cargo_ai_binary_sha256: &str,
+    suppress_missing_install_id: bool,
 ) -> Result<(), String> {
     match load_config_from_path(path).map_err(|error| error.to_string())? {
         ConfigLoad::Missing => {
@@ -134,7 +158,7 @@ fn persist_metadata_values_at(
                 template_schema_version,
                 cargo_ai_build_target,
                 cargo_ai_binary_sha256,
-                install_id_or_new(None),
+                (!suppress_missing_install_id).then(|| install_id_or_new(None)),
             );
             persist_section_fields_at(path, "cargo_ai_metadata", &fields)?;
         }
@@ -150,7 +174,17 @@ fn persist_metadata_values_at(
                 template_schema_version,
                 cargo_ai_build_target,
                 cargo_ai_binary_sha256,
-                install_id_or_new(existing_install_id.as_deref()),
+                if suppress_missing_install_id
+                    && existing_install_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .is_none()
+                {
+                    None
+                } else {
+                    Some(install_id_or_new(existing_install_id.as_deref()))
+                },
             );
             persist_loaded_section_fields(&loaded, "cargo_ai_metadata", &fields)?;
         }
@@ -163,7 +197,7 @@ fn metadata_fields(
     template_schema_version: &str,
     cargo_ai_build_target: &str,
     cargo_ai_binary_sha256: &str,
-    install_id: String,
+    install_id: Option<String>,
 ) -> [(&'static str, Option<toml::Value>); 5] {
     [
         (
@@ -178,7 +212,7 @@ fn metadata_fields(
             "cargo_ai_build_target",
             Some(toml::Value::String(cargo_ai_build_target.to_string())),
         ),
-        ("cargo_ai_install_id", Some(toml::Value::String(install_id))),
+        ("cargo_ai_install_id", install_id.map(toml::Value::String)),
         (
             "cargo_ai_binary_sha256",
             Some(toml::Value::String(cargo_ai_binary_sha256.to_string())),
@@ -186,12 +220,16 @@ fn metadata_fields(
     ]
 }
 
-pub fn persist_current_metadata() -> Result<(), String> {
-    persist_metadata_values(
+pub fn persist_current_metadata_with_options(
+    suppress_missing_install_id: bool,
+) -> Result<(), String> {
+    persist_metadata_values_at_with_options(
+        &config_path(),
         env!("CARGO_PKG_VERSION"),
         &current_template_schema_version(),
         &current_build_target(),
         &current_binary_sha256()?,
+        suppress_missing_install_id,
     )
 }
 
@@ -230,12 +268,14 @@ pub fn load_request_metadata() -> Option<CargoAiMetadataConfig> {
 mod tests {
     use super::{
         binary_sha256_for_path, normalized_metadata, persist_metadata_in_config,
-        persist_metadata_values_at,
+        persist_metadata_values_at, persist_metadata_values_at_with_options,
     };
     use crate::config::schema::{CargoAiMetadata, Config};
     use crate::schema_version;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
     use uuid::Uuid;
 
@@ -422,6 +462,96 @@ mod tests {
                 .expect("test path should have a file name")
         )));
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn tracking_off_metadata_does_not_initialize_missing_install_id() {
+        let path = temp_file_path("tracking-off");
+        persist_metadata_values_at_with_options(
+            &path,
+            CURRENT_CARGO_AI_VERSION,
+            "2026-03-03.r1",
+            "aarch64-apple-darwin",
+            "abc123",
+            true,
+        )
+        .expect("other startup metadata should still persist");
+        let config = fs::read_to_string(&path).expect("config should be readable");
+        assert!(config.contains("cargo_ai_version"));
+        assert!(!config.contains("cargo_ai_install_id"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn tracking_off_metadata_preserves_existing_install_id() {
+        let path = temp_file_path("tracking-off-existing");
+        fs::write(
+            &path,
+            "profile = []\n[cargo_ai_metadata]\ncargo_ai_install_id = \"existing-id\"\n",
+        )
+        .expect("config should be written");
+        persist_metadata_values_at_with_options(
+            &path,
+            CURRENT_CARGO_AI_VERSION,
+            "2026-03-03.r1",
+            "aarch64-apple-darwin",
+            "abc123",
+            true,
+        )
+        .expect("startup metadata should persist");
+        let config = fs::read_to_string(&path).expect("config should be readable");
+        assert!(config.contains("cargo_ai_install_id = \"existing-id\""));
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_file_name(format!(
+            "{}.bak",
+            path.file_name().unwrap().to_string_lossy()
+        )));
+    }
+
+    #[test]
+    fn metadata_writer_and_generated_initializer_converge_on_one_id() {
+        let path = temp_file_path("concurrent-initializers");
+        let barrier = Arc::new(Barrier::new(3));
+        let metadata_path = path.clone();
+        let metadata_barrier = Arc::clone(&barrier);
+        let metadata_writer = thread::spawn(move || {
+            metadata_barrier.wait();
+            persist_metadata_values_at_with_options(
+                &metadata_path,
+                CURRENT_CARGO_AI_VERSION,
+                "2026-03-03.r1",
+                "aarch64-apple-darwin",
+                "abc123",
+                false,
+            )
+            .unwrap();
+        });
+        let generated_path = path.clone();
+        let generated_barrier = Arc::clone(&barrier);
+        let generated_writer = thread::spawn(move || {
+            generated_barrier.wait();
+            crate::usage_attribution::ensure_environment_id_at(&generated_path)
+                .unwrap()
+                .unwrap()
+        });
+        barrier.wait();
+        metadata_writer.join().unwrap();
+        let generated_id = generated_writer.join().unwrap();
+        let config = fs::read_to_string(&path).unwrap();
+        let parsed: toml::Value = toml::from_str(&config).unwrap();
+        assert_eq!(
+            parsed["cargo_ai_metadata"]["cargo_ai_install_id"].as_str(),
+            Some(generated_id.as_str())
+        );
+        assert_eq!(
+            parsed["cargo_ai_metadata"]["cargo_ai_version"].as_str(),
+            Some(CURRENT_CARGO_AI_VERSION)
+        );
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_file_name(format!(
+            "{}.bak",
+            path.file_name().unwrap().to_string_lossy()
+        )));
     }
 
     #[test]

@@ -26,6 +26,72 @@ const GENERATED_AGENT_VERSION_BLOCK_TEMPLATE: &str =
 const MANIFEST_VERSION_PLACEHOLDER: &str = "__CARGO_AI_PACKAGE_VERSION__";
 const ROOT_EXCLUDED_TEMPLATE_ENTRIES_FOR_CHECK: &[&str] = &["target"];
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PortableAgentMetadata {
+    pub package_id: Option<String>,
+    pub hosted_source_id: Option<String>,
+    pub package_version: Option<String>,
+    pub hosted_version_id: Option<String>,
+    pub agent_key: Option<String>,
+}
+
+fn portable_value(value: Option<&str>) -> String {
+    value
+        .map(|value| format!("Some({})", rust_string_literal(value)))
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn portable_metadata_block(metadata: &PortableAgentMetadata) -> String {
+    let mut source = String::new();
+    for (name, value) in [
+        (
+            "PORTABLE_PACKAGE_ID",
+            metadata
+                .package_id
+                .as_deref()
+                .filter(|id| uuid::Uuid::parse_str(id).is_ok()),
+        ),
+        (
+            "PORTABLE_HOSTED_SOURCE_ID",
+            metadata.hosted_source_id.as_deref(),
+        ),
+        (
+            "PORTABLE_PACKAGE_VERSION",
+            metadata.package_version.as_deref(),
+        ),
+        (
+            "PORTABLE_HOSTED_VERSION_ID",
+            metadata.hosted_version_id.as_deref(),
+        ),
+        ("PORTABLE_AGENT_KEY", metadata.agent_key.as_deref()),
+    ] {
+        source.push_str(&format!(
+            "\nconst {name}: Option<&str> = {};\n",
+            portable_value(value)
+        ));
+    }
+    source
+}
+
+fn write_portable_agent_metadata(
+    workspace: &Path,
+    metadata: &PortableAgentMetadata,
+) -> Result<(), Error> {
+    let main_path = workspace.join("src/main.rs");
+    let source = fs::read_to_string(&main_path)?;
+    let default_block = portable_metadata_block(&PortableAgentMetadata::default());
+    if !source.contains(&default_block) {
+        return Err(Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Generated agent source is missing portable attribution placeholders.",
+        ));
+    }
+    fs::write(
+        main_path,
+        source.replace(&default_block, &portable_metadata_block(metadata)),
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AgentSyncState {
     InSync,
@@ -123,6 +189,7 @@ fn render_workspace_file_contents(
             generated_by_version,
             template_schema_version,
         ));
+        rendered.push_str(&portable_metadata_block(&PortableAgentMetadata::default()));
     }
 
     rendered
@@ -133,10 +200,11 @@ fn should_replace_agent_identity(file_name: &str) -> bool {
 }
 
 /// Creates a new agent project directory and initializes required files.
-pub fn create_new_agent_project(
+pub(crate) fn create_new_agent_project(
     template_path: &Path,
     agent_name: &str,
     agentcfg: Result<String, Error>,
+    portable_metadata: &PortableAgentMetadata,
 ) -> Result<(), Error> {
     create_agent_workspace(agent_name)?;
     seed_agent_workspace(template_path, agent_name)?;
@@ -145,6 +213,7 @@ pub fn create_new_agent_project(
         agent_name,
         agentcfg,
     )?;
+    write_portable_agent_metadata(&super::agent_workspace_path(agent_name), portable_metadata)?;
     Ok(())
 }
 
@@ -401,7 +470,9 @@ mod tests {
             "2026-03-03.r1",
         );
 
-        assert!(rendered.contains("Standalone machine detected. Local Cargo AI metadata is not available on this machine."));
+        assert!(rendered.contains(
+            "Standalone machine detected. Local Cargo AI metadata is not available on this machine."
+        ));
         assert!(rendered.contains("Not checked (standalone machine)"));
         assert!(rendered.contains("Inspect agent"));
         assert!(!rendered.contains("Run `cargo ai version` on this machine"));

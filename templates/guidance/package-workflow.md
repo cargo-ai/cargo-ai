@@ -184,3 +184,7 @@ Do not introduce unqualified global lookup by bare agent or tool name. Package i
 ## Source Project Data
 
 An opted-in source project declares `[runtime] data_root = ".cargo-ai/data"`. Assembly preserves that setting but excludes the data directory, even if tracked in Git or nested in an asset/tool-source tree. Explicit declarations overlapping runtime data and conflicting output roots fail before replacement. Keep immutable assets outside runtime data and never place credentials in distributable assets. Installed aliases still use their own `data/`; they do not inherit the producer's mutable files. Build roots acquire independent data only when a writing action needs it.
+
+## Portable usage identity
+
+Preserve a valid `[project].id` UUID when copying/building/packaging the same logical project. New project initialization supplies a missing UUID; existing projects can explicitly author one, and a deliberate independent fork can choose a new one. Do not infer identity from a display name or silently rewrite identity during execution. Package versions and physical locations are separate usage dimensions. Propagate only portable identity into generated artifacts; never package Home identity, author-machine absolute paths or usage history. Read `usage-ledger.md` for dimension queries and hosted/legacy fallbacks.

@@ -655,6 +655,51 @@ mod tests {
     }
 
     #[test]
+    fn local_attribution_does_not_change_legacy_backup_facts_or_mapping() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE usage_backup_ids(kind TEXT,local_value TEXT,opaque_id TEXT, UNIQUE(kind,local_value));").unwrap();
+        let original = json!({
+            "event_id":"cai_event_00000000-0000-4000-8000-000000000003",
+            "root_run_id":"cai_run_00000000-0000-4000-8000-000000000001",
+            "agent_run_id":"cai_agent_run_00000000-0000-4000-8000-000000000002",
+            "event_type":"provider_request_completed",
+            "timestamp":"2026-09-22T00:00:00Z",
+            "status":"success",
+            "agent":{"source":"installed_package","name":"main","project_root":"/private/project","package":{"name":"example","version":"1.0.0"}},
+            "provider":{"server":"ollama","profile":"private-profile","requested_model":"model"},
+            "usage":{"input_tokens":u64::MAX,"output_tokens":null}
+        });
+        let projected = project(&db, &original).unwrap();
+        let mappings: i64 = db
+            .query_row("SELECT COUNT(*) FROM usage_backup_ids", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let mut enriched = original.clone();
+        enriched["attribution"] = json!({
+            "schema_version":1,
+            "environment":{"id":"private-install"},
+            "package":{"id":{"kind":"authored","value":"private-package"}},
+            "package_location":{"path":"/private/package"},
+            "workspace":{"path":"/private/caller"},
+            "runtime":{"executable_path":"/private/bin/agent"}
+        });
+        assert_eq!(project(&db, &enriched).unwrap(), projected);
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM usage_backup_ids", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            mappings
+        );
+        let restored = restore(&projected).unwrap();
+        assert!(restored.get("attribution").is_none());
+        assert_eq!(restored["usage"]["input_tokens"], u64::MAX);
+        assert_eq!(project(&db, &restored).unwrap(), projected);
+        assert!(!projected.to_string().contains("/private/"));
+        assert!(!projected.to_string().contains("private-install"));
+    }
+
+    #[test]
     fn request_start_and_undispatched_completion_keep_attempt_identity_without_usage() {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE usage_backup_ids(kind TEXT,local_value TEXT,opaque_id TEXT, UNIQUE(kind,local_value));").unwrap();

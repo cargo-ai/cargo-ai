@@ -268,3 +268,5 @@ Then run it with the intended input mode, runtime variables, profile, platform, 
 - [Packages](./packages.md)
 - [Provider Setup](./providers/README.md)
 - [Troubleshooting](./troubleshooting.md)
+
+Updated child-agent runtimes also forward the root consuming-workspace context. Each child records its own package, location, environment and executable provenance. Direct provider usage is counted once under the executing agent; lifecycle durations can overlap across groups. See [local attribution](../templates/guidance/usage-ledger.md#local-attribution-and-dimension-queries) for query and legacy-runtime limitations.

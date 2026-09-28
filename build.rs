@@ -12,6 +12,7 @@ const _: &str = include_str!("templates/build_support.rs");
 const BUILD_RERUN_PATHS: &[&str] = &[
     "src/usage_store.rs",
     "src/usage_log.rs",
+    "src/usage_attribution.rs",
     ".agentcfg",
     "build.rs",
     "templates",
@@ -90,6 +91,10 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
     TemplateSource {
         destination: "src/usage_log.rs",
         source: "../src/usage_log.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_attribution.rs",
+        source: "../src/usage_attribution.rs",
     },
     TemplateSource {
         destination: "src/web_resources.rs",

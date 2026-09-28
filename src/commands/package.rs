@@ -59,6 +59,8 @@ fn default_project_subprocess_permission() -> String {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct ProjectIdentityDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     version: Option<String>,
@@ -117,6 +119,8 @@ pub(crate) struct AssembledPackage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct PackageManifestDocument {
     format_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     project_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -346,6 +350,18 @@ fn load_project_metadata(
             error
         )
     })?;
+    if let Some(id) = metadata
+        .project
+        .as_ref()
+        .and_then(|project| project.id.as_deref())
+    {
+        uuid::Uuid::parse_str(id).map_err(|_| {
+            format!(
+                "Invalid `[project].id` in '{}': expected a UUID.",
+                metadata_path.display()
+            )
+        })?;
+    }
     let Some(profile) = metadata.build.get(profile_name).cloned() else {
         let mut available = metadata.build.keys().cloned().collect::<Vec<_>>();
         available.sort();
@@ -543,6 +559,7 @@ fn assemble_package_root(
     )?;
     let manifest = PackageManifestDocument {
         format_version: 1,
+        project_id: project_identity.and_then(|project| project.id.clone()),
         project_name: project_identity.and_then(|project| project.name.clone()),
         project_version: project_identity.and_then(|project| project.version.clone()),
         profile: profile_name.to_string(),
@@ -849,8 +866,7 @@ fn load_project_source_tool_context(
     if source_root == project_root {
         return Err(format!(
             "Tool '{}' source manifest '{}' resolves to the current project root. `cargo ai package` currently requires tool source to live in its own project-relative directory.",
-            tool_name,
-            source.manifest_path
+            tool_name, source.manifest_path
         ));
     }
 
@@ -972,7 +988,8 @@ fn normalize_project_identity(
     project_identity.name = normalize_optional_metadata_text(project_identity.name.take());
     project_identity.version = normalize_optional_metadata_text(project_identity.version.take());
 
-    if project_identity.name.is_none()
+    if project_identity.id.is_none()
+        && project_identity.name.is_none()
         && project_identity.version.is_none()
         && project_identity.extra.is_empty()
     {
@@ -1631,6 +1648,20 @@ agent_definitions = ["agents/demo.json"]
     }
 
     #[test]
+    fn package_rejects_malformed_authored_id_before_assembly() {
+        let project_root = temp_dir("bad-authored-id");
+        let metadata = "format_version = 1\n[project]\nid = \"/Users/author/private\"\n[build.default]\nagent_definitions = [\"agents/demo.json\"]\n";
+        write_project_metadata(&project_root, metadata);
+        let error = load_project_metadata(&project_root, "default").unwrap_err();
+        assert!(error.contains("Invalid `[project].id`"));
+        assert_eq!(
+            fs::read_to_string(project_root.join(".cargo-ai/project.toml")).unwrap(),
+            metadata
+        );
+        let _ = fs::remove_dir_all(project_root);
+    }
+
+    #[test]
     fn load_project_metadata_rejects_invalid_package_permission_authoring() {
         for (stem, package_metadata, expected) in [
             (
@@ -1680,6 +1711,7 @@ agent_definitions = ["agents/demo.json"]
 format_version = 1
 
 [project]
+id = "f489ec66-482d-464a-90fc-54d8bfa18018"
 name = "hello_package"
 version = "0.1.0"
 
@@ -1742,6 +1774,7 @@ assets = ["assets/prompts/"]
             manifest,
             PackageManifestDocument {
                 format_version: 1,
+                project_id: Some("f489ec66-482d-464a-90fc-54d8bfa18018".to_string()),
                 project_name: Some("hello_package".to_string()),
                 project_version: Some("0.1.0".to_string()),
                 profile: "default".to_string(),
@@ -1781,6 +1814,7 @@ assets = ["assets/prompts/"]
         let generated_project = fs::read_to_string(output_root.path.join(".cargo-ai/project.toml"))
             .expect("generated project metadata should exist");
         assert!(generated_project.contains("[project]"));
+        assert!(generated_project.contains("id = \"f489ec66-482d-464a-90fc-54d8bfa18018\""));
         assert!(generated_project.contains("name = \"hello_package\""));
         assert!(generated_project.contains("version = \"0.1.0\""));
         assert!(generated_project.contains("allow_global_fallback = false"));

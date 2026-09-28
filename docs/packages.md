@@ -318,3 +318,7 @@ Package internals remain private unless exported as entrypoints. Do not introduc
 ---
 
 [Documentation hub](./README.md) · [Cargo AI README](../README.md)
+
+## Usage identity across copies
+
+An optional UUID in `[project].id` identifies the logical package independently of its name, version, install alias and physical location. New project initialization fills a missing ID and preserves an existing valid one. Build/package/install/hatch propagate portable identity; ordinary execution does not edit existing project metadata. Copies share logical identity and have separate location groups; an intentional new package can adopt a new UUID explicitly. Hosted source identity supplies a fallback for hosted packages without an authored ID. Legacy packages remain usable with unknown logical identity. Use [dimension queries](../templates/guidance/usage-ledger.md#local-attribution-and-dimension-queries) to separate package, location, agent and consuming project.

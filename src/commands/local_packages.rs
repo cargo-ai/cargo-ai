@@ -50,6 +50,8 @@ thread_local! {
 struct PackageManifestDocument {
     format_version: u32,
     #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
     project_name: Option<String>,
     #[serde(default)]
     project_version: Option<String>,
@@ -69,6 +71,8 @@ struct PackageManifestDocument {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct InstalledPackageDocument {
     format_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project_id: Option<String>,
     alias: String,
     package_name: String,
     package_version: String,
@@ -129,6 +133,11 @@ impl Default for PackagePermissionProfileDocument {
 pub(crate) struct InstalledPackageRuntimeContext {
     pub(crate) alias: String,
     pub(crate) source_kind: String,
+    pub(crate) project_id: Option<String>,
+    pub(crate) package_version: String,
+    pub(crate) content_sha256: String,
+    pub(crate) hosted_source_id: Option<String>,
+    pub(crate) hosted_version_id: Option<String>,
     pub(crate) package_payload_root: PathBuf,
     pub(crate) package_data_root: PathBuf,
     pub(crate) current_entrypoint_path: Option<String>,
@@ -226,6 +235,9 @@ pub(crate) struct ResolvedPackageEntrypoint {
     pub(crate) package_version: String,
     pub(crate) content_sha256: String,
     pub(crate) source_kind: String,
+    pub(crate) project_id: Option<String>,
+    pub(crate) hosted_source_id: Option<String>,
+    pub(crate) hosted_version_id: Option<String>,
     pub(crate) package_data_root: PathBuf,
     pub(crate) permissions: PackagePermissionProfileDocument,
     pub(crate) lease: Arc<crate::commands::package_lock::PackageAliasLockGuard>,
@@ -531,7 +543,8 @@ fn run_inspect(inspect_m: &ArgMatches) -> bool {
             .and_then(|path| load_package_manifest(&path));
             match manifest {
                 Ok(manifest) => {
-                    let payload_root = installed_package_root(alias).join(INSTALLED_PACKAGE_DIR_NAME);
+                    let payload_root =
+                        installed_package_root(alias).join(INSTALLED_PACKAGE_DIR_NAME);
                     let selection = super::requirements::BuildSelection {
                         agent_definitions: manifest.agent_definitions,
                         hatched_agents: manifest.hatched_agents,
@@ -544,10 +557,14 @@ fn run_inspect(inspect_m: &ArgMatches) -> bool {
                         &selection,
                     ) {
                         Ok(report) => print!("{report}"),
-                        Err(error) => println!("  Unavailable: {error}. Declared agent requirements remain unassessed."),
+                        Err(error) => println!(
+                            "  Unavailable: {error}. Declared agent requirements remain unassessed."
+                        ),
                     }
                 }
-                Err(_) => println!("  Unavailable in this installed payload; declared agent requirements remain unassessed."),
+                Err(_) => println!(
+                    "  Unavailable in this installed payload; declared agent requirements remain unassessed."
+                ),
             }
             true
         }
@@ -733,6 +750,7 @@ fn materialize_prepared_package_under_lock(
     if !matches!(action, InstallAction::Noop) {
         let document = InstalledPackageDocument {
             format_version: 1,
+            project_id: prepared.manifest.project_id.clone(),
             alias: alias.to_string(),
             package_name: package_name.clone(),
             package_version: package_version.clone(),
@@ -1272,6 +1290,9 @@ pub(crate) fn resolve_entrypoint_reference_for_project(
         package_version: package.package_version,
         content_sha256: package.content_sha256,
         source_kind: package.source.kind,
+        project_id: package.project_id,
+        hosted_source_id: package.source.hosted_source_id,
+        hosted_version_id: package.source.hosted_version_id,
         package_data_root: installed_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME),
         permissions: package.permissions,
         lease,
@@ -2164,6 +2185,11 @@ pub(crate) fn checked_runtime_lease_for_path(
     let mut context = InstalledPackageRuntimeContext {
         alias: package.alias,
         source_kind: package.source.kind,
+        project_id: package.project_id,
+        package_version: package.package_version,
+        content_sha256: package.content_sha256,
+        hosted_source_id: package.source.hosted_source_id,
+        hosted_version_id: package.source.hosted_version_id,
         package_payload_root: expected_package_root,
         package_data_root: expected_install_root.join(INSTALLED_PACKAGE_DATA_DIR_NAME),
         current_entrypoint_path: None,
@@ -3770,6 +3796,7 @@ mod tests {
     ) -> PackageManifestDocument {
         PackageManifestDocument {
             format_version: 1,
+            project_id: None,
             project_name: Some("demo".to_string()),
             project_version: Some("1.0.0".to_string()),
             profile: "default".to_string(),
@@ -4192,6 +4219,11 @@ fn main() {
         InstalledPackageRuntimeContext {
             alias: "data_integration".to_string(),
             source_kind: "hosted".to_string(),
+            project_id: None,
+            package_version: "1.0.0".to_string(),
+            content_sha256: "digest".to_string(),
+            hosted_source_id: None,
+            hosted_version_id: None,
             package_payload_root,
             package_data_root,
             current_entrypoint_path: None,
@@ -4226,6 +4258,7 @@ fn main() {
     fn version_decision_requires_downgrade_for_older_version() {
         let existing = super::InstalledPackageDocument {
             format_version: 1,
+            project_id: None,
             alias: "demo".to_string(),
             package_name: "demo".to_string(),
             package_version: "2.0.0".to_string(),
@@ -4255,6 +4288,23 @@ fn main() {
     fn local_root_install_resolves_entrypoints_and_uninstalls_alias() {
         let _store = PackagesRootGuard::new("install-resolve");
         let package_root = temp_package_root("install-resolve");
+        let project_id = uuid::Uuid::new_v4().to_string();
+        let manifest_path = package_root.join("cargo-ai-package.toml");
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        std::fs::write(
+            &manifest_path,
+            manifest.replacen(
+                "format_version = 1\n",
+                &format!("format_version = 1\nproject_id = \"{project_id}\"\n"),
+                1,
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            package_root.join(".cargo-ai/project.toml"),
+            format!("format_version = 1\n[project]\nid = \"{project_id}\"\n"),
+        )
+        .unwrap();
 
         let request = InstallRequest {
             source: Some(package_root.to_string_lossy().to_string()),
@@ -4272,6 +4322,7 @@ fn main() {
         assert_eq!(installed.alias, "data_integration");
         assert_eq!(installed.package_name, "data_integration");
         assert_eq!(installed.package_version, "1.0.0");
+        assert_eq!(installed.project_id.as_deref(), Some(project_id.as_str()));
         assert_eq!(installed.entrypoints.len(), 2);
 
         let run_entrypoint =
@@ -4281,6 +4332,10 @@ fn main() {
         assert!(run_entrypoint
             .definition_path
             .ends_with("package/agents/lookup_account.json"));
+        assert_eq!(
+            run_entrypoint.project_id.as_deref(),
+            Some(project_id.as_str())
+        );
 
         let hatch_entrypoint = resolve_entrypoint_reference("data_integration::daily_digest", true)
             .expect("hatch entrypoint should resolve")
@@ -5271,6 +5326,7 @@ version = "^2"
     fn cross_source_replacement_requires_explicit_data_disposition() {
         let existing = super::InstalledPackageDocument {
             format_version: 1,
+            project_id: None,
             alias: "reports".to_string(),
             package_name: "reports".to_string(),
             package_version: "1.0.0".to_string(),
@@ -5793,6 +5849,7 @@ version = "^2"
     fn hosted_permission_expansion_requires_acceptance() {
         let existing = super::InstalledPackageDocument {
             format_version: 1,
+            project_id: None,
             alias: "demo".to_string(),
             package_name: "demo".to_string(),
             package_version: "1.0.0".to_string(),

@@ -32,6 +32,7 @@ pub(crate) struct UsageLogContext {
     depth: u32,
     root_owner: bool,
     agent: Option<Value>,
+    attribution: crate::usage_attribution::AttributionSnapshot,
 }
 
 #[derive(Debug)]
@@ -123,6 +124,20 @@ impl UsageLogContext {
         depth: u32,
         agent: Option<Value>,
     ) -> Result<Option<(Self, UsageAgentRunGuard)>, String> {
+        Self::from_runtime_with_attribution(
+            explicit_path,
+            depth,
+            agent,
+            crate::usage_attribution::AttributionInput::default(),
+        )
+    }
+
+    pub(crate) fn from_runtime_with_attribution(
+        explicit_path: Option<&str>,
+        depth: u32,
+        agent: Option<Value>,
+        attribution_input: crate::usage_attribution::AttributionInput,
+    ) -> Result<Option<(Self, UsageAgentRunGuard)>, String> {
         let path = explicit_path.and_then(non_empty_string).or_else(|| {
             std::env::var(USAGE_LOG_ENV)
                 .ok()
@@ -151,6 +166,10 @@ impl UsageLogContext {
             .ok()
             .and_then(|v| non_empty_string(&v));
         let launched_by = launched_by_from_env();
+        let attribution = crate::usage_attribution::snapshot(attribution_input, tracking);
+        if tracking && attribution.environment.id.is_none() {
+            eprintln!("Usage attribution is incomplete: selected Cargo AI Home has no readable environment identity.");
+        }
 
         let context = Self {
             sink: Arc::new(UsageLogSink {
@@ -166,6 +185,7 @@ impl UsageLogContext {
             depth,
             root_owner,
             agent,
+            attribution,
         };
 
         if context.root_owner {
@@ -175,6 +195,7 @@ impl UsageLogContext {
                 "agent_run_id": context.agent_run_id,
                 "timestamp": timestamp(),
                 "root_run_id": context.root_run_id,
+                "attribution": context.attribution,
             }))?;
         }
 
@@ -219,7 +240,8 @@ impl UsageLogContext {
                 action: Some(action_name.to_string()),
                 tool: Some(tool_name.to_string()),
                 step_index,
-            }.to_json()
+            }.to_json(),
+            "caller_workspace": self.attribution.inherited_workspace_env(),
         })
     }
 
@@ -400,6 +422,7 @@ impl UsageLogContext {
                 "duration_ms": duration_ms(duration),
                 "status": status.as_str(),
                 "agent_run_id": self.agent_run_id,
+                "attribution": self.attribution,
             });
             add_time_range(&mut event, duration);
             self.write_event_lossy(event);
@@ -415,6 +438,10 @@ impl UsageLogContext {
             (USAGE_LOG_ENV, self.path().display().to_string()),
             (USAGE_ROOT_RUN_ID_ENV, self.root_run_id.clone()),
             (USAGE_PARENT_AGENT_RUN_ID_ENV, self.agent_run_id.clone()),
+            (
+                crate::usage_attribution::WORKSPACE_ENV,
+                self.attribution.inherited_workspace_env(),
+            ),
             (USAGE_LAUNCHED_BY_TYPE_ENV, launched_by.kind.to_string()),
         ];
         if let Some(action) = launched_by.action {
@@ -437,6 +464,7 @@ impl UsageLogContext {
             "agent_run_id": self.agent_run_id,
             "parent_agent_run_id": self.parent_agent_run_id,
             "depth": self.depth,
+            "attribution": self.attribution,
         });
         if let Some(agent) = self.agent.as_ref() {
             event["agent"] = agent.clone();
@@ -451,7 +479,10 @@ impl UsageLogContext {
     fn write_event_to_sinks(&self, mut event: Value, legacy_export: bool) -> Result<(), String> {
         event["event_id"] = json!(format!("cai_event_{}", Uuid::now_v7()));
         event["schema_version"] = json!(1);
-        event["capture_incomplete"] = json!(self.sink.warned.load(Ordering::Relaxed));
+        let attribution_incomplete = self.attribution.environment.id.is_none();
+        event["capture_incomplete"] =
+            json!(self.sink.warned.load(Ordering::Relaxed) || attribution_incomplete);
+        event["attribution_incomplete"] = json!(attribution_incomplete);
         event["runtime_version"] = json!(self
             .agent
             .as_ref()
@@ -1022,6 +1053,44 @@ mod automatic_failure_tests {
         guard.finish_success();
         assert!(!home.path.join("usage").exists());
         assert_eq!(std::fs::read_to_string(log).unwrap().lines().count(), 4);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn identity_initialization_failure_keeps_successful_events_with_incomplete_attribution() {
+        use std::os::unix::fs::symlink;
+        let home = Home::new();
+        std::fs::create_dir_all(&home.path).unwrap();
+        let target = home.path.join("config-target.toml");
+        let original = "profile = []\n";
+        std::fs::write(&target, original).unwrap();
+        symlink(&target, home.path.join("config.toml")).unwrap();
+        unsafe {
+            std::env::set_var(crate::usage_store::TRACKING_ENV, "on");
+        }
+        let log = home.path.join("explicit.ndjson");
+        let (_, mut guard) = UsageLogContext::from_runtime(Some(log.to_str().unwrap()), 0, None)
+            .unwrap()
+            .unwrap();
+        guard.finish_success();
+        let events = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert!(events.iter().any(
+            |event| event["event_type"] == "root_run_completed" && event["status"] == "success"
+        ));
+        assert!(events
+            .iter()
+            .all(|event| event["attribution"]["environment"]["id"].is_null()));
+        assert!(events.iter().all(
+            |event| event["attribution"]["environment"]["unknown_reason"] == "config_unavailable"
+        ));
+        assert!(events
+            .iter()
+            .all(|event| event["capture_incomplete"] == true
+                && event["attribution_incomplete"] == true));
+        assert_eq!(std::fs::read_to_string(target).unwrap(), original);
     }
     #[test]
     fn concurrent_writers_and_reader_preserve_facts_through_runtime_final_flush() {

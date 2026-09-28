@@ -16,6 +16,7 @@ mod runtime_definition;
 mod schema_version;
 mod ui;
 mod update_check;
+mod usage_attribution;
 #[path = "../templates/src/usage_backup.rs"]
 mod usage_backup;
 mod usage_backup_cli;
@@ -130,7 +131,12 @@ async fn main() {
     // Metadata only powers local drift checks; project-local commands should not
     // look failed when a sandbox blocks best-effort user-home writes.
     if automatic_persistence_allowed {
-        if let Err(error) = cargo_ai_metadata::persist_current_metadata() {
+        let suppress_missing_install_id =
+            matches!(cmd_args.subcommand_name(), Some("run" | "agents"))
+                && matches!(usage_store::tracking_enabled(), Ok(false));
+        if let Err(error) =
+            cargo_ai_metadata::persist_current_metadata_with_options(suppress_missing_install_id)
+        {
             automatic_persistence_allowed = false;
             eprintln!(
                 "⚠️ Skipping remaining automatic Cargo AI config updates because metadata persistence failed: {error}. Fix or restore the reported file, then retry."

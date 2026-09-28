@@ -108,6 +108,8 @@ struct ProjectMetadataDocument {
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct ProjectIdentityDocument {
     #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<String>,
@@ -198,12 +200,24 @@ fn scaffold_in_place(
     if metadata_exists {
         let contents = fs::read_to_string(&metadata_path)
             .map_err(|error| format!("Failed to read project metadata: {error}"))?;
-        toml::from_str::<ProjectMetadataDocument>(&contents).map_err(|error| {
+        let existing: ProjectMetadataDocument = toml::from_str(&contents).map_err(|error| {
             format!(
                 "Failed to parse project metadata '{}': {error}",
                 metadata_path.display()
             )
         })?;
+        if let Some(id) = existing
+            .project
+            .as_ref()
+            .and_then(|project| project.id.as_ref())
+        {
+            uuid::Uuid::parse_str(id).map_err(|_| {
+                format!(
+                    "Invalid `[project].id` in '{}': expected a UUID.",
+                    metadata_path.display()
+                )
+            })?;
+        }
         super::runtime_data::uses_project_data(&contents)?;
     }
 
@@ -290,7 +304,8 @@ fn setup_git(target_dir: &Path, vcs_mode: VcsMode) -> Result<GitSetup, String> {
     if !status.success() {
         return Err(format!(
             "Git initialization failed in '{}'. Install Git or re-run with `--vcs none` if you do not want version control. Exit status: {}.",
-            target_dir.display(), status
+            target_dir.display(),
+            status
         ));
     }
 
@@ -311,7 +326,7 @@ fn write_project_metadata(
                 "Failed to read metadata file '{}': {}",
                 metadata_path.display(),
                 error
-            ))
+            ));
         }
     };
     let rendered = render_project_metadata(
@@ -379,6 +394,12 @@ fn render_project_metadata(
     document.tools = Some(tools);
 
     let mut project = document.project.unwrap_or_default();
+    if let Some(id) = project.id.as_deref() {
+        uuid::Uuid::parse_str(id)
+            .map_err(|_| "Invalid `[project].id`: expected a UUID.".to_string())?;
+    } else {
+        project.id = Some(uuid::Uuid::new_v4().to_string());
+    }
     if project
         .name
         .as_deref()
@@ -423,7 +444,7 @@ fn ensure_gitignore(
                 "Failed to read ignore file '{}': {}",
                 gitignore_path.display(),
                 error
-            ))
+            ));
         }
     };
 
@@ -816,6 +837,13 @@ mod tests {
                 .and_then(Value::as_str),
             Some("0.1.0")
         );
+        let id = parsed
+            .get("project")
+            .and_then(Value::as_table)
+            .and_then(|project| project.get("id"))
+            .and_then(Value::as_str)
+            .expect("new project has authored id");
+        uuid::Uuid::parse_str(id).expect("new project id must be UUID");
         assert_eq!(
             parsed
                 .get("tools")
@@ -1107,6 +1135,29 @@ existing = true\n",
             Some(true)
         );
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scaffold_init_preserves_valid_project_id_and_rejects_malformed_without_write() {
+        let dir = temp_dir_path("init-project-id");
+        let metadata_path = dir.join(".cargo-ai/project.toml");
+        fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        fs::write(
+            &metadata_path,
+            format!("format_version = 1\n[project]\nid = \"{id}\"\n"),
+        )
+        .unwrap();
+        scaffold_init(&dir, VcsMode::None).expect("valid authored id should survive init");
+        let rendered = fs::read_to_string(&metadata_path).unwrap();
+        assert!(rendered.contains(&format!("id = \"{id}\"")));
+
+        let malformed = "format_version = 1\n[project]\nid = \"not-a-uuid\"\n";
+        fs::write(&metadata_path, malformed).unwrap();
+        let error = scaffold_init(&dir, VcsMode::None).expect_err("malformed id must fail");
+        assert!(error.contains("Invalid `[project].id`"));
+        assert_eq!(fs::read_to_string(&metadata_path).unwrap(), malformed);
         let _ = fs::remove_dir_all(dir);
     }
 

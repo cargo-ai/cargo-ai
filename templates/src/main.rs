@@ -6,6 +6,7 @@ mod definition_validation;
 mod providers;
 mod runtime_data;
 mod runtime_media;
+mod usage_attribution;
 mod usage_backup;
 mod usage_backup_host;
 mod usage_log;
@@ -29,8 +30,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use config::loader::{config_path, find_profile, load_config};
 use config::schema::{Profile, ProfileAuthMode, SecretStoreMode};
 use providers::{
-    provider_error_messages, validate_provider_content_parts, validate_provider_request,
-    AuthenticationPolicy, ProviderError, ProviderKind,
+    AuthenticationPolicy, ProviderError, ProviderKind, provider_error_messages,
+    validate_provider_content_parts, validate_provider_request,
 };
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
@@ -1691,6 +1692,29 @@ fn generated_usage_agent_info() -> serde_json::Value {
     })
 }
 
+fn generated_attribution_input() -> usage_attribution::AttributionInput {
+    let package_root = std::env::current_exe().ok().and_then(|executable| {
+        maybe_find_project_root(executable.as_path())
+            .ok()
+            .flatten()
+            .or_else(|| executable.parent().map(Path::to_path_buf))
+    });
+    usage_attribution::AttributionInput {
+        authored_package_id: PORTABLE_PACKAGE_ID.map(str::to_string),
+        hosted_source_id: PORTABLE_HOSTED_SOURCE_ID.map(str::to_string),
+        package_version: PORTABLE_PACKAGE_VERSION.map(str::to_string),
+        hosted_version_id: PORTABLE_HOSTED_VERSION_ID.map(str::to_string),
+        package_root,
+        agent_key: PORTABLE_AGENT_KEY.map(str::to_string),
+        definition_hash: Some(AGENT_DEFINITION_SHA256.to_string()),
+        workspace: Some(usage_attribution::capture_workspace()),
+        runtime_kind: usage_attribution::RuntimeKind::Generated,
+        runtime_version: Some(GENERATED_BY_CARGO_AI_VERSION.to_string()),
+        generator_version: Some(GENERATED_BY_CARGO_AI_VERSION.to_string()),
+        ..Default::default()
+    }
+}
+
 fn usage_provider_profile(context: &ActionProviderContext) -> Option<&str> {
     context.profile_name.as_deref()
 }
@@ -3314,10 +3338,11 @@ async fn main() {
     );
     let usage_log_arg = cmd_args.get_one::<String>("usage_log").map(String::as_str);
     let usage_agent_info = generated_usage_agent_info();
-    let usage_log_setup = match usage_log::UsageLogContext::from_runtime(
+    let usage_log_setup = match usage_log::UsageLogContext::from_runtime_with_attribution(
         usage_log_arg,
         current_agent_action_depth(),
         Some(usage_agent_info),
+        generated_attribution_input(),
     ) {
         Ok(setup) => setup,
         Err(error) => {
@@ -3733,9 +3758,9 @@ mod tests {
         assert!(error.contains("string_bytes"));
     }
     use super::{
+        ActionOutputMode, LoadedProfileKind, RequestedActionRenderMode,
         package_child_project_root_from, resolve_action_render_mode_for_capability,
-        resolve_loaded_profile, validate_agent_step_target, ActionOutputMode, LoadedProfileKind,
-        RequestedActionRenderMode,
+        resolve_loaded_profile, validate_agent_step_target,
     };
     use crate::config::schema::{Config, OpenAiAuth, Profile, ProfileAuthMode, WebResources};
     use std::fs;

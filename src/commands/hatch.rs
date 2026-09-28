@@ -13,6 +13,42 @@ struct HatchResolution {
     project_root: Option<PathBuf>,
     installed_source_kind: Option<String>,
     package_lease: Option<std::sync::Arc<crate::commands::package_lock::PackageAliasLockGuard>>,
+    portable_metadata: crate::agent_builder::project::PortableAgentMetadata,
+}
+
+fn portable_metadata_for_source(
+    source: &AgentDefinitionSource,
+    project_root: Option<&Path>,
+) -> crate::agent_builder::project::PortableAgentMetadata {
+    let Some(root) = project_root else {
+        return Default::default();
+    };
+    let AgentDefinitionSource::LocalPath(path) = source else {
+        return Default::default();
+    };
+    let metadata = std::fs::read_to_string(root.join(".cargo-ai/project.toml"))
+        .ok()
+        .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok());
+    let project = metadata
+        .as_ref()
+        .and_then(|document| document.get("project"));
+    let agent_key = std::fs::canonicalize(path)
+        .ok()
+        .zip(std::fs::canonicalize(root).ok())
+        .and_then(|(path, root)| path.strip_prefix(root).ok().map(Path::to_path_buf))
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"));
+    crate::agent_builder::project::PortableAgentMetadata {
+        package_id: project
+            .and_then(|project| project.get("id"))
+            .and_then(toml::Value::as_str)
+            .map(str::to_string),
+        package_version: project
+            .and_then(|project| project.get("version"))
+            .and_then(toml::Value::as_str)
+            .map(str::to_string),
+        agent_key,
+        ..Default::default()
+    }
 }
 
 fn project_root_for_hatch_source(
@@ -127,6 +163,7 @@ fn resolve_hatch_input_in_dir(
             project_root: None,
             installed_source_kind: None,
             package_lease: None,
+            portable_metadata: Default::default(),
         });
     }
 
@@ -139,6 +176,11 @@ fn resolve_hatch_input_in_dir(
             dependency_project_root.as_deref(),
         )?
     {
+        let agent_key = std::fs::canonicalize(&resolved.definition_path)
+            .ok()
+            .zip(std::fs::canonicalize(&resolved.package_root).ok())
+            .and_then(|(path, root)| path.strip_prefix(root).ok().map(Path::to_path_buf))
+            .map(|relative| relative.to_string_lossy().replace('\\', "/"));
         return Ok(HatchResolution {
             project_name: resolved.entrypoint,
             source: AgentDefinitionSource::LocalPath(
@@ -147,6 +189,13 @@ fn resolve_hatch_input_in_dir(
             project_root: Some(resolved.package_root),
             installed_source_kind: Some(resolved.source_kind),
             package_lease: Some(resolved.lease),
+            portable_metadata: crate::agent_builder::project::PortableAgentMetadata {
+                package_id: resolved.project_id,
+                hosted_source_id: resolved.hosted_source_id,
+                package_version: Some(resolved.package_version),
+                hosted_version_id: resolved.hosted_version_id,
+                agent_key,
+            },
         });
     }
 
@@ -166,6 +215,7 @@ fn resolve_hatch_input_in_dir(
         project_root: None,
         installed_source_kind: None,
         package_lease: None,
+        portable_metadata: Default::default(),
     })
 }
 
@@ -313,6 +363,17 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         }
         resolution.project_root = Some(checked.context.package_payload_root);
         resolution.installed_source_kind = Some(checked.context.source_kind);
+        resolution.portable_metadata = crate::agent_builder::project::PortableAgentMetadata {
+            package_id: checked.context.project_id,
+            hosted_source_id: checked.context.hosted_source_id,
+            package_version: Some(checked.context.package_version),
+            hosted_version_id: checked.context.hosted_version_id,
+            agent_key: portable_metadata_for_source(
+                &resolution.source,
+                resolution.project_root.as_deref(),
+            )
+            .agent_key,
+        };
         resolution.package_lease = Some(checked.lease);
     }
     let _package_lease = resolution.package_lease.clone();
@@ -383,6 +444,17 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         }
     }
 
+    if resolution.portable_metadata.package_id.is_none()
+        && resolution.portable_metadata.hosted_source_id.is_none()
+    {
+        let source_project_root = resolution.project_root.clone().or_else(|| {
+            project_root_for_hatch_source(&resolution.source)
+                .ok()
+                .flatten()
+        });
+        resolution.portable_metadata =
+            portable_metadata_for_source(&resolution.source, source_project_root.as_deref());
+    }
     let request = super::hatch_pipeline::HatchRequest::new(
         new_project_name,
         file_contents,
@@ -393,6 +465,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         output_dir,
         presentation,
     )
+    .with_portable_metadata(resolution.portable_metadata)
     .with_compatibility_profile(sub_m.get_one::<String>("profile").cloned());
 
     super::hatch_pipeline::run_hatch_pipeline(request)

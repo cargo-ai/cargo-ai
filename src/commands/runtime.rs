@@ -1115,8 +1115,15 @@ pub(crate) async fn run_with_definition_in_context(
     definition: &dyn InvocationDefinition,
     project_root: Option<PathBuf>,
 ) -> bool {
-    run_with_definition_in_context_and_usage_agent(sub_m, definition, project_root, None, None)
-        .await
+    run_with_definition_in_context_and_usage_agent(
+        sub_m,
+        definition,
+        project_root,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 pub(crate) async fn run_with_definition_in_context_and_usage_agent(
@@ -1125,6 +1132,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     project_root: Option<PathBuf>,
     usage_agent_info: Option<serde_json::Value>,
     package_context: Option<crate::commands::local_packages::InstalledPackageRuntimeContext>,
+    attribution_input: Option<crate::usage_attribution::AttributionInput>,
 ) -> bool {
     let full_run_started_at = std::time::Instant::now();
 
@@ -1321,10 +1329,18 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         }
     };
     let usage_log_arg = sub_m.get_one::<String>("usage_log").map(String::as_str);
-    let usage_log_setup = match crate::usage_log::UsageLogContext::from_runtime(
+    let mut attribution_input = attribution_input.unwrap_or_default();
+    if attribution_input.package_root.is_none() {
+        attribution_input.package_root = package_context
+            .as_ref()
+            .map(|context| context.package_payload_root.clone())
+            .or_else(|| project_root.clone());
+    }
+    let usage_log_setup = match crate::usage_log::UsageLogContext::from_runtime_with_attribution(
         usage_log_arg,
         super::runtime_actions::current_agent_action_depth(),
         Some(usage_agent_info),
+        attribution_input,
     ) {
         Ok(setup) => setup,
         Err(error) => {
@@ -1883,6 +1899,11 @@ mod tests {
         crate::commands::local_packages::InstalledPackageRuntimeContext {
             alias: "data_integration".to_string(),
             source_kind: "local".to_string(),
+            project_id: None,
+            package_version: "0.1.0".to_string(),
+            content_sha256: String::new(),
+            hosted_source_id: None,
+            hosted_version_id: None,
             package_payload_root: install_root.join("package"),
             package_data_root: install_root.join("data"),
             current_entrypoint_path: Some("agents/report.json".to_string()),
@@ -2710,6 +2731,11 @@ mod tests {
         let context = crate::commands::local_packages::InstalledPackageRuntimeContext {
             alias: "image_generator".to_string(),
             source_kind: source_kind.to_string(),
+            project_id: None,
+            package_version: "0.1.0".to_string(),
+            content_sha256: String::new(),
+            hosted_source_id: None,
+            hosted_version_id: None,
             package_payload_root: package_root.clone(),
             package_data_root: data_root,
             current_entrypoint_path: Some("agents/observer.json".to_string()),

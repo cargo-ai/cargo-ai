@@ -124,3 +124,7 @@ stops the affected upload. HTTP redirects are refused, request/response sizes ar
 bounded, and error output omits service bodies and credentials.
 
 Backup consent changes are serialized with uploads and other backup operations. If a command reports that another backup operation is active, it has not completed the requested change; retry after that operation finishes. Tracking changes affect collection only and preserve backup consent.
+
+## Local attribution boundary
+
+The v1 backup projection does not upload the newer local environment/package/location/agent/workspace/runtime attribution snapshot. Cloud-only restores retain their recorded counters and opaque legacy identifiers; the new dimensions remain unknown. The backup device ID describes its existing local mapping scope, not physical-machine identity. Local queries and exports can use the richer [attribution contract](../templates/guidance/usage-ledger.md#local-attribution-and-dimension-queries) without enabling backup.

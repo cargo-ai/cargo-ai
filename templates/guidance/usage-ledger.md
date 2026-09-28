@@ -169,6 +169,40 @@ History is retained until explicit deletion. `usage delete` first previews a cou
 
 SQLite is embedded in distributed CLI and standalone binaries: no SQLite executable/library/service or first-run engine download is required. Building from source requires the supported Rust and C toolchains. First tracked use initializes a versioned schema; compatible reopenings preserve existing data and unknown newer schemas are refused. WAL uses short transactions, FULL durability and bounded busy waits on local filesystem storage. Keep the live database outside network shares and cloud-synchronized folders. The database and its WAL/SHM/state files are mutable home data, not application package contents. Read-only empty-history queries and opt-out do not create a database.
 
+## Local attribution and dimension queries
+
+Older CLI and generated binaries lack this contract; use a source build or a release that includes it. Newly built runtimes attach a versioned top-level `attribution` snapshot to local events. It separates the selected environment, logical package, physical package location, logical agent, consuming workspace and actual runtime. The legacy `agent` object keeps its existing meaning. Older records are not rewritten and absent attribution remains unknown.
+
+An environment is the selected Cargo AI Home. Its `environment.id` reuses the existing Cargo AI install ID; it is not a machine or executable ID. The same executable can run against separate Homes, and several executables can share one Home. Upgrade or moving a complete Home preserves its identity. Copying a complete Home also copies its identity and history; create a fresh Home for an independent environment. There is no automatic machine-wide aggregation or hardware fingerprint.
+
+Logical package identity prefers a portable UUID in `[project].id`, with hosted source identity as a fallback. Package names and installed aliases are labels. Package version/content hash and agent definition hash describe revisions, while `agent_run_id` describes one execution. New project creation/initialization fills a missing UUID and preserves an existing valid one. Existing projects may explicitly author a valid UUID; execution and queries do not add one. Copies retain logical identity; a deliberate fork can adopt a new UUID. Legacy unidentified packages remain usable with qualified, location-scoped agent identity.
+
+Package locations and workspaces use canonical local paths with environment scope. Moving a package creates a new location bucket while its logical identity can remain stable. The consuming workspace is the project containing the root invocation's working directory, captured before an installed package runs. Children inherit that caller context and record their own runtime/package identities. No project marker means no consuming workspace; a resolution failure is unknown. Generated metadata contains portable identity, not the author's absolute paths.
+
+Inspect the effective usage context without creating state, contacting providers or looking up credentials:
+
+```bash
+cargo ai usage context --json
+```
+
+The response reports effective Home, existing identity or its absence, runtime provenance, supported query versions and grouping dimensions. Client-specific environment registries can associate their own IDs outside this contract. Read usage through the CLI rather than editing its database.
+
+Existing JSON commands remain schema v1 with the five-element summary tuple. Opt into schema v2 for named dimensions and attribution filters:
+
+```bash
+cargo ai usage summary --schema-version 2 --group-by package,package_location,agent --json
+cargo ai usage summary --schema-version 2 --group-by workspace,package --limit 100 --json
+cargo ai usage runs --schema-version 2 --environment INSTALL_ID --json
+```
+
+Without `--group-by`, v2 retains day/profile/provider/requested-model/resolved-model grouping using named keys. Supported additional dimensions are `environment`, `package`, `package_location`, `agent`, `workspace`, `runtime_version`, `package_revision`, `agent_revision` and `runtime_digest`. Package revision groups show version, content digest and hosted version ID when known; agent revision means definition digest. Unavailable revisions remain unknown, including some direct standalone contexts. Runtime values describe the executing process, with generator provenance separately retained.
+
+Identity filters preserve namespaces: `--package` and `--agent` take JSON identity objects with `source` and `id`; an agent whose source is `location_key` also requires `environment_id`. `--package-location` and `--workspace` take JSON objects with `environment_id` and `path`. Select these values from the named group keys and include only the required fields in each filter object; descriptive fields such as `key` or `unknown_reason` are not filter inputs. Environment, runtime version and revision/digest filters take their string values. `--package-revision` selects a content digest, while `--package-version` and `--hosted-version` select those revision facets. Attribution filters require `--schema-version 2`; no new dimensions are silently added to v1.
+
+V2 summary totals cover all selected facts at the snapshot, even when `groups` is paginated. Follow `next_cursor` with the same filters and grouping dimensions. Appends after the snapshot do not change it; deletion affecting that snapshot requires restarting summary pagination. Unknown/legacy coverage accompanies the totals. Provider attempts are counted once under their direct agent. Root/agent lifecycle counts and wall-clock durations may overlap between groups and must not be summed; percentiles cannot be averaged. No inclusive ancestor total should be added to its descendants' direct totals.
+
+These dimensions are local metadata. Existing v1 cloud backup does not upload them, and a cloud-only restore cannot recover them. Restored facts retain their recorded counters and opaque legacy identifiers with the new dimensions unknown. Do not infer a physical machine from the backup device ID or assume opaque IDs from different Homes are equivalent.
+
 ## Optional account backup
 
 Backup is disabled by default and is managed through `cargo ai usage backup`. `status --json` reads only local state; `status --remote --json` explicitly queries the signed-in account. `enable` selects future records, `disable` pauses upload without deleting history, and `sync` performs a bounded upload pass. The runtime and newly generated standalone agents can drain enabled queues on root-run completion without launching a CLI subprocess. Offline failures retain account-bound selections and use bounded backoff.

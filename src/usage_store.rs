@@ -1,4 +1,4 @@
-//! Device-local, immutable usage facts shared by the CLI and generated agents.
+//! Selected-Home immutable usage facts shared by the CLI and generated agents.
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 use std::{
@@ -187,6 +187,15 @@ fn open_at(dir: &Path, create: bool) -> Result<Option<Connection>, String> {
             }
             transaction.commit().map_err(db_error)?;
         }
+        // Optional expression indexes derive only from immutable JSON facts.
+        // Older writers can keep inserting version-1 records without supplying
+        // attribution fields or maintaining a separate projection.
+        connection.execute_batch("CREATE INDEX IF NOT EXISTS usage_events_attribution_environment ON usage_events(json_extract(record_json,'$.attribution.environment.id'),sequence);
+            CREATE INDEX IF NOT EXISTS usage_events_attribution_package ON usage_events(json_extract(record_json,'$.attribution.package.source'),json_extract(record_json,'$.attribution.package.id'),sequence);
+            CREATE INDEX IF NOT EXISTS usage_events_attribution_location ON usage_events(json_extract(record_json,'$.attribution.environment.id'),json_extract(record_json,'$.attribution.package_location.path'),sequence);
+            CREATE INDEX IF NOT EXISTS usage_events_attribution_agent ON usage_events(json_extract(record_json,'$.attribution.agent.source'),json_extract(record_json,'$.attribution.agent.id'),sequence);
+            CREATE INDEX IF NOT EXISTS usage_events_attribution_workspace ON usage_events(json_extract(record_json,'$.attribution.workspace.environment_id'),json_extract(record_json,'$.attribution.workspace.path'),sequence);")
+            .map_err(db_error)?;
         private_permissions(&path, false)?;
     } else if version != SCHEMA_VERSION {
         return Err("Usage database requires migration by a current runtime before reading".into());
