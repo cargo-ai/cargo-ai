@@ -171,7 +171,7 @@ SQLite is embedded in distributed CLI and standalone binaries: no SQLite executa
 
 ## Local attribution and dimension queries
 
-Older CLI and generated binaries lack this contract; use a source build or a release that includes it. Newly built runtimes attach a versioned top-level `attribution` snapshot to local events. It separates the selected environment, logical package, physical package location, logical agent, consuming workspace and actual runtime. The legacy `agent` object keeps its existing meaning. Older records are not rewritten and absent attribution remains unknown.
+The attribution contract is included in the 0.4.5 source candidate. Check release status before assuming it is available through normal installation. Older CLI and generated binaries lack this contract; upgrade to a release that includes it and rebuild generated agents to use it. Newly built runtimes attach a versioned top-level `attribution` snapshot to local events. It separates the selected environment, logical package, physical package location, logical agent, consuming workspace and actual runtime. The legacy `agent` object keeps its existing meaning. Older records are not rewritten and absent attribution remains unknown.
 
 An environment is the selected Cargo AI Home. Its `environment.id` reuses the existing Cargo AI install ID; it is not a machine or executable ID. The same executable can run against separate Homes, and several executables can share one Home. Upgrade or moving a complete Home preserves its identity. Copying a complete Home also copies its identity and history; create a fresh Home for an independent environment. There is no automatic machine-wide aggregation or hardware fingerprint.
 
