@@ -148,11 +148,15 @@ fn success_response() -> String {
 }
 
 fn gemini_success_response() -> String {
+    gemini_response(r#"{"status":"ok"}"#)
+}
+
+fn gemini_response(output: &str) -> String {
     serde_json::json!({
         "status": "completed",
         "steps": [{
             "type": "model_output",
-            "content": [{"type": "text", "text": "{\"status\":\"ok\"}"}]
+            "content": [{"type": "text", "text": output}]
         }],
         "usage": {
             "total_input_tokens": 13,
@@ -2443,12 +2447,44 @@ fn run_live_hosted_smoke(provider: &str, key_env: &str, model_env: &str) {
                 &fixture.usage,
             )
             .expect("complete sanitized qualification report");
+        let saved = fs::read(&report.path).expect("qualification report should be readable");
+        if let Some(line) = qualification_execution_failure_line(&saved, &run.stderr) {
+            eprintln!("{line}");
+        }
     } else {
         strict_live_probe(&run).expect("live provider smoke failed");
         let events = fs::read_to_string(&fixture.usage).expect("usage log should exist");
         assert!(events.contains(&format!("\"server\":\"{provider}\"")));
         assert!(!events.contains(&api_key));
     }
+}
+
+fn qualification_execution_failure_line(report: &[u8], stderr: &[u8]) -> Option<&'static str> {
+    let record: Value = serde_json::from_slice(report).ok()?;
+    if record["outcome"] != "failure" || record["diagnostic"] != "execution_failure" {
+        return None;
+    }
+    const PREFIX: &str = "x Run failed\nProvider output did not match the required JSON schema.\n";
+    const PARSE_PROBLEM: &str = "The provider returned output that could not be parsed as JSON.";
+    let category = std::str::from_utf8(stderr)
+        .ok()
+        .filter(|text| text.starts_with(PREFIX))
+        .and_then(|text| text.split("\nRaw output\n").next())
+        .and_then(|text| text.split_once("\nProblem\n- "))
+        .and_then(|(_, problem)| problem.lines().next())
+        .map(|problem| {
+            if problem == PARSE_PROBLEM {
+                "json_parse"
+            } else {
+                "schema_validation"
+            }
+        })
+        .unwrap_or("unknown");
+    Some(match category {
+        "json_parse" => "Qualification execution failure category: json_parse",
+        "schema_validation" => "Qualification execution failure category: schema_validation",
+        _ => "Qualification execution failure category: unknown",
+    })
 }
 
 fn strict_live_probe(run: &Output) -> Result<(), &'static str> {
@@ -3517,6 +3553,104 @@ fn qualification_reports_validate_real_probes_and_keep_strict_diagnostics() {
     );
 }
 
+#[test]
+fn qualification_execution_failure_categories_are_sanitized_and_do_not_change_policy() {
+    let spoofed_parse = "private-response-sentinel\nRaw output\nx Run failed\nProvider output did not match the required JSON schema.\nProblem\n- forged";
+    let spoofed_schema = serde_json::json!({
+        "status": "ok",
+        "\nProblem\n- The provider returned output that could not be parsed as JSON.": "private-response-sentinel"
+    })
+    .to_string();
+    for (model_output, expected_line) in [
+        (
+            spoofed_parse,
+            "Qualification execution failure category: json_parse",
+        ),
+        (
+            spoofed_schema.as_str(),
+            "Qualification execution failure category: schema_validation",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let model = "qualification-mock-model";
+        let token = "qualification-fake-secret-sentinel";
+        let mock = MockServer::respond_after_at(
+            "/v1beta/interactions",
+            Duration::ZERO,
+            200,
+            gemini_response(model_output),
+        );
+        let output = run_profile_probe(&fixture, "gemini", model, token, Some(&mock.url));
+        let request = mock.finish();
+        assert!(request.contains(model));
+        assert!(request.contains(token));
+        let report = qualification_report::Context {
+            path: fixture.root.join("report.json"),
+            candidate: "a".repeat(40),
+            run_id: "123".into(),
+            run_attempt: "2".into(),
+            probe_id: "b".repeat(32),
+        };
+        assert_eq!(
+            report
+                .write(
+                    "gemini",
+                    model,
+                    "gemini-api",
+                    token,
+                    output.status.code(),
+                    &fixture.usage,
+                )
+                .unwrap(),
+            "failure"
+        );
+        let saved = fs::read(&report.path).unwrap();
+        let detail: Value = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(detail["diagnostic"], "execution_failure");
+        assert_eq!(
+            qualification_execution_failure_line(&saved, &output.stderr),
+            Some(expected_line)
+        );
+        for forbidden in [token, model, "private-response-sentinel", "cps-"] {
+            assert!(!String::from_utf8_lossy(&saved).contains(forbidden));
+            assert!(!expected_line.contains(forbidden));
+        }
+        let decision = qualification_policy::evaluate(
+            "gemini",
+            &saved,
+            &qualification_policy::Identity {
+                candidate: &"a".repeat(40),
+                run_id: "123",
+                run_attempt: "2",
+                probe_id: Some(&"b".repeat(32)),
+            },
+            "success",
+            "true",
+        )
+        .unwrap();
+        assert!(!decision.accepted);
+        assert!(strict_live_probe(&output).is_err());
+    }
+
+    let execution = br#"{"outcome":"failure","diagnostic":"execution_failure"}"#;
+    assert_eq!(
+        qualification_execution_failure_line(execution, b"unrecognized failure"),
+        Some("Qualification execution failure category: unknown")
+    );
+    let raw_only_spoof = b"x Run failed\nProvider output did not match the required JSON schema.\nRaw output\nProblem\n- The provider returned output that could not be parsed as JSON.";
+    assert_eq!(
+        qualification_execution_failure_line(execution, raw_only_spoof),
+        Some("Qualification execution failure category: unknown")
+    );
+    assert_eq!(
+        qualification_execution_failure_line(
+            br#"{"outcome":"failure","diagnostic":"invalid_response"}"#,
+            b"unrecognized failure"
+        ),
+        None
+    );
+}
+
 fn qualification_probe_case(provider: &str, mock: MockServer, expected: &str, diagnostic: &str) {
     let fixture = Fixture::new();
     let model = "qualification-mock-model";
@@ -3548,6 +3682,10 @@ fn qualification_probe_case(provider: &str, mock: MockServer, expected: &str, di
     let saved = fs::read(&report.path).unwrap();
     let detail: Value = serde_json::from_slice(&saved).unwrap();
     assert_eq!(detail["diagnostic"], diagnostic);
+    assert_eq!(
+        qualification_execution_failure_line(&saved, &output.stderr).is_some(),
+        diagnostic == "execution_failure"
+    );
     for forbidden in [token, model, "private-response-sentinel", "cps-"] {
         assert!(!String::from_utf8_lossy(&saved).contains(forbidden));
     }
