@@ -193,6 +193,14 @@ fn select(
                 params![event_id, projection.to_string()],
             )
             .map_err(db_error)?;
+        } else if event["backup_min_schema_version"].as_u64() == Some(2)
+            && stored
+                .as_ref()
+                .and_then(|encoded| serde_json::from_str::<Value>(encoded).ok())
+                .and_then(|record| record["schema_version"].as_u64())
+                != Some(2)
+        {
+            return Err("Cached backup projection is older than this usage fact requires; selection remains pending".into());
         }
         added+=db.execute("INSERT OR IGNORE INTO usage_backup_queue(event_id,binding,generation) VALUES(?1,?2,?3)",params![event_id,binding.account,generation(binding)?]).map_err(db_error)?;
     }
@@ -301,16 +309,16 @@ pub(super) fn include_history(
 }
 pub(super) fn batch(binding: &Binding) -> Result<Vec<Value>, String> {
     let db = open()?;
-    let mut statement=db.prepare("SELECT p.record_json FROM usage_backup_queue q JOIN usage_backup_projection p USING(event_id) JOIN usage_events e USING(event_id) WHERE q.binding=?1 AND q.generation=?2 AND q.acknowledged=0 ORDER BY e.sequence LIMIT 100").map_err(db_error)?;
+    let mut statement=db.prepare("SELECT p.record_json,e.record_json FROM usage_backup_queue q JOIN usage_backup_projection p USING(event_id) JOIN usage_events e USING(event_id) WHERE q.binding=?1 AND q.generation=?2 AND q.acknowledged=0 ORDER BY e.sequence LIMIT 100").map_err(db_error)?;
     let rows = statement
         .query_map(params![binding.account, generation(binding)?], |r| {
-            r.get::<_, String>(0)
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })
         .map_err(db_error)?;
     let mut result = Vec::new();
     let mut bytes = 0;
     for row in rows {
-        let encoded = row.map_err(db_error)?;
+        let (encoded, event_json) = row.map_err(db_error)?;
         if bytes + encoded.len() + 1 > 240 * 1024 {
             break;
         }
@@ -318,6 +326,13 @@ pub(super) fn batch(binding: &Binding) -> Result<Vec<Value>, String> {
         let record =
             serde_json::from_str(&encoded).map_err(|_| "Queued backup metadata is invalid")?;
         projection::validate_cloud_record(&record)?;
+        let event: Value =
+            serde_json::from_str(&event_json).map_err(|_| "Stored usage record is invalid")?;
+        if event["backup_min_schema_version"].as_u64() == Some(2)
+            && record["schema_version"].as_u64() != Some(2)
+        {
+            return Err("Queued backup projection is older than this usage fact requires; pending selections remain".into());
+        }
         result.push(record);
     }
     Ok(result)
@@ -332,7 +347,7 @@ pub(super) fn acknowledge(binding: &Binding, ids: &[String]) -> Result<(), Strin
     }
     tx.commit().map_err(db_error)
 }
-pub(super) fn restore(records: &[Value]) -> Result<usize, String> {
+pub(super) fn restore(records: &[Value], account_binding: &str) -> Result<usize, String> {
     if records.len() > 100 {
         return Err("Backup page exceeds its record limit".into());
     }
@@ -376,7 +391,12 @@ pub(super) fn restore(records: &[Value]) -> Result<usize, String> {
                 );
             }
         } else {
-            let event = projection::restore(record)?;
+            let mut event = projection::restore(record)?;
+            if record["schema_version"] == 2 {
+                event["restored_attribution"] = json!({"schema_version":1,
+                    "namespace":{"kind":"usage_backup","account_binding":account_binding},
+                    "value":record["attribution"]});
+            }
             usage_store::insert_event(&tx, &event)?;
             inserted += 1;
             tx.execute(

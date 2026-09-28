@@ -1,4 +1,5 @@
 //! Closed cloud metadata projection. Local labels and paths never leave the device.
+use super::attribution;
 use crate::usage_store::db_error;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
@@ -38,6 +39,18 @@ fn code(value: &Value, max: usize) -> Option<Value> {
                     .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
         })
         .map(|s| json!(s))
+}
+fn runtime_code(value: &Value) -> Option<Value> {
+    value
+        .as_str()
+        .filter(|text| {
+            !text.is_empty()
+                && text.len() <= 128
+                && text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_.:+-".contains(&byte))
+        })
+        .map(|text| json!(text))
 }
 fn model(value: &Value) -> Option<Value> {
     value
@@ -173,7 +186,9 @@ pub(super) fn validate_cloud_record(record: &Value) -> Result<(), String> {
         return Err(invalid());
     }
     let fields = record.as_object().ok_or_else(invalid)?;
-    if record["schema_version"].as_u64() != Some(1)
+    let version = record["schema_version"].as_u64();
+    if !matches!(version, Some(1 | 2))
+        || (version == Some(2) && !attribution::validate(&record["attribution"]))
         || record["normalization_version"].as_u64() != Some(1)
         || ["event_id", "root_run_id", "agent_run_id"]
             .iter()
@@ -187,6 +202,7 @@ pub(super) fn validate_cloud_record(record: &Value) -> Result<(), String> {
     for (key, value) in fields {
         let valid = match key.as_str() {
             "schema_version" | "normalization_version" | "event_type" | "event_kind" => true,
+            "attribution" => version == Some(2) && attribution::validate(value),
             "event_id" | "root_run_id" | "agent_run_id" | "parent_run_id" | "device_id"
             | "operation_id" | "request_attempt_id" | "project_id" | "profile_id" | "agent_id"
             | "tool_id" | "action_id" => value.is_null() || cloud_id(value),
@@ -315,7 +331,210 @@ pub(super) fn validate_cloud_record(record: &Value) -> Result<(), String> {
             return Err(invalid());
         }
     }
+    if version == Some(2) && !fields.contains_key("attribution")
+        || version == Some(1) && fields.contains_key("attribution")
+    {
+        return Err(invalid());
+    }
     Ok(())
+}
+
+fn unavailable(reason: &str) -> Value {
+    json!({"state":"unavailable","reason":reason})
+}
+
+fn mapped(db: &Connection, kind: &str, identity: Value, missing: &str) -> Result<Value, String> {
+    if identity.is_null() {
+        return Ok(unavailable(missing));
+    }
+    Ok(json!({"state":"known","id":opaque(db, kind, &identity.to_string())?}))
+}
+
+fn local_reason(value: &Value, fallback: &str) -> &'static str {
+    match value.as_str().unwrap_or(fallback) {
+        "missing_install_id" => "missing_install_id",
+        "config_unavailable" => "config_unavailable",
+        "missing_package_identity" => "missing_package_identity",
+        "invalid_authored_project_id" => "invalid_authored_project_id",
+        "package_root_unavailable" => "package_root_unavailable",
+        "canonicalization_failed" => "canonicalization_failed",
+        "non_unicode_path" => "non_unicode_path",
+        "agent_key_unavailable" => "agent_key_unavailable",
+        "environment_unavailable" => "environment_unavailable",
+        "package_and_location_unavailable" => "package_and_location_unavailable",
+        "current_directory_unavailable" => "current_directory_unavailable",
+        "project_marker_invalid" => "project_marker_invalid",
+        "project_marker_unreadable" => "project_marker_unreadable",
+        "captured_path_invalid" => "captured_path_invalid",
+        "inherited_context_unavailable" => "inherited_context_unavailable",
+        "inherited_context_invalid" => "inherited_context_invalid",
+        "current_executable_unavailable" => "current_executable_unavailable",
+        "executable_unreadable" => "executable_unreadable",
+        _ => "not_reported",
+    }
+}
+
+fn project_attribution(db: &Connection, local: &Value) -> Result<Value, String> {
+    let environment = if let Some(id) = local["environment"]["id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+    {
+        mapped(
+            db,
+            "environment",
+            json!(["environment", id]),
+            "not_reported",
+        )?
+    } else {
+        unavailable(local_reason(
+            &local["environment"]["unknown_reason"],
+            "not_reported",
+        ))
+    };
+    let package = if let (Some(source), Some(id)) = (
+        local["package"]["source"].as_str(),
+        local["package"]["id"].as_str(),
+    ) {
+        mapped(
+            db,
+            "package",
+            json!(["package", source, id]),
+            "not_reported",
+        )?
+    } else {
+        unavailable(local_reason(
+            &local["package"]["unknown_reason"],
+            "not_reported",
+        ))
+    };
+    let package_location = if let (Some(origin), Some(path)) = (
+        local["environment"]["id"].as_str(),
+        local["package_location"]["path"].as_str(),
+    ) {
+        json!({"state":"known","id":opaque(db,"package_location",&json!(["package_location",origin,path]).to_string())?,
+            "environment_id":environment["id"]})
+    } else {
+        unavailable(local_reason(
+            &local["package_location"]["unknown_reason"],
+            "environment_unavailable",
+        ))
+    };
+    let agent = if let (Some(source), Some(id)) = (
+        local["agent"]["source"].as_str(),
+        local["agent"]["id"].as_str(),
+    ) {
+        let scope = match source {
+            "package_key" if package["state"] == "known" => Some("package"),
+            "location_key" if package_location["state"] == "known" => Some("package_location"),
+            _ => None,
+        };
+        if let Some(scope) = scope {
+            json!({"state":"known","id":opaque(db,"attributed_agent",&json!(["agent",source,id]).to_string())?,
+                "identity_scope":scope})
+        } else {
+            unavailable("package_and_location_unavailable")
+        }
+    } else {
+        unavailable(local_reason(
+            &local["agent"]["unknown_reason"],
+            "not_reported",
+        ))
+    };
+    let workspace = if local["workspace"]["source"] == "none" {
+        json!({"state":"none"})
+    } else if let (Some(origin), Some(path)) = (
+        local["workspace"]["environment_id"].as_str(),
+        local["workspace"]["path"].as_str(),
+    ) {
+        json!({"state":"known","id":opaque(db,"workspace",&json!(["workspace",origin,path]).to_string())?,
+            "environment_id":opaque(db,"environment",&json!(["environment",origin]).to_string())?})
+    } else {
+        unavailable(local_reason(
+            &local["workspace"]["unknown_reason"],
+            "caller_environment_unavailable",
+        ))
+    };
+    let package_revision = if package["state"] == "known" {
+        let p = &local["package"];
+        let revision = ["version", "content_digest", "hosted_version_id"]
+            .iter()
+            .map(|key| p[*key].as_str())
+            .collect::<Vec<_>>();
+        if revision.iter().any(Option::is_some) {
+            mapped(
+                db,
+                "package_revision",
+                json!(["package_revision", package["id"], revision]),
+                "not_reported",
+            )?
+        } else {
+            unavailable("not_reported")
+        }
+    } else {
+        unavailable("missing_package_identity")
+    };
+    let agent_revision = if agent["state"] == "known" {
+        if let Some(hash) = local["agent"]["definition_hash"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+        {
+            mapped(
+                db,
+                "agent_revision",
+                json!(["agent_revision", agent["id"], hash]),
+                "not_reported",
+            )?
+        } else {
+            unavailable("not_reported")
+        }
+    } else {
+        unavailable("agent_key_unavailable")
+    };
+    let runtime = &local["runtime"];
+    let executable = if let (Some(origin), Some(path)) = (
+        local["environment"]["id"].as_str(),
+        runtime["executable_path"].as_str(),
+    ) {
+        mapped(
+            db,
+            "runtime_executable",
+            json!(["executable", origin, path]),
+            "not_reported",
+        )?
+    } else {
+        unavailable(local_reason(
+            &runtime["executable_unknown_reason"],
+            "environment_unavailable",
+        ))
+    };
+    let build = if let Some(digest) = runtime["executable_sha256"]
+        .as_str()
+        .filter(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        mapped(
+            db,
+            "runtime_build",
+            json!(["build", digest]),
+            "not_reported",
+        )?
+    } else {
+        unavailable(local_reason(
+            &runtime["digest_unknown_reason"],
+            "not_reported",
+        ))
+    };
+    let mut runtime_out = json!({"kind":runtime["kind"],"version":runtime["version"],
+        "build_target":runtime["build_target"],"executable":executable,"build":build});
+    if let Some(version) = runtime_code(&runtime["generator_version"]) {
+        runtime_out["generator_version"] = version;
+    }
+    let output = json!({"schema_version":1,"environment":environment,"package":package,
+        "package_location":package_location,"agent":agent,"workspace":workspace,
+        "package_revision":package_revision,"agent_revision":agent_revision,"runtime":runtime_out});
+    if !attribution::validate(&output) {
+        return Err("Usage attribution cannot be projected into the closed backup contract".into());
+    }
+    Ok(output)
 }
 
 pub(super) fn project(db: &Connection, event: &Value) -> Result<Value, String> {
@@ -528,6 +747,13 @@ pub(super) fn project(db: &Connection, event: &Value) -> Result<Value, String> {
             out.insert("coverage".into(), json!("incomplete"));
         }
     }
+    if event["backup_min_schema_version"].as_u64() == Some(2) {
+        out.insert("schema_version".into(), json!(2));
+        out.insert(
+            "attribution".into(),
+            project_attribution(db, &event["attribution"])?,
+        );
+    }
     let result = Value::Object(out);
     if serde_json::to_vec(&result)
         .map_err(|_| "Cannot encode backup metadata")?
@@ -697,6 +923,59 @@ mod tests {
         assert_eq!(project(&db, &restored).unwrap(), projected);
         assert!(!projected.to_string().contains("/private/"));
         assert!(!projected.to_string().contains("private-install"));
+    }
+
+    #[test]
+    fn v2_uses_opaque_origin_scoped_references_and_keeps_logical_ids_stable() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE usage_backup_ids(kind TEXT,local_value TEXT,opaque_id TEXT, UNIQUE(kind,local_value));").unwrap();
+        let mut local = json!({
+            "event_id":"cai_event_00000000-0000-4000-8000-000000000003",
+            "root_run_id":"cai_run_00000000-0000-4000-8000-000000000001",
+            "agent_run_id":"cai_agent_run_00000000-0000-4000-8000-000000000002",
+            "event_type":"provider_request_completed","timestamp":"2026-09-22T00:00:00Z",
+            "backup_min_schema_version":2,
+            "attribution":{"schema_version":1,
+                "environment":{"id":"private-home"},
+                "package":{"source":"authored_project_id","id":"private-package","version":"1.0.0"},
+                "package_location":{"path":"/private/package"},
+                "agent":{"source":"package_key","id":"private-agent","definition_hash":"private-hash"},
+                "workspace":{"environment_id":"caller-home","path":"/private/workspace"},
+                "runtime":{"kind":"cli","version":"0.4.4","build_target":"aarch64-apple-darwin",
+                    "executable_path":"/private/bin/cargo-ai","executable_sha256":"a".repeat(64)}}
+        });
+        let original = project(&db, &local).unwrap();
+        assert_eq!(original["schema_version"], 2);
+        assert!(super::attribution::validate(&original["attribution"]));
+        assert!(!original.to_string().contains("private"));
+        let first = &original["attribution"];
+        assert_ne!(
+            first["environment"]["id"],
+            first["workspace"]["environment_id"]
+        );
+        local["attribution"]["package"]["version"] = json!("2.0.0");
+        local["attribution"]["agent"]["definition_hash"] = json!("changed");
+        let later = project(&db, &local).unwrap();
+        assert_eq!(
+            first["package"]["id"],
+            later["attribution"]["package"]["id"]
+        );
+        assert_eq!(first["agent"]["id"], later["attribution"]["agent"]["id"]);
+        assert_ne!(
+            first["package_revision"]["id"],
+            later["attribution"]["package_revision"]["id"]
+        );
+        assert_ne!(
+            first["agent_revision"]["id"],
+            later["attribution"]["agent_revision"]["id"]
+        );
+        assert_eq!(
+            project(&db, &restore(&original).unwrap()).unwrap(),
+            original
+        );
+        let mut invalid = original.clone();
+        invalid["attribution"]["package"]["path"] = json!("/private/leak");
+        assert!(validate_cloud_record(&invalid).is_err());
     }
 
     #[test]

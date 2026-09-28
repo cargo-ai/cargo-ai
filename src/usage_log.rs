@@ -496,7 +496,9 @@ impl UsageLogContext {
             event["package_revision"] = json!(revision);
         }
         if self.sink.tracking {
-            self.persist_history(event.clone());
+            let mut persisted = event.clone();
+            persisted["backup_min_schema_version"] = json!(2);
+            self.persist_history(persisted);
         }
         if !legacy_export || self.sink.path.as_os_str().is_empty() {
             return Ok(());

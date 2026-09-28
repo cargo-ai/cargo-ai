@@ -65,11 +65,15 @@ const CREDENTIALS_STORE_RS_NAME: &str = "src/credentials/store.rs";
 const CREDENTIALS_STORE_RS_TEMPLATE: &str = include_str!("src/credentials/store.rs");
 
 /// Template files emitted into a newly scaffolded agent workspace.
-pub const TEMPLATES: [(&str, &str); 27] = [
+pub const TEMPLATES: [(&str, &str); 28] = [
     ("src/usage_backup.rs", include_str!("src/usage_backup.rs")),
     (
         "src/usage_backup_host.rs",
         include_str!("src/usage_backup_host.rs"),
+    ),
+    (
+        "src/usage_backup/attribution.rs",
+        include_str!("src/usage_backup/attribution.rs"),
     ),
     (
         "src/usage_backup/queue.rs",

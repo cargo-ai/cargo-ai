@@ -1,4 +1,6 @@
 //! Explicitly enabled logical backup shared by interpreted and standalone runtimes.
+#[path = "usage_backup/attribution.rs"]
+pub(crate) mod attribution;
 #[path = "usage_backup/projection.rs"]
 mod projection;
 #[path = "usage_backup/queue.rs"]
@@ -176,6 +178,13 @@ async fn drain(max_batches: usize, timeout: Duration) -> Result<Value, String> {
         if records.is_empty() {
             break;
         }
+        if records.iter().any(|record| record["schema_version"] == 2)
+            && !status["supported_ingest_record_schema_versions"]
+                .as_array()
+                .is_some_and(|versions| versions.iter().any(|version| version.as_u64() == Some(2)))
+        {
+            return Err("Backup service cannot ingest record schema 2; update or recover the service before syncing. Pending selections remain".into());
+        }
         let expected: std::collections::BTreeSet<String> = records
             .iter()
             .filter_map(|r| r["event_id"].as_str().map(str::to_owned))
@@ -256,6 +265,12 @@ pub(crate) async fn restore(
     }
     let mut payload = binding.payload("restore");
     payload["limit"] = json!(100);
+    let supports_v2 = status["supported_record_schema_versions"]
+        .as_array()
+        .is_some_and(|versions| versions.iter().any(|version| version.as_u64() == Some(2)));
+    if supports_v2 {
+        payload["max_record_schema_version"] = json!(2);
+    }
     if let Some(cursor) = cursor {
         payload["cursor"] = json!(cursor);
     }
@@ -264,7 +279,13 @@ pub(crate) async fn restore(
     let records = page["records"]
         .as_array()
         .ok_or("Backup page is missing its records")?;
-    let inserted = queue::restore(records)?;
+    if !supports_v2 && records.iter().any(|record| record["schema_version"] != 1) {
+        return Err(
+            "Backup service returned a record schema it did not advertise; no page was imported"
+                .into(),
+        );
+    }
+    let inserted = queue::restore(records, &binding.account)?;
     Ok(
         json!({"account_binding":binding.account,"generation":binding.generation,"page_records":records.len(),"inserted_records":inserted,"next_cursor":page["next_cursor"],"snapshot_complete":page["snapshot_complete"],"note":"Continue --confirm --cursor with next_cursor until snapshot_complete. Local-only labels are preserved for existing facts; newly restored labels may be opaque IDs."}),
     )

@@ -119,6 +119,26 @@ fn append() -> Value {
     event
 }
 
+fn append_enriched() -> Value {
+    let event = json!({
+        "schema_version":1,"backup_min_schema_version":2,
+        "event_id":format!("cai_event_{}",uuid::Uuid::new_v4()),
+        "root_run_id":format!("cai_run_{}",uuid::Uuid::new_v4()),
+        "agent_run_id":format!("cai_agent_run_{}",uuid::Uuid::new_v4()),
+        "event_type":"provider_request_completed","timestamp":"2026-09-22T00:00:00Z",
+        "attribution":{"schema_version":1,
+            "environment":{"id":"private-home"},
+            "package":{"id":"private-package","source":"authored_project_id","version":"1.0.0"},
+            "package_location":{"path":"/private/package"},
+            "agent":{"id":"private-agent","source":"package_key","definition_hash":"private-hash"},
+            "workspace":{"source":"none"},
+            "runtime":{"kind":"cli","version":"0.4.4","build_target":"aarch64-apple-darwin",
+                "executable_path":"/private/bin/cargo-ai","executable_sha256":"a".repeat(64)}}
+    });
+    usage_store::persist(&event).unwrap();
+    event
+}
+
 fn event_id(event: &Value) -> String {
     event["event_id"].as_str().unwrap().to_owned()
 }
@@ -335,6 +355,80 @@ async fn restore_conflict_rolls_back_page_and_identical_restore_preserves_labels
         1
     );
     ingest.assert_async().await;
+    restored.assert_async().await;
+    status.assert_async().await;
+}
+
+#[tokio::test]
+async fn v2_requires_ingest_capability_and_restores_verified_opaque_namespace() {
+    let mut server = Server::new_async().await;
+    let _home = Home::new(format!("{}/account", server.url()), true);
+    let binding = binding();
+    enable(&mut server, &binding).await;
+    let local = append_enriched();
+    let old_status = reply(&mut server, "status", state(&binding), 1).await;
+    let error = usage_backup::sync().await.unwrap_err();
+    assert!(error.contains("cannot ingest record schema 2"));
+    assert_eq!(usage_backup::local_status().unwrap()["pending_records"], 1);
+    assert_eq!(projection(&event_id(&local))["schema_version"], 2);
+    old_status.assert_async().await;
+    old_status.remove_async().await;
+
+    let mut capable = state(&binding);
+    capable["supported_record_schema_versions"] = json!([1, 2]);
+    capable["supported_ingest_record_schema_versions"] = json!([1, 2]);
+    let status = reply(&mut server, "status", capable, 3).await;
+    let ingest = acknowledge(&mut server, &binding, &[event_id(&local)]).await;
+    assert_eq!(usage_backup::sync().await.unwrap()["uploaded_records"], 1);
+    assert_eq!(usage_backup::local_status().unwrap()["pending_records"], 0);
+    ingest.assert_async().await;
+
+    let mut remote = projection(&event_id(&local));
+    remote["event_id"] = json!(format!("cai_event_{}", uuid::Uuid::new_v4()));
+    let mut malformed = remote.clone();
+    malformed["event_id"] = json!(format!("cai_event_{}", uuid::Uuid::new_v4()));
+    malformed["attribution"]["workspace"]["path"] = json!("/private/leak");
+    let mut page = state(&binding);
+    page["records"] = json!([remote, malformed]);
+    page["snapshot_complete"] = json!(true);
+    page["next_cursor"] = Value::Null;
+    let rejected = reply(&mut server, "restore", page.clone(), 1).await;
+    assert!(usage_backup::restore(None, Some(binding.clone()), true)
+        .await
+        .is_err());
+    assert!(stored(&event_id(&remote)).is_none());
+    rejected.assert_async().await;
+    rejected.remove_async().await;
+    page["records"] = json!([remote]);
+    page["snapshot_complete"] = json!(true);
+    page["next_cursor"] = Value::Null;
+    let restored = server
+        .mock("POST", "/account")
+        .match_body(Matcher::PartialJson(
+            json!({"action":"usage_backup","usage_backup":{
+            "command":"restore","max_record_schema_version":2}}),
+        ))
+        .with_status(200)
+        .with_body(response(page))
+        .expect(1)
+        .create_async()
+        .await;
+    assert_eq!(
+        usage_backup::restore(None, Some(binding.clone()), true)
+            .await
+            .unwrap()["inserted_records"],
+        1
+    );
+    let saved = stored(&event_id(&remote)).unwrap();
+    assert_eq!(
+        saved["restored_attribution"]["namespace"]["account_binding"],
+        binding.account
+    );
+    assert_eq!(
+        saved["restored_attribution"]["value"],
+        remote["attribution"]
+    );
+    assert!(saved.get("attribution").is_none());
     restored.assert_async().await;
     status.assert_async().await;
 }

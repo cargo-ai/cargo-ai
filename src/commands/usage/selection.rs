@@ -1,8 +1,10 @@
 //! Database-side selection keeps a page independent of unrelated history size.
+use super::v2::restored;
 use crate::usage_store::db_error;
 use clap::ArgMatches;
 use rusqlite::{params_from_iter, types::Value as Parameter, Connection};
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 const FILTER: &str = "sequence<=?1
     AND (?2 IS NULL OR root_run_id=?2 OR agent_run_id=?2)
@@ -51,6 +53,9 @@ fn identity_filter(
     let Some(raw) = args.get_one::<String>(name) else {
         return Ok(());
     };
+    if restored::has_namespace(raw) {
+        return Ok(());
+    }
     let parsed: Value = serde_json::from_str(raw)
         .map_err(|_| format!("--{name} requires a structured JSON identity value"))?;
     let object = parsed
@@ -91,7 +96,8 @@ fn v2_filter(
 ) -> Result<(String, Vec<Parameter>), String> {
     let mut values = parameters(snapshot, run, args);
     let mut filter = FILTER.to_string();
-    if [
+    let mut remote = BTreeSet::new();
+    let flags = [
         "environment",
         "package",
         "package-location",
@@ -103,14 +109,25 @@ fn v2_filter(
         "hosted-version",
         "agent-revision",
         "runtime-digest",
-    ]
-    .iter()
-    .any(|name| args.get_one::<String>(name).is_some())
+    ];
+    for name in flags {
+        if let Some(raw) = args.get_one::<String>(name) {
+            if restored::append_filter(name, raw, &mut filter, &mut values)? {
+                remote.insert(name);
+            }
+        }
+    }
+    if flags
+        .iter()
+        .any(|name| args.get_one::<String>(name).is_some() && !remote.contains(name))
     {
         filter.push_str(" AND json_valid(record_json)");
         filter.push_str(" AND json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.schema_version')=1");
     }
     for (name, path) in ATTRIBUTION_FILTERS {
+        if remote.contains(name) {
+            continue;
+        }
         if let Some(value) = args.get_one::<String>(name) {
             values.push(Parameter::Text(value.clone()));
             filter.push_str(&format!(
@@ -119,7 +136,10 @@ fn v2_filter(
             ));
         }
     }
-    if let Some(raw) = args.get_one::<String>("package") {
+    if let Some(raw) = args
+        .get_one::<String>("package")
+        .filter(|_| !remote.contains("package"))
+    {
         let parsed: Value = serde_json::from_str(raw)
             .map_err(|_| "--package requires a structured JSON identity value")?;
         if !matches!(
@@ -159,7 +179,10 @@ fn v2_filter(
         &mut filter,
         &mut values,
     )?;
-    if let Some(raw) = args.get_one::<String>("agent") {
+    if let Some(raw) = args
+        .get_one::<String>("agent")
+        .filter(|_| !remote.contains("agent"))
+    {
         let parsed: Value = serde_json::from_str(raw)
             .map_err(|_| "--agent requires a structured JSON identity value")?;
         let source = parsed["source"]
@@ -183,6 +206,10 @@ fn v2_filter(
         identity_filter(args, "agent", fields, &mut filter, &mut values)?;
     }
     Ok((filter, values))
+}
+
+pub(super) fn validate_v2_filters(args: &ArgMatches) -> Result<(), String> {
+    v2_filter(0, None, args).map(|_| ())
 }
 
 pub(super) fn v2_event_page(

@@ -29,6 +29,10 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
         source: "src/usage_backup_host.rs",
     },
     TemplateSource {
+        destination: "src/usage_backup/attribution.rs",
+        source: "src/usage_backup/attribution.rs",
+    },
+    TemplateSource {
         destination: "src/usage_backup/queue.rs",
         source: "src/usage_backup/queue.rs",
     },

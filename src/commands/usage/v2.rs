@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+pub(super) mod restored;
 mod scratch;
 
 const DEFAULT_GROUPS: [&str; 5] = [
@@ -210,7 +211,7 @@ fn dimension(event: &Value, name: &str) -> Value {
         "day" | "profile" | "provider" | "requested_model" | "resolved_model"
     ) && attr["schema_version"] != 1
     {
-        return Value::Null;
+        return restored::dimension(event, name).unwrap_or(Value::Null);
     }
     match name {
         "day" => event["timestamp"]
@@ -282,6 +283,7 @@ pub(super) fn execute(command: &str, args: &ArgMatches) -> Result<Option<Value>,
             validate_time(value)?;
         }
     }
+    selection::validate_v2_filters(args)?;
     let groups = if command == "summary" {
         requested_groups(args)?
     } else {

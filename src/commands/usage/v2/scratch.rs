@@ -1,5 +1,5 @@
 //! Query-local scratch keeps complete snapshot calculations off the process heap.
-use super::{dimension, incomplete, key, selection};
+use super::{dimension, incomplete, key, restored, selection};
 use crate::usage_store::db_error;
 use clap::ArgMatches;
 use rusqlite::{params, Connection};
@@ -225,15 +225,19 @@ impl<'a> Scratch<'a> {
             let event: Value = serde_json::from_str(&encoded)
                 .map_err(|_| "Stored usage record is invalid; history was left unchanged")?;
             count += 1;
-            if event["attribution"].is_null() {
+            if event["attribution"].is_null() && event["restored_attribution"].is_null() {
                 legacy += 1;
-            } else if event["attribution"]["schema_version"] != 1 {
+            } else if event["attribution"]["schema_version"] != 1
+                && restored::attribution(&event).is_none()
+            {
                 unsupported += 1;
             }
             for (index, name) in groups.iter().enumerate() {
                 let value = dimension(&event, name);
                 let available = if value.is_null() {
                     false
+                } else if value["namespace"]["kind"] == "usage_backup" {
+                    matches!(value["state"].as_str(), Some("known" | "none"))
                 } else {
                     match name.as_str() {
                         "environment" | "package" | "agent" => value["id"].as_str().is_some(),

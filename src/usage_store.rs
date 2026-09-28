@@ -207,7 +207,44 @@ pub(crate) fn db_error(error: rusqlite::Error) -> String {
     format!("Usage database operation failed: {error}")
 }
 
+fn install_backup_guard(connection: &Connection) -> Result<(), String> {
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS usage_backup_projection(event_id TEXT PRIMARY KEY REFERENCES usage_events(event_id) ON DELETE CASCADE,record_json TEXT NOT NULL);
+        CREATE TRIGGER IF NOT EXISTS usage_backup_projection_min_version BEFORE INSERT ON usage_backup_projection
+        WHEN CAST(json_extract(NEW.record_json,'$.schema_version') AS INTEGER) <
+          COALESCE((SELECT CAST(json_extract(record_json,'$.backup_min_schema_version') AS INTEGER)
+                    FROM usage_events WHERE event_id=NEW.event_id),1)
+        BEGIN SELECT RAISE(ABORT,'backup projection is older than the usage fact requires'); END;")
+        .map_err(db_error)
+}
+
 pub(crate) fn insert_event(connection: &Connection, event: &Value) -> Result<bool, String> {
+    if event["backup_min_schema_version"].as_u64() == Some(2) {
+        if connection.is_autocommit() {
+            connection
+                .execute_batch("BEGIN IMMEDIATE")
+                .map_err(db_error)?;
+            let result = install_backup_guard(connection)
+                .and_then(|_| insert_event_inner(connection, event));
+            match result {
+                Ok(inserted) => {
+                    connection.execute_batch("COMMIT").map_err(db_error)?;
+                    Ok(inserted)
+                }
+                Err(error) => {
+                    let _ = connection.execute_batch("ROLLBACK");
+                    Err(error)
+                }
+            }
+        } else {
+            install_backup_guard(connection)?;
+            insert_event_inner(connection, event)
+        }
+    } else {
+        insert_event_inner(connection, event)
+    }
+}
+
+fn insert_event_inner(connection: &Connection, event: &Value) -> Result<bool, String> {
     let required = |key| {
         event
             .get(key)
@@ -300,6 +337,45 @@ mod tests {
             serde_json::from_str::<Value>(&stored).unwrap(),
             event("one")
         );
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn enriched_insert_blocks_the_legacy_scanner_without_changing_v1_writes() {
+        let dir = fixture();
+        let db = open_at(&dir, true).unwrap().unwrap();
+        let mut enriched = event("enriched");
+        enriched["backup_min_schema_version"] = json!(2);
+        enriched["attribution"] = json!({"schema_version":1});
+        insert_event(&db, &enriched).unwrap();
+        let old_scanner = Connection::open(dir.join("usage.sqlite3")).unwrap();
+        let old_insert = "INSERT INTO usage_backup_projection(event_id,record_json) VALUES(?1,?2)";
+        assert!(old_scanner
+            .execute(old_insert, params!["enriched", r#"{"schema_version":1}"#])
+            .is_err());
+        assert_eq!(
+            old_scanner
+                .query_row("SELECT COUNT(*) FROM usage_backup_projection", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        old_scanner
+            .execute(old_insert, params!["enriched", r#"{"schema_version":2}"#])
+            .unwrap();
+        old_scanner.execute("INSERT INTO usage_events(event_id,root_run_id,event_type,created_at,record_json) VALUES(?1,?2,?3,?4,?5)",
+            params!["legacy","root","provider_request_completed","2026-09-22T00:00:00Z",event("legacy").to_string()]).unwrap();
+        old_scanner
+            .execute(old_insert, params!["legacy", r#"{"schema_version":1}"#])
+            .unwrap();
+        assert_eq!(
+            old_scanner
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            1
+        );
+        drop(old_scanner);
         drop(db);
         fs::remove_dir_all(dir).unwrap();
     }
