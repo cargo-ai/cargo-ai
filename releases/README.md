@@ -6,6 +6,7 @@ Read what changed and any compatibility or upgrade guidance for each version. A 
 
 | Version | Highlights |
 | --- | --- |
+| [0.4.5](./0.4.5.md) | Usage attribution by environment, package, package location, agent and consuming workspace |
 | [0.4.4](./0.4.4.md) | Speech generation, expanded image providers, audio transcription and declaration inspection |
 | [0.4.3](./0.4.3.md) | Automatic local usage history, optional account backup/restore and Jev-inclusive qualification |
 | [0.4.2](./0.4.2.md) | TypeSafe Jev Choice/Score support, profile-aware hatch checks and explicit-profile failure correction |

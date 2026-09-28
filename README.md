@@ -223,7 +223,7 @@ Runnable repository examples include [adder_test.json](./adder_test.json) and [w
 
 ## Releases
 
-The [release history](./releases/README.md) collects changes and upgrade guidance by version. [0.4.4 source notes](./releases/0.4.4.md) describe speech generation, expanded image providers, audio transcription and declaration inspection. [0.4.3](./releases/0.4.3.md) remains the latest verified release shown above; its notes explain usage-history collection, backup consent and rebuilding existing generated agents. Check [release status and verification](./docs/testing-and-release-qualification.md#release-status) before installing a version described in source notes.
+The [release history](./releases/README.md) collects changes and upgrade guidance by version. [0.4.5 source notes](./releases/0.4.5.md) describe upcoming usage attribution by environment, package, location, agent and consuming workspace. [0.4.4](./releases/0.4.4.md) remains the latest verified release shown above, with speech generation, expanded image providers, audio transcription and declaration inspection. Check [release status and verification](./docs/testing-and-release-qualification.md#release-status) before installing a version described in source notes.
 
 ## Project Status
 

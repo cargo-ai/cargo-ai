@@ -68,6 +68,10 @@ Artifacts retain compiler-reported dependency identities/features, installation 
 
 ## Release status
 
+### 0.4.5 source candidate
+
+[0.4.5 source notes](../releases/0.4.5.md) describe usage attribution by selected environment, package, package location, agent and consuming workspace, with optional opaque backup metadata. Release qualification, publication and native registry installation are pending. Earlier development checks do not establish release qualification for this candidate. The latest verified release remains 0.4.4 below.
+
 ### 0.4.4 recorded results
 
 Verified: 2026-09-27. [0.4.4](../releases/0.4.4.md) adds speech generation, expanded image providers, audio transcription and offline declaration inspection. The published, non-yanked crates.io archive embeds clean source `c429d72c4424994844414d34256865d9ab88d8da`, matching tag `v0.4.4`. Its SHA-256 is `dc37ea10e3bb37c78f17f086c22fdb9b1d7422df4b7e7668780e1fb6903171f0`, byte-identical to the reviewed package. Later documentation updates do not change that released source.
