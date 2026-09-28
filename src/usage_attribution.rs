@@ -909,19 +909,21 @@ mod tests {
 
     #[test]
     fn inherited_workspace_keeps_captured_path_and_parent_origin() {
+        let caller = std::env::temp_dir().join("previous-caller");
+        let child = std::env::temp_dir().join("unrelated-child");
         let inherited = InheritedWorkspace {
-            workspace: Workspace::Known("/previous/caller".into()),
+            workspace: Workspace::Known(caller.clone()),
             environment_id: Some("parent-home".to_string()),
         };
         let encoded = serde_json::to_string(&inherited).unwrap();
         let (workspace, origin) = resolve_workspace_context(
-            Some(Workspace::Known("/unrelated/child".into())),
+            Some(Workspace::Known(child)),
             Some(&encoded),
             Some("child-home".to_string()),
             false,
         );
         let attributed = workspace_attribution(&workspace, origin);
-        assert_eq!(attributed.path.as_deref(), Some("/previous/caller"));
+        assert_eq!(attributed.path.as_deref(), caller.to_str());
         assert_eq!(attributed.environment_id.as_deref(), Some("parent-home"));
     }
 
