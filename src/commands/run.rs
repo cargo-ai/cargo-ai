@@ -216,6 +216,113 @@ fn definition_sha256_from_json_str(json_str: &str) -> Result<String, String> {
     Ok(sha256_hex(serialized.as_str()))
 }
 
+fn authored_project_identity(project_root: Option<&Path>) -> (Option<String>, Option<String>) {
+    let Some(root) = project_root else {
+        return (None, None);
+    };
+    let Ok(contents) = fs::read_to_string(root.join(".cargo-ai/project.toml")) else {
+        return (None, None);
+    };
+    let Ok(document) = toml::from_str::<toml::Value>(&contents) else {
+        return (None, None);
+    };
+    let project = document.get("project");
+    (
+        project
+            .and_then(|project| project.get("id"))
+            .and_then(toml::Value::as_str)
+            .map(str::to_string),
+        project
+            .and_then(|project| project.get("version"))
+            .and_then(toml::Value::as_str)
+            .map(str::to_string),
+    )
+}
+
+fn relative_agent_key(path: &Path, project_root: Option<&Path>) -> Option<String> {
+    let root = project_root?;
+    let canonical_root = fs::canonicalize(root).ok()?;
+    let canonical_path = fs::canonicalize(path).ok()?;
+    let relative = canonical_path.strip_prefix(canonical_root).ok()?;
+    Some(relative.to_string_lossy().replace('\\', "/"))
+}
+
+fn attribution_path(path: &Path, caller_dir: Option<&Path>) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else if let Some(caller_dir) = caller_dir {
+        caller_dir.join(path)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn attribution_for_definition_source(
+    source: &AgentDefinitionSource,
+    definition_json: &str,
+    project_root: Option<&Path>,
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
+) -> crate::usage_attribution::AttributionInput {
+    let caller_dir = std::env::current_dir().ok();
+    attribution_for_definition_source_in_dir(
+        source,
+        definition_json,
+        project_root,
+        package_context,
+        caller_dir.as_deref(),
+    )
+}
+
+fn attribution_for_definition_source_in_dir(
+    source: &AgentDefinitionSource,
+    definition_json: &str,
+    project_root: Option<&Path>,
+    package_context: Option<&crate::commands::local_packages::InstalledPackageRuntimeContext>,
+    caller_dir: Option<&Path>,
+) -> crate::usage_attribution::AttributionInput {
+    let local_definition = matches!(source, AgentDefinitionSource::LocalPath(_));
+    let discovered_root = project_root
+        .filter(|_| local_definition)
+        .map(|root| attribution_path(root, caller_dir));
+    let (authored_package_id, package_version) =
+        authored_project_identity(discovered_root.as_deref());
+    let package_context = package_context.filter(|_| local_definition);
+    let package_root = discovered_root.or_else(|| match source {
+        AgentDefinitionSource::LocalPath(path) => Some(attribution_path(
+            Path::new(path)
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new(".")),
+            caller_dir,
+        )),
+        _ => None,
+    });
+    let agent_key = match source {
+        AgentDefinitionSource::LocalPath(path) => {
+            let source_path = attribution_path(Path::new(path), caller_dir);
+            relative_agent_key(source_path.as_path(), package_root.as_deref())
+        }
+        AgentDefinitionSource::RegistryName(name) => Some(format!("registry/{name}")),
+        _ => None,
+    };
+    crate::usage_attribution::AttributionInput {
+        authored_package_id: package_context
+            .and_then(|context| context.project_id.clone())
+            .or(authored_package_id),
+        hosted_source_id: package_context.and_then(|context| context.hosted_source_id.clone()),
+        package_version: package_context
+            .map(|context| context.package_version.clone())
+            .or(package_version),
+        package_content_digest: package_context.map(|context| context.content_sha256.clone()),
+        hosted_version_id: package_context.and_then(|context| context.hosted_version_id.clone()),
+        package_root,
+        agent_key,
+        definition_hash: definition_sha256_from_json_str(definition_json).ok(),
+        workspace: Some(crate::usage_attribution::capture_workspace()),
+        ..Default::default()
+    }
+}
+
 fn canonicalize_json_value(value: &Value) -> Value {
     match value {
         Value::Array(items) => Value::Array(items.iter().map(canonicalize_json_value).collect()),
@@ -271,6 +378,21 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                         &resolved,
                         definition_json.as_str(),
                     );
+                    let attribution = crate::usage_attribution::AttributionInput {
+                        authored_package_id: resolved.project_id.clone(),
+                        hosted_source_id: resolved.hosted_source_id.clone(),
+                        package_version: Some(resolved.package_version.clone()),
+                        package_content_digest: Some(resolved.content_sha256.clone()),
+                        hosted_version_id: resolved.hosted_version_id.clone(),
+                        package_root: Some(resolved.package_root.clone()),
+                        agent_key: relative_agent_key(
+                            resolved.definition_path.as_path(),
+                            Some(resolved.package_root.as_path()),
+                        ),
+                        definition_hash: definition_sha256_from_json_str(&definition_json).ok(),
+                        workspace: Some(crate::usage_attribution::capture_workspace()),
+                        ..Default::default()
+                    };
                     let package_context =
                         match crate::commands::local_packages::runtime_context_for_resolved_entrypoint(
                             &resolved,
@@ -291,6 +413,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                             Some(resolved.package_root.clone()),
                             Some(usage_agent_info),
                             Some(package_context),
+                            Some(attribution),
                         ),
                     )
                     .await;
@@ -396,6 +519,12 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         definition_json.as_str(),
         project_root.as_deref(),
     );
+    let attribution = attribution_for_definition_source(
+        &definition_source,
+        definition_json.as_str(),
+        project_root.as_deref(),
+        package_context.as_ref(),
+    );
 
     super::runtime_actions::scope_declaring_project_root(
         project_root.clone(),
@@ -405,6 +534,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
             project_root,
             Some(usage_agent_info),
             package_context,
+            Some(attribution),
         ),
     )
     .await
@@ -413,6 +543,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
+        attribution_for_definition_source, attribution_for_definition_source_in_dir,
         caller_project_root_for_installed_context, definition_sha256_from_json_str,
         project_root_for_definition_source, resolve_run_definition_source_in_dir,
         usage_agent_info_for_definition_source, AgentDefinitionSource,
@@ -590,5 +721,61 @@ mod tests {
 
         let _ = fs::remove_dir_all(project_a);
         let _ = fs::remove_dir_all(project_b);
+    }
+
+    #[test]
+    fn copied_project_keeps_authored_package_and_relative_agent_key() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let base =
+            std::env::temp_dir().join(format!("cargo-ai-run-copies-{}", uuid::Uuid::new_v4()));
+        for folder in ["first", "second"] {
+            let root = base.join(folder);
+            fs::create_dir_all(root.join(".cargo-ai")).unwrap();
+            fs::create_dir_all(root.join("agents")).unwrap();
+            fs::write(
+                root.join(".cargo-ai/project.toml"),
+                format!("format_version = 1\n[project]\nid = \"{id}\"\nversion = \"2.0.0\"\n"),
+            )
+            .unwrap();
+            let definition = root.join("agents/reports.json");
+            fs::write(&definition, minimal_definition_json()).unwrap();
+            let source = AgentDefinitionSource::LocalPath(definition.display().to_string());
+            let input = attribution_for_definition_source(
+                &source,
+                minimal_definition_json(),
+                Some(root.as_path()),
+                None,
+            );
+            assert_eq!(input.authored_package_id.as_deref(), Some(id.as_str()));
+            assert_eq!(input.agent_key.as_deref(), Some("agents/reports.json"));
+            assert_eq!(input.package_version.as_deref(), Some("2.0.0"));
+            assert_eq!(input.package_root.as_deref(), Some(root.as_path()));
+        }
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn bare_config_in_cwd_resolves_empty_discovered_root_for_attribution() {
+        let root = std::env::temp_dir().join(format!("cargo-ai-run-cwd-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".cargo-ai")).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        fs::write(
+            root.join(".cargo-ai/project.toml"),
+            format!("format_version = 1\n[project]\nid = \"{id}\"\n"),
+        )
+        .unwrap();
+        fs::write(root.join("agent.json"), minimal_definition_json()).unwrap();
+        let source = AgentDefinitionSource::LocalPath("agent.json".to_string());
+        let input = attribution_for_definition_source_in_dir(
+            &source,
+            minimal_definition_json(),
+            Some(Path::new("")),
+            None,
+            Some(root.as_path()),
+        );
+        assert_eq!(input.authored_package_id.as_deref(), Some(id.as_str()));
+        assert_eq!(input.package_root.as_deref(), Some(root.as_path()));
+        assert_eq!(input.agent_key.as_deref(), Some("agent.json"));
+        fs::remove_dir_all(root).unwrap();
     }
 }

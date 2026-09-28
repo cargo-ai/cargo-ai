@@ -4,6 +4,7 @@ use clap::ArgMatches;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 mod selection;
+mod v2;
 
 pub(crate) fn run(matches: &ArgMatches) -> bool {
     match execute(matches) {
@@ -14,9 +15,17 @@ pub(crate) fn run(matches: &ArgMatches) -> bool {
             true
         }
         Err(error) => {
+            let version = matches
+                .subcommand()
+                .and_then(|(command, args)| {
+                    matches!(command, "runs" | "show" | "summary" | "export")
+                        .then(|| args.get_one::<String>("schema-version").map(String::as_str))
+                        .flatten()
+                })
+                .unwrap_or("1");
             println!(
                 "{}",
-                json!({"schema_version":1,"error":{"kind":"usage_operation_failed","message":error}})
+                json!({"schema_version":if version == "2" {2} else {1},"error":{"kind":"usage_operation_failed","message":error}})
             );
             false
         }
@@ -50,6 +59,25 @@ fn execute(matches: &ArgMatches) -> Result<Option<Value>, String> {
         output["settings"] = serde_json::to_value(settings).unwrap();
         output["effective_tracking"] = json!(usage_store::tracking_enabled()?);
         return Ok(Some(output));
+    }
+    if command == "context" {
+        let mut value = serde_json::to_value(crate::usage_attribution::inspect_context())
+            .map_err(|_| "Cannot encode usage context")?;
+        value["schema_version"] = json!(1);
+        return Ok(Some(value));
+    }
+    let version = if matches!(command, "runs" | "show" | "summary" | "export") {
+        args.get_one::<String>("schema-version")
+            .map(String::as_str)
+            .unwrap_or("1")
+    } else {
+        "1"
+    };
+    if version == "2" {
+        return v2::execute(command, args);
+    }
+    if matches!(command, "runs" | "show" | "summary" | "export") {
+        v2::reject_v1_options(command, args)?;
     }
     let db = usage_store::open_database(command == "delete" && args.get_flag("confirm"))?;
     if command == "delete" {
@@ -745,5 +773,679 @@ mod contract_tests {
             "--json",
         ]);
         assert_eq!(historical["runs"][0]["status"], "interrupted_or_running");
+    }
+
+    fn attributed_event(
+        id: &str,
+        environment: &str,
+        package_source: &str,
+        package: &str,
+        input: u64,
+    ) -> Value {
+        json!({
+            "schema_version":1,"event_id":id,"root_run_id":id,"agent_run_id":id,
+            "attempt_id":id,"event_type":"provider_request_completed",
+            "timestamp":"2026-09-22T00:00:00Z",
+            "provider":{"profile":"default","server":"typesafe","requested_model":"jev","resolved_model":"jev-1"},
+            "status":"success","usage":{"input_tokens":input,"output_tokens":0,"total_tokens":input},
+            "attribution":{"schema_version":1,
+                "environment":{"id":environment,"source":"cargo_ai_install_id","unknown_reason":null},
+                "package":{"id":package,"source":package_source,"version":"1.0.0","content_digest":"digest","hosted_version_id":null},
+                "package_location":{"path":"/packages/p","source":"canonical_package_root","unknown_reason":null},
+                "agent":{"id":"agent-1","source":"package_key","key":"main","definition_hash":"revision"},
+                "workspace":{"path":"/work/w","source":"canonical_project_root","environment_id":environment,"unknown_reason":null},
+                "runtime":{"kind":"cli","version":"0.4.4","build_target":"test","executable_path":null,"executable_sha256":"runtime-digest","generator_version":null}
+            }
+        })
+    }
+
+    fn attributed_record(
+        id: &str,
+        environment: &str,
+        package_source: &str,
+        package: &str,
+        input: u64,
+    ) {
+        let db = usage_store::open_database(true).unwrap().unwrap();
+        usage_store::insert_event(
+            &db,
+            &attributed_event(id, environment, package_source, package, input),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn v2_named_groups_and_structured_filters_preserve_v1_contract() {
+        let _home = Home::new();
+        attributed_record("one", "environment-a", "authored_project_id", "same", 4);
+        attributed_record("two", "environment-b", "hosted_source_id", "same", 6);
+        let v1 = query(&["summary", "--json"]);
+        assert_eq!(v1["schema_version"], 1);
+        assert_eq!(
+            v1["groups"][0]["key"],
+            json!(["2026-09-22", "default", "typesafe", "jev", "jev-1"])
+        );
+        let v2 = query(&[
+            "summary",
+            "--schema-version",
+            "2",
+            "--group-by",
+            "package,package_location,agent,workspace",
+            "--json",
+        ]);
+        assert_eq!(v2["schema_version"], 2);
+        assert_eq!(v2["summary"]["tokens"]["input_tokens"], 10);
+        assert_eq!(v2["groups"].as_array().unwrap().len(), 2);
+        assert_eq!(v2["coverage"]["attribution"]["legacy_request_count"], 0);
+        assert!(v2["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |group| group["key"]["package"]["source"] == "authored_project_id"
+                    && group["key"]["package_location"]["environment_id"] == "environment-a"
+            ));
+        let filtered = query(&[
+            "summary",
+            "--schema-version",
+            "2",
+            "--group-by",
+            "package",
+            "--package",
+            r#"{"source":"hosted_source_id","id":"same"}"#,
+            "--json",
+        ]);
+        assert_eq!(filtered["summary"]["tokens"]["input_tokens"], 6);
+        assert_eq!(
+            filtered["groups"][0]["key"]["package"]["source"],
+            "hosted_source_id"
+        );
+        let location = query(&[
+            "summary",
+            "--schema-version",
+            "2",
+            "--group-by",
+            "package_location",
+            "--package-location",
+            r#"{"environment_id":"environment-a","path":"/packages/p"}"#,
+            "--json",
+        ]);
+        assert_eq!(location["summary"]["request_count"], 1);
+    }
+
+    #[test]
+    fn v2_group_pages_keep_complete_totals_and_reject_deleted_snapshot() {
+        let _home = Home::new();
+        for index in 0..24 {
+            attributed_record(
+                &format!("event-{index}"),
+                "environment-a",
+                "authored_project_id",
+                &format!("package-{index}"),
+                1,
+            );
+        }
+        let first = query(&[
+            "summary",
+            "--schema-version",
+            "2",
+            "--group-by",
+            "package",
+            "--limit",
+            "5",
+            "--json",
+        ]);
+        assert_eq!(first["summary"]["request_count"], 24);
+        assert_eq!(first["groups"].as_array().unwrap().len(), 5);
+        let cursor = first["next_cursor"].as_str().unwrap();
+        attributed_record(
+            "later",
+            "environment-a",
+            "authored_project_id",
+            "package-later",
+            100,
+        );
+        let second = query(&[
+            "summary",
+            "--schema-version",
+            "2",
+            "--group-by",
+            "package",
+            "--limit",
+            "5",
+            "--cursor",
+            cursor,
+            "--json",
+        ]);
+        assert_eq!(second["summary"]["request_count"], 24);
+        assert_eq!(second["groups"].as_array().unwrap().len(), 5);
+        let db = usage_store::open_database(true).unwrap().unwrap();
+        db.execute("DELETE FROM usage_events WHERE event_id='event-0'", [])
+            .unwrap();
+        let matches = crate::args::parse_cli(
+            "cargo-ai",
+            [
+                "cargo-ai",
+                "usage",
+                "summary",
+                "--schema-version",
+                "2",
+                "--group-by",
+                "package",
+                "--cursor",
+                cursor,
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .collect(),
+        )
+        .unwrap();
+        let error = execute(matches.subcommand_matches("usage").unwrap()).unwrap_err();
+        assert!(error.contains("deleted"));
+    }
+
+    #[test]
+    fn v2_streams_complete_high_cardinality_snapshot_and_exact_u64() {
+        let _home = Home::new();
+        let db = usage_store::open_database(true).unwrap().unwrap();
+        for index in 0..600 {
+            let event = attributed_event(
+                &format!("event-{index}"),
+                "environment-a",
+                "authored_project_id",
+                &format!("package-{index}"),
+                1,
+            );
+            usage_store::insert_event(&db, &event).unwrap();
+        }
+        let first = query(&[
+            "summary",
+            "--schema-version",
+            "2",
+            "--group-by",
+            "package",
+            "--limit",
+            "100",
+            "--json",
+        ]);
+        assert_eq!(first["summary"]["request_count"], 600);
+        assert_eq!(first["summary"]["tokens"]["input_tokens"], 600);
+        assert_eq!(first["groups"].as_array().unwrap().len(), 100);
+        assert!(first["next_cursor"].as_str().is_some());
+        let second = query(&[
+            "summary",
+            "--schema-version",
+            "2",
+            "--group-by",
+            "package",
+            "--limit",
+            "100",
+            "--cursor",
+            first["next_cursor"].as_str().unwrap(),
+            "--json",
+        ]);
+        assert_eq!(second["summary"]["request_count"], 600);
+        assert_eq!(second["groups"].as_array().unwrap().len(), 100);
+        assert_ne!(first["groups"][0]["key"], second["groups"][0]["key"]);
+    }
+
+    #[test]
+    fn v2_mixed_legacy_future_and_unknown_attempts_are_honest() {
+        let _home = Home::new();
+        record("legacy", "legacy", 4);
+        let db = usage_store::open_database(true).unwrap().unwrap();
+        let mut future = attributed_event(
+            "future",
+            "environment-a",
+            "authored_project_id",
+            "future",
+            5,
+        );
+        future["attribution"]["schema_version"] = json!(9);
+        usage_store::insert_event(&db, &future).unwrap();
+        let mut start = attributed_event(
+            "start",
+            "environment-a",
+            "authored_project_id",
+            "current",
+            0,
+        );
+        start["event_type"] = json!("provider_request_started");
+        start["usage"] = Value::Null;
+        usage_store::insert_event(&db, &start).unwrap();
+        let v2 = query(&[
+            "summary",
+            "--schema-version",
+            "2",
+            "--group-by",
+            "package",
+            "--json",
+        ]);
+        assert_eq!(v2["summary"]["request_count"], 3);
+        assert_eq!(v2["summary"]["unfinished_request_count"], 1);
+        assert_eq!(v2["summary"]["unknown_request_counts"]["input_tokens"], 1);
+        assert_eq!(v2["coverage"]["attribution"]["legacy_request_count"], 1);
+        assert_eq!(
+            v2["coverage"]["attribution"]["unsupported_schema_request_count"],
+            1
+        );
+        assert_eq!(
+            v2["coverage"]["attribution"]["dimensions"]["package"]["unknown_request_count"],
+            2
+        );
+    }
+
+    #[test]
+    fn v2_exact_u64_overflow_is_an_error() {
+        let _home = Home::new();
+        attributed_record(
+            "max",
+            "environment-a",
+            "authored_project_id",
+            "package",
+            u64::MAX,
+        );
+        let exact = query(&[
+            "summary",
+            "--schema-version",
+            "2",
+            "--group-by",
+            "package",
+            "--json",
+        ]);
+        assert_eq!(exact["summary"]["tokens"]["input_tokens"], json!(u64::MAX));
+        attributed_record(
+            "one-more",
+            "environment-a",
+            "authored_project_id",
+            "package",
+            1,
+        );
+        let matches = crate::args::parse_cli(
+            "cargo-ai",
+            ["cargo-ai", "usage", "summary", "--schema-version", "2"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+        )
+        .unwrap();
+        let error = execute(matches.subcommand_matches("usage").unwrap()).unwrap_err();
+        assert!(error.contains("overflow"));
+    }
+
+    #[test]
+    fn v2_out_of_interval_completion_prevents_false_unfinished_attempt() {
+        let _home = Home::new();
+        let db = usage_store::open_database(true).unwrap().unwrap();
+        let mut start = attributed_event(
+            "start",
+            "environment-a",
+            "authored_project_id",
+            "package",
+            0,
+        );
+        start["root_run_id"] = json!("root");
+        start["attempt_id"] = json!("attempt");
+        start["event_type"] = json!("provider_request_started");
+        start["usage"] = Value::Null;
+        usage_store::insert_event(&db, &start).unwrap();
+        let mut complete = attributed_event(
+            "complete",
+            "environment-a",
+            "authored_project_id",
+            "package",
+            7,
+        );
+        complete["root_run_id"] = json!("root");
+        complete["attempt_id"] = json!("attempt");
+        complete["timestamp"] = json!("2026-09-23T00:00:00Z");
+        usage_store::insert_event(&db, &complete).unwrap();
+        let interval = query(&[
+            "summary",
+            "--schema-version",
+            "2",
+            "--before",
+            "2026-09-23T00:00:00Z",
+            "--group-by",
+            "package",
+            "--json",
+        ]);
+        assert_eq!(interval["summary"]["request_count"], 0);
+        assert_eq!(interval["summary"]["unfinished_request_count"], 0);
+        let full = query(&[
+            "summary",
+            "--schema-version",
+            "2",
+            "--group-by",
+            "package",
+            "--json",
+        ]);
+        assert_eq!(full["summary"]["request_count"], 1);
+        assert_eq!(full["summary"]["tokens"]["input_tokens"], 7);
+    }
+    #[test]
+    fn v2_known_attribution_filters_safely_exclude_undecodable_unrelated_rows() {
+        let _home = Home::new();
+        attributed_record(
+            "known",
+            "environment-a",
+            "authored_project_id",
+            "package",
+            5,
+        );
+        record("broken", "unrelated", 9);
+        let db = usage_store::open_database(true).unwrap().unwrap();
+        db.execute(
+            "UPDATE usage_events SET record_json='not JSON' WHERE event_id='broken'",
+            [],
+        )
+        .unwrap();
+        for indexed in [true, false] {
+            if !indexed {
+                db.execute_batch("DROP INDEX usage_events_attribution_environment; DROP INDEX usage_events_attribution_package; DROP INDEX usage_events_attribution_location; DROP INDEX usage_events_attribution_agent; DROP INDEX usage_events_attribution_workspace;").unwrap();
+            }
+            let selected = query(&[
+                "summary",
+                "--schema-version",
+                "2",
+                "--environment",
+                "environment-a",
+                "--json",
+            ]);
+            assert_eq!(selected["summary"]["request_count"], 1);
+            assert_eq!(selected["summary"]["tokens"]["input_tokens"], 5);
+        }
+        let matches = crate::args::parse_cli(
+            "cargo-ai",
+            ["cargo-ai", "usage", "summary", "--schema-version", "2"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+        )
+        .unwrap();
+        let error = execute(matches.subcommand_matches("usage").unwrap()).unwrap_err();
+        assert!(error.contains("malformed JSON"), "{error}");
+        let raw: String = db
+            .query_row(
+                "SELECT record_json FROM usage_events WHERE event_id='broken'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw, "not JSON");
+    }
+    fn restored_event(id: &str, namespace: u128, location: u128, input: u64) -> Value {
+        let uuid = |value| uuid::Uuid::from_u128(value).to_string();
+        let known = |value| json!({"state":"known","id":uuid(value)});
+        let mut event = attributed_event(
+            id,
+            "local-home",
+            "authored_project_id",
+            "local-package",
+            input,
+        );
+        event.as_object_mut().unwrap().remove("attribution");
+        event["restored"] = json!(true);
+        event["restored_attribution"] = json!({"schema_version":1,"namespace":{"kind":"usage_backup","account_binding":uuid(namespace)},"value":{
+            "schema_version":1,"environment":known(10),"package":known(20),
+            "package_location":{"state":"known","id":uuid(location),"environment_id":uuid(10)},
+            "agent":{"state":"known","id":uuid(30),"identity_scope":"package"},
+            "workspace":{"state":"known","id":uuid(location+100),"environment_id":uuid(11)},
+            "package_revision":known(40),"agent_revision":known(50),
+            "runtime":{"kind":"cli","version":"0.4.4","build_target":"aarch64-apple-darwin","executable":known(60),"build":known(70)}
+        }});
+        assert!(crate::usage_backup::attribution::validate(
+            &event["restored_attribution"]["value"]
+        ));
+        event
+    }
+
+    #[test]
+    fn v2_restored_dimensions_preserve_namespaces_and_round_trip_filters() {
+        let _home = Home::new();
+        let db = usage_store::open_database(true).unwrap().unwrap();
+        for event in [
+            restored_event("remote-one", 1, 80, 1),
+            restored_event("remote-two", 1, 81, 2),
+            restored_event("other-account", 2, 80, 3),
+            attributed_event(
+                "local",
+                "local-home",
+                "authored_project_id",
+                "local-package",
+                4,
+            ),
+        ] {
+            usage_store::insert_event(&db, &event).unwrap();
+        }
+        record("legacy", "legacy", 5);
+        let default = query(&["summary", "--json"]);
+        assert_eq!(default["summary"]["tokens"]["input_tokens"], 15);
+        for (dimension, flag) in [
+            ("environment", "--environment"),
+            ("package", "--package"),
+            ("package_location", "--package-location"),
+            ("agent", "--agent"),
+            ("workspace", "--workspace"),
+            ("runtime_version", "--runtime-version"),
+            ("package_revision", "--package-revision"),
+            ("agent_revision", "--agent-revision"),
+            ("runtime_digest", "--runtime-digest"),
+        ] {
+            let result = query(&[
+                "summary",
+                "--schema-version",
+                "2",
+                "--group-by",
+                dimension,
+                "--json",
+            ]);
+            assert_eq!(result["summary"]["tokens"]["input_tokens"], 15);
+            assert_eq!(result["coverage"]["attribution"]["legacy_request_count"], 1);
+            assert_eq!(
+                result["coverage"]["attribution"]["unsupported_schema_request_count"],
+                0
+            );
+            let remote: Vec<_> = result["groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|group| group["key"][dimension]["namespace"]["kind"] == "usage_backup")
+                .collect();
+            assert_eq!(
+                remote.len(),
+                if matches!(dimension, "workspace" | "package_location") {
+                    3
+                } else {
+                    2
+                },
+                "{dimension}"
+            );
+            for group in remote {
+                let key = &group["key"][dimension];
+                assert!(key.get("path").is_none());
+                let filter = key["filter_value"].as_str().unwrap();
+                let selected = query(&[
+                    "summary",
+                    "--schema-version",
+                    "2",
+                    "--group-by",
+                    dimension,
+                    flag,
+                    filter,
+                    "--json",
+                ]);
+                assert_eq!(
+                    selected["summary"]["request_count"], group["summary"]["request_count"],
+                    "{dimension}"
+                );
+                assert_eq!(
+                    selected["summary"]["tokens"], group["summary"]["tokens"],
+                    "{dimension}"
+                );
+                let runs = query(&["runs", "--schema-version", "2", flag, filter, "--json"]);
+                assert_eq!(
+                    runs["runs"].as_array().unwrap().len() as u64,
+                    group["summary"]["request_count"].as_u64().unwrap()
+                );
+            }
+        }
+        let local = query(&[
+            "summary",
+            "--schema-version",
+            "2",
+            "--package",
+            r#"{"source":"authored_project_id","id":"local-package"}"#,
+            "--json",
+        ]);
+        assert_eq!(local["summary"]["request_count"], 1);
+        assert_eq!(local["summary"]["tokens"]["input_tokens"], 4);
+    }
+
+    #[test]
+    fn v2_restored_runtime_digest_groups_builds_independently_of_paths() {
+        let _home = Home::new();
+        let db = usage_store::open_database(true).unwrap().unwrap();
+        for (id, executable, build, input) in [
+            ("first", 60, 70, 1),
+            ("moved", 61, 70, 2),
+            ("replaced", 60, 71, 4),
+        ] {
+            let mut event = restored_event(id, 1, 80, input);
+            for (key, value) in [("executable", executable), ("build", build)] {
+                event["restored_attribution"]["value"]["runtime"][key]["id"] =
+                    json!(uuid::Uuid::from_u128(value).to_string());
+            }
+            usage_store::insert_event(&db, &event).unwrap();
+        }
+        let result = query(&[
+            "summary",
+            "--schema-version",
+            "2",
+            "--group-by",
+            "runtime_digest",
+            "--json",
+        ]);
+        let groups = result["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        for group in groups {
+            let key = &group["key"]["runtime_digest"];
+            let expected = if key["id"] == uuid::Uuid::from_u128(70).to_string() {
+                3
+            } else {
+                4
+            };
+            assert_eq!(group["summary"]["tokens"]["input_tokens"], expected);
+            let selected = query(&[
+                "summary",
+                "--schema-version",
+                "2",
+                "--runtime-digest",
+                key["filter_value"].as_str().unwrap(),
+                "--json",
+            ]);
+            assert_eq!(selected["summary"]["tokens"]["input_tokens"], expected);
+        }
+    }
+
+    #[test]
+    fn v2_invalid_restored_filter_rejects_without_creating_home() {
+        let home = Home::new();
+        let filter = json!({"namespace":{"kind":"usage_backup","account_binding":"invalid"},"dimension":"package","state":"known","id":"invalid"}).to_string();
+        let matches = crate::args::parse_cli(
+            "cargo-ai",
+            [
+                "cargo-ai",
+                "usage",
+                "summary",
+                "--schema-version",
+                "2",
+                "--package",
+                &filter,
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .collect(),
+        )
+        .unwrap();
+        assert!(execute(matches.subcommand_matches("usage").unwrap())
+            .unwrap_err()
+            .contains("filter_value"));
+        assert!(!home.path.exists());
+    }
+
+    #[test]
+    fn v2_restored_none_unknown_future_and_filter_validation_are_explicit() {
+        let _home = Home::new();
+        let db = usage_store::open_database(true).unwrap().unwrap();
+        let mut event = restored_event("none", 1, 80, 7);
+        event["restored_attribution"]["value"]["workspace"] = json!({"state":"none"});
+        event["restored_attribution"]["value"]["package"] =
+            json!({"state":"unavailable","reason":"missing_package_identity"});
+        event["restored_attribution"]["value"]["agent"]["identity_scope"] =
+            json!("package_location");
+        event["restored_attribution"]["value"]["package_revision"] =
+            json!({"state":"unavailable","reason":"not_reported"});
+        assert!(crate::usage_backup::attribution::validate(
+            &event["restored_attribution"]["value"]
+        ));
+        usage_store::insert_event(&db, &event).unwrap();
+        let mut future = restored_event("future", 1, 81, 8);
+        future["restored_attribution"]["schema_version"] = json!(9);
+        usage_store::insert_event(&db, &future).unwrap();
+        for (dimension, flag, known) in
+            [("workspace", "--workspace", 1), ("package", "--package", 0)]
+        {
+            let result = query(&[
+                "summary",
+                "--schema-version",
+                "2",
+                "--group-by",
+                dimension,
+                "--json",
+            ]);
+            assert_eq!(result["coverage"]["attribution"]["legacy_request_count"], 0);
+            assert_eq!(
+                result["coverage"]["attribution"]["unsupported_schema_request_count"],
+                1
+            );
+            assert_eq!(
+                result["coverage"]["attribution"]["dimensions"][dimension]["known_request_count"],
+                known
+            );
+            let group = result["groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|g| g["key"][dimension]["filter_value"].is_string())
+                .unwrap();
+            let filter = group["key"][dimension]["filter_value"].as_str().unwrap();
+            assert_eq!(
+                query(&["summary", "--schema-version", "2", flag, filter, "--json"])["summary"]
+                    ["tokens"]["input_tokens"],
+                7
+            );
+            let mut invalid: Value = serde_json::from_str(filter).unwrap();
+            invalid["path"] = json!("/private/path");
+            let matches = crate::args::parse_cli(
+                "cargo-ai",
+                [
+                    "cargo-ai",
+                    "usage",
+                    "summary",
+                    "--schema-version",
+                    "2",
+                    flag,
+                    &invalid.to_string(),
+                ]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+            )
+            .unwrap();
+            assert!(execute(matches.subcommand_matches("usage").unwrap())
+                .unwrap_err()
+                .contains("filter_value"));
+        }
     }
 }

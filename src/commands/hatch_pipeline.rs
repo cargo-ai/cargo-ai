@@ -70,6 +70,7 @@ pub(crate) struct HatchRequest {
     pub output_dir: Option<PathBuf>,
     pub presentation: HatchPresentation,
     pub compatibility_profile: Option<String>,
+    pub portable_metadata: crate::agent_builder::project::PortableAgentMetadata,
 }
 
 impl HatchRequest {
@@ -93,11 +94,20 @@ impl HatchRequest {
             output_dir,
             presentation,
             compatibility_profile: None,
+            portable_metadata: Default::default(),
         }
     }
 
     pub(crate) fn with_compatibility_profile(mut self, profile: Option<String>) -> Self {
         self.compatibility_profile = profile;
+        self
+    }
+
+    pub(crate) fn with_portable_metadata(
+        mut self,
+        metadata: crate::agent_builder::project::PortableAgentMetadata,
+    ) -> Self {
+        self.portable_metadata = metadata;
         self
     }
 }
@@ -185,7 +195,11 @@ where
         output_dir,
         presentation,
         compatibility_profile,
+        mut portable_metadata,
     } = request;
+    if portable_metadata.agent_key.is_none() {
+        portable_metadata.agent_key = Some(format!("generated/{project_name}"));
+    }
 
     match super::hatch_compatibility::check(&file_contents, compatibility_profile.as_deref()) {
         Ok(Some(summary)) => println!("{summary}"),
@@ -259,6 +273,7 @@ where
         &warmed_template.path,
         project_name.as_str(),
         Ok(file_contents),
+        &portable_metadata,
     ) {
         Ok(_) => {}
         Err(error) => {

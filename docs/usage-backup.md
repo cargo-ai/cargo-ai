@@ -124,3 +124,13 @@ stops the affected upload. HTTP redirects are refused, request/response sizes ar
 bounded, and error output omits service bodies and credentials.
 
 Backup consent changes are serialized with uploads and other backup operations. If a command reports that another backup operation is active, it has not completed the requested change; retry after that operation finishes. Tracking changes affect collection only and preserve backup consent.
+
+## Attribution through backup and restore
+
+Updated clients use cloud record version 2 for newly recorded attribution. Its closed metadata projection preserves opaque environment, package, package-location, agent, consuming-workspace and revision references, plus runtime kind/version/build target. Local paths, names, agent keys and executable paths stay private. Each source Home has its own mappings; equal names or paths across independently initialized Homes do not establish identity.
+
+A fresh restore retains the original source environment and explicitly marks backup-scoped identities. It does not assign historical usage to the destination Home. Schema-v2 usage queries can group these opaque dimensions and return a `filter_value` for selecting each restored group. Local facts already present retain their richer metadata. Legacy v1 cloud records keep their original counters and identifiers; missing attribution remains unknown. Existing cached v1 projections are never rewritten or upgraded under the same event ID.
+
+The server must advertise v2 upload support before new v2 facts are sent. Unsupported service versions leave those facts pending and report incompatibility; they are not silently downgraded. An older backup process sharing an updated Home may be unable to select new enriched facts, while local execution and history remain usable. Upgrade the backup client or rebuild the generated agent to drain them. Older clients restoring a snapshot containing v2 receive an upgrade-required failure before any page is returned. Updated clients read both versions, with the supported version bound to pagination.
+
+The backup device ID describes its existing local mapping scope, not a physical machine. Local queries and exports use the richer [attribution contract](../templates/guidance/usage-ledger.md#local-attribution-and-dimension-queries) independently of backup. Backup enablement and historical-selection consent remain separate; upgrading does not select older history.

@@ -1,4 +1,4 @@
-//! Device-local, immutable usage facts shared by the CLI and generated agents.
+//! Selected-Home immutable usage facts shared by the CLI and generated agents.
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 use std::{
@@ -187,6 +187,15 @@ fn open_at(dir: &Path, create: bool) -> Result<Option<Connection>, String> {
             }
             transaction.commit().map_err(db_error)?;
         }
+        // Optional expression indexes derive only from immutable JSON facts.
+        // Older writers can keep inserting version-1 records without supplying
+        // attribution fields or maintaining a separate projection.
+        connection.execute_batch("CREATE INDEX IF NOT EXISTS usage_events_attribution_environment ON usage_events(json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.environment.id'),sequence) WHERE json_valid(record_json);
+            CREATE INDEX IF NOT EXISTS usage_events_attribution_package ON usage_events(json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.package.source'),json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.package.id'),sequence) WHERE json_valid(record_json);
+            CREATE INDEX IF NOT EXISTS usage_events_attribution_location ON usage_events(json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.environment.id'),json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.package_location.path'),sequence) WHERE json_valid(record_json);
+            CREATE INDEX IF NOT EXISTS usage_events_attribution_agent ON usage_events(json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.agent.source'),json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.agent.id'),sequence) WHERE json_valid(record_json);
+            CREATE INDEX IF NOT EXISTS usage_events_attribution_workspace ON usage_events(json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.workspace.environment_id'),json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.workspace.path'),sequence) WHERE json_valid(record_json);")
+            .map_err(db_error)?;
         private_permissions(&path, false)?;
     } else if version != SCHEMA_VERSION {
         return Err("Usage database requires migration by a current runtime before reading".into());
@@ -198,7 +207,44 @@ pub(crate) fn db_error(error: rusqlite::Error) -> String {
     format!("Usage database operation failed: {error}")
 }
 
+fn install_backup_guard(connection: &Connection) -> Result<(), String> {
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS usage_backup_projection(event_id TEXT PRIMARY KEY REFERENCES usage_events(event_id) ON DELETE CASCADE,record_json TEXT NOT NULL);
+        CREATE TRIGGER IF NOT EXISTS usage_backup_projection_min_version BEFORE INSERT ON usage_backup_projection
+        WHEN CAST(json_extract(NEW.record_json,'$.schema_version') AS INTEGER) <
+          COALESCE((SELECT CAST(json_extract(record_json,'$.backup_min_schema_version') AS INTEGER)
+                    FROM usage_events WHERE event_id=NEW.event_id),1)
+        BEGIN SELECT RAISE(ABORT,'backup projection is older than the usage fact requires'); END;")
+        .map_err(db_error)
+}
+
 pub(crate) fn insert_event(connection: &Connection, event: &Value) -> Result<bool, String> {
+    if event["backup_min_schema_version"].as_u64() == Some(2) {
+        if connection.is_autocommit() {
+            connection
+                .execute_batch("BEGIN IMMEDIATE")
+                .map_err(db_error)?;
+            let result = install_backup_guard(connection)
+                .and_then(|_| insert_event_inner(connection, event));
+            match result {
+                Ok(inserted) => {
+                    connection.execute_batch("COMMIT").map_err(db_error)?;
+                    Ok(inserted)
+                }
+                Err(error) => {
+                    let _ = connection.execute_batch("ROLLBACK");
+                    Err(error)
+                }
+            }
+        } else {
+            install_backup_guard(connection)?;
+            insert_event_inner(connection, event)
+        }
+    } else {
+        insert_event_inner(connection, event)
+    }
+}
+
+fn insert_event_inner(connection: &Connection, event: &Value) -> Result<bool, String> {
     let required = |key| {
         event
             .get(key)
@@ -292,6 +338,77 @@ mod tests {
             event("one")
         );
         drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn enriched_insert_blocks_the_legacy_scanner_without_changing_v1_writes() {
+        let dir = fixture();
+        let db = open_at(&dir, true).unwrap().unwrap();
+        let mut enriched = event("enriched");
+        enriched["backup_min_schema_version"] = json!(2);
+        enriched["attribution"] = json!({"schema_version":1});
+        insert_event(&db, &enriched).unwrap();
+        let old_scanner = Connection::open(dir.join("usage.sqlite3")).unwrap();
+        let old_insert = "INSERT INTO usage_backup_projection(event_id,record_json) VALUES(?1,?2)";
+        assert!(old_scanner
+            .execute(old_insert, params!["enriched", r#"{"schema_version":1}"#])
+            .is_err());
+        assert_eq!(
+            old_scanner
+                .query_row("SELECT COUNT(*) FROM usage_backup_projection", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        old_scanner
+            .execute(old_insert, params!["enriched", r#"{"schema_version":2}"#])
+            .unwrap();
+        old_scanner.execute("INSERT INTO usage_events(event_id,root_run_id,event_type,created_at,record_json) VALUES(?1,?2,?3,?4,?5)",
+            params!["legacy","root","provider_request_completed","2026-09-22T00:00:00Z",event("legacy").to_string()]).unwrap();
+        old_scanner
+            .execute(old_insert, params!["legacy", r#"{"schema_version":1}"#])
+            .unwrap();
+        assert_eq!(
+            old_scanner
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            1
+        );
+        drop(old_scanner);
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn optional_attribution_indexes_leave_unrelated_malformed_rows_writable() {
+        let dir = fixture();
+        fs::create_dir_all(&dir).unwrap();
+        let old_writer = Connection::open(dir.join("usage.sqlite3")).unwrap();
+        old_writer.execute_batch("CREATE TABLE usage_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT UNIQUE NOT NULL,root_run_id TEXT,agent_run_id TEXT,event_type TEXT NOT NULL,created_at TEXT NOT NULL,record_json TEXT NOT NULL);
+            CREATE TABLE usage_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            PRAGMA user_version=1;
+            INSERT INTO usage_events(event_id,root_run_id,event_type,created_at,record_json) VALUES('legacy','root','provider_request_completed','2026-09-22T00:00:00Z','not JSON');").unwrap();
+        drop(old_writer);
+        let reopened = open_at(&dir, true).unwrap().unwrap();
+        insert_event(&reopened, &event("new")).unwrap();
+        let index_count: i64 = reopened.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'usage_events_attribution_%'", [], |row| row.get(0)).unwrap();
+        assert_eq!(index_count, 5);
+        let legacy: String = reopened
+            .query_row(
+                "SELECT record_json FROM usage_events WHERE event_id='legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy, "not JSON");
+        assert_eq!(
+            reopened
+                .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        drop(reopened);
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

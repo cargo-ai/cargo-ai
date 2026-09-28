@@ -5198,6 +5198,11 @@ mod tests {
         crate::commands::local_packages::InstalledPackageRuntimeContext {
             alias: "image_generator".to_string(),
             source_kind: "hosted".to_string(),
+            project_id: None,
+            package_version: "0.1.0".to_string(),
+            content_sha256: String::new(),
+            hosted_source_id: None,
+            hosted_version_id: None,
             package_payload_root,
             package_data_root,
             current_entrypoint_path: Some("agents/observer.json".to_string()),
@@ -7652,6 +7657,11 @@ auth_mode = "{auth_mode}"
         let context = crate::commands::local_packages::InstalledPackageRuntimeContext {
             alias: "image_generator".to_string(),
             source_kind: "hosted".to_string(),
+            project_id: None,
+            package_version: "0.1.0".to_string(),
+            content_sha256: String::new(),
+            hosted_source_id: None,
+            hosted_version_id: None,
             package_payload_root: data_root
                 .parent()
                 .expect("data root should have a parent")

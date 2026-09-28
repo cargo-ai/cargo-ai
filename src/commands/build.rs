@@ -12,9 +12,23 @@ const BUILD_MANIFEST_FILE_NAME: &str = "cargo-ai-build.toml";
 #[derive(Clone, Debug, Default, Deserialize)]
 struct ProjectMetadataDocument {
     #[serde(default)]
+    project: Option<ProjectIdentityDocument>,
+    #[serde(default)]
     runtime: Option<ProjectRuntimeDocument>,
     #[serde(default)]
     build: BTreeMap<String, BuildProfileDocument>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct ProjectIdentityDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(flatten)]
+    extra: toml::Table,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -51,6 +65,8 @@ struct ProjectRuntimeDefaultsDocument {
 struct GeneratedProjectMetadataDocument {
     format_version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<ProjectIdentityDocument>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     runtime: Option<ProjectRuntimeDocument>,
     tools: GeneratedProjectToolsPolicyDocument,
 }
@@ -74,6 +90,7 @@ struct HatchedAgentEntry {
 
 #[derive(Clone, Debug, Default)]
 struct LoadedProjectMetadata {
+    project_identity: Option<ProjectIdentityDocument>,
     project_runtime: Option<ProjectRuntimeDocument>,
     build_profile: BuildProfileDocument,
 }
@@ -81,6 +98,8 @@ struct LoadedProjectMetadata {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct BuildManifestDocument {
     format_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_id: Option<String>,
     profile: String,
     cargo_compile_profile: String,
     target: String,
@@ -205,6 +224,18 @@ fn load_project_metadata(
             error
         )
     })?;
+    if let Some(id) = metadata
+        .project
+        .as_ref()
+        .and_then(|project| project.id.as_deref())
+    {
+        uuid::Uuid::parse_str(id).map_err(|_| {
+            format!(
+                "Invalid `[project].id` in '{}': expected a UUID.",
+                metadata_path.display()
+            )
+        })?;
+    }
     let Some(profile) = metadata.build.get(profile_name).cloned() else {
         let mut available = metadata.build.keys().cloned().collect::<Vec<_>>();
         available.sort();
@@ -234,6 +265,7 @@ fn load_project_metadata(
     }
 
     Ok(LoadedProjectMetadata {
+        project_identity: metadata.project,
         project_runtime: metadata.runtime,
         build_profile: profile,
     })
@@ -297,6 +329,7 @@ fn assemble_build_root(
     prepare_output_root(output_root, force)?;
     write_generated_project_metadata(
         output_root.path.as_path(),
+        loaded_metadata.project_identity.as_ref(),
         loaded_metadata.project_runtime.as_ref(),
     )?;
 
@@ -355,6 +388,7 @@ fn assemble_build_root(
         hatch_agent_into_build_root(
             project_root,
             agent,
+            loaded_metadata.project_identity.as_ref(),
             build_target,
             output_root.path.as_path(),
         )?;
@@ -362,6 +396,10 @@ fn assemble_build_root(
 
     let manifest = BuildManifestDocument {
         format_version: 1,
+        project_id: loaded_metadata
+            .project_identity
+            .as_ref()
+            .and_then(|project| project.id.clone()),
         profile: profile_name.to_string(),
         cargo_compile_profile: CargoCompileProfile::Release.name().to_string(),
         target: build_target.cache_key_target().to_string(),
@@ -490,6 +528,7 @@ fn remove_existing_output_root(path: &Path) -> Result<(), String> {
 
 fn write_generated_project_metadata(
     build_root: &Path,
+    project_identity: Option<&ProjectIdentityDocument>,
     project_runtime: Option<&ProjectRuntimeDocument>,
 ) -> Result<(), String> {
     let metadata_path = build_root.join(PROJECT_METADATA_RELATIVE_PATH);
@@ -504,6 +543,7 @@ fn write_generated_project_metadata(
     }
     let document = GeneratedProjectMetadataDocument {
         format_version: 1,
+        project: project_identity.cloned(),
         runtime: project_runtime.cloned(),
         tools: GeneratedProjectToolsPolicyDocument {
             allow_global_fallback: false,
@@ -680,6 +720,7 @@ fn resolve_hatched_agents(
 fn hatch_agent_into_build_root(
     project_root: &Path,
     agent: &HatchedAgentEntry,
+    project_identity: Option<&ProjectIdentityDocument>,
     build_target: &crate::agent_builder::build_target::BuildTarget,
     build_root: &Path,
 ) -> Result<(), String> {
@@ -733,6 +774,12 @@ fn hatch_agent_into_build_root(
         &warmed_template.path,
         agent.output_name.as_str(),
         Ok(file_contents),
+        &crate::agent_builder::project::PortableAgentMetadata {
+            package_id: project_identity.and_then(|project| project.id.clone()),
+            package_version: project_identity.and_then(|project| project.version.clone()),
+            agent_key: Some(agent.relative_path.replace('\\', "/")),
+            ..Default::default()
+        },
     )
     .map_err(|error| {
         format!(
@@ -1077,6 +1124,34 @@ mod tests {
         BuildProfileDocument, ProjectMetadataDocument,
     };
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn generated_build_metadata_preserves_authored_identity() {
+        let root = std::env::temp_dir().join(format!("cargo-ai-build-id-{}", uuid::Uuid::new_v4()));
+        let project: super::ProjectIdentityDocument = toml::from_str(
+            "id = \"f489ec66-482d-464a-90fc-54d8bfa18018\"\nname = \"reports\"\nversion = \"2.0.0\"\n",
+        )
+        .unwrap();
+        super::write_generated_project_metadata(&root, Some(&project), None).unwrap();
+        let generated = std::fs::read_to_string(root.join(".cargo-ai/project.toml")).unwrap();
+        assert!(generated.contains("id = \"f489ec66-482d-464a-90fc-54d8bfa18018\""));
+        assert!(generated.contains("version = \"2.0.0\""));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn build_rejects_malformed_authored_id_without_editing_project() {
+        let root =
+            std::env::temp_dir().join(format!("cargo-ai-build-bad-id-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".cargo-ai")).unwrap();
+        let metadata = "format_version = 1\n[project]\nid = \"/Users/author/private\"\n[build.default]\nagent_definitions = [\"agents/demo.json\"]\n";
+        let path = root.join(".cargo-ai/project.toml");
+        std::fs::write(&path, metadata).unwrap();
+        let error = super::load_project_metadata(&root, "default").unwrap_err();
+        assert!(error.contains("Invalid `[project].id`"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), metadata);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn parses_build_profile_shape_from_project_metadata() {

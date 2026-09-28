@@ -20,8 +20,34 @@ fn selection(command: Command) -> Command {
         .map(|name| Arg::new(name).long(name).value_name("VALUE")),
     )
 }
+fn versioned(command: Command) -> Command {
+    command
+        .arg(
+            Arg::new("schema-version")
+                .long("schema-version")
+                .default_value("1")
+                .value_parser(["1", "2"])
+                .help("Select the usage query contract (default: 1)"),
+        )
+        .args(
+            [
+                "environment",
+                "package",
+                "package-location",
+                "agent",
+                "workspace",
+                "runtime-version",
+                "package-version",
+                "package-revision",
+                "hosted-version",
+                "agent-revision",
+                "runtime-digest",
+            ]
+            .map(|name| Arg::new(name).long(name).value_name("VALUE")),
+        )
+}
 fn page(command: Command) -> Command {
-    selection(json(command))
+    versioned(selection(json(command)))
         .arg(
             Arg::new("limit")
                 .long("limit")
@@ -48,6 +74,9 @@ pub(super) fn command() -> Command {
                         .value_parser(["on", "off"]),
                 ),
         ))
+        .subcommand(json(Command::new("context").about(
+            "Inspect the selected Home and supported usage capabilities without creating state",
+        )))
         .subcommand(page(
             Command::new("runs").about("List root runs and their child relationships"),
         ))
@@ -56,9 +85,28 @@ pub(super) fn command() -> Command {
                 .about("Show committed run events")
                 .arg(Arg::new("run-id").required(true)),
         ))
-        .subcommand(selection(json(Command::new("summary").about(
-            "Aggregate known usage facts with coverage and operational statistics",
-        ))))
+        .subcommand(
+            versioned(selection(json(Command::new("summary").about(
+                "Aggregate known usage facts with coverage and operational statistics",
+            ))))
+            .arg(
+                Arg::new("group-by")
+                    .long("group-by")
+                    .value_name("DIMENSIONS")
+                    .help("Replace v2 default dimensions with a comma-separated allowlist"),
+            )
+            .arg(
+                Arg::new("limit")
+                    .long("limit")
+                    .value_parser(clap::value_parser!(u32).range(1..=1000))
+                    .help("Maximum v2 groups per page"),
+            )
+            .arg(
+                Arg::new("cursor")
+                    .long("cursor")
+                    .help("Continue a v2 group page at the original snapshot"),
+            ),
+        )
         .subcommand(
             page(Command::new("export").about("Export a page of immutable metadata facts")).arg(
                 Arg::new("format")

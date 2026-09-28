@@ -235,3 +235,7 @@ For complete resource and dependency review criteria, see [Tool hardening](../te
 ---
 
 [Documentation hub](./README.md) · [Cargo AI README](../README.md)
+
+## Attribute usage to the consuming project
+
+Local usage captures the project containing the root invocation's working directory as its consuming workspace, separately from an installed package's payload location. Child agents and updated tool bridges retain that root caller even when their working directory changes. Rebuild older generated agents/tools to gain the updated context forwarding; missing historical attribution remains unknown. See [usage dimensions](../templates/guidance/usage-ledger.md#local-attribution-and-dimension-queries) for environment-scoped queries.

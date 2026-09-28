@@ -1,6 +1,8 @@
 //! Process-level coverage for the public Cargo AI CLI spine.
 
 mod support;
+#[path = "product_conformance/usage_attribution.rs"]
+mod usage_attribution;
 
 use std::fs;
 
@@ -589,6 +591,8 @@ pub(crate) fn invoke(_params: BTreeMap<String, Value>, context: InvocationContex
             .unwrap(),
         "generated writing tool",
     );
+    usage_attribution::assert_caller_context_survives_children(&fixture, true);
+    usage_attribution::assert_generated_runtime_initializes_without_cli(&fixture, &project);
     assert!(project.join(".cargo-ai/data/result.txt").is_file());
     verify_project_image_paths(&fixture, &project);
     #[cfg(unix)]
@@ -729,6 +733,7 @@ pub(crate) fn invoke(_params: BTreeMap<String, Value>, context: InvocationContex
         &data_cli(&recipient, &recipient.root, &["run", "owned::parent"]),
         "recipient independent run",
     );
+    usage_attribution::assert_caller_context_survives_children(&recipient, false);
     assert!(!recipient.root.join("result.txt").exists());
     assert_eq!(
         fs::read_to_string(

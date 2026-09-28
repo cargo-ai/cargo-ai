@@ -124,6 +124,7 @@ impl Transport {
             Some("usage_backup_disabled")=>"Cloud backup is disabled; enable it explicitly",
             Some("usage_backup_conflict")=>"Cloud event identity conflict; original facts and local pending selections preserved",
             Some("usage_backup_invalid_request")=>"Backup metadata was rejected; local facts and pending selections preserved",
+            Some("usage_backup_upgrade_required")=>"Backup snapshot contains a newer record schema; update this client before restoring. No page was imported",
             Some("access_token_expired")=>"Account session expired; sign in explicitly to resume backup",
             _=>"Backup service did not accept this operation; local history and pending selections preserved",
         };

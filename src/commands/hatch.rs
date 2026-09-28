@@ -13,6 +13,66 @@ struct HatchResolution {
     project_root: Option<PathBuf>,
     installed_source_kind: Option<String>,
     package_lease: Option<std::sync::Arc<crate::commands::package_lock::PackageAliasLockGuard>>,
+    portable_metadata: crate::agent_builder::project::PortableAgentMetadata,
+}
+
+fn portable_metadata_for_source(
+    source: &AgentDefinitionSource,
+    project_root: Option<&Path>,
+) -> crate::agent_builder::project::PortableAgentMetadata {
+    let caller_dir = std::env::current_dir().ok();
+    portable_metadata_for_source_in_dir(source, project_root, caller_dir.as_deref())
+}
+
+fn portable_metadata_for_source_in_dir(
+    source: &AgentDefinitionSource,
+    project_root: Option<&Path>,
+    caller_dir: Option<&Path>,
+) -> crate::agent_builder::project::PortableAgentMetadata {
+    let Some(root) = project_root else {
+        return Default::default();
+    };
+    let AgentDefinitionSource::LocalPath(path) = source else {
+        return Default::default();
+    };
+    let root = if root.is_absolute() {
+        root.to_path_buf()
+    } else if let Some(caller_dir) = caller_dir {
+        caller_dir.join(root)
+    } else {
+        root.to_path_buf()
+    };
+    let source_path = Path::new(path);
+    let source_path = if source_path.is_absolute() {
+        source_path.to_path_buf()
+    } else if let Some(caller_dir) = caller_dir {
+        caller_dir.join(source_path)
+    } else {
+        source_path.to_path_buf()
+    };
+    let metadata = std::fs::read_to_string(root.join(".cargo-ai/project.toml"))
+        .ok()
+        .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok());
+    let project = metadata
+        .as_ref()
+        .and_then(|document| document.get("project"));
+    let agent_key = std::fs::canonicalize(source_path)
+        .ok()
+        .zip(std::fs::canonicalize(&root).ok())
+        .and_then(|(path, root)| path.strip_prefix(root).ok().map(Path::to_path_buf))
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"));
+    crate::agent_builder::project::PortableAgentMetadata {
+        package_id: project
+            .and_then(|project| project.get("id"))
+            .and_then(toml::Value::as_str)
+            .map(str::to_string),
+        package_version: project
+            .and_then(|project| project.get("version"))
+            .and_then(toml::Value::as_str)
+            .map(str::to_string),
+        agent_key,
+        ..Default::default()
+    }
 }
 
 fn project_root_for_hatch_source(
@@ -127,6 +187,7 @@ fn resolve_hatch_input_in_dir(
             project_root: None,
             installed_source_kind: None,
             package_lease: None,
+            portable_metadata: Default::default(),
         });
     }
 
@@ -139,6 +200,11 @@ fn resolve_hatch_input_in_dir(
             dependency_project_root.as_deref(),
         )?
     {
+        let agent_key = std::fs::canonicalize(&resolved.definition_path)
+            .ok()
+            .zip(std::fs::canonicalize(&resolved.package_root).ok())
+            .and_then(|(path, root)| path.strip_prefix(root).ok().map(Path::to_path_buf))
+            .map(|relative| relative.to_string_lossy().replace('\\', "/"));
         return Ok(HatchResolution {
             project_name: resolved.entrypoint,
             source: AgentDefinitionSource::LocalPath(
@@ -147,6 +213,13 @@ fn resolve_hatch_input_in_dir(
             project_root: Some(resolved.package_root),
             installed_source_kind: Some(resolved.source_kind),
             package_lease: Some(resolved.lease),
+            portable_metadata: crate::agent_builder::project::PortableAgentMetadata {
+                package_id: resolved.project_id,
+                hosted_source_id: resolved.hosted_source_id,
+                package_version: Some(resolved.package_version),
+                hosted_version_id: resolved.hosted_version_id,
+                agent_key,
+            },
         });
     }
 
@@ -166,6 +239,7 @@ fn resolve_hatch_input_in_dir(
         project_root: None,
         installed_source_kind: None,
         package_lease: None,
+        portable_metadata: Default::default(),
     })
 }
 
@@ -313,6 +387,17 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         }
         resolution.project_root = Some(checked.context.package_payload_root);
         resolution.installed_source_kind = Some(checked.context.source_kind);
+        resolution.portable_metadata = crate::agent_builder::project::PortableAgentMetadata {
+            package_id: checked.context.project_id,
+            hosted_source_id: checked.context.hosted_source_id,
+            package_version: Some(checked.context.package_version),
+            hosted_version_id: checked.context.hosted_version_id,
+            agent_key: portable_metadata_for_source(
+                &resolution.source,
+                resolution.project_root.as_deref(),
+            )
+            .agent_key,
+        };
         resolution.package_lease = Some(checked.lease);
     }
     let _package_lease = resolution.package_lease.clone();
@@ -383,6 +468,17 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         }
     }
 
+    if resolution.portable_metadata.package_id.is_none()
+        && resolution.portable_metadata.hosted_source_id.is_none()
+    {
+        let source_project_root = resolution.project_root.clone().or_else(|| {
+            project_root_for_hatch_source(&resolution.source)
+                .ok()
+                .flatten()
+        });
+        resolution.portable_metadata =
+            portable_metadata_for_source(&resolution.source, source_project_root.as_deref());
+    }
     let request = super::hatch_pipeline::HatchRequest::new(
         new_project_name,
         file_contents,
@@ -393,6 +489,7 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         output_dir,
         presentation,
     )
+    .with_portable_metadata(resolution.portable_metadata)
     .with_compatibility_profile(sub_m.get_one::<String>("profile").cloned());
 
     super::hatch_pipeline::run_hatch_pipeline(request)
@@ -401,8 +498,9 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_hosted_hatch_acknowledged, mode_from_check_flag, resolve_hatch_input,
-        resolve_hatch_input_in_dir, resolve_local_output_dir,
+        ensure_hosted_hatch_acknowledged, mode_from_check_flag,
+        portable_metadata_for_source_in_dir, resolve_hatch_input, resolve_hatch_input_in_dir,
+        resolve_local_output_dir,
     };
     use crate::commands::definition_source::AgentDefinitionSource;
     use crate::commands::hatch_pipeline::HatchMode;
@@ -505,6 +603,52 @@ mod tests {
             resolution.source,
             AgentDefinitionSource::LocalPath("./adder.json".to_string())
         );
+    }
+
+    #[test]
+    fn bare_config_in_cwd_has_same_portable_key_as_absolute_path_for_any_output_name() {
+        let root = temp_dir_path("portable-bare-config");
+        fs::create_dir_all(root.join(".cargo-ai")).unwrap();
+        let project_id = uuid::Uuid::new_v4().to_string();
+        fs::write(
+            root.join(".cargo-ai/project.toml"),
+            format!("format_version = 1\n[project]\nid = \"{project_id}\"\nversion = \"2.0.0\"\n"),
+        )
+        .unwrap();
+        let definition_path = root.join("agent.json");
+        fs::write(&definition_path, "{}").unwrap();
+
+        for output_name in ["first_binary", "renamed_binary"] {
+            let bare = resolve_hatch_input_in_dir(
+                output_name,
+                Some("agent.json"),
+                None,
+                None,
+                root.as_path(),
+            )
+            .unwrap();
+            let metadata = portable_metadata_for_source_in_dir(
+                &bare.source,
+                Some(Path::new("")),
+                Some(root.as_path()),
+            );
+            assert_eq!(metadata.package_id.as_deref(), Some(project_id.as_str()));
+            assert_eq!(metadata.package_version.as_deref(), Some("2.0.0"));
+            assert_eq!(metadata.agent_key.as_deref(), Some("agent.json"));
+        }
+
+        let absolute = AgentDefinitionSource::LocalPath(definition_path.display().to_string());
+        let absolute_metadata = portable_metadata_for_source_in_dir(
+            &absolute,
+            Some(root.as_path()),
+            Some(root.as_path()),
+        );
+        assert_eq!(absolute_metadata.agent_key.as_deref(), Some("agent.json"));
+        assert_eq!(
+            absolute_metadata.package_id.as_deref(),
+            Some(project_id.as_str())
+        );
+        remove_temp_dir_if_present(&root);
     }
 
     #[test]
