@@ -2448,14 +2448,20 @@ fn run_live_hosted_smoke(provider: &str, key_env: &str, model_env: &str) {
             )
             .expect("complete sanitized qualification report");
         let saved = fs::read(&report.path).expect("qualification report should be readable");
-        if let Some(line) = qualification_execution_failure_line(&saved, &run.stderr) {
-            eprintln!("{line}");
-        }
+        emit_qualification_execution_failure(&saved, &run.stderr);
     } else {
         strict_live_probe(&run).expect("live provider smoke failed");
         let events = fs::read_to_string(&fixture.usage).expect("usage log should exist");
         assert!(events.contains(&format!("\"server\":\"{provider}\"")));
         assert!(!events.contains(&api_key));
+    }
+}
+
+fn emit_qualification_execution_failure(report: &[u8], stderr: &[u8]) {
+    if let Some(line) = qualification_execution_failure_line(report, stderr) {
+        // Report-writing tests pass even when the probe fails. Direct stderr keeps
+        // this fixed diagnostic visible through libtest's successful-test capture.
+        writeln!(std::io::stderr(), "{line}").expect("write fixed qualification diagnostic");
     }
 }
 
@@ -3551,6 +3557,39 @@ fn qualification_reports_validate_real_probes_and_keep_strict_diagnostics() {
         "failure",
         "execution_failure",
     );
+}
+
+#[test]
+fn qualification_execution_failure_is_visible_with_default_test_capture() {
+    const CHILD: &str = "CARGO_AI_TEST_QUALIFICATION_DETAIL_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        emit_qualification_execution_failure(
+            br#"{"outcome":"failure","diagnostic":"execution_failure"}"#,
+            b"x Run failed\nProvider output did not match the required JSON schema.\nProblem\n- The provider returned output that could not be parsed as JSON.\nRaw output\nprivate-response-sentinel qualification-fake-secret-sentinel",
+        );
+        return;
+    }
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "qualification_execution_failure_is_visible_with_default_test_capture",
+        ])
+        .env(CHILD, "1")
+        .env_remove("RUST_TEST_NOCAPTURE")
+        .output()
+        .unwrap();
+    assert!(child.status.success());
+    assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+    assert_eq!(
+        child.stderr,
+        b"Qualification execution failure category: json_parse\n"
+    );
+    for sentinel in [
+        "private-response-sentinel",
+        "qualification-fake-secret-sentinel",
+    ] {
+        assert!(!String::from_utf8_lossy(&child.stdout).contains(sentinel));
+    }
 }
 
 #[test]
