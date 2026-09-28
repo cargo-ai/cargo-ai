@@ -81,13 +81,28 @@ pub(super) fn assert_generated_runtime_initializes_without_cli(fixture: &Fixture
         project.join("identity_probe.json"),
         json!({
             "agent_definition_schema_version":"2026-03-03.r1",
-        "inputs":[{"type":"text","name":"job","text":"local identity probe"}],
+            "inputs":[{"type":"text","name":"job","text":"local identity probe"}],
             "agent_schema":{"type":"object","properties":{}},
             "actions":[]
         })
         .to_string(),
     )
     .unwrap();
+    assert_success(
+        &data_cli(
+            fixture,
+            project,
+            &["run", "--config", "identity_probe.json"],
+        ),
+        "interpreted identity probe",
+    );
+    let interpreted = events(fixture)
+        .into_iter()
+        .find(|event| {
+            event["event_type"] == "agent_run_started"
+                && event["attribution"]["agent"]["key"] == "identity_probe.json"
+        })
+        .expect("interpreted probe has a definition-relative key");
     assert_success(
         &data_cli(
             fixture,
@@ -102,11 +117,17 @@ pub(super) fn assert_generated_runtime_initializes_without_cli(fixture: &Fixture
         "identity_probe"
     });
     let isolated = Fixture::new("usage-generated-without-cli");
+    let moved_binary = isolated.root.join(if cfg!(windows) {
+        "renamed_probe.exe"
+    } else {
+        "renamed_probe"
+    });
+    fs::copy(&binary, &moved_binary).unwrap();
     fs::write(isolated.cargo_ai_home.join("config.toml"), "default_profile = 'local'\n[[profile]]\nname = 'local'\nserver = 'ollama'\nmodel = 'unused'\n").unwrap();
     let empty_path = isolated.root.join("empty-path");
     fs::create_dir(&empty_path).unwrap();
     let out = isolated
-        .command(&binary, &isolated.root)
+        .command(&moved_binary, &isolated.root)
         .env("PATH", &empty_path)
         .output()
         .unwrap();
@@ -123,6 +144,15 @@ pub(super) fn assert_generated_runtime_initializes_without_cli(fixture: &Fixture
         assert_eq!(event["attribution"]["environment"]["id"], id);
         assert_eq!(event["attribution"]["runtime"]["kind"], "generated");
         assert!(event["attribution"]["package"]["id"].is_string());
+        assert_eq!(
+            event["attribution"]["package"]["id"],
+            interpreted["attribution"]["package"]["id"]
+        );
+        assert_eq!(event["attribution"]["agent"]["key"], "identity_probe.json");
+        assert_eq!(
+            event["attribution"]["agent"]["id"],
+            interpreted["attribution"]["agent"]["id"]
+        );
         assert!(event["attribution"]["workspace"]["path"].is_null());
     }
 }

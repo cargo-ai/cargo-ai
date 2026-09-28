@@ -77,7 +77,7 @@ fn identity_filter(
         let value = object[*key].as_str().unwrap();
         values.push(Parameter::Text(value.into()));
         filter.push_str(&format!(
-            " AND json_extract(record_json,'{path}')=?{}",
+            " AND json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'{path}')=?{}",
             values.len()
         ));
     }
@@ -107,13 +107,14 @@ fn v2_filter(
     .iter()
     .any(|name| args.get_one::<String>(name).is_some())
     {
-        filter.push_str(" AND json_extract(record_json,'$.attribution.schema_version')=1");
+        filter.push_str(" AND json_valid(record_json)");
+        filter.push_str(" AND json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.schema_version')=1");
     }
     for (name, path) in ATTRIBUTION_FILTERS {
         if let Some(value) = args.get_one::<String>(name) {
             values.push(Parameter::Text(value.clone()));
             filter.push_str(&format!(
-                " AND json_extract(record_json,'{path}')=?{}",
+                " AND json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'{path}')=?{}",
                 values.len()
             ));
         }

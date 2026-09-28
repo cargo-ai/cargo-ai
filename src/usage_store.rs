@@ -190,11 +190,11 @@ fn open_at(dir: &Path, create: bool) -> Result<Option<Connection>, String> {
         // Optional expression indexes derive only from immutable JSON facts.
         // Older writers can keep inserting version-1 records without supplying
         // attribution fields or maintaining a separate projection.
-        connection.execute_batch("CREATE INDEX IF NOT EXISTS usage_events_attribution_environment ON usage_events(json_extract(record_json,'$.attribution.environment.id'),sequence);
-            CREATE INDEX IF NOT EXISTS usage_events_attribution_package ON usage_events(json_extract(record_json,'$.attribution.package.source'),json_extract(record_json,'$.attribution.package.id'),sequence);
-            CREATE INDEX IF NOT EXISTS usage_events_attribution_location ON usage_events(json_extract(record_json,'$.attribution.environment.id'),json_extract(record_json,'$.attribution.package_location.path'),sequence);
-            CREATE INDEX IF NOT EXISTS usage_events_attribution_agent ON usage_events(json_extract(record_json,'$.attribution.agent.source'),json_extract(record_json,'$.attribution.agent.id'),sequence);
-            CREATE INDEX IF NOT EXISTS usage_events_attribution_workspace ON usage_events(json_extract(record_json,'$.attribution.workspace.environment_id'),json_extract(record_json,'$.attribution.workspace.path'),sequence);")
+        connection.execute_batch("CREATE INDEX IF NOT EXISTS usage_events_attribution_environment ON usage_events(json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.environment.id'),sequence) WHERE json_valid(record_json);
+            CREATE INDEX IF NOT EXISTS usage_events_attribution_package ON usage_events(json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.package.source'),json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.package.id'),sequence) WHERE json_valid(record_json);
+            CREATE INDEX IF NOT EXISTS usage_events_attribution_location ON usage_events(json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.environment.id'),json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.package_location.path'),sequence) WHERE json_valid(record_json);
+            CREATE INDEX IF NOT EXISTS usage_events_attribution_agent ON usage_events(json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.agent.source'),json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.agent.id'),sequence) WHERE json_valid(record_json);
+            CREATE INDEX IF NOT EXISTS usage_events_attribution_workspace ON usage_events(json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.workspace.environment_id'),json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.workspace.path'),sequence) WHERE json_valid(record_json);")
             .map_err(db_error)?;
         private_permissions(&path, false)?;
     } else if version != SCHEMA_VERSION {
@@ -301,6 +301,38 @@ mod tests {
             event("one")
         );
         drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn optional_attribution_indexes_leave_unrelated_malformed_rows_writable() {
+        let dir = fixture();
+        fs::create_dir_all(&dir).unwrap();
+        let old_writer = Connection::open(dir.join("usage.sqlite3")).unwrap();
+        old_writer.execute_batch("CREATE TABLE usage_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT UNIQUE NOT NULL,root_run_id TEXT,agent_run_id TEXT,event_type TEXT NOT NULL,created_at TEXT NOT NULL,record_json TEXT NOT NULL);
+            CREATE TABLE usage_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            PRAGMA user_version=1;
+            INSERT INTO usage_events(event_id,root_run_id,event_type,created_at,record_json) VALUES('legacy','root','provider_request_completed','2026-09-22T00:00:00Z','not JSON');").unwrap();
+        drop(old_writer);
+        let reopened = open_at(&dir, true).unwrap().unwrap();
+        insert_event(&reopened, &event("new")).unwrap();
+        let index_count: i64 = reopened.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'usage_events_attribution_%'", [], |row| row.get(0)).unwrap();
+        assert_eq!(index_count, 5);
+        let legacy: String = reopened
+            .query_row(
+                "SELECT record_json FROM usage_events WHERE event_id='legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy, "not JSON");
+        assert_eq!(
+            reopened
+                .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        drop(reopened);
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

@@ -664,7 +664,7 @@ fn replace_config(staged: &Path, path: &Path) -> Result<(), String> {
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
     const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
     #[link(name = "Kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn MoveFileExW(source: *const u16, destination: *const u16, flags: u32) -> i32;
     }
     let source = staged

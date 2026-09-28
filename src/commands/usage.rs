@@ -1123,4 +1123,55 @@ mod contract_tests {
         assert_eq!(full["summary"]["request_count"], 1);
         assert_eq!(full["summary"]["tokens"]["input_tokens"], 7);
     }
+    #[test]
+    fn v2_known_attribution_filters_safely_exclude_undecodable_unrelated_rows() {
+        let _home = Home::new();
+        attributed_record(
+            "known",
+            "environment-a",
+            "authored_project_id",
+            "package",
+            5,
+        );
+        record("broken", "unrelated", 9);
+        let db = usage_store::open_database(true).unwrap().unwrap();
+        db.execute(
+            "UPDATE usage_events SET record_json='not JSON' WHERE event_id='broken'",
+            [],
+        )
+        .unwrap();
+        for indexed in [true, false] {
+            if !indexed {
+                db.execute_batch("DROP INDEX usage_events_attribution_environment; DROP INDEX usage_events_attribution_package; DROP INDEX usage_events_attribution_location; DROP INDEX usage_events_attribution_agent; DROP INDEX usage_events_attribution_workspace;").unwrap();
+            }
+            let selected = query(&[
+                "summary",
+                "--schema-version",
+                "2",
+                "--environment",
+                "environment-a",
+                "--json",
+            ]);
+            assert_eq!(selected["summary"]["request_count"], 1);
+            assert_eq!(selected["summary"]["tokens"]["input_tokens"], 5);
+        }
+        let matches = crate::args::parse_cli(
+            "cargo-ai",
+            ["cargo-ai", "usage", "summary", "--schema-version", "2"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+        )
+        .unwrap();
+        let error = execute(matches.subcommand_matches("usage").unwrap()).unwrap_err();
+        assert!(error.contains("malformed JSON"), "{error}");
+        let raw: String = db
+            .query_row(
+                "SELECT record_json FROM usage_events WHERE event_id='broken'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw, "not JSON");
+    }
 }
