@@ -14,6 +14,7 @@ const UNKNOWN: &str = "Could not determine the confirmation outcome from the ser
 
 struct Outcome {
     success: bool,
+    remote_confirmation: &'static str,
     message: &'static str,
     recovery: bool,
     reactivated: bool,
@@ -24,6 +25,7 @@ impl Outcome {
     fn failure(message: &'static str) -> Self {
         Self {
             success: false,
+            remote_confirmation: "unknown",
             message,
             recovery: false,
             reactivated: false,
@@ -57,16 +59,18 @@ fn apply_response<E>(
         .and_then(Value::as_str)
         .unwrap_or_default();
     if !status.eq_ignore_ascii_case("success") {
-        return Outcome::failure(
+        let outcome = Outcome::failure(
             if status.eq_ignore_ascii_case("failure") || status.eq_ignore_ascii_case("error") {
                 "Confirmation was not accepted. Check the latest code and configured account email. If the code is invalid or expired, request a fresh code through account registration with the existing consent."
             } else {
                 UNKNOWN
             },
         );
+        return outcome;
     }
     let mut outcome = Outcome {
         success: false,
+        remote_confirmation: "applied",
         message: "The account was confirmed, but the service returned invalid or missing required credentials; local setup is incomplete.",
         recovery: true,
         reactivated: json.get("reactivated").and_then(Value::as_bool) == Some(true),
@@ -113,6 +117,29 @@ async fn confirm_with<E>(
 
 /// Confirms a registration code and reports success only after persistence.
 pub async fn run(conf_m: &ArgMatches) -> bool {
+    execute(conf_m, &mut super::machine::Report::new(false)).await
+}
+pub(crate) async fn machine_run(
+    args: &ArgMatches,
+) -> Result<Value, crate::commands::machine::Failure> {
+    if !args.get_flag("stdin") {
+        return Err(crate::commands::machine::Failure::new(
+            "input.secret_transport",
+            "Machine confirmation requires the code through closed, nonterminal --stdin.",
+        ));
+    }
+    let mut report = super::machine::Report::new(true);
+    execute(args, &mut report).await;
+    report.result
+}
+async fn execute(conf_m: &ArgMatches, report: &mut super::machine::Report) -> bool {
+    execute_at(conf_m, report, INFRA_BASE_URL).await
+}
+async fn execute_at(
+    conf_m: &ArgMatches,
+    report: &mut super::machine::Report,
+    base_url: &str,
+) -> bool {
     let code = if conf_m.get_flag("stdin") {
         match secret_input::read_stdin(secret_input::CONFIRMATION_LIMIT) {
             Ok(code) => code,
@@ -127,6 +154,7 @@ pub async fn run(conf_m: &ArgMatches) -> bool {
         eprintln!("x Supply exactly one confirmation source: CODE or --stdin.");
         return false;
     };
+    report.prerequisites();
     let Some(email) = load_config()
         .and_then(|cfg| cfg.account)
         .and_then(|account| account.email)
@@ -134,11 +162,40 @@ pub async fn run(conf_m: &ArgMatches) -> bool {
         eprintln!("x No configured account email is available. Check the selected CARGO_AI_HOME and config, or register the account first.");
         return false;
     };
-    if crate::credentials::migration::run_legacy_credential_migration().is_err() {
-        eprintln!("x Could not prepare existing credentials. Check the selected home, config and credential-store access; no confirmation request was sent.");
-        return false;
+    let migration = match crate::credentials::migration::run_legacy_credential_migration() {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            eprintln!("x Could not prepare existing credentials. Check the selected home, config and credential-store access; no confirmation request was sent.");
+            report.fail("credentials.preparation_failed", "Existing credentials could not be prepared; no confirmation request was sent.", serde_json::json!({"remote_confirmation":"not_attempted","credential_preparation":"incomplete"}));
+            return false;
+        }
+    };
+    report.transmitting(true);
+    let outcome = confirm_with(base_url, &email, &code, set_account_tokens).await;
+    let data = serde_json::json!({"remote_confirmation":outcome.remote_confirmation,
+        "credential_migration":{"changed":migration.changed(),"profile_tokens_migrated":migration.migrated_profile_tokens,"account_tokens_migrated":migration.migrated_account_tokens},
+        "required_local_persistence":if outcome.success {"persisted"} else if outcome.remote_confirmation == "applied" {"incomplete"} else {"not_attempted"},
+        "credential_persistence":if outcome.success {"persisted"} else if outcome.remote_confirmation == "applied" {"unknown"} else {"not_attempted"},
+        "metadata_persistence":if outcome.success {"persisted"} else if outcome.remote_confirmation == "applied" {"unknown"} else {"not_attempted"},
+        "reactivated":outcome.reactivated,"deletion_cancelled":outcome.deletion_cancelled});
+    if outcome.success {
+        report.accepted(data);
+    } else {
+        report.fail(
+            if outcome.remote_confirmation == "applied" {
+                "operation.partial"
+            } else if outcome.remote_confirmation == "unapplied" {
+                "account.remote_rejected"
+            } else {
+                "operation.outcome_unknown"
+            },
+            "Account confirmation did not complete required local setup.",
+            data,
+        );
     }
-    let outcome = confirm_with(INFRA_BASE_URL, &email, &code, set_account_tokens).await;
+    if report.active {
+        return outcome.success;
+    }
     outcome
         .write(&mut io::stdout().lock(), &mut io::stderr().lock())
         .is_ok()
@@ -182,6 +239,65 @@ mod secret_input_tests {
         (out, err)
     }
 
+    #[tokio::test]
+    async fn machine_account_confirm_rejects_argv_before_credential_migration() {
+        let home = Home::new();
+        let path = home.path.join("config.toml");
+        let config = fs::read_to_string(&path).unwrap().replace(
+            "model = 'synthetic-model'",
+            "model = 'synthetic-model'\ntoken = 'private-inline-sentinel'",
+        );
+        fs::write(&path, &config).unwrap();
+        let args = super::super::machine::fixture_args(&["cargo-ai", "account", "confirm", CODE]);
+        let error = machine_run(
+            args.subcommand_matches("account")
+                .unwrap()
+                .subcommand_matches("confirm")
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "input.secret_transport");
+        assert!(!error.message.contains(CODE));
+        assert_eq!(fs::read_to_string(&path).unwrap(), config);
+        assert!(!home.path.join("credentials.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn machine_account_confirm_core_records_persisted_setup_and_migration_without_secret_output(
+    ) {
+        let _home = Home::new();
+        let mut server = mockito::Server::new_async().await;
+        let request = server
+            .mock("POST", "/account")
+            .with_status(200)
+            .with_body(response().to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let args = super::super::machine::fixture_args(&["cargo-ai", "account", "confirm", CODE]);
+        let mut report = super::super::machine::Report::new(true);
+        assert!(
+            execute_at(
+                args.subcommand_matches("account")
+                    .unwrap()
+                    .subcommand_matches("confirm")
+                    .unwrap(),
+                &mut report,
+                &server.url()
+            )
+            .await
+        );
+        let data = report.result.unwrap();
+        assert_eq!(data["remote_confirmation"], "applied");
+        assert_eq!(data["required_local_persistence"], "persisted");
+        assert_eq!(data["credential_migration"]["changed"], false);
+        for secret in [CODE, ACCESS, REFRESH, ID] {
+            assert!(!data.to_string().contains(secret));
+        }
+        request.assert_async().await;
+    }
+
     #[test]
     fn secret_input_rejects_malformed_credentials_and_untrusted_backend_text() {
         for (key, value) in [
@@ -208,6 +324,7 @@ mod secret_input_tests {
                 |_, _, _| -> Result<(), ()> { panic!("failed response must not be saved") },
             );
             assert!(!result.success);
+            assert_eq!(result.remote_confirmation, "unknown");
             captured(&result);
         }
         let result = apply_response(&response(), |_, _, _| Err(format!("{ACCESS} {REFRESH}")));

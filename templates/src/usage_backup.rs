@@ -79,8 +79,66 @@ pub(crate) async fn remote_status() -> Result<Value, String> {
         .call(json!({"command":"status"}))
         .await
 }
+/// Effect facts recorded at the transport and local persistence boundaries.
+#[derive(Debug, Default)]
+pub(crate) struct OperationEffects {
+    pub(crate) remote: &'static str,
+    pub(crate) local: &'static str,
+    pub(crate) queue: &'static str,
+    pub(crate) settings: &'static str,
+    pub(crate) uploaded_records: usize,
+    pub(crate) accepted_records: usize,
+    pub(crate) batches: usize,
+    pub(crate) binding: Option<Binding>,
+}
+impl OperationEffects {
+    fn initial() -> Self {
+        Self {
+            remote: "unapplied",
+            local: "unapplied",
+            queue: "unapplied",
+            settings: "unapplied",
+            ..Self::default()
+        }
+    }
+    pub(crate) fn value(&self) -> Value {
+        json!({"remote":self.remote,"local":self.local,"queue":self.queue,"settings":self.settings,
+            "uploaded_records":self.uploaded_records.to_string(),"remote_accepted_records":self.accepted_records.to_string(),"batches":self.batches,
+            "account_binding":self.binding.as_ref().map(|b| &b.account),
+            "generation":self.binding.as_ref().map(|b| b.generation),
+            "reconciliation":"usage backup status; do not replay an uncertain remote mutation"})
+    }
+}
+#[derive(Debug)]
+pub(crate) struct OperationFailure {
+    pub(crate) message: String,
+    pub(crate) effects: OperationEffects,
+}
+
 pub(crate) async fn enable() -> Result<Value, String> {
+    enable_outcome().await.map_err(|error| error.message)
+}
+pub(crate) async fn enable_outcome() -> Result<Value, OperationFailure> {
+    let mut effects = OperationEffects::initial();
+    enable_impl(&mut effects, crate::usage_backup_host::save_settings)
+        .await
+        .map_err(|message| OperationFailure { message, effects })
+}
+#[cfg(test)]
+pub(crate) async fn enable_outcome_with_writer(
+    persist: impl FnOnce(&crate::usage_store::UsageSettings) -> Result<(), String>,
+) -> Result<Value, OperationFailure> {
+    let mut effects = OperationEffects::initial();
+    enable_impl(&mut effects, persist)
+        .await
+        .map_err(|message| OperationFailure { message, effects })
+}
+async fn enable_impl(
+    effects: &mut OperationEffects,
+    persist: impl FnOnce(&crate::usage_store::UsageSettings) -> Result<(), String>,
+) -> Result<Value, String> {
     let _lease = queue::Lease::acquire()?;
+    effects.local = "applied";
     let mut client = transport(Duration::from_secs(10))?;
     let status = client.call(json!({"command":"status"})).await?;
     let payload = if status["account_binding"].is_null() {
@@ -88,42 +146,71 @@ pub(crate) async fn enable() -> Result<Value, String> {
     } else {
         Binding::from_result(&status)?.payload("enable")
     };
+    effects.remote = "unknown";
     let result = client.call(payload).await?;
     let binding = Binding::from_result(&result)?;
     if result["enabled"] != true {
         return Err("Backup service did not enable consent".into());
     }
+    effects.remote = "applied";
+    effects.binding = Some(binding.clone());
     let mut settings = usage_store::settings()?;
     let prior = Binding::from_settings().ok();
     let preserve_active = settings.backup_enabled && prior.as_ref() == Some(&binding);
+    effects.local = "unknown";
+    effects.queue = "unknown";
     if settings.backup_enabled && !preserve_active {
         if let Some(prior) = prior.as_ref() {
             queue::pause(prior)?;
         }
     }
     let boundary = queue::enable(&binding, preserve_active)?;
+    effects.queue = "applied";
     settings.backup_enabled = true;
     settings.backup_account_binding = Some(binding.account);
     settings.backup_generation = Some(binding.generation);
-    if let Err(error) = crate::usage_backup_host::save_settings(&settings) {
+    effects.settings = "unknown";
+    if let Err(error) = persist(&settings) {
         let _ = queue::pause(&Binding {
             account: settings.backup_account_binding.clone().unwrap(),
             generation: settings.backup_generation.unwrap(),
         });
         return Err(error);
     }
+    effects.local = "applied";
+    effects.settings = "applied";
     Ok(
         json!({"enabled":true,"account_binding":settings.backup_account_binding,"generation":settings.backup_generation,"future_records_after":boundary.to_string(),"historical_records_selected":0,"note":"Previously queued selections for this same account and generation remain selected. Records collected while upload was disabled require explicit historical selection."}),
     )
 }
 pub(crate) fn disable() -> Result<Value, String> {
+    disable_outcome().map_err(|error| error.message)
+}
+pub(crate) fn disable_outcome() -> Result<Value, OperationFailure> {
+    disable_outcome_with_writer(crate::usage_backup_host::save_settings)
+}
+pub(crate) fn disable_outcome_with_writer(
+    persist: impl FnOnce(&crate::usage_store::UsageSettings) -> Result<(), String>,
+) -> Result<Value, OperationFailure> {
+    let mut effects = OperationEffects::initial();
+    disable_impl(&mut effects, persist).map_err(|message| OperationFailure { message, effects })
+}
+fn disable_impl(
+    effects: &mut OperationEffects,
+    persist: impl FnOnce(&crate::usage_store::UsageSettings) -> Result<(), String>,
+) -> Result<Value, String> {
     let _lease = queue::Lease::acquire()?;
+    effects.local = "applied";
     let mut settings = usage_store::settings()?;
     if let Ok(binding) = Binding::from_settings() {
+        effects.queue = "unknown";
         queue::pause(&binding)?;
+        effects.queue = "applied";
     }
     settings.backup_enabled = false;
-    crate::usage_backup_host::save_settings(&settings)?;
+    effects.settings = "unknown";
+    persist(&settings)?;
+    effects.settings = "applied";
     Ok(
         json!({"enabled":false,"history_deleted":false,"queued_selections_preserved":true,"note":"Already transmitted requests may finish; future upload passes stop."}),
     )
@@ -154,12 +241,20 @@ pub(crate) fn include_history(
     )
 }
 async fn drain(max_batches: usize, timeout: Duration) -> Result<Value, String> {
+    drain_impl(max_batches, timeout, &mut OperationEffects::initial()).await
+}
+async fn drain_impl(
+    max_batches: usize,
+    timeout: Duration,
+    effects: &mut OperationEffects,
+) -> Result<Value, String> {
     // Disabled backup must not inspect account credentials or create a database.
     if !usage_store::settings()?.backup_enabled {
         return Ok(json!({"enabled":false,"uploaded_records":0}));
     }
     let binding = Binding::from_settings()?;
     let _lease = queue::Lease::acquire()?;
+    effects.local = "applied";
     let mut client = transport(timeout)?;
     let status = client.call(json!({"command":"status"})).await?;
     binding.check(&status)?;
@@ -173,7 +268,11 @@ async fn drain(max_batches: usize, timeout: Duration) -> Result<Value, String> {
         if !settings.backup_enabled || Binding::from_settings()? != binding {
             break;
         }
+        effects.local = "unknown";
+        effects.queue = "unknown";
         queue::capture(&binding)?;
+        effects.local = "applied";
+        effects.queue = "applied";
         let records = queue::batch(&binding)?;
         if records.is_empty() {
             break;
@@ -191,6 +290,7 @@ async fn drain(max_batches: usize, timeout: Duration) -> Result<Value, String> {
             .collect();
         let mut payload = binding.payload("ingest");
         payload["records"] = json!(records);
+        effects.remote = "unknown";
         let response = client.call(payload).await?;
         binding.check(&response)?;
         let acknowledged = response["acknowledged_event_ids"]
@@ -209,18 +309,37 @@ async fn drain(max_batches: usize, timeout: Duration) -> Result<Value, String> {
         if unique.len() != ids.len() || ids.len() != expected.len() {
             return Err("Backup acknowledgment is incomplete; pending selections remain".into());
         }
+        effects.remote = "applied";
+        effects.accepted_records += ids.len();
+        effects.binding = Some(binding.clone());
+        effects.local = "unknown";
+        effects.queue = "unknown";
         queue::acknowledge(&binding, &ids)?;
+        effects.local = "applied";
+        effects.queue = "applied";
         uploaded += ids.len();
         batches += 1;
+        effects.uploaded_records = uploaded;
+        effects.batches = batches;
     }
     Ok(
         json!({"enabled":true,"uploaded_records":uploaded,"batches":batches,"account_binding":binding.account,"generation":binding.generation,"local":queue::status()?}),
     )
 }
 pub(crate) async fn sync() -> Result<Value, String> {
-    tokio::time::timeout(Duration::from_secs(30), drain(10, Duration::from_secs(30)))
-        .await
-        .map_err(|_| "Backup sync reached its 30-second budget; pending selections remain")?
+    sync_outcome().await.map_err(|error| error.message)
+}
+pub(crate) async fn sync_outcome() -> Result<Value, OperationFailure> {
+    let mut effects = OperationEffects::initial();
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        drain_impl(10, Duration::from_secs(30), &mut effects),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err("Backup sync reached its 30-second budget; pending selections remain".into())
+    });
+    result.map_err(|message| OperationFailure { message, effects })
 }
 pub(crate) async fn opportunistic() {
     if !usage_store::settings().is_ok_and(|s| s.backup_enabled) {

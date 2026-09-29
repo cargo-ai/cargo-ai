@@ -123,8 +123,14 @@ impl ActionOutput {
         requested_mode: RequestedActionRenderMode,
         run_started_at: Instant,
     ) -> Self {
-        let (mode, startup_notice) =
-            resolve_action_render_mode_for_capability(requested_mode, live_dashboard_supported());
+        let (mode, startup_notice) = resolve_action_render_mode_for_capability(
+            if super::machine::selected() {
+                RequestedActionRenderMode::AppendOnly
+            } else {
+                requested_mode
+            },
+            live_dashboard_supported(),
+        );
         Self::new_for_mode_with_notice(action_execution, mode, startup_notice, run_started_at)
     }
 
@@ -182,6 +188,10 @@ impl ActionOutput {
     }
 
     fn action_started(&self, action_index: usize, action_name: &str) {
+        super::machine::event(
+            "action_started",
+            serde_json::json!({"action_index":action_index,"action_name":action_name}),
+        );
         self.with_state(|state| {
             let lane = ensure_lane_state(state, action_index, action_name);
             lane.status = ActionLaneStatus::Running;
@@ -904,6 +914,9 @@ impl InvocationAbortSignal {
     }
 
     fn is_triggered(&self) -> bool {
+        if super::machine::canceled() {
+            return true;
+        }
         self.inner
             .lock()
             .expect("abort signal lock should succeed")
@@ -1170,7 +1183,9 @@ async fn apply_actions_parallel(
         let action_output_clone = action_output.clone();
         let declaring_project_root_clone = declaring_project_root.clone();
 
-        lane_tasks.push(tokio::spawn(async move {
+        let completion = super::machine::lane_completion();
+        lane_tasks.push(OwnedLane(tokio::spawn(async move {
+            let _completion = completion;
             let lane_future = async move {
                 run_matching_action_steps(
                     action_index,
@@ -1194,7 +1209,7 @@ async fn apply_actions_parallel(
             } else {
                 lane_future.await
             }
-        }));
+        })));
 
         tokio::task::yield_now().await;
     }
@@ -1208,6 +1223,24 @@ async fn apply_actions_parallel(
     }
 
     Ok(top_level_failures)
+}
+
+struct OwnedLane<T>(tokio::task::JoinHandle<T>);
+impl<T> std::future::Future for OwnedLane<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(context)
+    }
+}
+impl<T> Drop for OwnedLane<T> {
+    fn drop(&mut self) {
+        if super::machine::selected() {
+            self.0.abort();
+        }
+    }
 }
 
 fn named_input_lookup(inputs: &[crate::Input]) -> BTreeMap<String, crate::Input> {
@@ -1244,6 +1277,23 @@ fn collect_action_execution_result(
     result: ActionExecutionResult,
     top_level_failures: &mut Vec<String>,
 ) -> bool {
+    let state = match &result {
+        ActionExecutionResult::Completed(outcomes)
+            if outcomes
+                .iter()
+                .any(|o| matches!(o, StepExecutionOutcome::SoftFailureLogged)) =>
+        {
+            "completed_with_soft_failures"
+        }
+        ActionExecutionResult::Completed(_) => "completed",
+        ActionExecutionResult::Failed(_) => "failed",
+        ActionExecutionResult::Aborted(_) => "aborted",
+        ActionExecutionResult::StoppedByAbort => "stopped_by_abort",
+    };
+    super::machine::event(
+        "action_completed",
+        serde_json::json!({"action_index":action_index,"action_name":action.name,"state":state,"success":state=="completed"}),
+    );
     match result {
         ActionExecutionResult::Completed(outcomes) => {
             if let Some(summary) = action_completion_summary(&outcomes) {
@@ -1536,13 +1586,17 @@ async fn run_exec_step(
         if let Some(context) = package_context {
             command.current_dir(context.package_data_root.as_path());
         }
+        if super::machine::selected() {
+            super::machine_process::prepare(&mut command)
+                .map_err(|_| "Could not prepare owned subprocess execution".to_string())?;
+        }
         let child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
 
-        match tokio::time::timeout(remaining, child.wait_with_output()).await {
+        match tokio::time::timeout(remaining, wait_child_output(child, remaining)).await {
             Ok(Ok(output)) if output.status.success() => {
                 emit_exec_output_lines(
                     action_index,
@@ -1590,13 +1644,17 @@ async fn run_exec_step(
         if let Some(context) = package_context {
             command.current_dir(context.package_data_root.as_path());
         }
+        if super::machine::selected() {
+            super::machine_process::prepare(&mut command)
+                .map_err(|_| "Could not prepare owned subprocess execution".to_string())?;
+        }
         let child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("{action_name}: failed to execute command: {error}."))?;
 
-        match tokio::time::timeout(remaining, child.wait_with_output()).await {
+        match tokio::time::timeout(remaining, wait_child_output(child, remaining)).await {
             Ok(Ok(output)) if output.status.success() => {
                 emit_exec_output_lines(
                     action_index,
@@ -1750,6 +1808,10 @@ async fn run_tool_step(
     } else if let Some(root) = provider_context.project_data.as_ref() {
         command.current_dir(root.ensure_directory()?);
     }
+    if super::machine::selected() {
+        super::machine_process::prepare(&mut command)
+            .map_err(|_| "Could not prepare owned tool execution".to_string())?;
+    }
     let child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1761,38 +1823,50 @@ async fn run_tool_step(
                 action_name, tool_name, error
             )
         })?;
-    let mut child = child;
-    {
-        use tokio::io::AsyncWriteExt;
-        let mut stdin = child.stdin.take().ok_or_else(|| {
-            format!(
-                "Action '{}' failed to open stdin for tool '{}'.",
-                action_name, tool_name
-            )
-        })?;
-        stdin.write_all(&request_bytes).await.map_err(|error| {
-            format!(
-                "Action '{}' failed to write invoke request for tool '{}': {}",
-                action_name, tool_name, error
-            )
-        })?;
-    }
+    let output = if super::machine::selected() {
+        super::machine_process::wait_with_input(child, remaining, &request_bytes)
+            .await
+            .map_err(|error| {
+                super::machine::record_process_error(&error);
+                "Owned tool execution did not complete".to_string()
+            })?
+    } else {
+        let mut child = child;
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut stdin = child.stdin.take().ok_or_else(|| {
+                format!(
+                    "Action '{}' failed to open stdin for tool '{}'.",
+                    action_name, tool_name
+                )
+            })?;
+            stdin.write_all(&request_bytes).await.map_err(|error| {
+                format!(
+                    "Action '{}' failed to write invoke request for tool '{}': {}",
+                    action_name, tool_name, error
+                )
+            })?;
+        }
 
-    let output = match tokio::time::timeout(remaining, child.wait_with_output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            return Err(format!(
-                "Action '{}' failed while waiting for tool '{}': {}",
-                action_name, tool_name, error
-            ));
-        }
-        Err(_) => {
-            return Err(action_runtime_timeout_message(
-                action_name,
-                runtime_budget,
-                &format!("while waiting for tool '{}'", tool_name),
-            ));
-        }
+        let output =
+            match tokio::time::timeout(remaining, wait_child_output(child, remaining)).await {
+                Ok(Ok(output)) => output,
+                Ok(Err(error)) => {
+                    return Err(format!(
+                        "Action '{}' failed while waiting for tool '{}': {}",
+                        action_name, tool_name, error
+                    ));
+                }
+                Err(_) => {
+                    return Err(action_runtime_timeout_message(
+                        action_name,
+                        runtime_budget,
+                        &format!("while waiting for tool '{}'", tool_name),
+                    ));
+                }
+            };
+
+        output
     };
 
     emit_action_output_bytes(action_index, action_name, &output.stderr);
@@ -2372,12 +2446,21 @@ async fn run_generate_image_step(
         )
     })?;
 
+    super::machine::record_artifact(
+        serde_json::json!({"kind":"image","state":"produced","path":output_path_ref.display().to_string(),"content_included":false}),
+    );
     print_action_line(
         action_index,
         action_name,
         format!("wrote generated image to '{}'.", output_path_ref.display()).as_str(),
     );
     Ok(StepExecutionOutcome::Completed)
+}
+
+fn note_runtime_artifact(kind: &str, path: &Path) {
+    super::machine::record_artifact(
+        serde_json::json!({"kind":kind,"state":"produced","path":path.display().to_string(),"content_included":false}),
+    );
 }
 
 fn resolve_step_profile_name(
@@ -2850,6 +2933,10 @@ async fn run_agent_step_with_provider_context(
         action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
     })?;
 
+    if super::machine::selected() {
+        super::machine_process::prepare(&mut command)
+            .map_err(|_| "Could not prepare owned child execution".to_string())?;
+    }
     let child = command.spawn().map_err(|error| {
         format!(
             "Action '{}' failed to start child agent '{}': {}",
@@ -2857,6 +2944,34 @@ async fn run_agent_step_with_provider_context(
         )
     })?;
     let mut child = child;
+    if super::machine::selected() {
+        super::machine::opaque_child();
+        super::machine::event(
+            "child_started",
+            serde_json::json!({"action_index":action_index,"step_index":step_index,"instrumentation":"unavailable"}),
+        );
+        let result = super::machine_process::wait(child, remaining).await;
+        return match result {
+            Ok(output) => {
+                super::machine::event(
+                    "child_completed",
+                    serde_json::json!({"action_index":action_index,"step_index":step_index,"exit_code":output.status.code(),"success":output.status.success(),"diagnostics":{"origin":"child","stdout_bytes":output.stdout.len(),"stderr_bytes":output.stderr.len(),"content_included":false}}),
+                );
+                if output.status.success() {
+                    Ok(StepExecutionOutcome::Completed)
+                } else {
+                    Err(
+                        "Child execution failed; private child diagnostics were omitted"
+                            .to_string(),
+                    )
+                }
+            }
+            Err(error) => {
+                super::machine::record_process_error(&error);
+                Err("Owned child execution did not complete".to_string())
+            }
+        };
+    }
     let child_output = current_action_output();
     let child_action_name = action_name.to_string();
     let child_using_forwarder = child.stdout.take().map(|stdout| {
@@ -2964,6 +3079,21 @@ async fn run_agent_step_with_provider_context(
         }
     };
     result
+}
+
+async fn wait_child_output(
+    child: tokio::process::Child,
+    remaining: Duration,
+) -> io::Result<std::process::Output> {
+    if super::machine::selected() {
+        let result = super::machine_process::wait(child, remaining).await;
+        if let Err(error) = &result {
+            super::machine::record_process_error(error);
+        }
+        result
+    } else {
+        child.wait_with_output().await
+    }
 }
 
 #[cfg(test)]
@@ -3825,6 +3955,10 @@ fn action_runtime_timeout_message(
     runtime_budget: InvocationRuntimeBudget,
     context: &str,
 ) -> String {
+    super::machine::record_error(super::machine::Failure::new(
+        "runtime.timeout",
+        "Execution exceeded its runtime deadline.",
+    ));
     format!(
         "Action '{}' exceeded max-runtime-in-sec {} after {} seconds {}.",
         action_name,

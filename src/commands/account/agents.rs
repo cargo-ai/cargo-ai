@@ -584,6 +584,23 @@ async fn continue_run_from_response(run_m: &ArgMatches, response: &Value) -> boo
 
 /// Executes account-agent management operations.
 pub async fn run(agents_m: &ArgMatches) -> bool {
+    execute(agents_m, &mut super::machine::Report::new(false)).await
+}
+pub(crate) async fn machine_run(
+    args: &ArgMatches,
+) -> Result<Value, crate::commands::machine::Failure> {
+    let mut report = super::machine::Report::new(true);
+    execute(args, &mut report).await;
+    report.result
+}
+async fn execute(agents_m: &ArgMatches, report: &mut super::machine::Report) -> bool {
+    execute_at(agents_m, report, INFRA_BASE_URL).await
+}
+async fn execute_at(
+    agents_m: &ArgMatches,
+    report: &mut super::machine::Report,
+    base_url: &str,
+) -> bool {
     enum AgentsCommand {
         List {
             owner_handle: Option<String>,
@@ -808,6 +825,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         return false;
     };
 
+    report.prerequisites();
     let auth = match load_account_auth() {
         Ok(auth) => auth,
         Err(message) => {
@@ -815,17 +833,27 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             return false;
         }
     };
+    report.protect(&auth.access_token);
+    if let Some(secret) = auth.refresh_token.as_deref() {
+        report.protect(secret);
+    }
     let access_token_owned = auth.access_token;
     let refresh_token = auth.refresh_token;
 
     // 4. Execute first attempt using current access token.
+    report.transmitting(matches!(
+        &agents_command,
+        AgentsCommand::Push { .. }
+            | AgentsCommand::Visibility { .. }
+            | AgentsCommand::Archive { .. }
+    ));
     let mut response = match &agents_command {
         AgentsCommand::List {
             owner_handle,
             include_archived,
             ..
         } => match infra_api::account::agents::list_agents(
-            INFRA_BASE_URL,
+            base_url,
             access_token_owned.as_str(),
             owner_handle.as_deref(),
             *include_archived,
@@ -843,7 +871,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             definition_path,
             definition_json,
         } => match infra_api::account::agents::push_agent(
-            INFRA_BASE_URL,
+            base_url,
             access_token_owned.as_str(),
             name,
             definition_path.as_deref(),
@@ -863,7 +891,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             definition_path,
             ..
         } => match infra_api::account::agents::pull_agent(
-            INFRA_BASE_URL,
+            base_url,
             access_token_owned.as_str(),
             name,
             owner_handle.as_deref(),
@@ -884,7 +912,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             public_from,
             public_until,
         } => match infra_api::account::agents::set_agent_visibility(
-            INFRA_BASE_URL,
+            base_url,
             access_token_owned.as_str(),
             name,
             definition_path.as_deref(),
@@ -905,7 +933,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
             definition_path,
             is_archived,
         } => match infra_api::account::agents::set_agent_archive(
-            INFRA_BASE_URL,
+            base_url,
             access_token_owned.as_str(),
             name,
             definition_path.as_deref(),
@@ -929,6 +957,11 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         .unwrap_or(false);
 
     if is_expired_error {
+        report.fail(
+            "account.authentication",
+            "The operation was rejected because its access token expired.",
+            json!({"remote_effect":"unapplied","session_refresh":"unconfirmed"}),
+        );
         match refresh_access_token_for_retry(access_token_owned.as_str(), refresh_token.as_deref())
             .await
         {
@@ -957,21 +990,38 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                 return false;
             }
             Ok((retry_access_token, refreshed_expires_in)) => {
+                report.protect(&retry_access_token);
                 if let Some(rt) = refresh_token.as_deref() {
-                    persist_refreshed_access_token(
-                        retry_access_token.as_str(),
-                        rt,
-                        refreshed_expires_in,
-                    );
+                    if report.active {
+                        report.session_persistence =
+                            match super::helpers::persist_selected_refreshed_access_token(
+                                &retry_access_token,
+                                rt,
+                                refreshed_expires_in,
+                            ) {
+                                Ok(()) => "persisted",
+                                Err(_) => "failed",
+                            };
+                    } else {
+                        persist_refreshed_access_token(
+                            &retry_access_token,
+                            rt,
+                            refreshed_expires_in,
+                        );
+                    }
                 }
 
+                report.transmitting(!matches!(
+                    &agents_command,
+                    AgentsCommand::List { .. } | AgentsCommand::Pull { .. }
+                ));
                 response = match &agents_command {
                     AgentsCommand::List {
                         owner_handle,
                         include_archived,
                         ..
                     } => match infra_api::account::agents::list_agents(
-                        INFRA_BASE_URL,
+                        base_url,
                         retry_access_token.as_str(),
                         owner_handle.as_deref(),
                         *include_archived,
@@ -989,7 +1039,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                         definition_path,
                         definition_json,
                     } => match infra_api::account::agents::push_agent(
-                        INFRA_BASE_URL,
+                        base_url,
                         retry_access_token.as_str(),
                         name,
                         definition_path.as_deref(),
@@ -1009,7 +1059,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                         definition_path,
                         ..
                     } => match infra_api::account::agents::pull_agent(
-                        INFRA_BASE_URL,
+                        base_url,
                         retry_access_token.as_str(),
                         name,
                         owner_handle.as_deref(),
@@ -1030,7 +1080,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                         public_from,
                         public_until,
                     } => match infra_api::account::agents::set_agent_visibility(
-                        INFRA_BASE_URL,
+                        base_url,
                         retry_access_token.as_str(),
                         name,
                         definition_path.as_deref(),
@@ -1051,7 +1101,7 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                         definition_path,
                         is_archived,
                     } => match infra_api::account::agents::set_agent_archive(
-                        INFRA_BASE_URL,
+                        base_url,
                         retry_access_token.as_str(),
                         name,
                         definition_path.as_deref(),
@@ -1070,6 +1120,75 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         }
     }
 
+    let expected_type = match &agents_command {
+        AgentsCommand::List { .. } => "account_agents_list_succeeded",
+        AgentsCommand::Push { .. } => "account_agents_push_succeeded",
+        AgentsCommand::Pull { .. } => "account_agents_pull_succeeded",
+        AgentsCommand::Visibility { .. } => "account_agents_visibility_updated",
+        AgentsCommand::Archive { .. } => "account_agents_archive_succeeded",
+    };
+    let original_count = response["agents"].as_array().map(Vec::len).unwrap_or(0);
+    if report.active {
+        if let Err(error) = super::machine::response_ok(&response, expected_type) {
+            report.result = Err(error);
+            return false;
+        }
+        let identity = match &agents_command {
+            AgentsCommand::Push {
+                name,
+                definition_path,
+                ..
+            }
+            | AgentsCommand::Pull {
+                name,
+                definition_path,
+                ..
+            }
+            | AgentsCommand::Visibility {
+                name,
+                definition_path,
+                ..
+            }
+            | AgentsCommand::Archive {
+                name,
+                definition_path,
+                ..
+            } => Some((name, definition_path)),
+            AgentsCommand::List { .. } => None,
+        };
+        if let Some((name, path)) = identity {
+            if response["agent"].as_str() != Some(name)
+                || response["definition_path"].as_str() != Some(path.as_deref().unwrap_or("/"))
+            {
+                report.fail(
+                    "operation.outcome_unknown",
+                    "The service response did not match the selected agent identity.",
+                    json!({"remote_effect":"unknown"}),
+                );
+                return false;
+            }
+        }
+        if let AgentsCommand::Visibility { is_public, .. } = &agents_command {
+            if response["public"].as_bool() != Some(*is_public) {
+                report.fail(
+                    "operation.outcome_unknown",
+                    "The service did not confirm the requested visibility.",
+                    json!({"remote_effect":"unknown"}),
+                );
+                return false;
+            }
+        }
+        report.accepted(super::machine::fields(
+            &response,
+            &[
+                "agent",
+                "definition_path",
+                "owner_handle",
+                "public",
+                "is_archived",
+            ],
+        ));
+    }
     let mut pull_stdout_payload: Option<String> = None;
     if let AgentsCommand::Pull {
         name,
@@ -1089,8 +1208,13 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
 
         if is_pull_success {
             let definition_json = match response.get("definition_json") {
-                Some(value) => value,
-                None => {
+                Some(value) if value.is_object() => value,
+                _ => {
+                    report.fail(
+                        "response.invalid",
+                        "The agent definition was missing or invalid.",
+                        json!({"retrieved":false,"file_persistence":"not_attempted"}),
+                    );
                     eprintln!("x Pull succeeded but response did not include 'definition_json'.");
                     return false;
                 }
@@ -1118,7 +1242,24 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                 &response,
             );
 
+            if report.active {
+                let mut data = super::machine::fields(
+                    &response,
+                    &["agent", "definition_path", "owner_handle"],
+                );
+                data["definition"] = definition_json.clone();
+                data["retrieved"] = json!(true);
+                data["file_persistence"] = json!("not_requested");
+                report.accepted(data);
+            }
             if let Some(path) = output_path {
+                if report.active {
+                    report.fail(
+                        "persistence.failed",
+                        "The retrieved definition could not be saved.",
+                        json!({"retrieved":true,"file_persistence":"unknown","output_path":path}),
+                    );
+                }
                 if Path::new(&path).exists() && !*force {
                     eprintln!(
                         "x Output file '{}' already exists. Use --force to overwrite or --json-file <FILE> to choose another path.",
@@ -1135,6 +1276,17 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
                     return false;
                 }
 
+                if report.active {
+                    let mut data = super::machine::fields(
+                        &response,
+                        &["agent", "definition_path", "owner_handle"],
+                    );
+                    data["definition"] = definition_json.clone();
+                    data["retrieved"] = json!(true);
+                    data["file_persistence"] = json!("persisted");
+                    data["output_path"] = json!(path);
+                    report.accepted(data);
+                }
                 if *stdout {
                     eprintln!(
                         "Saved agent definition to '{}'.",
@@ -1176,6 +1328,25 @@ pub async fn run(agents_m: &ArgMatches) -> bool {
         restyle_agents_list_ui(&mut response, list_display_truncation);
     }
 
+    if report.active && matches!(&agents_command, AgentsCommand::List { .. }) {
+        report.result = super::machine::list_payload(
+            &response,
+            "agents",
+            &[
+                "agent_name",
+                "agent",
+                "definition_path",
+                "owner_handle",
+                "is_public",
+                "is_archived",
+                "updated_at",
+            ],
+            original_count,
+        );
+        if let Ok(data) = &report.result {
+            report.accepted(data.clone());
+        }
+    }
     // 6. Render backend-provided UI when available, fallback to raw JSON.
     render_account_agents_response(&response);
 
@@ -1580,5 +1751,134 @@ mod tests {
         });
 
         assert_eq!(suffix, " --from-account");
+    }
+}
+
+#[cfg(test)]
+mod machine_contract_tests {
+    use super::*;
+    #[tokio::test]
+    async fn machine_agents_list_pull_push_and_visibility_use_typed_service_facts() {
+        let home = crate::commands::secret_input::test_support::Home::new();
+        crate::config::adder::set_account_tokens(
+            "fixture-access".into(),
+            "fixture-refresh".into(),
+            3600,
+        )
+        .unwrap();
+        let definition = home.path.join("fixture.json");
+        fs::write(&definition, r#"{"agent_schema":"1","name":"fixture"}"#).unwrap();
+        let mut server = mockito::Server::new_async().await;
+        let cases = vec![
+            (
+                vec!["cargo-ai", "agents", "list", "--all"],
+                json!({"status":"success","type":"account_agents_list_succeeded","agents":[{"agent_name":"fixture","definition_path":"/","is_public":false,"is_archived":false,"private_owner":"secret"}],"ui":{"title":"secret"}}),
+            ),
+            (
+                vec![
+                    "cargo-ai",
+                    "agents",
+                    "pull",
+                    "--name",
+                    "fixture",
+                    "--definition-path",
+                    "/",
+                    "--stdout",
+                ],
+                json!({"status":"success","type":"account_agents_pull_succeeded","agent":"fixture","definition_path":"/","definition_json":{"agent_schema":"1","name":"fixture"},"ui":{"title":"secret"}}),
+            ),
+            (
+                vec![
+                    "cargo-ai",
+                    "agents",
+                    "push",
+                    "--name",
+                    "fixture",
+                    "--definition-path",
+                    "/",
+                    "--json-file",
+                    definition.to_str().unwrap(),
+                ],
+                json!({"status":"success","type":"account_agents_push_succeeded","agent":"fixture","definition_path":"/","message":"secret"}),
+            ),
+            (
+                vec![
+                    "cargo-ai",
+                    "agents",
+                    "visibility",
+                    "--name",
+                    "fixture",
+                    "--definition-path",
+                    "/",
+                    "--public",
+                ],
+                json!({"status":"success","type":"account_agents_visibility_updated","agent":"fixture","definition_path":"/","public":true,"message":"secret"}),
+            ),
+        ];
+        for (words, response) in cases {
+            let request = server
+                .mock("POST", "/account")
+                .with_status(200)
+                .with_body(response.to_string())
+                .expect(1)
+                .create_async()
+                .await;
+            let args = super::super::machine::fixture_args(&words);
+            let mut report = super::super::machine::Report::new(true);
+            assert!(
+                execute_at(
+                    args.subcommand_matches("agents").unwrap(),
+                    &mut report,
+                    &server.url()
+                )
+                .await
+            );
+            let data = report.result.unwrap();
+            assert!(!data.to_string().contains("secret"));
+            if words[2] == "pull" {
+                assert_eq!(data["file_persistence"], "not_requested");
+                assert_eq!(data["definition"]["name"], "fixture");
+            }
+            if words[2] == "list" {
+                assert_eq!(data["complete"], true);
+                assert_eq!(data["items"].as_array().unwrap().len(), 1);
+            }
+            request.assert_async().await;
+            request.remove_async().await;
+        }
+        assert!(!home.path.join("fixture.json.json").exists());
+    }
+    #[tokio::test]
+    async fn machine_agents_visibility_does_not_infer_success_from_unrelated_identity() {
+        let _home = crate::commands::secret_input::test_support::Home::new();
+        crate::config::adder::set_account_tokens(
+            "fixture-access".into(),
+            "fixture-refresh".into(),
+            3600,
+        )
+        .unwrap();
+        let mut server = mockito::Server::new_async().await;
+        let request=server.mock("POST","/account").with_status(200).with_body(json!({"status":"success","type":"account_agents_visibility_updated","agent":"other","definition_path":"/","public":true}).to_string()).expect(1).create_async().await;
+        let args = super::super::machine::fixture_args(&[
+            "cargo-ai",
+            "agents",
+            "visibility",
+            "--name",
+            "fixture",
+            "--definition-path",
+            "/",
+            "--public",
+        ]);
+        let mut report = super::super::machine::Report::new(true);
+        assert!(
+            !execute_at(
+                args.subcommand_matches("agents").unwrap(),
+                &mut report,
+                &server.url()
+            )
+            .await
+        );
+        assert_eq!(report.result.unwrap_err().code, "operation.outcome_unknown");
+        request.assert_async().await;
     }
 }

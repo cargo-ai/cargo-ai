@@ -350,6 +350,16 @@ fn sha256_hex(contents: &str) -> String {
 }
 
 /// Executes the interpreted runtime flow from a local or registry JSON definition.
+pub(crate) async fn machine_run(
+    sub_m: &ArgMatches,
+) -> Result<serde_json::Value, super::machine::Failure> {
+    if sub_m.get_one::<String>("token").is_some() {
+        return Err(super::machine::Failure::new("cli.invalid_input", "Application runtime authentication uses the configured profile; argv tokens are not accepted."));
+    }
+    let succeeded = run(sub_m).await;
+    super::machine::runtime_outcome(succeeded)
+}
+
 pub async fn run(sub_m: &ArgMatches) -> bool {
     if is_account_run_invocation(sub_m) {
         return crate::commands::account::run_account_agent(sub_m).await;
@@ -370,6 +380,10 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
                         match load_run_definition_from_source(&source).await {
                             Ok(loaded) => loaded,
                             Err(error) => {
+                                super::machine::record_error(super::machine::Failure::new(
+                                "runtime.invalid_definition",
+                                "The selected agent definition could not be loaded or validated.",
+                            ));
                                 eprintln!("x {error}");
                                 return false;
                             }

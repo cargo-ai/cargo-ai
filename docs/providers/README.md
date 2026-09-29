@@ -58,7 +58,7 @@ endpoint URL; the selected adapter still expects its documented protocol. For
 example, an Anthropic custom URL must implement Messages, not an
 OpenAI-compatible facade.
 
-Cargo AI does not maintain a provider model catalog or silently substitute a
+Cargo AI can optionally [discover a connection’s live model catalog](../machine-interface.md#models), with exact IDs and honest coverage. Listing does not prove invocation access. Cargo AI does not silently substitute a
 model. Choose a current model that the selected provider account, project,
 workspace, or local Ollama installation can access.
 

@@ -46,6 +46,21 @@ fn append(variable_name: &str, value: &str) -> Result<()> {
 }
 
 struct ProbeDirectory(PathBuf);
+const PROVIDER_KEYS: [&str; 6] = [
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "XAI_API_KEY",
+    "MISTRAL_API_KEY",
+    "TYPESAFE_API_KEY",
+];
+
+fn without_provider_keys(command: &mut Command) -> &mut Command {
+    for name in PROVIDER_KEYS {
+        command.env_remove(name);
+    }
+    command
+}
 impl ProbeDirectory {
     fn new() -> Result<Self> {
         let parent = PathBuf::from(variable("RUNNER_TEMP")?);
@@ -193,6 +208,164 @@ fn probe(provider: &str) -> Result<()> {
     Err("probe attempt budget exhausted")
 }
 
+/// A single bounded catalog invocation; no generation, login or persisted keys.
+fn discover(provider: &str) -> Result<()> {
+    if !["openai", "anthropic", "gemini", "xai", "mistral"].contains(&provider) {
+        return Err("unsupported discovery provider");
+    }
+    let candidate = variable("CARGO_AI_SHA")?;
+    if !qualification_policy::hexadecimal(&candidate, 40) {
+        return Err("invalid candidate");
+    }
+    let checkout = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|_| "cannot verify discovery candidate")?;
+    if !checkout.status.success()
+        || String::from_utf8(checkout.stdout)
+            .map_err(|_| "invalid checkout identity")?
+            .trim()
+            != candidate
+    {
+        return Err("discovery checkout does not match candidate");
+    }
+    let directory = ProbeDirectory::new()?;
+    let key = variable(&format!("{}_API_KEY", provider.to_uppercase()))?;
+    if key.trim().is_empty() || key.len() > 16 * 1024 || key.chars().any(char::is_control) {
+        return Err("invalid discovery credential input");
+    }
+    // Compile before handing a key to the CLI. Build output contains no key input.
+    let key = key.trim().to_owned();
+    let mut build = Command::new("cargo");
+    if !without_provider_keys(&mut build)
+        .args(["build", "--locked", "--bin", "cargo-ai"])
+        .status()
+        .map_err(|_| "cannot build discovery candidate")?
+        .success()
+    {
+        return Err("discovery candidate build failed");
+    }
+    let mut command = Command::new(if cfg!(windows) {
+        "target/debug/cargo-ai.exe"
+    } else {
+        "target/debug/cargo-ai"
+    });
+    command
+        .args([
+            "models",
+            "list",
+            "--server",
+            provider,
+            "--auth",
+            "api_key",
+            "--stdin",
+            "--output-format",
+            "json",
+            "--output-schema-version",
+            "1",
+        ])
+        .env("CARGO_AI_HOME", directory.0.join("absent-home"))
+        .env("CARGO_AI_DISABLE_KEYCHAIN", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    without_provider_keys(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|_| "cannot start discovery candidate")?;
+    let mut input = child
+        .stdin
+        .take()
+        .ok_or("cannot open discovery credential input")?;
+    input
+        .write_all(key.as_bytes())
+        .map_err(|_| "cannot supply discovery credential input")?;
+    drop(input);
+    let output = child
+        .wait_with_output()
+        .map_err(|_| "discovery invocation failed")?;
+    if output.stdout.len() > 8 * 1024 * 1024
+        || output
+            .stdout
+            .windows(key.len())
+            .any(|s| s == key.as_bytes())
+        || output
+            .stderr
+            .windows(key.len())
+            .any(|s| s == key.as_bytes())
+    {
+        return Err("discovery output failed safety validation");
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|_| "invalid discovery contract")?;
+    if !output.status.success()
+        || value["schema_version"] != 1
+        || value["command"] != "models list"
+        || value["payload_schema"] != "cargo-ai.models.list.v1"
+        || value["outcome"] != "succeeded"
+        || value.get("error") != Some(&serde_json::Value::Null)
+        || value["completion"]["terminal"] != true
+        || value["completion"]["complete"] != true
+        || value["data"]["schema_version"] != 1
+        || value["data"]["complete"] != true
+        || value["data"]["provider"] != provider
+        || value["data"]["auth"] != "api_key"
+        || value["data"]["source"] != "live"
+        || value["data"].get("cache") != Some(&serde_json::Value::Null)
+        || value["data"].get("continuation") != Some(&serde_json::Value::Null)
+        || value["data"]["invocation_access"] != "unverified"
+        || !value["data"]["pages_fetched"]
+            .as_u64()
+            .is_some_and(|n| (1..=20).contains(&n))
+    {
+        return Err("discovery did not prove complete provider listing");
+    }
+    let connection = &value["data"]["connection"];
+    let endpoint = connection["endpoint"]
+        .as_str()
+        .and_then(|url| reqwest::Url::parse(url).ok())
+        .ok_or("invalid discovery connection identity")?;
+    if !matches!(endpoint.scheme(), "http" | "https")
+        || endpoint.host_str().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+        || endpoint.path() != "/"
+        || connection.get("profile") != Some(&serde_json::Value::Null)
+    {
+        return Err("invalid discovery connection identity");
+    }
+    let models = value["data"]["models"]
+        .as_array()
+        .ok_or("invalid discovery catalog")?;
+    if models.iter().any(|m| {
+        m["id"].as_str().is_none_or(|id| id.is_empty())
+            || !matches!(
+                m.get("name"),
+                Some(serde_json::Value::Null | serde_json::Value::String(_))
+            )
+            || !m["metadata"].is_object()
+            || m["metadata_source"] != "provider"
+            || m["invocation_access"] != "unverified"
+    }) {
+        return Err("invalid discovery model identity");
+    }
+    let ids = models
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    if ids.len() != models.len() {
+        return Err("duplicate discovery model identity");
+    }
+    if directory.0.join("absent-home").exists() {
+        return Err("discovery unexpectedly persisted local state");
+    }
+    println!("Discovery {provider}: complete live listing verified for candidate {candidate}; {} exact IDs; invocation access untested.",models.len());
+    append("GITHUB_STEP_SUMMARY",&format!("- {provider}: complete model listing verified; {} IDs; candidate `{candidate}`; no inference; no retry.\n",models.len()))?;
+    Ok(())
+}
+
 fn aggregate() -> Result<()> {
     let rendered = (|| {
         let inputs = qualification_dashboard::Inputs {
@@ -254,10 +427,11 @@ fn main() {
     let args: Vec<_> = env::args().skip(1).collect();
     let result = match args.as_slice() {
         [mode, provider] if mode == "probe" => probe(provider),
+        [mode, provider] if mode == "discover" => discover(provider),
         [mode] if mode == "aggregate" => aggregate(),
         [mode] if mode == "catalog" => catalog(),
         [mode] if mode == "package-root" => package_root(),
-        _ => Err("usage: qualification-gate probe <provider> | aggregate | catalog | package-root"),
+        _ => Err("usage: qualification-gate probe <provider> | discover <provider> | aggregate | catalog | package-root"),
     };
     if let Err(message) = result {
         // Errors are fixed descriptions, never raw evidence, environment or service responses.

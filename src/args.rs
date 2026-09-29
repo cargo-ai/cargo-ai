@@ -17,6 +17,7 @@ mod guidance;
 mod hatch;
 mod init;
 mod mail;
+mod models;
 mod new;
 #[cfg(feature = "developer-tools")]
 mod package;
@@ -35,7 +36,7 @@ fn developer_tools_enabled() -> bool {
 }
 
 fn cli_command(bin_name: &'static str) -> Command {
-    let command = Command::new("cargo-ai")
+    let command = crate::commands::machine::arguments(Command::new("cargo-ai"))
         .bin_name(bin_name)
         .version(env!("CARGO_PKG_VERSION"))
         .arg(
@@ -54,6 +55,8 @@ fn cli_command(bin_name: &'static str) -> Command {
         .subcommand(hatch::command());
 
     command
+        .subcommand(models::command())
+        .subcommand(crate::commands::machine::command())
         .subcommand(new::command())
         .subcommand(init::command())
         .subcommand(add::command())
@@ -85,7 +88,14 @@ pub fn build_cli() -> ArgMatches {
         }
     }
 
-    parse_cli(bin_name, args).unwrap_or_else(|error| error.exit())
+    let machine = crate::commands::machine::requested(&args);
+    let parser_contract = crate::commands::machine::parser_contract_supported(&args);
+    parse_cli(bin_name, args).unwrap_or_else(|error| {
+        if machine {
+            crate::commands::machine::parser_failure(error.kind(), parser_contract);
+        }
+        error.exit()
+    })
 }
 
 // clap diagnostics can include supplied values, including misplaced secrets.

@@ -2,6 +2,17 @@
 //!
 //! This file intentionally stays thin: it parses CLI arguments and dispatches
 //! into command modules, while command behavior lives in `src/commands/*`.
+// Legacy renderers remain active unless the caller selects a machine contract.
+// Domain adapters provide structured facts; human text is never parsed as data.
+macro_rules! println {
+    ($($arg:tt)*) => { if !crate::commands::machine::selected() { std::println!($($arg)*); } };
+}
+macro_rules! print {
+    ($($arg:tt)*) => { if !crate::commands::machine::selected() { std::print!($($arg)*); } };
+}
+macro_rules! eprintln {
+    ($($arg:tt)*) => { if !crate::commands::machine::selected() { std::eprintln!($($arg)*); } };
+}
 mod agent_builder;
 mod args;
 mod cargo_ai_metadata;
@@ -43,6 +54,12 @@ fn should_run_automatic_update_check(
 #[tokio::main]
 async fn main() {
     let cmd_args = args::build_cli();
+    if let Some(exit) = commands::machine::dispatch(&cmd_args).await {
+        if exit != 0 {
+            process::exit(exit);
+        }
+        return;
+    }
     if let Some(usage) = cmd_args.subcommand_matches("usage") {
         if let Some(backup) = usage.subcommand_matches("backup") {
             if !usage_backup_cli::run(backup).await {

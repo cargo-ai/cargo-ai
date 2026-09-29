@@ -67,7 +67,21 @@ fn run_cargo_compile_in_path(
         shared_target_dir,
     );
 
-    let status = cargo_command.status()?;
+    let status = if crate::commands::machine::selected() {
+        cargo_command.stdin(std::process::Stdio::null());
+        let output =
+            crate::commands::machine_process::run_sync(&mut cargo_command).map_err(|error| {
+                crate::commands::machine::record_process_error(&error);
+                error
+            })?;
+        crate::commands::machine::event(
+            "subprocess_completed",
+            serde_json::json!({"origin":"cargo_build","success":output.status.success(),"stdout_bytes":output.stdout.len(),"stderr_bytes":output.stderr.len(),"content_included":false}),
+        );
+        output.status
+    } else {
+        cargo_command.status()?
+    };
 
     if !status.success() {
         let target_detail = build_target

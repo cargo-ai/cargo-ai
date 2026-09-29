@@ -1,0 +1,429 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/machine-event-v1.json",
+  "title": "Cargo AI run event v1",
+  "$comment": "Normal run NDJSON frames. Enforce 65536 bytes per progress record and 8388608 bytes per terminal record outside JSON Schema. Consumers must verify equal operation/root/invocation IDs, contiguous sequence, one start and one terminal frame, and matching terminal request_id. A bootstrap/crash/forced-kill or delivery failure can yield incomplete output.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "event_type": {
+      "enum": [
+        "operation_started",
+        "provider_completed",
+        "action_started",
+        "action_completed",
+        "child_started",
+        "child_completed",
+        "subprocess_completed",
+        "operation_completed"
+      ]
+    },
+    "operation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "root_invocation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "invocation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "data": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "event_type",
+    "operation_id",
+    "root_invocation_id",
+    "invocation_id",
+    "sequence",
+    "timestamp",
+    "data"
+  ],
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "operation_started"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "command"
+            ],
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "provider_completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": "string",
+                "minLength": 1
+              },
+              "resolved_model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "success": {
+                "const": true
+              }
+            },
+            "required": [
+              "provider",
+              "resolved_model",
+              "success"
+            ],
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "action_started"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "action_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615
+              },
+              "action_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action_index",
+              "action_name"
+            ],
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "action_completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "action_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615
+              },
+              "action_name": {
+                "type": "string"
+              },
+              "success": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action_index",
+              "action_name",
+              "success"
+            ],
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "child_started"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "action_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615
+              },
+              "step_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615
+              },
+              "instrumentation": {
+                "const": "unavailable"
+              }
+            },
+            "required": [
+              "action_index",
+              "step_index",
+              "instrumentation"
+            ],
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "child_completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "action_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615
+              },
+              "step_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615
+              },
+              "exit_code": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "success": {
+                "type": "boolean"
+              },
+              "diagnostics": {
+                "type": "object",
+                "properties": {
+                  "origin": {
+                    "const": "child"
+                  },
+                  "stdout_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 18446744073709551615
+                  },
+                  "stderr_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 18446744073709551615
+                  },
+                  "content_included": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "origin",
+                  "stdout_bytes",
+                  "stderr_bytes",
+                  "content_included"
+                ],
+                "additionalProperties": true
+              }
+            },
+            "required": [
+              "action_index",
+              "step_index",
+              "exit_code",
+              "success",
+              "diagnostics"
+            ],
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "subprocess_completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "origin": {
+                "enum": [
+                  "cargo_build",
+                  "tool_contract"
+                ]
+              },
+              "success": {
+                "type": "boolean"
+              },
+              "stdout_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615
+              },
+              "stderr_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615
+              },
+              "content_included": {
+                "const": false
+              }
+            },
+            "required": [
+              "origin",
+              "success",
+              "stdout_bytes",
+              "stderr_bytes",
+              "content_included"
+            ],
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "operation_completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "machine-response-v1.json"
+          }
+        }
+      }
+    }
+  ],
+  "examples": [
+    {
+      "schema_version": 1,
+      "event_type": "operation_started",
+      "operation_id": "00000000-0000-4000-8000-000000000001",
+      "root_invocation_id": "00000000-0000-4000-8000-000000000001",
+      "invocation_id": "00000000-0000-4000-8000-000000000001",
+      "sequence": 0,
+      "timestamp": "2026-09-29T12:00:00Z",
+      "data": {
+        "command": "run"
+      }
+    },
+    {
+      "schema_version": 1,
+      "event_type": "operation_completed",
+      "operation_id": "00000000-0000-4000-8000-000000000001",
+      "root_invocation_id": "00000000-0000-4000-8000-000000000001",
+      "invocation_id": "00000000-0000-4000-8000-000000000001",
+      "sequence": 1,
+      "timestamp": "2026-09-29T12:00:00Z",
+      "data": {
+        "schema_version": 1,
+        "payload_schema": "cargo-ai.run.v1",
+        "command": "run",
+        "build": {
+          "version": "0.4.5",
+          "developer_tools": true,
+          "target_os": "macos",
+          "target_arch": "aarch64"
+        },
+        "request_id": "00000000-0000-4000-8000-000000000001",
+        "context": {
+          "home_selection": "explicit",
+          "keychain_scope": "shared_profile_name_not_home_isolated"
+        },
+        "outcome": "failed",
+        "data": {
+          "execution": {
+            "completed": false
+          },
+          "result": {
+            "availability": "not_produced"
+          },
+          "artifacts": [],
+          "child_instrumentation": "no_opaque_children",
+          "effects": {
+            "external": "may_have_been_applied",
+            "replay_safe": false
+          }
+        },
+        "warnings": [],
+        "error": {
+          "code": "runtime.invalid_definition",
+          "message": "The selected agent definition could not be loaded or validated.",
+          "retryable": false
+        },
+        "completion": {
+          "terminal": true,
+          "complete": true
+        }
+      }
+    }
+  ]
+}

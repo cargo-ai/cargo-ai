@@ -212,3 +212,9 @@ For published packages, keep the contract narrow:
 - If the user asks for a new agent from scratch, start from the closest local example instead of inventing a shape from memory.
 - Summarize validation failures concretely and then fix the JSON.
 - After updating a definition, explain what changed in plain language and summarize what `hatch --check` proved.
+
+## Optional application interfaces
+
+When helping an application embed Cargo AI, inspect `cargo ai capabilities --output-format json` on its selected installed binary before choosing a machine format. Supported finite commands can use `--output-format json --output-schema-version 1`; `run` can use NDJSON. Existing `run --json` still supplies definition input, and usage `--schema-version` still selects the usage payload. Use saved profiles or bounded stdin for secrets, retain explicit consent and reconcile uncertain effects before retries. Private result content requires `--include-result-content` and is not usage/backup metadata.
+
+See the public [machine interface](https://github.com/cargo-ai/cargo-ai/blob/develop/docs/machine-interface.md) and [typed payloads](https://github.com/cargo-ai/cargo-ai/blob/develop/docs/machine-payloads.md) as supplemental integration guidance; the installed capabilities and this versioned local bundle control availability. Older binaries retain their documented human/legacy JSON interfaces.

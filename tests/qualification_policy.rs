@@ -160,6 +160,9 @@ fn gate() -> &'static Path {
             "--example",
             "qualification-gate",
         ]);
+        for provider in PROVIDERS {
+            command.env_remove(format!("{}_API_KEY", provider.to_uppercase()));
+        }
         let rustc = Command::new("rustc").arg("-vV").output().unwrap();
         assert!(rustc.status.success());
         let version = String::from_utf8(rustc.stdout).unwrap();
@@ -998,5 +1001,310 @@ fn dashboard_requires_every_parallel_native_stage() {
                 assert!(!data.run().0.status.success(), "{name}: {outcome}");
             }
         }
+    }
+}
+
+struct DiscoveryFixture {
+    fixture: Fixture,
+    path: std::ffi::OsString,
+}
+impl DiscoveryFixture {
+    fn new() -> Self {
+        let fixture = Fixture::new();
+        let source = fixture.path("discovery_fixture.rs");
+        fs::write(&source, r###"
+use std::{env,fs,io::{self,Read,Write}};
+fn main() {
+ let role=std::path::Path::new(&env::args().next().unwrap()).file_stem().unwrap().to_string_lossy().into_owned();
+ let args:Vec<_>=env::args().skip(1).collect();
+ let mode=env::var("DISCOVERY_FIXTURE_MODE").unwrap();
+ let root=std::path::PathBuf::from(env::var("DISCOVERY_FIXTURE_ROOT").unwrap());
+ let mut log=fs::OpenOptions::new().create(true).append(true).open(root.join("calls")).unwrap();
+ writeln!(log,"{role}:{}",args.join(" ")).unwrap();
+ if role=="git" {
+  assert_eq!(args,["rev-parse","HEAD"]);
+  if mode=="git_failure" {std::process::exit(2)}
+  if mode=="git_stale" {println!("{}","b".repeat(40))} else {println!("{}","a".repeat(40))}
+  return;
+ }
+ for provider in ["OPENAI","ANTHROPIC","GEMINI","XAI","MISTRAL","TYPESAFE"] {
+  assert!(env::var_os(format!("{provider}_API_KEY")).is_none(),"provider key inherited");
+ }
+ if role=="cargo" {
+  assert_eq!(args,["build","--locked","--bin","cargo-ai"]);
+  if mode=="build_failure" {std::process::exit(3)}
+  return;
+ }
+ assert_eq!(role,"cargo-ai");
+ assert_eq!(&args[..3],["models","list","--server"]);
+ assert_eq!(&args[4..],["--auth","api_key","--stdin","--output-format","json","--output-schema-version","1"]);
+ assert_eq!(env::var("CARGO_AI_DISABLE_KEYCHAIN").unwrap(),"1");
+ let home=std::path::PathBuf::from(env::var("CARGO_AI_HOME").unwrap());
+ assert!(!home.exists());
+ assert!(home.starts_with(&root));
+ assert_eq!(home.file_name().unwrap(),"absent-home");
+ let mut key=String::new();io::stdin().read_to_string(&mut key).unwrap();
+ assert_eq!(key,"fixture-private-key");
+ if mode=="persist" {fs::create_dir(&home).unwrap();fs::write(home.join("config.json"),"fixture").unwrap()}
+ if mode=="stderr_secret" {eprintln!("{key}")}
+ if mode=="stdout_secret" {print!("{key}");return}
+ if mode=="oversized" {print!("{}","x".repeat(8*1024*1024+1));return}
+ if mode=="malformed" {print!("private-response-marker");return}
+ print!("{}",fs::read_to_string(root.join("response.json")).unwrap());
+ if mode=="cli_failure" {std::process::exit(4)}
+}
+"###).unwrap();
+        let bin = fixture.path("bin");
+        fs::create_dir(&bin).unwrap();
+        let executable = bin.join(format!("git{}", std::env::consts::EXE_SUFFIX));
+        assert!(Command::new("rustc")
+            .arg(&source)
+            .args(["--edition=2021", "-o"])
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success());
+        fs::copy(
+            &executable,
+            bin.join(format!("cargo{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .unwrap();
+        fs::create_dir_all(fixture.path("target/debug")).unwrap();
+        fs::copy(
+            &executable,
+            fixture.path(&format!(
+                "target/debug/cargo-ai{}",
+                std::env::consts::EXE_SUFFIX
+            )),
+        )
+        .unwrap();
+        let paths = std::iter::once(bin)
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap()))
+            .collect::<Vec<_>>();
+        Self {
+            fixture,
+            path: std::env::join_paths(paths).unwrap(),
+        }
+    }
+    fn response(provider: &str) -> Value {
+        json!({"schema_version":1,"payload_schema":"cargo-ai.models.list.v1","command":"models list",
+            "outcome":"succeeded","error":null,"completion":{"terminal":true,"complete":true},
+            "data":{"schema_version":1,"provider":provider,"auth":"api_key",
+                "connection":{"endpoint":"https://fixture.invalid","profile":null},
+                "fetched_at":"2026-09-29T12:00:00Z","source":"live","cache":null,
+                "complete":true,"continuation":null,"pages_fetched":1,
+                "models":[{"id":"exact-opaque-id","name":null,"metadata":{},
+                    "metadata_source":"provider","invocation_access":"unverified"}],
+                "invocation_access":"unverified"}})
+    }
+    fn run(
+        &self,
+        provider: &str,
+        mode: &str,
+        candidate: &str,
+        key: &str,
+        response: &Value,
+    ) -> (Output, String) {
+        for name in ["calls", "summary", "output"] {
+            let _ = fs::remove_file(self.fixture.path(name));
+        }
+        fs::write(self.fixture.path("response.json"), response.to_string()).unwrap();
+        let mut command = self.fixture.command("discover");
+        command
+            .arg(provider)
+            .env("PATH", &self.path)
+            .env("CARGO_AI_SHA", candidate)
+            .env("DISCOVERY_FIXTURE_MODE", mode)
+            .env("DISCOVERY_FIXTURE_ROOT", &self.fixture.0);
+        for name in PROVIDERS {
+            command.env(
+                format!("{}_API_KEY", name.to_uppercase()),
+                "unused-fixture-key",
+            );
+        }
+        command.env(format!("{}_API_KEY", provider.to_uppercase()), key);
+        let output = command.output().unwrap();
+        let summary = fs::read_to_string(self.fixture.path("summary")).unwrap_or_default();
+        let public = format!(
+            "{}{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            summary
+        );
+        assert!(
+            !public.contains("fixture-private-key") && !public.contains("private-response-marker")
+        );
+        assert!(!self.fixture.path("isolated-home").exists());
+        assert!(!self.fixture.path("output").exists());
+        assert!(!fs::read_dir(&self.fixture.0).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("provider-qualification-")));
+        (output, summary)
+    }
+    fn calls(&self) -> String {
+        fs::read_to_string(self.fixture.path("calls")).unwrap_or_default()
+    }
+}
+
+#[test]
+fn discovery_entrypoint_confines_keys_listing_and_exact_candidate() {
+    let fixture = DiscoveryFixture::new();
+    for provider in ["openai", "anthropic", "gemini", "xai", "mistral"] {
+        let (output, summary) = fixture.run(
+            provider,
+            "pass",
+            &"a".repeat(40),
+            "  fixture-private-key  ",
+            &DiscoveryFixture::response(provider),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            summary.contains("complete model listing verified; 1 IDs")
+                && summary.contains("no inference; no retry")
+        );
+        assert!(!summary.contains("exact-opaque-id"));
+        assert_eq!(fixture.calls().lines().count(), 3);
+        assert!(fixture
+            .calls()
+            .contains("cargo:build --locked --bin cargo-ai"));
+        assert!(fixture.calls().contains(&format!("cargo-ai:models list --server {provider} --auth api_key --stdin --output-format json --output-schema-version 1")));
+    }
+    let mut empty = DiscoveryFixture::response("openai");
+    empty["data"]["models"] = json!([]);
+    let (output, summary) = fixture.run(
+        "openai",
+        "pass",
+        &"a".repeat(40),
+        "fixture-private-key",
+        &empty,
+    );
+    assert!(output.status.success() && summary.contains("0 IDs"));
+    for (mode, candidate) in [
+        ("git_stale", "a".repeat(40)),
+        ("git_failure", "a".repeat(40)),
+        ("pass", "not-an-exact-sha".into()),
+    ] {
+        let (output, summary) =
+            fixture.run("openai", mode, &candidate, "fixture-private-key", &empty);
+        assert!(!output.status.success() && summary.is_empty());
+        assert!(!fixture.calls().contains("cargo:"));
+    }
+    for provider in ["typesafe", "ollama", "unknown"] {
+        assert!(!fixture
+            .run(
+                provider,
+                "pass",
+                &"a".repeat(40),
+                "fixture-private-key",
+                &empty
+            )
+            .0
+            .status
+            .success());
+        assert!(fixture.calls().is_empty());
+    }
+    for key in [
+        "".into(),
+        " \t ".into(),
+        "fixture-private-key\n".into(),
+        "x".repeat(16 * 1024 + 1),
+    ] {
+        assert!(!fixture
+            .run("openai", "pass", &"a".repeat(40), &key, &empty)
+            .0
+            .status
+            .success());
+        assert!(!fixture.calls().contains("cargo:"));
+    }
+}
+
+#[test]
+fn discovery_entrypoint_rejects_unsafe_incomplete_and_persisting_results_without_retry() {
+    let fixture = DiscoveryFixture::new();
+    let valid = DiscoveryFixture::response("openai");
+    for mode in [
+        "build_failure",
+        "cli_failure",
+        "malformed",
+        "stdout_secret",
+        "stderr_secret",
+        "oversized",
+        "persist",
+    ] {
+        let (output, summary) = fixture.run(
+            "openai",
+            mode,
+            &"a".repeat(40),
+            "fixture-private-key",
+            &valid,
+        );
+        assert!(!output.status.success() && summary.is_empty(), "{mode}");
+        assert_eq!(
+            fixture.calls().lines().count(),
+            if mode == "build_failure" { 2 } else { 3 }
+        );
+    }
+    for case in 0..17 {
+        let mut response = valid.clone();
+        match case {
+            0 => response["data"]["complete"] = json!(false),
+            1 => response["outcome"] = json!("partial"),
+            2 => response["data"]["provider"] = json!("mistral"),
+            3 => response["completion"]["complete"] = json!(false),
+            4 => response["data"]["source"] = json!("cache"),
+            5 => response["data"]["cache"] = json!({"age":0}),
+            6 => response["data"]["continuation"] = json!({"available":false}),
+            7 => response["data"]["pages_fetched"] = json!(21),
+            8 => {
+                response["data"]["connection"]["endpoint"] = json!(
+                "https://user:private-response-marker@fixture.invalid?key=private-response-marker"
+            )
+            }
+            9 => response["data"]["models"][0]["id"] = json!(""),
+            10 => response["data"]["models"][0]["invocation_access"] = json!("verified"),
+            11 => {
+                let duplicate = response["data"]["models"][0].clone();
+                response["data"]["models"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(duplicate);
+            }
+            12 => {
+                response["data"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("schema_version");
+            }
+            13 => {
+                response["data"]["models"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("name");
+            }
+            14 => response["payload_schema"] = json!("cargo-ai.run.v1"),
+            15 => response["data"]["auth"] = json!("none"),
+            16 => {
+                response.as_object_mut().unwrap().remove("error");
+            }
+            _ => unreachable!(),
+        }
+        let (output, summary) = fixture.run(
+            "openai",
+            "pass",
+            &"a".repeat(40),
+            "fixture-private-key",
+            &response,
+        );
+        assert!(
+            !output.status.success() && summary.is_empty(),
+            "case {case}"
+        );
+        assert_eq!(fixture.calls().lines().count(), 3);
     }
 }

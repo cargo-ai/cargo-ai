@@ -31,6 +31,51 @@ pub(crate) fn run(matches: &ArgMatches) -> bool {
         }
     }
 }
+/// Adapts the existing usage payload without changing its released schemas.
+pub(crate) fn machine_run(matches: &ArgMatches) -> Result<Value, super::machine::Failure> {
+    let Some((command, args)) = matches.subcommand() else {
+        return Err(super::machine::Failure::new(
+            "input.invalid",
+            "A usage command is required.",
+        ));
+    };
+    if !matches!(
+        command,
+        "context" | "summary" | "runs" | "show" | "settings"
+    ) {
+        return Err(super::machine::Failure::new(
+            "contract.unsupported",
+            "This usage command has no selected finite contract.",
+        ));
+    }
+    let mutation = command == "settings" && args.get_one::<String>("tracking").is_some();
+    let value = execute(matches).map_err(|error| {
+        let code = if error.contains("cursor") || error.contains("filter") || error.contains("schema") || error.contains("timestamps") {
+            "input.invalid"
+        } else if mutation { "persistence.failed" } else { "usage.read_failed" };
+        super::machine::Failure::new(code, "The usage operation could not be completed.")
+            .with_data(json!({"effects":{"local":if mutation {"unknown"} else {"unapplied"},"remote":"unapplied"}}))
+    })?.ok_or_else(|| super::machine::Failure::new("contract.incomplete", "The usage operation returned no payload."))?;
+    if mutation {
+        let requested = args.get_one::<String>("tracking").unwrap() == "on";
+        let saved = usage_store::settings().map_err(|_| {
+            super::machine::Failure::new(
+                "persistence.unverified",
+                "The saved usage setting could not be verified.",
+            )
+        })?;
+        if saved.tracking != requested {
+            return Err(super::machine::Failure::new(
+                "persistence.unverified",
+                "The saved usage setting differs from the requested value.",
+            ));
+        }
+    }
+    Ok(
+        json!({"usage":value,"effects":{"local":if mutation {"applied"} else {"unapplied"},"remote":"unapplied"},"postconditions_verified":mutation}),
+    )
+}
+
 fn envelope() -> Value {
     json!({"schema_version":1,"coverage":{"capture_incomplete":usage_store::incomplete(),"completion":"committed_events_only","unobservable_loss":"process termination or an unwritable home can leave unrecorded facts"}})
 }
@@ -522,6 +567,55 @@ mod contract_tests {
         let db = usage_store::open_database(true).unwrap().unwrap();
         usage_store::insert_event(&db,&json!({"schema_version":1,"event_id":id,"root_run_id":root,"agent_run_id":root,"event_type":"provider_request_completed","timestamp":"2026-09-22T00:00:00Z","provider":{"server":"typesafe","requested_model":"jev","resolved_model":"jev-1"},"status":"success","usage":{"input_tokens":value,"output_tokens":0,"total_tokens":value}})).unwrap();
     }
+    #[test]
+    fn machine_contract_usage_preserves_v1_v2_domain_payloads_and_tracking_independence() {
+        let _home = Home::new();
+        record("fixture-event", "fixture-root", 7);
+        for words in [
+            vec!["summary", "--json"],
+            vec!["summary", "--json", "--schema-version", "2"],
+            vec!["runs", "--json"],
+            vec!["runs", "--json", "--schema-version", "2"],
+            vec!["show", "fixture-root", "--json"],
+            vec!["show", "fixture-root", "--json", "--schema-version", "2"],
+            vec!["context", "--json"],
+            vec!["settings", "--json"],
+        ] {
+            let args = crate::args::parse_cli(
+                "cargo-ai",
+                ["cargo-ai", "usage"]
+                    .into_iter()
+                    .chain(words.iter().copied())
+                    .map(Into::into)
+                    .collect(),
+            )
+            .unwrap();
+            let args = args.subcommand_matches("usage").unwrap();
+            let legacy = execute(args).unwrap().unwrap();
+            let selected = machine_run(args).unwrap();
+            assert_eq!(selected["usage"], legacy);
+            assert_eq!(selected["effects"]["local"], "unapplied");
+        }
+        let args = crate::args::parse_cli(
+            "cargo-ai",
+            ["cargo-ai", "usage", "settings", "--tracking", "off"]
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        )
+        .unwrap();
+        let selected = machine_run(args.subcommand_matches("usage").unwrap()).unwrap();
+        assert_eq!(selected["effects"]["local"], "applied");
+        assert_eq!(selected["postconditions_verified"], true);
+        let saved = usage_store::settings().unwrap();
+        assert!(!saved.tracking);
+        assert!(!saved.backup_enabled);
+        assert_eq!(
+            query(&["summary", "--json"])["summary"]["tokens"]["input_tokens"],
+            7
+        );
+    }
+
     #[test]
     fn empty_reads_and_optout_do_not_create_history() {
         let home = Home::new();

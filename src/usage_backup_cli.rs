@@ -130,3 +130,54 @@ async fn execute(args: &ArgMatches) -> Result<Value, String> {
         _ => Err("Unknown backup command".into()),
     }
 }
+
+/// New selection wraps existing payloads and retains remote/local failure facts.
+pub(crate) async fn machine_run(
+    args: &ArgMatches,
+) -> Result<Value, crate::commands::machine::Failure> {
+    use crate::commands::machine::Failure;
+    let (command, _leaf) = args
+        .subcommand()
+        .ok_or_else(|| Failure::new("input.invalid", "A backup command is required."))?;
+    if !matches!(
+        command,
+        "status" | "enable" | "disable" | "sync" | "include-history"
+    ) {
+        return Err(Failure::new(
+            "contract.unsupported",
+            "This backup command has no selected finite contract.",
+        ));
+    }
+    let mutation = matches!(command, "enable" | "disable" | "sync" | "include-history");
+    let result = match command {
+        "enable" => usage_backup::enable_outcome().await.map_err(|error| {
+            Failure::new(if error.effects.remote == "applied" {"operation.partial"} else {"backup.enable_failed"},
+                "Backup enable did not complete; reconcile consent and local state before retrying.")
+                .with_data(json!({"partial":error.effects.remote == "applied" || error.effects.uploaded_records > 0,"effects":error.effects.value()}))
+        }),
+        "disable" => usage_backup::disable_outcome().map_err(|error| {
+            Failure::new(if error.effects.queue == "applied" {"operation.partial"} else {"backup.disable_failed"},
+                "Backup disable did not complete; inspect consent and queue state before retrying.")
+                .with_data(json!({"partial":error.effects.queue == "applied","effects":error.effects.value()}))
+        }),
+        "sync" => usage_backup::sync_outcome().await.map_err(|error| {
+            Failure::new(if error.effects.remote == "applied" || error.effects.uploaded_records > 0 {"operation.partial"} else {"backup.sync_failed"},
+                "Backup sync did not complete; reconcile remote acknowledgments and local queue before retrying.")
+                .with_data(json!({"partial":error.effects.remote == "applied" || error.effects.uploaded_records > 0,"effects":error.effects.value()}))
+        }),
+        _ => execute(args).await.map_err(|_| Failure::new("backup.operation_failed", "The backup operation could not be completed.")
+            .with_data(json!({"effects":{"local":if mutation {"unknown"} else {"unapplied"},"remote":"unapplied"}}))),
+    }?;
+    let local = usage_backup::local_status().map_err(|_| Failure::new("persistence.unverified", "The local backup state could not be verified.")
+        .with_data(json!({"partial":mutation,"backup":result,"effects":{"local":if mutation {"unknown"} else {"unapplied"},"remote":if command == "enable" || command == "sync" && result["uploaded_records"].as_u64().unwrap_or(0) > 0 {"applied"} else {"unapplied"}}})))?;
+    if command == "enable" && local["enabled"] != true
+        || command == "disable" && local["enabled"] != false
+    {
+        return Err(Failure::new("persistence.unverified", "The saved backup consent differs from the requested state.")
+            .with_data(json!({"partial":true,"backup":result,"local":local,"effects":{"local":"unknown","remote":if command == "enable" {"applied"} else {"unapplied"}}})));
+    }
+    Ok(
+        json!({"backup":result,"local":local,"effects":{"local":if mutation && !(command == "sync" && result["enabled"] == false) {"applied"} else {"unapplied"},
+        "remote":if command == "enable" || command == "sync" && result["uploaded_records"].as_u64().unwrap_or(0) > 0 {"applied"} else {"unapplied"}},"postconditions_verified":true}),
+    )
+}

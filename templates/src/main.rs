@@ -15,6 +15,10 @@ mod web_resources;
 
 use jsonlogic::apply;
 use serde::{Deserialize, Serialize};
+// Generated agents retain their established output protocol. The interpreted
+// CLI supplies the optional observer for this shared production write hook.
+fn note_runtime_artifact(_kind: &str, _path: &std::path::Path) {}
+
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -30,8 +34,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use config::loader::{config_path, find_profile, load_config};
 use config::schema::{Profile, ProfileAuthMode, SecretStoreMode};
 use providers::{
-    AuthenticationPolicy, ProviderError, ProviderKind, provider_error_messages,
-    validate_provider_content_parts, validate_provider_request,
+    provider_error_messages, validate_provider_content_parts, validate_provider_request,
+    AuthenticationPolicy, ProviderError, ProviderKind,
 };
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
@@ -3758,9 +3762,9 @@ mod tests {
         assert!(error.contains("string_bytes"));
     }
     use super::{
-        ActionOutputMode, LoadedProfileKind, RequestedActionRenderMode,
         package_child_project_root_from, resolve_action_render_mode_for_capability,
-        resolve_loaded_profile, validate_agent_step_target,
+        resolve_loaded_profile, validate_agent_step_target, ActionOutputMode, LoadedProfileKind,
+        RequestedActionRenderMode,
     };
     use crate::config::schema::{Config, OpenAiAuth, Profile, ProfileAuthMode, WebResources};
     use std::fs;

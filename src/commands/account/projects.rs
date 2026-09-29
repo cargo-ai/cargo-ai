@@ -182,6 +182,23 @@ impl<R: Read> Read for BoundedArchiveReader<R> {
 }
 
 pub async fn run(projects_m: &ArgMatches) -> bool {
+    execute(projects_m, &mut super::machine::Report::new(false)).await
+}
+pub(crate) async fn machine_run(
+    args: &ArgMatches,
+) -> Result<Value, crate::commands::machine::Failure> {
+    let mut report = super::machine::Report::new(true);
+    execute(args, &mut report).await;
+    report.result
+}
+async fn execute(projects_m: &ArgMatches, report: &mut super::machine::Report) -> bool {
+    execute_at(projects_m, report, INFRA_BASE_URL).await
+}
+async fn execute_at(
+    projects_m: &ArgMatches,
+    report: &mut super::machine::Report,
+    base_url: &str,
+) -> bool {
     let projects_command = if let Some(list_m) = projects_m.subcommand_matches("list") {
         let owner_handle =
             crate::commands::local_packages::account_handle_from_list_matches(list_m).flatten();
@@ -285,6 +302,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
         }
     };
 
+    report.prerequisites();
     let auth = match load_account_auth() {
         Ok(auth) => auth,
         Err(message) => {
@@ -292,6 +310,10 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
             return false;
         }
     };
+    report.protect(&auth.access_token);
+    if let Some(secret) = auth.refresh_token.as_deref() {
+        report.protect(secret);
+    }
     let access_token_owned = auth.access_token;
     let refresh_token = auth.refresh_token;
 
@@ -300,6 +322,11 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
 
     #[cfg(feature = "developer-tools")]
     if let ProjectsCommand::Publish { profile, source_id } = &projects_command {
+        report.fail(
+            "package.preparation_failed",
+            "The package or publication receipt could not be prepared.",
+            json!({"remote_effect":"not_attempted","local_preparation":"unknown"}),
+        );
         match prepare_publish_payload(profile.as_str()).and_then(|mut payload| {
             let root = current_project_root()?.ok_or("No project root")?;
             payload.receipt_root = root.clone();
@@ -321,13 +348,17 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
         }
     }
 
+    report.transmitting(!matches!(
+        &projects_command,
+        ProjectsCommand::List { .. } | ProjectsCommand::Pull { .. }
+    ));
     let mut response = match &projects_command {
         ProjectsCommand::List {
             owner_handle,
             include_archived,
             ..
         } => match infra_api::account::projects::list_projects(
-            INFRA_BASE_URL,
+            base_url,
             access_token_owned.as_str(),
             owner_handle.as_deref(),
             *include_archived,
@@ -346,8 +377,13 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
                 .as_ref()
                 .expect("publish payload should be prepared");
 
-            match transmit_publish_payload(INFRA_BASE_URL, access_token_owned.as_str(), payload)
-                .await
+            match transmit_publish_payload_observed(
+                base_url,
+                access_token_owned.as_str(),
+                payload,
+                report,
+            )
+            .await
             {
                 Ok(r) => r,
                 Err(e) => {
@@ -363,12 +399,13 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
             owner_handle,
             version,
             ..
-        } => match crate::commands::local_packages::pull_inspected_hosted_package(
+        } => match crate::commands::local_packages::pull_inspected_hosted_package_observed(
             name,
             owner_handle.as_deref(),
             source_id.as_deref(),
             version.as_deref(),
             version_id.as_deref(),
+            report,
         )
         .await
         {
@@ -380,7 +417,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
         },
         ProjectsCommand::Rename { source_id, name } => {
             match infra_api::account::projects::rename_project(
-                INFRA_BASE_URL,
+                base_url,
                 access_token_owned.as_str(),
                 source_id,
                 name,
@@ -396,7 +433,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
         }
         ProjectsCommand::Visibility { name, is_public } => {
             match infra_api::account::projects::set_project_visibility(
-                INFRA_BASE_URL,
+                base_url,
                 access_token_owned.as_str(),
                 name,
                 *is_public,
@@ -412,7 +449,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
         }
         ProjectsCommand::Archive { name, is_archived } => {
             match infra_api::account::projects::set_project_archive(
-                INFRA_BASE_URL,
+                base_url,
                 access_token_owned.as_str(),
                 name,
                 *is_archived,
@@ -435,6 +472,11 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
         .unwrap_or(false);
 
     if is_expired_error {
+        report.fail(
+            "account.authentication",
+            "The operation was rejected because its access token expired.",
+            json!({"remote_effect":"unapplied","session_refresh":"unconfirmed"}),
+        );
         match refresh_access_token_for_retry(access_token_owned.as_str(), refresh_token.as_deref())
             .await
         {
@@ -453,21 +495,38 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
                 return false;
             }
             Ok((retry_access_token, refreshed_expires_in)) => {
+                report.protect(&retry_access_token);
                 if let Some(rt) = refresh_token.as_deref() {
-                    persist_refreshed_access_token(
-                        retry_access_token.as_str(),
-                        rt,
-                        refreshed_expires_in,
-                    );
+                    if report.active {
+                        report.session_persistence =
+                            match super::helpers::persist_selected_refreshed_access_token(
+                                &retry_access_token,
+                                rt,
+                                refreshed_expires_in,
+                            ) {
+                                Ok(()) => "persisted",
+                                Err(_) => "failed",
+                            };
+                    } else {
+                        persist_refreshed_access_token(
+                            &retry_access_token,
+                            rt,
+                            refreshed_expires_in,
+                        );
+                    }
                 }
 
+                report.transmitting(!matches!(
+                    &projects_command,
+                    ProjectsCommand::List { .. } | ProjectsCommand::Pull { .. }
+                ));
                 response = match &projects_command {
                     ProjectsCommand::List {
                         owner_handle,
                         include_archived,
                         ..
                     } => match infra_api::account::projects::list_projects(
-                        INFRA_BASE_URL,
+                        base_url,
                         retry_access_token.as_str(),
                         owner_handle.as_deref(),
                         *include_archived,
@@ -486,10 +545,11 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
                             .as_ref()
                             .expect("publish payload should be prepared");
 
-                        match transmit_publish_payload(
-                            INFRA_BASE_URL,
+                        match transmit_publish_payload_observed(
+                            base_url,
                             retry_access_token.as_str(),
                             payload,
+                            report,
                         )
                         .await
                         {
@@ -507,12 +567,13 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
                         owner_handle,
                         version,
                         ..
-                    } => match crate::commands::local_packages::pull_inspected_hosted_package(
+                    } => match crate::commands::local_packages::pull_inspected_hosted_package_observed(
                         name,
                         owner_handle.as_deref(),
                         source_id.as_deref(),
                         version.as_deref(),
                         version_id.as_deref(),
+                        report,
                     )
                     .await
                     {
@@ -524,7 +585,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
                     },
                     ProjectsCommand::Rename { source_id, name } => {
                         match infra_api::account::projects::rename_project(
-                            INFRA_BASE_URL,
+                            base_url,
                             retry_access_token.as_str(),
                             source_id,
                             name,
@@ -540,7 +601,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
                     }
                     ProjectsCommand::Visibility { name, is_public } => {
                         match infra_api::account::projects::set_project_visibility(
-                            INFRA_BASE_URL,
+                            base_url,
                             retry_access_token.as_str(),
                             name,
                             *is_public,
@@ -556,7 +617,7 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
                     }
                     ProjectsCommand::Archive { name, is_archived } => {
                         match infra_api::account::projects::set_project_archive(
-                            INFRA_BASE_URL,
+                            base_url,
                             retry_access_token.as_str(),
                             name,
                             *is_archived,
@@ -575,6 +636,34 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
         }
     }
 
+    let expected_type = match &projects_command {
+        ProjectsCommand::List { .. } => "account_projects_list_succeeded",
+        #[cfg(feature = "developer-tools")]
+        ProjectsCommand::Publish { .. } => "account_projects_publish_succeeded",
+        ProjectsCommand::Pull { .. } => "account_projects_pull_succeeded",
+        ProjectsCommand::Visibility { .. } => "account_projects_visibility_updated",
+        ProjectsCommand::Rename { .. } => "account_projects_rename_succeeded",
+        ProjectsCommand::Archive { .. } => "account_projects_archive_succeeded",
+    };
+    if report.active {
+        if let Err(error) = super::machine::response_ok(&response, expected_type) {
+            report.result = Err(error);
+            return false;
+        }
+        if let ProjectsCommand::Visibility { name, is_public } = &projects_command {
+            if response["project"].as_str() != Some(name)
+                || response["public"].as_bool() != Some(*is_public)
+            {
+                report.fail(
+                    "operation.outcome_unknown",
+                    "The service did not confirm the selected package visibility.",
+                    json!({"remote_effect":"unknown"}),
+                );
+                return false;
+            }
+        }
+    }
+    let original_count = response["projects"].as_array().map(Vec::len).unwrap_or(0);
     if let ProjectsCommand::List { display_limit, .. } = &projects_command {
         let _ = apply_projects_list_display_limit(&mut response, *display_limit);
     }
@@ -612,11 +701,34 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
                 .clone()
                 .unwrap_or_else(|| PathBuf::from(resolved_name));
 
+            report.fail(
+                "persistence.failed",
+                "The package was retrieved but local extraction could not be confirmed.",
+                json!({"retrieved":true,"local_effect":"unknown","output_path":output_path}),
+            );
             if let Err(error) = restore_pulled_project(&response, &output_path, *force) {
                 eprintln!("x {error}");
                 return false;
             }
 
+            if report.active {
+                let mut data = super::machine::fields(
+                    &response,
+                    &[
+                        "project",
+                        "owner_handle",
+                        "project_version",
+                        "hosted_source_id",
+                        "hosted_version_id",
+                        "package_sha256",
+                        "package_size_bytes",
+                    ],
+                );
+                data["output_path"] = json!(output_path);
+                data["retrieved"] = json!(true);
+                data["local_effect"] = json!("applied");
+                report.accepted(data);
+            }
             response["ui"] = build_local_pull_ui(
                 response
                     .get("owner_handle")
@@ -636,6 +748,60 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
         }
     }
 
+    if report.active {
+        match &projects_command {
+            ProjectsCommand::List { owner_handle, .. } => {
+                report.result = super::machine::list_payload(
+                    &response,
+                    "projects",
+                    &[
+                        "project_name",
+                        "project",
+                        "project_version",
+                        "owner_handle",
+                        "hosted_source_id",
+                        "hosted_version_id",
+                        "is_public",
+                        "is_archived",
+                        "updated_at",
+                    ],
+                    original_count,
+                );
+                if let Ok(data) = &report.result {
+                    let mut data = data.clone();
+                    data["owner_handle"] = json!(owner_handle);
+                    report.accepted(data);
+                }
+            }
+            ProjectsCommand::Pull { .. } => {}
+            #[cfg(feature = "developer-tools")]
+            ProjectsCommand::Publish { .. } => {
+                let mut data = super::machine::fields(
+                    &response,
+                    &[
+                        "project",
+                        "project_version",
+                        "hosted_source_id",
+                        "hosted_version_id",
+                        "package_sha256",
+                    ],
+                );
+                if let Some(payload) = &prepared_publish_payload {
+                    data["request_id"] = json!(payload.request_id);
+                    data["package_sha256"] = json!(payload.package_sha256);
+                }
+                data["remote_effect"] = json!("applied");
+                data["receipt_persistence"] = json!("persisted");
+                report.accepted(data);
+            }
+            _ => {
+                let mut data =
+                    super::machine::fields(&response, &["project", "public", "is_archived"]);
+                data["remote_effect"] = json!("applied");
+                report.accepted(data);
+            }
+        }
+    }
     render_account_projects_response(&response);
     response
         .get("status")
@@ -644,11 +810,27 @@ pub async fn run(projects_m: &ArgMatches) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(feature = "developer-tools")]
+#[cfg(all(feature = "developer-tools", test))]
 async fn transmit_publish_payload(
     base_url: &str,
     token: &str,
     payload: &PublishPayload,
+) -> Result<Value, String> {
+    transmit_publish_payload_observed(
+        base_url,
+        token,
+        payload,
+        &mut super::machine::Report::new(false),
+    )
+    .await
+}
+
+#[cfg(feature = "developer-tools")]
+async fn transmit_publish_payload_observed(
+    base_url: &str,
+    token: &str,
+    payload: &PublishPayload,
+    report: &mut super::machine::Report,
 ) -> Result<Value, String> {
     let response = infra_api::account::projects::publish_project(
         base_url,
@@ -663,14 +845,49 @@ async fn transmit_publish_payload(
         payload.hosted_source_id.as_deref(),
     )
     .await?;
+    if report.active {
+        if let Err(error) =
+            super::machine::response_ok(&response, "account_projects_publish_succeeded")
+        {
+            report.result = Err(error);
+            return Ok(response);
+        }
+        if response["project"].as_str() != Some(payload.project_name.as_str())
+            || crate::commands::package_publication::validate_terminal_response(
+                &payload.request_id,
+                &payload.project_version,
+                &payload.package_sha256,
+                &response,
+            )
+            .is_err()
+        {
+            report.fail("operation.outcome_unknown", "The publication response did not confirm its immutable request identity.", json!({"request_id":payload.request_id,"remote_effect":"unknown","receipt_persistence":"not_attempted"}));
+            return Err("Publication response identity was invalid".into());
+        }
+    }
     if response["status"] == "success" {
-        crate::commands::package_publication::record_terminal(
+        if let Err(error) = crate::commands::package_publication::record_terminal(
             &payload.receipt_root,
             &payload.request_id,
             &payload.project_version,
             &payload.package_sha256,
             &response,
-        )?;
+        ) {
+            let mut data = super::machine::fields(
+                &response,
+                &[
+                    "project",
+                    "project_version",
+                    "hosted_source_id",
+                    "hosted_version_id",
+                ],
+            );
+            data["request_id"] = json!(payload.request_id);
+            data["remote_effect"] = json!("applied");
+            data["receipt_persistence"] = json!("failed");
+            report.fail("operation.partial", "The service confirmed publication, but its terminal receipt could not be persisted.", data);
+            return Err(error);
+        }
     }
     Ok(response)
 }
@@ -3117,5 +3334,96 @@ package_sha256 = "abc"
             super::FILE_ATTRIBUTE_REPARSE_POINT
         ));
         assert!(!super::archive_windows_attributes_are_link_like(0));
+    }
+}
+
+#[cfg(test)]
+mod machine_contract_tests {
+    use super::*;
+    #[tokio::test]
+    async fn machine_packages_hosted_listing_and_visibility_are_allowlisted() {
+        let _home = crate::commands::secret_input::test_support::Home::new();
+        crate::config::adder::set_account_tokens(
+            "fixture-access".into(),
+            "fixture-refresh".into(),
+            3600,
+        )
+        .unwrap();
+        let mut server = mockito::Server::new_async().await;
+        for (words, response) in [
+            (
+                vec!["cargo-ai", "packages", "list", "--account", "--all"],
+                json!({"status":"success","type":"account_projects_list_succeeded","projects":[{"project_name":"fixture","is_public":false,"internal_owner":"secret"}],"ui":{"title":"secret"}}),
+            ),
+            (
+                vec![
+                    "cargo-ai",
+                    "packages",
+                    "visibility",
+                    "--name",
+                    "fixture",
+                    "--private",
+                ],
+                json!({"status":"success","type":"account_projects_visibility_updated","project":"fixture","public":false,"message":"secret"}),
+            ),
+        ] {
+            let request = server
+                .mock("POST", "/account")
+                .with_status(200)
+                .with_body(response.to_string())
+                .expect(1)
+                .create_async()
+                .await;
+            let args = super::super::machine::fixture_args(&words);
+            let mut report = super::super::machine::Report::new(true);
+            assert!(
+                execute_at(
+                    args.subcommand_matches("packages").unwrap(),
+                    &mut report,
+                    &server.url()
+                )
+                .await
+            );
+            let data = report.result.unwrap();
+            assert!(!data.to_string().contains("secret"));
+            request.assert_async().await;
+            request.remove_async().await;
+        }
+    }
+    #[cfg(feature = "developer-tools")]
+    #[tokio::test]
+    async fn machine_publication_distinguishes_remote_acceptance_and_receipt_failure() {
+        let home = crate::commands::secret_input::test_support::Home::new();
+        let digest = "a".repeat(64);
+        let id = Uuid::new_v4().to_string();
+        let payload = PublishPayload {
+            receipt_root: home.path.clone(),
+            request_id: id.clone(),
+            hosted_source_id: None,
+            project_name: "fixture".into(),
+            project_version: "1.0.0".into(),
+            package_manifest: json!({}),
+            package_sha256: digest.clone(),
+            package_size_bytes: 1,
+            package_archive_base64: "YQ==".into(),
+        };
+        let mut server = mockito::Server::new_async().await;
+        let request=server.mock("POST","/account").with_status(200).with_body(json!({"status":"success","type":"account_projects_publish_succeeded","project":"fixture","hosted_source_id":"source-id","hosted_version_id":"version-id","project_version":"1.0.0","package_sha256":digest,"message":"private-secret"}).to_string()).expect(1).create_async().await;
+        let mut report = super::super::machine::Report::new(true);
+        assert!(transmit_publish_payload_observed(
+            &server.url(),
+            "fixture-access",
+            &payload,
+            &mut report
+        )
+        .await
+        .is_err());
+        let failure = report.result.unwrap_err();
+        assert_eq!(failure.code, "operation.partial");
+        assert_eq!(failure.data["remote_effect"], "applied");
+        assert_eq!(failure.data["receipt_persistence"], "failed");
+        assert_eq!(failure.data["request_id"], id);
+        assert!(!failure.data.to_string().contains("private-secret"));
+        request.assert_async().await;
     }
 }

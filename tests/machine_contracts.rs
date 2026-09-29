@@ -1,0 +1,628 @@
+//! Application contracts exercise isolated production entrypoints.
+#[allow(dead_code)]
+mod support;
+use serde_json::{json, Value};
+use std::{fs, process::Output};
+use support::Fixture;
+
+fn run(f: &Fixture, args: &[&str]) -> Output {
+    f.cargo_ai_command(&f.root)
+        .args(args)
+        .args(["--output-format", "json", "--output-schema-version", "1"])
+        .output()
+        .unwrap()
+}
+fn response(output: &Output) -> Value {
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v: Value = serde_json::from_slice(&output.stdout).expect("exactly one JSON response");
+    assert_eq!(v["schema_version"], 1);
+    assert_eq!(v["completion"]["terminal"], true);
+    assert!(!v["request_id"].as_str().unwrap().is_empty());
+    assert_eq!(output.status.success(), v["outcome"] == "succeeded");
+    v
+}
+fn configure(f: &Fixture) {
+    fs::write(
+        f.cargo_ai_home.join("config.toml"),
+        "secret_store='file'\nprofile=[]\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn capabilities_and_rejected_negotiation_are_passive_and_secret_safe() {
+    let f = Fixture::new("machine-passive");
+    let absent = f.root.join("absent");
+    let output = f
+        .cargo_ai_command(&f.root)
+        .env("CARGO_AI_HOME", &absent)
+        .args(["capabilities", "--output-format", "json"])
+        .output()
+        .unwrap();
+    let data = response(&output);
+    assert_eq!(data["outcome"], "succeeded");
+    assert!(!absent.exists());
+    assert!(data["data"]["contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["command"] == "models list"));
+    let version = response(&run(&f, &["--version"]));
+    for field in ["version", "developer_tools", "target_os", "target_arch"] {
+        assert!(!version["data"][field].is_null());
+    }
+    for args in [
+        vec![
+            "--help",
+            "--output-format",
+            "json",
+            "--output-schema-version",
+            "99",
+        ],
+        vec![
+            "--version",
+            "--output-format=json",
+            "--output-schema-version=99",
+        ],
+        vec!["run", "--help", "--output-format", "ndjson"],
+        vec!["--version", "--output-format", "yaml"],
+        vec!["--help", "--output-schema-version", "1"],
+    ] {
+        let output = f
+            .cargo_ai_command(&f.root)
+            .env("CARGO_AI_HOME", &absent)
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(
+            response(&output)["error"]["code"],
+            "cli.unsupported_contract"
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!absent.exists());
+    }
+    let help = f
+        .cargo_ai_command(&f.root)
+        .env("CARGO_AI_HOME", &absent)
+        .args([
+            "--help",
+            "--output-format=json",
+            "--output-schema-version=1",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(response(&help)["command"], "capabilities");
+    assert!(!absent.exists());
+    let output = f
+        .cargo_ai_command(&f.root)
+        .env("CARGO_AI_HOME", &absent)
+        .args([
+            "profile",
+            "add",
+            "unapplied",
+            "--server",
+            "ollama",
+            "--model",
+            "x",
+            "--auth",
+            "none",
+            "--output-format",
+            "json",
+            "--output-schema-version",
+            "99",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        response(&output)["error"]["code"],
+        "cli.unsupported_contract"
+    );
+    assert!(!absent.exists());
+    let output = run(
+        &f,
+        &[
+            "profile",
+            "set",
+            "x",
+            "--temperature",
+            "synthetic-misplaced-secret",
+        ],
+    );
+    assert_eq!(response(&output)["error"]["code"], "cli.invalid_input");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-misplaced-secret"));
+}
+
+#[test]
+fn profile_machine_changes_and_legacy_readers_share_persisted_state() {
+    let f = Fixture::new("machine-profile");
+    configure(&f);
+    assert_eq!(
+        response(&run(
+            &f,
+            &[
+                "profile",
+                "add",
+                "fixture",
+                "--server",
+                "ollama",
+                "--model",
+                "exact:id",
+                "--auth",
+                "none",
+                "--default"
+            ]
+        ))["outcome"],
+        "succeeded"
+    );
+    let before = fs::read(f.cargo_ai_home.join("config.toml")).unwrap();
+    let show = response(&run(&f, &["profile", "show", "fixture"]));
+    assert_eq!(show["data"]["profile"]["model"], "exact:id");
+    assert_eq!(
+        fs::read(f.cargo_ai_home.join("config.toml")).unwrap(),
+        before
+    );
+    let legacy = f
+        .cargo_ai_command(&f.root)
+        .args(["profile", "show", "fixture", "--no-update-check"])
+        .output()
+        .unwrap();
+    assert!(legacy.status.success());
+    assert!(String::from_utf8_lossy(&legacy.stdout).contains("Model:   exact:id"));
+    let updated = response(&run(
+        &f,
+        &["profile", "set", "fixture", "--model", "other:exact"],
+    ));
+    assert_eq!(updated["outcome"], "succeeded");
+    let refusal = response(&run(&f, &["profile", "remove", "fixture"]));
+    assert_eq!(refusal["outcome"], "requires_interaction");
+    assert_eq!(
+        response(&run(&f, &["profile", "remove", "fixture", "--yes"]))["outcome"],
+        "succeeded"
+    );
+}
+
+#[test]
+fn runtime_provider_results_require_explicit_private_content_opt_in() {
+    for include in [false, true] {
+        let f = Fixture::new("machine-private-result");
+        configure(&f);
+        let private = "private answer fixture";
+        let server = support::OneShotHttpServer::json(
+            "/v1/chat/completions",
+            json!({"choices":[{"message":{"role":"assistant","content":json!({"answer":private}).to_string()}}]}),
+        );
+        fs::write(f.root.join("answer.json"),json!({"agent_definition_schema_version":"2026-03-03.r1","inputs":[{"type":"text","text":"fixture"}],"agent_schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false},"actions":[]}).to_string()).unwrap();
+        let mut command = f.cargo_ai_command(&f.root);
+        command.args([
+            "run",
+            "answer.json",
+            "--server",
+            "ollama",
+            "--model",
+            "fixture",
+            "--url",
+            &server.url,
+            "--output-format",
+            "json",
+        ]);
+        if include {
+            command.arg("--include-result-content");
+        }
+        let output = command.output().unwrap();
+        let value = response(&output);
+        assert_eq!(value["outcome"], "succeeded", "{value}");
+        assert_eq!(value["data"]["result"]["availability"], "available");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).contains(private),
+            include
+        );
+        if include {
+            assert_eq!(value["data"]["result"]["content"]["answer"], private);
+        } else {
+            assert_eq!(value["data"]["result"]["content_included"], false);
+        }
+        assert!(server.finish().starts_with("POST /v1/chat/completions"));
+    }
+}
+
+#[test]
+fn inventory_leaf_prerequisites_never_fall_back_to_prose_or_network() {
+    let f = Fixture::new("machine-inventory");
+    configure(&f);
+    let cases: &[&[&str]] = &[
+        &["profile", "list"],
+        &["profile", "show", "missing"],
+        &["account", "status"],
+        &["account", "register", "fixture@example.test"],
+        &["account", "confirm", "--stdin"],
+        &["account", "deactivate"],
+        &["auth", "login", "openai"],
+        &["packages", "list"],
+        &["packages", "inspect", "missing"],
+        &["packages", "list", "--account", "--all"],
+        &["packages", "inspect", "missing", "--account", "--json"],
+        &[
+            "packages",
+            "install",
+            "--account",
+            "--source-id",
+            "source",
+            "--version-id",
+            "version",
+            "--as",
+            "alias",
+            "--accept-permissions",
+        ],
+        &[
+            "packages",
+            "pull",
+            "--source-id",
+            "source",
+            "--version-id",
+            "version",
+            "--output-dir",
+            "out",
+        ],
+        &["packages", "visibility", "--name", "missing", "--public"],
+        &["packages", "publish"],
+        &["agents", "list", "--all"],
+        &[
+            "agents",
+            "pull",
+            "--name",
+            "missing",
+            "--definition-path",
+            "/",
+            "--stdout",
+        ],
+        &[
+            "agents",
+            "push",
+            "--name",
+            "missing",
+            "--definition-path",
+            "/",
+            "--json-file",
+            "absent.json",
+        ],
+        &[
+            "agents",
+            "visibility",
+            "--name",
+            "missing",
+            "--definition-path",
+            "/",
+            "--private",
+        ],
+        &["usage", "context", "--json"],
+        &["usage", "summary", "--json"],
+        &["usage", "summary", "--json", "--schema-version", "2"],
+        &["usage", "runs", "--json", "--limit", "50"],
+        &["usage", "runs", "--json", "--schema-version", "2"],
+        &["usage", "show", "missing", "--json", "--limit", "50"],
+        &[
+            "usage",
+            "show",
+            "missing",
+            "--json",
+            "--schema-version",
+            "2",
+        ],
+        &["usage", "settings", "--json"],
+        &["usage", "backup", "status", "--json"],
+        &["usage", "backup", "enable", "--json"],
+        &["usage", "backup", "disable", "--json"],
+        &["usage", "backup", "sync", "--json"],
+        &["usage", "backup", "include-history", "--json"],
+        &[
+            "run",
+            "absent.json",
+            "--render-mode",
+            "append-only",
+            "--max-runtime-in-sec",
+            "1",
+        ],
+    ];
+    for args in cases {
+        let v = response(&run(&f, args));
+        assert_ne!(v["error"]["code"], "cli.unsupported_contract", "{args:?}");
+        assert_ne!(
+            v["error"]["code"], "cli.invalid_input",
+            "{args:?}: malformed fixture arguments"
+        );
+    }
+    assert!(!f.root.join("out").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_stream_frames_real_lifecycle_and_private_child_output_isolated() {
+    let f = Fixture::new("machine-runtime");
+    configure(&f);
+    let definition = json!({"agent_definition_schema_version":"2026-03-03.r1","inputs":[{"type":"text","name":"job","text":"local fixture"}],"agent_schema":{"type":"object","properties":{}},"actions":[{"name":"local","logic":{"==":[1,1]},"run":[{"kind":"exec","program":"sh","args":["-c","printf 'private child sentinel\\n'; printf 'private stderr sentinel\\n' >&2"]}]}]});
+    fs::write(f.root.join("local.json"), definition.to_string()).unwrap();
+    let output = f
+        .cargo_ai_command(&f.root)
+        .args([
+            "run",
+            "local.json",
+            "--server",
+            "ollama",
+            "--model",
+            "unused",
+            "--output-format",
+            "ndjson",
+            "--max-runtime-in-sec",
+            "5",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(output.stderr.is_empty());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("private child sentinel"));
+    let events: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.first().unwrap()["event_type"], "operation_started");
+    assert_eq!(events.last().unwrap()["event_type"], "operation_completed");
+    assert_eq!(events.last().unwrap()["data"]["outcome"], "succeeded");
+    for (index, event) in events.iter().enumerate() {
+        assert_eq!(event["sequence"], index as u64);
+        assert_eq!(event["operation_id"], events[0]["operation_id"]);
+    }
+    assert!(events
+        .iter()
+        .any(|event| event["event_type"] == "action_started"));
+}
+
+#[cfg(unix)]
+#[test]
+fn blocked_stream_pipe_cannot_prevent_cancellation_and_owned_child_cleanup() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let f = Fixture::new("machine-blocked-pipe");
+    configure(&f);
+    let child_pid = f.root.join("child.pid");
+    let script = format!("echo $$ > '{}'; sleep 30 & wait", child_pid.display());
+    let definition = json!({"agent_definition_schema_version":"2026-03-03.r1","inputs":[{"type":"text","name":"job","text":"local fixture"}],"agent_schema":{"type":"object","properties":{}},"actions":[{"name":"x".repeat(60000),"logic":{"==":[1,1]},"run":[{"kind":"exec","program":"sh","args":["-c",script]}]}]});
+    fs::write(f.root.join("blocked.json"), definition.to_string()).unwrap();
+    let mut child = f
+        .cargo_ai_command(&f.root)
+        .args([
+            "run",
+            "blocked.json",
+            "--server",
+            "ollama",
+            "--model",
+            "unused",
+            "--output-format",
+            "ndjson",
+            "--max-runtime-in-sec",
+            "30",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    while !child_pid.exists() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(child_pid.exists(), "owned child did not start");
+    let owned_pid = fs::read_to_string(&child_pid).unwrap();
+    assert!(std::process::Command::new("/bin/kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("Blocked stdout prevented bounded cancellation");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(!status.success());
+    let alive = std::process::Command::new("/bin/kill")
+        .args(["-0", owned_pid.trim()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!alive.success(), "owned child survived cancellation");
+    // The caller abandoned its output channel; absence of a delivered terminal
+    // must remain an incomplete invocation, not a success claim.
+}
+
+#[cfg(unix)]
+#[test]
+fn cooperative_cancel_settles_parallel_lanes_before_terminal_cleanup_claim() {
+    use std::{
+        process::Stdio,
+        time::{Duration, Instant},
+    };
+    let f = Fixture::new("machine-parallel-cancel");
+    configure(&f);
+    let mut actions = vec![];
+    for index in 0..2 {
+        let script = format!("echo $$ > lane-{index}.pid; sleep 2; echo late > lane-{index}.late");
+        actions.push(json!({"name":format!("lane-{index}"),"logic":{"==":[1,1]},"run":[{"kind":"exec","program":"sh","args":["-c",script]}]}));
+    }
+    fs::write(f.root.join("parallel.json"),json!({"agent_definition_schema_version":"2026-03-03.r1","action_execution":"parallel","inputs":[{"type":"text","name":"job","text":"fixture"}],"agent_schema":{"type":"object","properties":{}},"actions":actions}).to_string()).unwrap();
+    let mut child = f
+        .cargo_ai_command(&f.root)
+        .args([
+            "run",
+            "parallel.json",
+            "--server",
+            "ollama",
+            "--model",
+            "unused",
+            "--output-format",
+            "ndjson",
+            "--max-runtime-in-sec",
+            "10",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !(0..2).all(|i| f.root.join(format!("lane-{i}.pid")).exists()) {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("parallel lanes did not start");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(std::process::Command::new("/bin/kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("cooperative cancel did not settle");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(130));
+    assert!(output.stderr.is_empty());
+    let events: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    let terminal = events.last().unwrap();
+    assert_eq!(terminal["event_type"], "operation_completed");
+    assert_eq!(terminal["data"]["outcome"], "canceled");
+    assert_eq!(terminal["data"]["data"]["owned_child_cleanup"], "completed");
+    std::thread::sleep(Duration::from_millis(2200));
+    for index in 0..2 {
+        assert!(
+            !f.root.join(format!("lane-{index}.late")).exists(),
+            "canceled lane applied a late effect"
+        );
+        let pid = fs::read_to_string(f.root.join(format!("lane-{index}.pid"))).unwrap();
+        assert!(!std::process::Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+    }
+}
+
+#[cfg(feature = "developer-tools")]
+#[test]
+fn source_backed_package_install_keeps_build_diagnostics_out_of_contract_output() {
+    let f = Fixture::new("machine-source-install");
+    configure(&f);
+    let project = f.root.join("source");
+    support::copy_tree(
+        &support::repository_root().join("tests/fixtures/package_lifecycle"),
+        &project,
+    );
+    let metadata = project.join(".cargo-ai/project.toml");
+    fs::write(
+        &metadata,
+        fs::read_to_string(&metadata)
+            .unwrap()
+            .replace("tools = []", "tools = [\"fixture_tool\"]"),
+    )
+    .unwrap();
+    let tool = project.join("tools/fixture_tool");
+    fs::create_dir_all(tool.join("src")).unwrap();
+    fs::write(
+        tool.join("Cargo.toml"),
+        "[package]\nname='fixture_tool'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    fs::write(
+        tool.join("Cargo.lock"),
+        "version = 4\n[[package]]\nname='fixture_tool'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    fs::write(tool.join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(tool.join("build.rs"),"fn main() { println!(\"cargo:warning=private build stdout sentinel\"); eprintln!(\"private build stderr sentinel\"); }\n").unwrap();
+    let manifest = project.join(".cargo-ai/tools/fixture_tool");
+    fs::create_dir_all(&manifest).unwrap();
+    fs::write(manifest.join("tool.json"),json!({"schema_version":1,"tool_id":"fixture_tool","source":{"manifest_path":"tools/fixture_tool/Cargo.toml"},"binary":{"default_name":"fixture_tool"},"artifacts":{}}).to_string()).unwrap();
+    let package = f.root.join("package");
+    let assembled = f
+        .cargo_ai_command(&project)
+        .args([
+            "package",
+            "default",
+            "--output-dir",
+            package.to_str().unwrap(),
+            "--output-format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(response(&assembled)["outcome"], "succeeded");
+    let installed = response(&run(
+        &f,
+        &[
+            "packages",
+            "install",
+            package.to_str().unwrap(),
+            "--as",
+            "fixture",
+        ],
+    ));
+    assert_eq!(installed["outcome"], "succeeded", "{installed}");
+    assert_eq!(installed["data"]["readback"], "verified");
+    assert_eq!(installed["data"]["package"]["alias"], "fixture");
+    assert_eq!(
+        response(&run(&f, &["packages", "inspect", "fixture"]))["outcome"],
+        "succeeded"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_deadline_and_child_output_limit_have_distinct_safe_errors() {
+    for (script, code, seconds) in [
+        ("sleep 5", "runtime.timeout", "1"),
+        ("head -c 1200000 /dev/zero", "runtime.output_limit", "5"),
+    ] {
+        let f = Fixture::new("machine-runtime-limits");
+        configure(&f);
+        fs::write(f.root.join("limits.json"),json!({"agent_definition_schema_version":"2026-03-03.r1","inputs":[{"type":"text","name":"job","text":"fixture"}],"agent_schema":{"type":"object","properties":{}},"actions":[{"name":"bounded","logic":{"==":[1,1]},"run":[{"kind":"exec","program":"sh","args":["-c",script]}]}]}).to_string()).unwrap();
+        let v = response(&run(
+            &f,
+            &[
+                "run",
+                "limits.json",
+                "--server",
+                "ollama",
+                "--model",
+                "unused",
+                "--max-runtime-in-sec",
+                seconds,
+            ],
+        ));
+        assert_eq!(v["outcome"], "failed", "{v}");
+        assert_eq!(v["error"]["code"], code);
+    }
+}
