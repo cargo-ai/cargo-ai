@@ -68,9 +68,15 @@ Artifacts retain compiler-reported dependency identities/features, installation 
 
 ## Release status
 
-### 0.4.5 source candidate
+### 0.4.5 recorded results
 
-[0.4.5 source notes](../releases/0.4.5.md) describe usage attribution by selected environment, package, package location, agent and consuming workspace, with optional opaque backup metadata. Release qualification, publication and native registry installation are pending. Earlier development checks do not establish release qualification for this candidate. The latest verified release remains 0.4.4 below.
+Verified: 2026-09-28. [0.4.5](../releases/0.4.5.md) adds usage attribution by selected environment, package, package location, agent and consuming workspace, with optional opaque backup metadata. The published, non-yanked crates.io archive embeds clean source `fd483745137260435d3027c7900c9f42c54c3036`, matching tag `v0.4.5`. Its SHA-256 is `2d8d7eed13f3aaaffe574f977a234d29554ba61de87aaef49a9c114c32810532`, byte-identical to the reviewed package. Later test diagnostics and documentation updates do not change this released source.
+
+[Product Qualification 36463738958](https://github.com/cargo-ai/cargo-ai/actions/runs/36463738958/attempts/2), attempt 2, passed on that exact source and workflow revision. All nine native stages, six source-canary/official-package cells, security and the required aggregate passed. Attempt 1 failed on Gemini execution; the failed-job rerun passed Gemini with one new request and retained the original successful jobs and their attempt identities. This recovery does not establish the original failure's cause. OpenAI, Anthropic, Gemini and xAI representative live probes passed; TypeSafe Jev completed its eight interpreted/generated cases with requested/returned `jev-1.13.0`. Mistral returned three typed rate limits and remains supplemental **unverified**, not a live-success pass. Earlier media limitations remain applicable; representative text probes do not establish fresh live success for every media route.
+
+Native deterministic lanes recorded 1,136 passing tests on Linux and macOS and 1,073 on Windows, with 19 intentionally ignored on each. Generated-provider parity passed separately. Canary revision `b803c21e692bc249c23a3f50fdf18e0cf7ae460e` and official Animal Patrol revision `5cc555977a40a4766b5fe65d6ed3cbf5cff33eed` passed on all three platforms. The security family passed cargo-audit; separate unchanged cargo-deny policy passed with the recorded duplicate-dependency warnings and clean RustSec revision `ef03605143a913024f864d2edf476adad5720c93` fetched on 2026-09-28.
+
+[Registry Installation 36488035975](https://github.com/cargo-ai/cargo-ai/actions/runs/36488035975), attempt 1, passed plain fresh registry installation on Linux, macOS and Windows against published source `fd483745137260435d3027c7900c9f42c54c3036`. Its distinct workflow revision is `94e0611165bda7b4b5221c6e873fb6328fd8ca36`; the Registry Installation badge uses that revision. Each lane downloaded the exact reviewed archive, compiled with fresh registry resolution, verified version 0.4.5 through direct and Cargo CLI dispatch, and completed a local action. The aggregate passed. The matching [GitHub release](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.5) is published as Latest. These results do not qualify the later diagnostic/documentation commits as a different release candidate.
 
 ### 0.4.4 recorded results
 
