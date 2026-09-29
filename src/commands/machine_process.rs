@@ -271,7 +271,8 @@ pub(crate) fn terminate_all() -> io::Result<()> {
 }
 async fn bounded_read(mut stream: impl tokio::io::AsyncRead + Unpin) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    let mut chunk = [0u8; 8192];
+    // Heap backing avoids multiplying this fixed buffer across nested async frames.
+    let mut chunk = vec![0u8; 8192];
     loop {
         let n = stream.read(&mut chunk).await?;
         if n == 0 {
