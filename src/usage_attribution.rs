@@ -620,6 +620,19 @@ pub(crate) fn with_environment_lock<T>(
     path: &Path,
     action: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
+    with_environment_lock_inner(path, action, |_| {})
+}
+
+fn lock_creation_is_contended(error: &std::io::Error) -> bool {
+    // Windows can deny creation while the previous lock is pending deletion.
+    error.kind() == ErrorKind::AlreadyExists || (cfg!(windows) && error.raw_os_error() == Some(5))
+}
+
+fn with_environment_lock_inner<T>(
+    path: &Path,
+    action: impl FnOnce() -> Result<T, String>,
+    mut on_contention: impl FnMut(&std::io::Error),
+) -> Result<T, String> {
     reject_link_like(path)?;
     let parent = path.parent().ok_or("config path has no parent")?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -642,9 +655,10 @@ pub(crate) fn with_environment_lock<T>(
                 return result;
             }
             Err(error)
-                if error.kind() == ErrorKind::AlreadyExists
+                if lock_creation_is_contended(&error)
                     && start.elapsed() < Duration::from_secs(3) =>
             {
+                on_contention(&error);
                 thread::sleep(Duration::from_millis(10))
             }
             Err(error) => return Err(format!("attribution config lock unavailable: {error}")),
@@ -765,13 +779,124 @@ fn non_empty(value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        authored_id_issue, ensure_environment_id_at, package_identity, read_environment_id_at,
-        resolve_workspace_context, workspace_attribution, InheritedWorkspace, Workspace,
+        authored_id_issue, ensure_environment_id_at, lock_creation_is_contended, package_identity,
+        read_environment_id_at, resolve_workspace_context, workspace_attribution,
+        InheritedWorkspace, Workspace,
     };
     use std::fs;
     use std::sync::Arc;
     use std::thread;
     use uuid::Uuid;
+
+    #[test]
+    fn lock_creation_retries_only_platform_contention() {
+        use std::io::{Error, ErrorKind};
+        assert!(lock_creation_is_contended(&ErrorKind::AlreadyExists.into()));
+        assert_eq!(
+            lock_creation_is_contended(&Error::from_raw_os_error(5)),
+            cfg!(windows)
+        );
+        for kind in [
+            ErrorKind::NotFound,
+            ErrorKind::PermissionDenied,
+            ErrorKind::InvalidInput,
+        ] {
+            assert!(!lock_creation_is_contended(&kind.into()));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delete_pending_lock_waits_for_observed_retry_then_acquires() {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::sync::mpsc;
+        use std::time::Duration;
+        #[link(name = "Kernel32")]
+        unsafe extern "system" {
+            fn DeleteFileW(path: *const u16) -> i32;
+        }
+        let dir = std::env::temp_dir().join(format!("cargo-ai-attribution-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let lock = path.with_extension("toml.attribution.lock");
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(1 | 2 | 4)
+            .open(&lock)
+            .unwrap();
+        let wide = lock
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        // SAFETY: the owned path buffer is NUL-terminated and lives through the call.
+        assert_ne!(unsafe { DeleteFileW(wide.as_ptr()) }, 0);
+        let denied = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+            .unwrap_err();
+        assert_eq!(denied.raw_os_error(), Some(5));
+        let (observed, retries) = mpsc::channel();
+        let release = thread::spawn(move || {
+            let retry = retries.recv_timeout(Duration::from_secs(1));
+            drop(held);
+            retry.unwrap();
+        });
+        let mut signal = Some(observed);
+        let mut actions = 0;
+        let result = super::with_environment_lock_inner(
+            &path,
+            || {
+                actions += 1;
+                Ok(())
+            },
+            |error| {
+                assert_eq!(error.raw_os_error(), Some(5));
+                if let Some(sender) = signal.take() {
+                    sender.send(()).unwrap();
+                }
+            },
+        );
+        release.join().unwrap();
+        result.unwrap();
+        assert_eq!(actions, 1);
+        assert!(!lock.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn persistent_lock_access_denial_does_not_run_action_or_extend_budget() {
+        use std::time::{Duration, Instant};
+        let dir = std::env::temp_dir().join(format!("cargo-ai-attribution-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let lock = path.with_extension("toml.attribution.lock");
+        fs::create_dir(&lock).unwrap();
+        let denied = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+            .unwrap_err();
+        assert_eq!(denied.raw_os_error(), Some(5));
+        let started = Instant::now();
+        let mut actions = 0;
+        let error = super::with_environment_lock(&path, || {
+            actions += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.contains("os error 5"), "{error}");
+        assert_eq!(actions, 0);
+        assert!(started.elapsed() >= Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(lock.is_dir());
+        assert!(!path.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn concurrent_initializers_reuse_one_persisted_identity() {

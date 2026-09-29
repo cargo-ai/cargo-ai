@@ -877,8 +877,25 @@ fn live_run(
     let output = command
         .output()
         .map_err(|_| qualification_policy::Diagnostic::ExecutionFailure)?;
+    if key == TOKEN {
+        // Synthetic fixture diagnostics contain only bounded execution facts.
+        eprintln!(
+            "TypeSafe fixture: child={invoke_child} exit={:?} judgment={} marker={} legacy_usage={}",
+            output.status.code(), judgment(&output).is_some(), marker.exists(), fixture.usage.exists()
+        );
+    }
     require_live(!text(&output).contains(key) && !fixture.usage.exists())?;
     let events = history_events(fixture, key)?;
+    if key == TOKEN {
+        eprintln!(
+            "TypeSafe fixture history: events={} typesafe={} children={} roots_succeeded={} roots_failed={}",
+            events.len(),
+            events.iter().filter(|event| event["event_type"] == "provider_request_completed" && event["provider"]["server"] == "typesafe").count(),
+            events.iter().filter(|event| event["event_type"] == "provider_request_completed" && event["provider"]["server"] != "typesafe").count(),
+            events.iter().filter(|event| event["event_type"] == "root_run_completed" && event["status"] == "success").count(),
+            events.iter().filter(|event| event["event_type"] == "root_run_completed" && event["status"] == "failed").count()
+        );
+    }
     let requests: Vec<_> = events
         .iter()
         .filter(|event| event["event_type"] == "provider_request_completed")
