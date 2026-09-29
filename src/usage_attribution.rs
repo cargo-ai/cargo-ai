@@ -807,61 +807,38 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn delete_pending_lock_waits_for_observed_retry_then_acquires() {
-        use std::os::windows::ffi::OsStrExt;
-        use std::os::windows::fs::OpenOptionsExt;
-        use std::sync::mpsc;
-        use std::time::Duration;
-        #[link(name = "Kernel32")]
-        unsafe extern "system" {
-            fn DeleteFileW(path: *const u16) -> i32;
-        }
+    fn transient_lock_access_denial_waits_for_observed_retry_then_acquires() {
         let dir = std::env::temp_dir().join(format!("cargo-ai-attribution-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let lock = path.with_extension("toml.attribution.lock");
-        let held = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .share_mode(1 | 2 | 4)
-            .open(&lock)
-            .unwrap();
-        let wide = lock
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
-        // SAFETY: the owned path buffer is NUL-terminated and lives through the call.
-        assert_ne!(unsafe { DeleteFileW(wide.as_ptr()) }, 0);
+        fs::create_dir(&lock).unwrap();
         let denied = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&lock)
             .unwrap_err();
         assert_eq!(denied.raw_os_error(), Some(5));
-        let (observed, retries) = mpsc::channel();
-        let release = thread::spawn(move || {
-            let retry = retries.recv_timeout(Duration::from_secs(1));
-            drop(held);
-            retry.unwrap();
-        });
-        let mut signal = Some(observed);
         let mut actions = 0;
-        let result = super::with_environment_lock_inner(
+        let mut retries = 0;
+        super::with_environment_lock_inner(
             &path,
             || {
+                assert!(lock.is_file());
                 actions += 1;
                 Ok(())
             },
             |error| {
-                assert_eq!(error.raw_os_error(), Some(5));
-                if let Some(sender) = signal.take() {
-                    sender.send(()).unwrap();
+                if retries == 0 {
+                    assert_eq!(error.raw_os_error(), Some(5));
+                    assert!(lock.is_dir());
+                    fs::remove_dir(&lock).unwrap();
                 }
+                retries += 1;
             },
-        );
-        release.join().unwrap();
-        result.unwrap();
+        )
+        .unwrap();
+        assert!(retries >= 1);
         assert_eq!(actions, 1);
         assert!(!lock.exists());
         fs::remove_dir_all(dir).unwrap();

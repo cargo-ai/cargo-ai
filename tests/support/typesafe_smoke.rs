@@ -883,6 +883,36 @@ fn live_run(
             "TypeSafe fixture: child={invoke_child} exit={:?} judgment={} marker={} legacy_usage={}",
             output.status.code(), judgment(&output).is_some(), marker.exists(), fixture.usage.exists()
         );
+        if invoke_child {
+            // These synthetic diagnostics classify fixed labels without exposing matching text.
+            let captured = text(&output);
+            let child_exit = captured.lines().find_map(|line| {
+                let (_, status) = line.split_once("child: exited with status ")?;
+                let status = status
+                    .strip_prefix("exit code: ")
+                    .or_else(|| status.strip_prefix("exit status: "))?;
+                status.split_whitespace().next()?.parse::<i32>().ok()
+            });
+            let cli_unavailable = captured.contains("requires Cargo AI to be available");
+            let artifact_unavailable =
+                captured.contains("was not found relative to the current working directory");
+            let profile_unavailable = captured.contains("references unknown profile")
+                || captured.contains("profile 'local-child' not found")
+                || captured.contains("but no Cargo AI config was found");
+            let spawn_failed = captured.contains("failed to start child agent");
+            let cargo_dispatch_failed = captured.contains("no such command: `ai`")
+                || captured.contains("could not execute process");
+            let parser_rejected = captured.contains("unexpected argument")
+                || captured.contains("unrecognized subcommand");
+            let panicked = captured.contains("panicked at");
+            eprintln!(
+                "TypeSafe fixture child: started={} nonzero={} child_exit={child_exit:?} stderr={} cli_unavailable={cli_unavailable} artifact_unavailable={artifact_unavailable} profile_unavailable={profile_unavailable} spawn_failed={spawn_failed} cargo_dispatch_failed={cargo_dispatch_failed} parser_rejected={parser_rejected} panicked={panicked} unclassified={}",
+                captured.contains("child: started"),
+                captured.contains("child: exited with status"),
+                captured.contains("Child error:"),
+                !output.status.success() && !(cli_unavailable || artifact_unavailable || profile_unavailable || spawn_failed || cargo_dispatch_failed || parser_rejected || panicked)
+            );
+        }
     }
     require_live(!text(&output).contains(key) && !fixture.usage.exists())?;
     let events = history_events(fixture, key)?;
