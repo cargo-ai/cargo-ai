@@ -3185,7 +3185,9 @@ fn parse_runtime_var_value(
 // Initialize Tokio runtime macro
 #[tokio::main]
 async fn main() {
-    run_with_matches(args::build_cli()).await;
+    // Generation inserts provenance command dispatch after argument parsing.
+    let cmd_args = args::build_cli();
+    run_with_matches(cmd_args).await;
 }
 
 async fn run_with_matches(cmd_args: clap::ArgMatches) {

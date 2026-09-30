@@ -1837,6 +1837,101 @@ fn generated_native_account_case(fixture: &Fixture) {
     );
     let target =
         provider_cache::CacheIdentity::current(Path::new(env!("CARGO_BIN_EXE_cargo-ai"))).target;
+    let executable = fixture.root.join("dist").join(if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    });
+    let provenance_fixture = Fixture::new();
+    let invalid_config = b"[invalid synthetic runtime config";
+    let invalid_auth = b"invalid synthetic Codex auth";
+    fs::write(provenance_fixture.home.join("config.toml"), invalid_config).unwrap();
+    fs::create_dir_all(provenance_fixture.root.join("codex")).unwrap();
+    fs::write(
+        provenance_fixture.root.join("codex/auth.json"),
+        invalid_auth,
+    )
+    .unwrap();
+    let cargo_home = provenance_fixture.root.join("cargo-system");
+    fs::create_dir_all(cargo_home.join(".cargo-ai")).unwrap();
+    fs::write(cargo_home.join(".cargo-ai/config.toml"), invalid_config).unwrap();
+    let inspect = provenance_fixture
+        .isolated_command(&executable)
+        .env("CARGO_HOME", &cargo_home)
+        .args(["inspect", "--json"])
+        .output()
+        .expect("actual emitted provenance inspection should start");
+    assert!(
+        inspect.status.success(),
+        "emitted inspect must succeed before runtime setup\n{}\n{}",
+        String::from_utf8_lossy(&inspect.stdout),
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let provenance: Value =
+        serde_json::from_slice(&inspect.stdout).expect("emitted inspect must return JSON");
+    let definition: Value =
+        serde_json::from_slice(&fs::read(&fixture.definition).unwrap()).unwrap();
+    let schema_version = definition["agent_definition_schema_version"]
+        .as_str()
+        .expect("fixture must declare its schema version");
+    assert_eq!(provenance["embedded_definition_json"], definition);
+    assert_eq!(
+        provenance["definition_sha256"],
+        format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&definition).unwrap())
+        )
+    );
+    assert_eq!(provenance["target_triple"], target);
+    assert_eq!(
+        provenance["generated_by_cargo_ai_version"],
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(
+        provenance["generated_with_template_schema_version"],
+        schema_version
+    );
+    assert!(!provenance["agent_build_id"].as_str().unwrap().is_empty());
+    assert!(!provenance["build_timestamp_utc"]
+        .as_str()
+        .unwrap()
+        .is_empty());
+    let version = provenance_fixture
+        .isolated_command(&executable)
+        .env("CARGO_HOME", &cargo_home)
+        .arg("version")
+        .output()
+        .expect("actual emitted version should start");
+    assert!(
+        version.status.success(),
+        "emitted version must succeed before runtime setup\n{}\n{}",
+        String::from_utf8_lossy(&version.stdout),
+        String::from_utf8_lossy(&version.stderr)
+    );
+    let version_text = String::from_utf8_lossy(&version.stdout);
+    for marker in [
+        "Agent version status",
+        env!("CARGO_PKG_VERSION"),
+        schema_version,
+    ] {
+        assert!(
+            version_text.contains(marker),
+            "emitted version missed {marker}: {version_text}"
+        );
+    }
+    assert_eq!(
+        fs::read(provenance_fixture.home.join("config.toml")).unwrap(),
+        invalid_config
+    );
+    assert_eq!(
+        fs::read(provenance_fixture.root.join("codex/auth.json")).unwrap(),
+        invalid_auth
+    );
+    assert_eq!(
+        fs::read(cargo_home.join(".cargo-ai/config.toml")).unwrap(),
+        invalid_config
+    );
+    eprintln!("actual emitted inspect/version provenance dispatch passed with invalid isolated runtime config/auth");
     let output = fixture
         .isolated_command("cargo")
         .current_dir(&workspace)
