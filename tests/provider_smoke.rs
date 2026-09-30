@@ -93,6 +93,7 @@ impl Fixture {
             .current_dir(&self.root)
             .env("CARGO_AI_HOME", &self.home)
             .env("CARGO_AI_DISABLE_KEYCHAIN", "1")
+            .env("CODEX_HOME", self.root.join("codex"))
             // Generated workspaces own their outputs independently of the test runner.
             .env_remove("CARGO_TARGET_DIR");
         command
@@ -1802,6 +1803,186 @@ fn generated_ollama_case(fixture: &Fixture) {
 
 #[test]
 #[ignore = "run explicitly in the provider smoke CI lane"]
+fn generated_native_account_runtime_isolated_and_deterministic() {
+    generated_native_account_case(&Fixture::new());
+}
+
+fn generated_native_account_case(fixture: &Fixture) {
+    let name = "native_account_provider_smoke";
+    let hatch = fixture
+        .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
+        .args(["--no-update-check", "hatch", name, "--config"])
+        .arg(&fixture.definition)
+        .arg("--output-dir")
+        .arg(fixture.root.join("dist"))
+        .args(["--force", "--keep-project"])
+        .output()
+        .expect("native account hatch should start");
+    assert!(
+        hatch.status.success(),
+        "native account hatch failed\n{}\n{}",
+        String::from_utf8_lossy(&hatch.stdout),
+        String::from_utf8_lossy(&hatch.stderr)
+    );
+    if fixture.home.join("batch-seed-marker").exists() {
+        assert!(
+            String::from_utf8_lossy(&hatch.stdout).contains("Reused warmed template"),
+            "native account case should reuse copied seed"
+        );
+    }
+    let workspace = fixture.home.join("agents").join(name);
+    assert!(
+        workspace.join("Cargo.toml").is_file(),
+        "actual emitted workspace must exist"
+    );
+    let target =
+        provider_cache::CacheIdentity::current(Path::new(env!("CARGO_BIN_EXE_cargo-ai"))).target;
+    let executable = fixture.root.join("dist").join(if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    });
+    let provenance_fixture = Fixture::new();
+    let invalid_config = b"[invalid synthetic runtime config";
+    let invalid_auth = b"invalid synthetic Codex auth";
+    fs::write(provenance_fixture.home.join("config.toml"), invalid_config).unwrap();
+    fs::create_dir_all(provenance_fixture.root.join("codex")).unwrap();
+    fs::write(
+        provenance_fixture.root.join("codex/auth.json"),
+        invalid_auth,
+    )
+    .unwrap();
+    let cargo_home = provenance_fixture.root.join("cargo-system");
+    fs::create_dir_all(cargo_home.join(".cargo-ai")).unwrap();
+    fs::write(cargo_home.join(".cargo-ai/config.toml"), invalid_config).unwrap();
+    let inspect = provenance_fixture
+        .isolated_command(&executable)
+        .env("CARGO_HOME", &cargo_home)
+        .args(["inspect", "--json"])
+        .output()
+        .expect("actual emitted provenance inspection should start");
+    assert!(
+        inspect.status.success(),
+        "emitted inspect must succeed before runtime setup\n{}\n{}",
+        String::from_utf8_lossy(&inspect.stdout),
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let provenance: Value =
+        serde_json::from_slice(&inspect.stdout).expect("emitted inspect must return JSON");
+    let definition: Value =
+        serde_json::from_slice(&fs::read(&fixture.definition).unwrap()).unwrap();
+    let schema_version = definition["agent_definition_schema_version"]
+        .as_str()
+        .expect("fixture must declare its schema version");
+    assert_eq!(provenance["embedded_definition_json"], definition);
+    assert_eq!(
+        provenance["definition_sha256"],
+        format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&definition).unwrap())
+        )
+    );
+    assert_eq!(provenance["target_triple"], target);
+    assert_eq!(
+        provenance["generated_by_cargo_ai_version"],
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(
+        provenance["generated_with_template_schema_version"],
+        schema_version
+    );
+    assert!(!provenance["agent_build_id"].as_str().unwrap().is_empty());
+    assert!(!provenance["build_timestamp_utc"]
+        .as_str()
+        .unwrap()
+        .is_empty());
+    let version = provenance_fixture
+        .isolated_command(&executable)
+        .env("CARGO_HOME", &cargo_home)
+        .arg("version")
+        .output()
+        .expect("actual emitted version should start");
+    assert!(
+        version.status.success(),
+        "emitted version must succeed before runtime setup\n{}\n{}",
+        String::from_utf8_lossy(&version.stdout),
+        String::from_utf8_lossy(&version.stderr)
+    );
+    let version_text = String::from_utf8_lossy(&version.stdout);
+    for marker in [
+        "Agent version status",
+        env!("CARGO_PKG_VERSION"),
+        schema_version,
+    ] {
+        assert!(
+            version_text.contains(marker),
+            "emitted version missed {marker}: {version_text}"
+        );
+    }
+    assert_eq!(
+        fs::read(provenance_fixture.home.join("config.toml")).unwrap(),
+        invalid_config
+    );
+    assert_eq!(
+        fs::read(provenance_fixture.root.join("codex/auth.json")).unwrap(),
+        invalid_auth
+    );
+    assert_eq!(
+        fs::read(cargo_home.join(".cargo-ai/config.toml")).unwrap(),
+        invalid_config
+    );
+    eprintln!("actual emitted inspect/version provenance dispatch passed with invalid isolated runtime config/auth");
+    // Compile the integration fixture only into its matching generated definition.
+    let main_source = workspace.join("src/main.rs");
+    let emitted_source = fs::read_to_string(&main_source).unwrap();
+    fs::write(
+        &main_source,
+        format!(
+            "{emitted_source}\n{}",
+            include_str!("fixtures/native_account_runtime_tests.rs")
+        ),
+    )
+    .unwrap();
+    let output = fixture
+        .isolated_command("cargo")
+        .current_dir(&workspace)
+        .args([
+            "test",
+            "--locked",
+            "--release",
+            "--target",
+            &target,
+            "native_account_",
+            "--",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .output()
+        .expect("actual emitted native account tests should start");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "actual emitted native account tests failed\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for required in [
+        "native_account_selected_session_text_image_override_and_legacy",
+        "native_account_context_requires_exact_origin_and_path",
+        "native_account_text_image_and_explicit_token_context",
+        "native_account_redirects_never_reach_either_target",
+        "native_account_context_is_never_sent_to_custom_or_api_key_origins",
+    ] {
+        assert!(
+            stdout.contains(required),
+            "emitted proof missed {required}: {stdout}"
+        );
+    }
+    assert!(!stdout.contains("running 0 tests"));
+    eprintln!("actual emitted native-account text/image/override, selected-session/legacy, explicit-token/custom isolation and redirect target zero-request proof passed");
+}
+
+#[test]
+#[ignore = "run explicitly in the provider smoke CI lane"]
 fn generated_provider_batch_isolated_and_deterministic() {
     let seed = Fixture::new();
     let identity =
@@ -1832,12 +2013,13 @@ fn generated_provider_batch_isolated_and_deterministic() {
         "generated-provider neutral-seed: {:.2}s",
         started.elapsed().as_secs_f64()
     );
-    let cases: [(&str, fn(&Fixture)); 8] = [
+    let cases: [(&str, fn(&Fixture)); 9] = [
         ("anthropic", generated_anthropic_case),
         ("gemini", generated_gemini_case),
         ("mistral", generated_mistral_case),
         ("xai", generated_xai_case),
         ("openai", generated_openai_case),
+        ("native-account", generated_native_account_case),
         ("ollama", generated_ollama_case),
         ("typesafe", typesafe_smoke::generated_typesafe_case),
         ("media-chain", generated_audio_chain_case),
@@ -1883,13 +2065,14 @@ fn generated_provider_batch_isolated_and_deterministic() {
             "mistral",
             "xai",
             "openai",
+            "native-account",
             "ollama",
             "typesafe",
             "media-chain"
         ]
     );
     eprintln!(
-        "generated-provider batch: 8/8 passed in {:.2}s",
+        "generated-provider batch: 9/9 passed in {:.2}s",
         started.elapsed().as_secs_f64()
     );
 }

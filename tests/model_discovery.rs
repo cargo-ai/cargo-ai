@@ -44,6 +44,7 @@ impl Home {
             .current_dir(&self.0)
             .env("CARGO_AI_HOME", &self.0)
             .env("CARGO_AI_DISABLE_KEYCHAIN", "1")
+            .env("CODEX_HOME", &self.0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -178,6 +179,7 @@ async fn draft_discovery_consumes_bounded_stdin_and_never_creates_home() {
         .args(FORMAT)
         .env("CARGO_AI_HOME", &selected)
         .env("CARGO_AI_DISABLE_KEYCHAIN", "1")
+        .env("CODEX_HOME", &home.0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -258,6 +260,7 @@ fn cancellation_stops_pending_catalog_and_preserves_home() {
         .args(args(&["models", "list", "--profile", "fixture"]))
         .env("CARGO_AI_HOME", &home.0)
         .env("CARGO_AI_DISABLE_KEYCHAIN", "1")
+        .env("CODEX_HOME", &home.0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -275,4 +278,149 @@ fn cancellation_stops_pending_catalog_and_preserves_home() {
     assert_eq!(response["outcome"], "canceled");
     assert_eq!(home.snapshot(), before);
     server.join().unwrap();
+}
+
+fn account_config(home: &Home, disabled: bool) {
+    fs::write(home.0.join("config.toml"), format!("default_profile='fixture'\n[[profile]]\nname='fixture'\nserver='openai'\nmodel='invalid-placeholder-never-invoked'\nauth_mode='openai_account'\n[openai_auth]\nlocally_disabled={disabled}\n")).unwrap();
+}
+fn synthetic_jwt(claims: Value) -> String {
+    use base64::Engine;
+    format!(
+        "e30.{}.synthetic-signature",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+    )
+}
+#[test]
+fn account_discovery_missing_expired_invalid_and_local_logout_are_safe_and_read_only() {
+    let home = Home::new();
+    account_config(&home, false);
+    let commands = [
+        args(&["models", "list", "--profile", "fixture"]),
+        args(&[
+            "models",
+            "list",
+            "--server",
+            "openai",
+            "--auth",
+            "openai_account",
+        ]),
+    ];
+    for command in &commands {
+        let before = home.snapshot();
+        let output = home.run(command, b"");
+        assert_eq!(
+            body(&output)["error"]["code"],
+            "discovery.credentials_required"
+        );
+        assert_eq!(home.snapshot(), before);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expired = serde_json::json!({"auth_mode":"chatgpt","tokens":{
+        "access_token":synthetic_jwt(serde_json::json!({"exp":now-1})),
+        "id_token":synthetic_jwt(serde_json::json!({"https://api.openai.com/auth":{"chatgpt_account_id":"synthetic-cli-context"}})),
+        "account_id":"synthetic-cli-context"}}).to_string();
+    for (raw, code) in [
+        (expired.as_str(), "discovery.credentials_expired"),
+        (
+            "{malformed-synthetic-private-auth",
+            "discovery.invalid_credentials",
+        ),
+        (
+            "{\"tokens\":{\"access_token\":\"synthetic-token\"}}",
+            "discovery.unsupported_connection",
+        ),
+    ] {
+        fs::write(home.0.join("auth.json"), raw).unwrap();
+        for command in &commands {
+            let before = home.snapshot();
+            let output = home.run(command, b"");
+            assert_eq!(body(&output)["error"]["code"], code);
+            for secret in [
+                "synthetic-cli-context",
+                "synthetic-token",
+                "malformed-synthetic-private-auth",
+            ] {
+                assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
+                assert!(!String::from_utf8_lossy(&output.stderr).contains(secret));
+            }
+            assert_eq!(home.snapshot(), before);
+        }
+    }
+    account_config(&home, true);
+    for command in &commands {
+        let before = home.snapshot();
+        let output = home.run(command, b"");
+        assert_eq!(body(&output)["error"]["code"], "discovery.locally_disabled");
+        assert_eq!(home.snapshot(), before);
+    }
+}
+#[test]
+fn account_draft_selectors_reject_unsafe_routes_before_auth_and_do_not_initialize_home() {
+    let home = Home::new();
+    fs::write(home.0.join("auth.json"), "synthetic-auth-must-not-be-read").unwrap();
+    for options in [
+        vec!["--server", "ollama", "--auth", "openai_account"],
+        vec![
+            "--server",
+            "openai",
+            "--auth",
+            "openai_account",
+            "--url",
+            "https://fixture.invalid/backend-api/codex/responses",
+        ],
+        vec![
+            "--server",
+            "openai",
+            "--auth",
+            "openai_account",
+            "--url",
+            "https://chatgpt.com/backend-api/codex/responses?secret=sentinel",
+        ],
+    ] {
+        let output = home.run(
+            &[vec!["models", "list"], options, FORMAT.to_vec()].concat(),
+            b"",
+        );
+        assert_eq!(
+            body(&output)["error"]["code"],
+            "discovery.unsupported_connection"
+        );
+    }
+    let output = home.run(
+        &args(&[
+            "models",
+            "list",
+            "--server",
+            "openai",
+            "--auth",
+            "openai_account",
+            "--stdin",
+        ]),
+        b"synthetic-private-stdin",
+    );
+    assert_eq!(body(&output)["error"]["code"], "cli.invalid_input");
+    let selected = home.0.join("absent-account-home");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-ai"))
+        .args(args(&[
+            "models",
+            "list",
+            "--server",
+            "openai",
+            "--auth",
+            "openai_account",
+        ]))
+        .env("CARGO_AI_HOME", &selected)
+        .env("CODEX_HOME", &home.0)
+        .env("CARGO_AI_DISABLE_KEYCHAIN", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        body(&output)["error"]["code"],
+        "discovery.invalid_credentials"
+    );
+    assert!(!selected.exists());
 }

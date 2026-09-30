@@ -5,6 +5,7 @@ use crate::config::{
 };
 pub use crate::providers::discovery::DiscoveryError;
 use crate::providers::{
+    account_discovery,
     discovery::{self, Connection},
     ProviderKind,
 };
@@ -50,7 +51,7 @@ pub async fn run(matches: &ArgMatches) -> Result<Value, DiscoveryError> {
         if stdin != (auth == ProfileAuthMode::ApiKey) {
             return Err(DiscoveryError::new(
                 "invalid_request",
-                "Draft API keys require --stdin; no-auth drafts must omit it.",
+                "Draft API keys require --stdin; account and no-auth drafts must omit it.",
             ));
         }
         let token = if stdin {
@@ -58,12 +59,20 @@ pub async fn run(matches: &ArgMatches) -> Result<Value, DiscoveryError> {
         } else {
             String::new()
         };
+        let account = if auth == ProfileAuthMode::OpenaiAccount {
+            Some(account_discovery::snapshot(
+                &crate::config::paths::cargo_ai_root().join("config.toml"),
+            )?)
+        } else {
+            None
+        };
         Connection {
             provider,
             auth,
             endpoint,
             token,
             profile: None,
+            account,
         }
     };
     discovery::list(
@@ -103,9 +112,17 @@ fn resolve_saved(path: &std::path::Path, name: &str) -> Result<Connection, Disco
         )
     })?;
     let endpoint = discovery::endpoint(provider, profile.url.as_deref(), profile.auth_mode)?;
+    let account = if profile.auth_mode == ProfileAuthMode::OpenaiAccount {
+        Some(account_discovery::snapshot_saved(
+            path,
+            loaded.original_contents(),
+        )?)
+    } else {
+        None
+    };
     let token = match profile.auth_mode {
         ProfileAuthMode::None => String::new(),
-        ProfileAuthMode::OpenaiAccount => unreachable!("endpoint rejects account discovery"),
+        ProfileAuthMode::OpenaiAccount => String::new(),
         ProfileAuthMode::ApiKey => {
             if config.secret_store != Some(SecretStoreMode::File) {
                 return Err(DiscoveryError::new("unsupported_secret_store", "Saved API-key discovery requires an explicit file secret store; use a draft stdin key for other stores."));
@@ -139,6 +156,7 @@ fn resolve_saved(path: &std::path::Path, name: &str) -> Result<Connection, Disco
         endpoint,
         token,
         profile: Some(name.to_owned()),
+        account,
     })
 }
 

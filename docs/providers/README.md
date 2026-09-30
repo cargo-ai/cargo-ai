@@ -62,6 +62,12 @@ Cargo AI can optionally [discover a connection’s live model catalog](../machin
 model. Choose a current model that the selected provider account, project,
 workspace, or local Ollama installation can access.
 
+OpenAI account discovery supports an existing file-backed commercial Codex
+session on the default endpoint. It lists picker-visible exact IDs without
+login/refresh/cache writes; profiles follow the current shared Codex session.
+Unsupported account storage/routing retains manual selection. See the
+[OpenAI guide](openai.md#option-1-openai-account-session) for the supported boundary.
+
 ## Store API Keys Safely
 
 Create the profile first. A native client should start `cargo-ai` directly with arguments `profile`, `set`, `PROFILE_NAME`, `--stdin`, write the key from its secure entry field to the child's stdin pipe, and close the pipe to signal EOF. Wait for completion. Do not put real keys in shell commands/history, process arguments, agent JSON, logs, examples, or source control. Terminal stdin is rejected; this mode does not prompt.

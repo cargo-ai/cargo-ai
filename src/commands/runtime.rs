@@ -64,10 +64,21 @@ struct SelectedProfile {
     legacy_token: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct ResolvedOpenAiToken {
     token: String,
+    openai_account_id: Option<String>,
     uses_account_session: bool,
+}
+
+impl std::fmt::Debug for ResolvedOpenAiToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedOpenAiToken")
+            .field("credential_present", &!self.token.is_empty())
+            .field("account_context_present", &self.openai_account_id.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -422,12 +433,14 @@ async fn resolve_openai_token_for_request(
         Some(profile) => match profile.auth_mode {
             ProfileAuthMode::ApiKey => Ok(ResolvedOpenAiToken {
                 token: resolve_profile_api_token(profile)?,
+            openai_account_id: None,
                 uses_account_session: false,
             }),
             ProfileAuthMode::OpenaiAccount => {
                 let session = openai_oauth::resolve_session_for_runtime().await?;
                 Ok(ResolvedOpenAiToken {
                     token: session.access_token,
+                    openai_account_id: session.account_id,
                     uses_account_session: true,
                 })
             }
@@ -443,6 +456,7 @@ async fn resolve_openai_token_for_request(
             let session = openai_oauth::resolve_session_for_runtime().await?;
             Ok(ResolvedOpenAiToken {
                 token: session.access_token,
+                    openai_account_id: session.account_id,
                 uses_account_session: true,
             })
         }
@@ -1163,6 +1177,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     let mut selected_profile: Option<SelectedProfile> = None;
     let mut loaded_profile_message: Option<(LoadedProfileKind, String)> = None;
     let mut use_openai_account_transport = false;
+    let mut openai_account_id = None;
 
     let config = load_config();
     let explicit_profile_name = sub_m.get_one::<String>("profile").map(String::as_str);
@@ -1270,6 +1285,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         token = match resolve_openai_token_for_request(selected_profile.as_ref()).await {
             Ok(resolved_token) => {
                 use_openai_account_transport = resolved_token.uses_account_session;
+                openai_account_id = resolved_token.openai_account_id;
                 resolved_token.token
             }
             Err(error) => {
@@ -1438,6 +1454,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         model: model.clone(),
         url: url.clone(),
         token: token.clone(),
+        openai_account_id: openai_account_id.clone(),
         inference_timeout_in_sec,
         tool_resolver: Some(tool_resolver),
         package_context,
@@ -1658,7 +1675,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     let provider_started_at = std::time::Instant::now();
     let provider_result = tokio::time::timeout(
         remaining,
-        crate::providers::send_text_request(
+        crate::providers::send_text_request_with_account_context(
             provider,
             &url,
             crate::providers::ProviderTextRequest {
@@ -1671,6 +1688,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                 max_output_tokens,
                 temperature,
             },
+            openai_account_id.as_deref(),
         ),
     )
     .await;
@@ -2410,6 +2428,7 @@ mod tests {
             model: "gpt-5".to_string(),
             url: "https://synthetic-user:synthetic-password@api.openai.com/synthetic-path?key=synthetic-query#synthetic-fragment".to_string(),
             token: "secret".to_string(),
+            openai_account_id: None,
             inference_timeout_in_sec: 60,
             tool_resolver: None,
             package_context: None,
@@ -3263,5 +3282,243 @@ mod tests {
             .expect("run subcommand should parse");
 
         assert!(!super::run_with_definition_in_context(runtime_m, &definition, None).await);
+    }
+}
+
+#[cfg(test)]
+mod native_account_runtime_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    struct Fixture {
+        root: PathBuf,
+        original_home: Option<std::ffi::OsString>,
+        original_codex: Option<std::ffi::OsString>,
+        original_disable: Option<std::ffi::OsString>,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "native-account-runtime-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(root.join("codex")).unwrap();
+            std::fs::create_dir_all(root.join("cargo")).unwrap();
+            let original_home = std::env::var_os("CARGO_AI_HOME");
+            let original_codex = std::env::var_os("CODEX_HOME");
+            let original_disable = std::env::var_os("CARGO_AI_DISABLE_KEYCHAIN");
+            unsafe {
+                std::env::set_var("CARGO_AI_HOME", root.join("cargo"));
+                std::env::set_var("CODEX_HOME", root.join("codex"));
+                std::env::set_var("CARGO_AI_DISABLE_KEYCHAIN", "1");
+            }
+            std::fs::write(root.join("cargo/config.toml"), "[cargo_ai_metadata]\ncargo_ai_install_id = \"11111111-1111-4111-8111-111111111111\"\n\n[[profile]]\nname = \"native-image\"\nserver = \"openai\"\nmodel = \"selected-image\"\nauth_mode = \"openai_account\"\n").unwrap();
+            std::fs::create_dir_all(root.join(".cargo-ai")).unwrap();
+            std::fs::write(
+                root.join(".cargo-ai/project.toml"),
+                "[runtime]\ndata_root = \".cargo-ai/data\"\n",
+            )
+            .unwrap();
+            Self {
+                root,
+                original_home,
+                original_codex,
+                original_disable,
+            }
+        }
+        #[cfg(unix)]
+        fn use_linked_auth(&self) {
+            let auth = self.root.join("codex/auth.json");
+            std::fs::rename(&auth, self.root.join("codex/auth-target.json")).unwrap();
+            std::os::unix::fs::symlink("auth-target.json", &auth).unwrap();
+            std::os::unix::fs::symlink(self.root.join("codex"), self.root.join("codex-linked"))
+                .unwrap();
+            unsafe {
+                std::env::set_var("CODEX_HOME", self.root.join("codex-linked"));
+            }
+        }
+        fn auth(&self, account: Option<&str>) -> Vec<u8> {
+            let payload = serde_json::json!({"tokens":{"access_token":"synthetic-runtime-token", "account_id":account}}).to_string().into_bytes();
+            std::fs::write(self.root.join("codex/auth.json"), &payload).unwrap();
+            payload
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.original_home {
+                    Some(value) => std::env::set_var("CARGO_AI_HOME", value),
+                    None => std::env::remove_var("CARGO_AI_HOME"),
+                }
+                match &self.original_codex {
+                    Some(value) => std::env::set_var("CODEX_HOME", value),
+                    None => std::env::remove_var("CODEX_HOME"),
+                }
+            }
+            unsafe {
+                match &self.original_disable {
+                    Some(value) => std::env::set_var("CARGO_AI_DISABLE_KEYCHAIN", value),
+                    None => std::env::remove_var("CARGO_AI_DISABLE_KEYCHAIN"),
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[tokio::test]
+    async fn native_account_selected_session_text_image_override_and_legacy() {
+        let _lock = crate::commands::runtime_actions::TEST_ENV_LOCK
+            .lock()
+            .unwrap();
+        let fixture = Fixture::new();
+        for account in [
+            Some("synthetic-personal-context"),
+            Some("synthetic-workspace-context"),
+            None,
+        ] {
+            #[cfg(unix)]
+            if account == Some("synthetic-workspace-context") {
+                fixture.use_linked_auth();
+            }
+            let auth_before = fixture.auth(account);
+            let config_before = std::fs::read(fixture.root.join("cargo/config.toml")).unwrap();
+            let selected = SelectedProfile {
+                name: "native-image".into(),
+                auth_mode: ProfileAuthMode::OpenaiAccount,
+                legacy_token: None,
+            };
+            let resolved = resolve_openai_token_for_request(Some(&selected))
+                .await
+                .unwrap();
+            assert_eq!(resolved.openai_account_id.as_deref(), account);
+            assert!(!format!("{resolved:?}").contains("synthetic-runtime-token"));
+            if let Some(account) = account {
+                assert!(!format!("{resolved:?}").contains(account));
+            }
+            let override_context =
+                crate::commands::runtime_actions::resolve_generate_image_step_profile_context(
+                    Some(&crate::RunArg::Literal("native-image".into())),
+                    &serde_json::json!({}),
+                    "image",
+                    9,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(override_context.openai_account_id.as_deref(), account);
+            assert_eq!(override_context.inference_timeout_in_sec, 9);
+            assert!(!format!("{override_context:?}").contains("synthetic-runtime-token"));
+            for image in [false, true] {
+                let mut server = mockito::Server::new_async().await;
+                let body = if image {
+                    "data: {\"item\":{\"type\":\"image_generation_call\",\"result\":\"c2FmZS1pbWFnZQ==\"}}\n\n"
+                } else {
+                    "data: {\"type\":\"response.output_text.done\",\"text\":\"{\\\"status\\\":\\\"ok\\\"}\"}\n\n"
+                };
+                let mock = server
+                    .mock("POST", "/native")
+                    .match_header("authorization", "Bearer synthetic-runtime-token")
+                    .match_header(
+                        "chatgpt-account-id",
+                        account.map_or(mockito::Matcher::Missing, |value| {
+                            mockito::Matcher::Exact(value.into())
+                        }),
+                    )
+                    .with_status(200)
+                    .with_body(body)
+                    .create_async()
+                    .await;
+                let _endpoint = crate::providers::native_account_test_endpoint(format!(
+                    "{}/native",
+                    server.url()
+                ));
+                if image {
+                    let step: crate::RunStep = serde_json::from_value(serde_json::json!({
+                        "kind":"generate_image", "profile":{"Literal":"native-image"}, "prompt":[{"Literal":"draw"}],
+                        "path":[{"Literal":"native-image.png"}], "args":[], "tool_params":{}, "ignore_tools":false
+                    })).unwrap();
+                    let mut parent_context = override_context.clone();
+                    parent_context.token = "wrong-parent-token".into();
+                    parent_context.openai_account_id = Some("wrong-parent-context".into());
+                    parent_context.project_data =
+                        super::super::runtime_data::project_data_root(Some(&fixture.root)).unwrap();
+                    assert!(parent_context.project_data.is_some());
+                    crate::commands::runtime_actions::test_run_generate_image_step(
+                        &step,
+                        &serde_json::json!({}),
+                        &std::collections::BTreeMap::new(),
+                        0,
+                        "image",
+                        1,
+                        &parent_context,
+                        crate::commands::runtime_actions::configured_agent_action_runtime_budget(
+                            Some(9),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        std::fs::read(fixture.root.join(".cargo-ai/data/native-image.png"))
+                            .unwrap(),
+                        b"safe-image"
+                    );
+                } else {
+                    let definition = crate::runtime_definition::RuntimeAgentDefinition::from_str(r#"{"agent_definition_schema_version":"2026-03-03.r1","inputs":[{"type":"text","text":"short"}],"agent_schema":{"type":"object","properties":{"status":{"type":"string"}},"required":["status"]},"actions":[]}"#).unwrap();
+                    let matches = clap::Command::new("cargo-ai")
+                        .subcommand(crate::args::runtime_common::runtime_command("run", "test"))
+                        .try_get_matches_from(["cargo-ai", "run", "--profile", "native-image"])
+                        .unwrap();
+                    assert!(
+                        run_with_definition_in_context(
+                            matches.subcommand_matches("run").unwrap(),
+                            &definition,
+                            None
+                        )
+                        .await
+                    );
+                }
+                mock.assert_async().await;
+            }
+            assert_eq!(
+                std::fs::read(fixture.root.join("codex/auth.json")).unwrap(),
+                auth_before
+            );
+            assert_eq!(
+                std::fs::read(fixture.root.join("cargo/config.toml")).unwrap(),
+                config_before
+            );
+            #[cfg(unix)]
+            if account == Some("synthetic-workspace-context") {
+                assert!(
+                    std::fs::symlink_metadata(fixture.root.join("codex/auth.json"))
+                        .unwrap()
+                        .file_type()
+                        .is_symlink()
+                );
+                assert!(std::fs::symlink_metadata(fixture.root.join("codex-linked"))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink());
+                assert_eq!(
+                    std::fs::read(fixture.root.join("codex/auth-target.json")).unwrap(),
+                    auth_before
+                );
+            }
+        }
+        std::fs::write(
+            fixture.root.join("codex/auth.json"),
+            b"invalid private auth payload",
+        )
+        .unwrap();
+        let api = SelectedProfile {
+            name: "manual-api".into(),
+            auth_mode: ProfileAuthMode::ApiKey,
+            legacy_token: Some("synthetic-api-key".into()),
+        };
+        let api = resolve_openai_token_for_request(Some(&api)).await.unwrap();
+        assert_eq!(api.token, "synthetic-api-key");
+        assert!(api.openai_account_id.is_none());
+        assert!(!api.uses_account_session);
     }
 }

@@ -785,10 +785,21 @@ struct SelectedProfile {
     legacy_token: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct ResolvedOpenAiToken {
     token: String,
+    openai_account_id: Option<String>,
     uses_account_session: bool,
+}
+
+impl std::fmt::Debug for ResolvedOpenAiToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedOpenAiToken")
+            .field("credential_present", &!self.token.is_empty())
+            .field("account_context_present", &self.openai_account_id.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -798,7 +809,7 @@ struct InvocationRuntimeBudget {
     deadline_ms: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct ActionProviderContext {
     project_data: Option<runtime_data::DataRoot>,
     provider: ProviderKind,
@@ -807,9 +818,20 @@ struct ActionProviderContext {
     model: String,
     url: String,
     token: String,
+    openai_account_id: Option<String>,
     inference_timeout_in_sec: u64,
     tool_resolver: Option<Arc<ToolResolver>>,
     usage_log: Option<usage_log::UsageLogContext>,
+}
+
+impl std::fmt::Debug for ActionProviderContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActionProviderContext")
+            .field("credential_present", &!self.token.is_empty())
+            .field("account_context_present", &self.openai_account_id.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ActionProviderContext {
@@ -2020,10 +2042,59 @@ fn now_unix_seconds() -> i64 {
         .unwrap_or(0)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct CodexSession {
     access_token: String,
+    account_id: Option<String>,
     access_token_expires_at_unix: Option<i64>,
+}
+
+impl std::fmt::Debug for CodexSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CodexSession")
+            .field("credential_present", &!self.access_token.is_empty())
+            .field("account_context_present", &self.account_id.is_some())
+            .field(
+                "access_token_expires_at_unix",
+                &self.access_token_expires_at_unix,
+            )
+            .finish()
+    }
+}
+
+fn bounded_codex_header(value: &str, maximum: usize) -> bool {
+    !value.is_empty() && value.len() <= maximum && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn parse_codex_session(raw: &str) -> Result<CodexSession, String> {
+    if raw.len() > 64 * 1024 {
+        return Err("Codex auth storage exceeds the 64 KiB limit.".into());
+    }
+    let parsed = serde_json::from_str::<serde_json::Value>(raw)
+        .map_err(|_| "Codex auth JSON is invalid. Re-run `codex login`.".to_string())?;
+    let tokens = parsed.get("tokens").ok_or_else(|| {
+        "Codex auth payload did not include a `tokens` object. Re-run `codex login`.".to_string()
+    })?;
+    let access_token = parse_non_empty_token(tokens, "access_token").ok_or_else(|| {
+        "Codex auth payload did not include a non-empty access token. Re-run `codex login`."
+            .to_string()
+    })?;
+    if !bounded_codex_header(&access_token, 16 * 1024) {
+        return Err("Codex access token is invalid bounded credential input.".into());
+    }
+    let account_id = match tokens.get("account_id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) if bounded_codex_header(value, 256) => {
+            Some(value.clone())
+        }
+        _ => return Err("Codex selected account context is invalid.".into()),
+    };
+    Ok(CodexSession {
+        access_token,
+        account_id,
+        access_token_expires_at_unix: parse_access_token_expires_at_unix(tokens),
+    })
 }
 
 fn parse_unix_timestamp(value: &serde_json::Value) -> Option<i64> {
@@ -2091,29 +2162,25 @@ fn codex_auth_path() -> Result<PathBuf, String> {
 }
 
 fn load_codex_session() -> Result<Option<CodexSession>, String> {
+    use std::io::Read;
     let path = codex_auth_path()?;
-    if !path.exists() {
-        return Ok(None);
+    let metadata = match fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Codex auth storage could not be inspected.".into()),
+    };
+    if !metadata.is_file() {
+        return Err("Codex auth storage must resolve to a regular file.".into());
     }
-
-    let raw = fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
-    let parsed = serde_json::from_str::<serde_json::Value>(&raw)
-        .map_err(|error| format!("failed to parse Codex auth JSON: {error}"))?;
-
-    let tokens = parsed.get("tokens").ok_or_else(|| {
-        "Codex auth payload did not include a `tokens` object. Re-run `codex login`.".to_string()
-    })?;
-
-    let access_token = parse_non_empty_token(tokens, "access_token").ok_or_else(|| {
-        "Codex auth payload did not include a non-empty access token. Re-run `codex login`."
-            .to_string()
-    })?;
-
-    Ok(Some(CodexSession {
-        access_token,
-        access_token_expires_at_unix: parse_access_token_expires_at_unix(tokens),
-    }))
+    let mut bytes = Vec::new();
+    fs::File::open(&path)
+        .map_err(|_| "Codex auth storage could not be read.".to_string())?
+        .take(64 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Codex auth storage could not be read.".to_string())?;
+    let raw = std::str::from_utf8(&bytes)
+        .map_err(|_| "Codex auth storage is not valid UTF-8.".to_string())?;
+    parse_codex_session(raw).map(Some)
 }
 
 fn codex_access_token_expired_or_near(expires_at_unix: Option<i64>) -> bool {
@@ -2557,7 +2624,7 @@ async fn run_email_me_action(
 
 async fn resolve_openai_oauth_access_token(
     config: Option<&config::schema::Config>,
-) -> Result<String, String> {
+) -> Result<CodexSession, String> {
     if openai_account_locally_disabled(config) {
         return Err(
             "OpenAI account auth is logged out for Cargo AI locally. Run `cargo ai auth login openai` to re-enable, or pass `--token`."
@@ -2579,7 +2646,7 @@ async fn resolve_openai_oauth_access_token(
         );
     }
 
-    Ok(session.access_token)
+    Ok(session)
 }
 
 async fn resolve_openai_token_for_request(
@@ -2590,12 +2657,13 @@ async fn resolve_openai_token_for_request(
         Some(profile) => match profile.auth_mode {
             ProfileAuthMode::ApiKey => Ok(ResolvedOpenAiToken {
                 token: resolve_profile_api_token(profile)?,
+            openai_account_id: None,
                 uses_account_session: false,
             }),
-            ProfileAuthMode::OpenaiAccount => Ok(ResolvedOpenAiToken {
-                token: resolve_openai_oauth_access_token(config).await?,
-                uses_account_session: true,
-            }),
+            ProfileAuthMode::OpenaiAccount => {
+                let session = resolve_openai_oauth_access_token(config).await?;
+                Ok(ResolvedOpenAiToken { token: session.access_token, openai_account_id: session.account_id, uses_account_session: true })
+            },
             ProfileAuthMode::None => Err(format!(
                 "Profile '{}' auth mode is '{}'. Set it to '{}' or '{}' before using OpenAI without `--token`.",
                 profile.name,
@@ -2604,10 +2672,10 @@ async fn resolve_openai_token_for_request(
                 ProfileAuthMode::OpenaiAccount.as_str()
             )),
         },
-        None => Ok(ResolvedOpenAiToken {
-            token: resolve_openai_oauth_access_token(config).await?,
-            uses_account_session: true,
-        }),
+        None => {
+            let session = resolve_openai_oauth_access_token(config).await?;
+            Ok(ResolvedOpenAiToken { token: session.access_token, openai_account_id: session.account_id, uses_account_session: true })
+        },
     }
 }
 
@@ -3117,7 +3185,12 @@ fn parse_runtime_var_value(
 // Initialize Tokio runtime macro
 #[tokio::main]
 async fn main() {
+    // Generation inserts provenance command dispatch after argument parsing.
     let cmd_args = args::build_cli();
+    run_with_matches(cmd_args).await;
+}
+
+async fn run_with_matches(cmd_args: clap::ArgMatches) {
     let config = load_config();
     let project_root = match std::env::current_dir()
         .map_err(|error| format!("Failed to inspect current project directory: {error}"))
@@ -3160,6 +3233,7 @@ async fn main() {
     let mut selected_profile: Option<SelectedProfile> = None;
     let mut loaded_profile_message: Option<(LoadedProfileKind, String)> = None;
     let mut use_openai_account_transport = false;
+    let mut openai_account_id = None;
 
     let explicit_profile_name = cmd_args.get_one::<String>("profile").map(String::as_str);
     match resolve_loaded_profile(config.as_ref(), explicit_profile_name) {
@@ -3260,6 +3334,7 @@ async fn main() {
                 {
                     Ok(resolved) => {
                         use_openai_account_transport = resolved.uses_account_session;
+                        openai_account_id = resolved.openai_account_id;
                         resolved.token
                     }
                     Err(error) => {
@@ -3392,6 +3467,7 @@ async fn main() {
         model: model.clone(),
         url: url.clone(),
         token: token.clone(),
+        openai_account_id: openai_account_id.clone(),
         inference_timeout_in_sec,
         tool_resolver: Some(tool_resolver),
         usage_log: usage_log_context.clone(),
@@ -3547,7 +3623,7 @@ async fn main() {
     let provider_started_at = Instant::now();
     let provider_result = tokio::time::timeout(
         remaining,
-        crate::providers::send_text_request(
+        crate::providers::send_text_request_with_account_context(
             provider,
             &url,
             crate::providers::ProviderTextRequest {
@@ -3560,6 +3636,7 @@ async fn main() {
                 max_output_tokens,
                 temperature,
             },
+            openai_account_id.as_deref(),
         ),
     )
     .await;
@@ -5077,7 +5154,7 @@ async fn run_generate_image_step(
 
     let provider_started_at = Instant::now();
     let image_response = match tokio::time::timeout(remaining, async {
-        crate::providers::send_image_request(
+        crate::providers::send_image_request_with_account_context(
             effective_provider_context.provider,
             &effective_provider_context.url,
             &model,
@@ -5086,6 +5163,7 @@ async fn run_generate_image_step(
             &effective_provider_context.token,
             output_format,
             &reference_images,
+            effective_provider_context.openai_account_id.as_deref(),
         )
         .await
     })
@@ -5363,6 +5441,7 @@ async fn resolve_media_step_profile_context(
         | ProviderKind::Xai
         | ProviderKind::TypeSafe => ResolvedOpenAiToken {
             token: resolve_api_key_provider_token(provider, Some(&selected_profile))?,
+            openai_account_id: None,
             uses_account_session: false,
         },
         ProviderKind::OpenAi => {
@@ -5371,10 +5450,12 @@ async fn resolve_media_step_profile_context(
         ProviderKind::Ollama => match profile.auth_mode {
             ProfileAuthMode::None => ResolvedOpenAiToken {
                 token: String::new(),
+                openai_account_id: None,
                 uses_account_session: false,
             },
             ProfileAuthMode::ApiKey => ResolvedOpenAiToken {
                 token: resolve_profile_api_token(&selected_profile)?,
+                openai_account_id: None,
                 uses_account_session: false,
             },
             ProfileAuthMode::OpenaiAccount => {
@@ -5412,6 +5493,7 @@ async fn resolve_media_step_profile_context(
         model,
         url,
         token: resolved_token.token,
+        openai_account_id: resolved_token.openai_account_id,
         inference_timeout_in_sec: invocation_timeout_in_sec,
         tool_resolver: None,
         usage_log: None,

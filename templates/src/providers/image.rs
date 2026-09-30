@@ -15,6 +15,7 @@ const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_JSON_BYTES: usize = 30 * 1024 * 1024;
 const MAX_REFERENCE_BYTES: usize = 10 * 1024 * 1024;
 
+#[cfg(test)]
 pub(crate) async fn send_image_request(
     provider: ProviderKind,
     url: &str,
@@ -24,6 +25,31 @@ pub(crate) async fn send_image_request(
     token: &str,
     format: &str,
     reference_images: &[ImageReference],
+) -> Result<ProviderImageResponse, ProviderError> {
+    send_image_request_with_account_context(
+        provider,
+        url,
+        model,
+        prompt,
+        timeout_in_sec,
+        token,
+        format,
+        reference_images,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn send_image_request_with_account_context(
+    provider: ProviderKind,
+    url: &str,
+    model: &str,
+    prompt: &str,
+    timeout_in_sec: u64,
+    token: &str,
+    format: &str,
+    reference_images: &[ImageReference],
+    account_id: Option<&str>,
 ) -> Result<ProviderImageResponse, ProviderError> {
     if !provider.capabilities().supports_generate_image {
         return Err(ProviderError::invalid_request(
@@ -40,7 +66,7 @@ pub(crate) async fn send_image_request(
     let deadline = Instant::now() + Duration::from_secs(timeout_in_sec);
     match provider {
         ProviderKind::OpenAi => {
-            return super::openai::send_image_request(
+            return super::openai::send_image_request_with_account_context(
                 &url.to_owned(),
                 &model.to_owned(),
                 prompt,
@@ -48,8 +74,9 @@ pub(crate) async fn send_image_request(
                 &token.to_owned(),
                 format,
                 reference_images,
+                account_id,
             )
-            .await
+            .await;
         }
         ProviderKind::Ollama => {
             if format != "png" || !reference_images.is_empty() {
@@ -263,7 +290,7 @@ fn validate_image(provider: ProviderKind, bytes: &[u8], format: &str) -> Result<
             return Err(ProviderError::invalid_request(
                 provider,
                 "Unsupported image output format.",
-            ))
+            ));
         }
     };
     if valid {

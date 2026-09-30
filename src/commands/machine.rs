@@ -444,7 +444,7 @@ fn contracts() -> Vec<Value> {
         let variants=match *name {
             "packages list"=>json!([{"selector":"installed","pagination":"limit_and_all","legacy_default_limit":20},{"selector":"account","pagination":"all_and_existing_limit"}]),
             "packages inspect"=>json!([{"selector":"installed_alias"},{"selector":"account_name_and_optional_version"}]),
-            "models list"=>json!([{"selector":"saved_profile","api_key_store":"explicit_file_only"},{"selector":"draft_server_auth","api_key_input":"stdin"}]),
+            "models list"=>json!([{"selector":"saved_profile","api_key_store":"explicit_file_only","auth_modes":["none","api_key","openai_account"]},{"selector":"draft_server_auth","api_key_input":"stdin","auth_modes":["none","api_key","openai_account"],"account_provider":"openai"}]),
             "usage summary"|"usage runs"|"usage show"=>json!([{"domain_schema_version":1},{"domain_schema_version":2}]),
             "account deactivate"=>json!([{"deletion_request":false},{"deletion_request":true,"requires":"matching_confirm_email"}]),
             _=>json!([]),
@@ -647,6 +647,9 @@ fn discovery_code(code: &str) -> &'static str {
         "profile_not_found" => "discovery.profile_not_found",
         "missing_credentials" | "authentication_required" => "discovery.credentials_required",
         "invalid_credentials" => "discovery.invalid_credentials",
+        "expired_credentials" => "discovery.credentials_expired",
+        "locally_disabled" => "discovery.locally_disabled",
+        "changed_connection" => "discovery.connection_changed",
         "invalid_configuration" => "discovery.invalid_configuration",
         "invalid_connection" | "invalid_request" => "cli.invalid_input",
         "unauthorized" | "authentication_failed" => "discovery.authentication_failed",

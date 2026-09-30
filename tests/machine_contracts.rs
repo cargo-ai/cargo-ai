@@ -7,6 +7,7 @@ use support::Fixture;
 
 fn run(f: &Fixture, args: &[&str]) -> Output {
     f.cargo_ai_command(&f.root)
+        .env("CODEX_HOME", f.root.join("synthetic-codex"))
         .args(args)
         .args(["--output-format", "json", "--output-schema-version", "1"])
         .output()
@@ -39,6 +40,7 @@ fn capabilities_and_rejected_negotiation_are_passive_and_secret_safe() {
     let absent = f.root.join("absent");
     let output = f
         .cargo_ai_command(&f.root)
+        .env("CODEX_HOME", f.root.join("synthetic-codex"))
         .env("CARGO_AI_HOME", &absent)
         .args(["capabilities", "--output-format", "json"])
         .output()
@@ -74,6 +76,7 @@ fn capabilities_and_rejected_negotiation_are_passive_and_secret_safe() {
     ] {
         let output = f
             .cargo_ai_command(&f.root)
+            .env("CODEX_HOME", f.root.join("synthetic-codex"))
             .env("CARGO_AI_HOME", &absent)
             .args(args)
             .output()
@@ -87,6 +90,7 @@ fn capabilities_and_rejected_negotiation_are_passive_and_secret_safe() {
     }
     let help = f
         .cargo_ai_command(&f.root)
+        .env("CODEX_HOME", f.root.join("synthetic-codex"))
         .env("CARGO_AI_HOME", &absent)
         .args([
             "--help",
@@ -99,6 +103,7 @@ fn capabilities_and_rejected_negotiation_are_passive_and_secret_safe() {
     assert!(!absent.exists());
     let output = f
         .cargo_ai_command(&f.root)
+        .env("CODEX_HOME", f.root.join("synthetic-codex"))
         .env("CARGO_AI_HOME", &absent)
         .args([
             "profile",
@@ -167,6 +172,7 @@ fn profile_machine_changes_and_legacy_readers_share_persisted_state() {
     );
     let legacy = f
         .cargo_ai_command(&f.root)
+        .env("CODEX_HOME", f.root.join("synthetic-codex"))
         .args(["profile", "show", "fixture", "--no-update-check"])
         .output()
         .unwrap();
@@ -197,6 +203,7 @@ fn runtime_provider_results_require_explicit_private_content_opt_in() {
         );
         fs::write(f.root.join("answer.json"),json!({"agent_definition_schema_version":"2026-03-03.r1","inputs":[{"type":"text","text":"fixture"}],"agent_schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false},"actions":[]}).to_string()).unwrap();
         let mut command = f.cargo_ai_command(&f.root);
+        command.env("CODEX_HOME", f.root.join("synthetic-codex"));
         command.args([
             "run",
             "answer.json",
@@ -347,6 +354,7 @@ fn runtime_stream_frames_real_lifecycle_and_private_child_output_isolated() {
     fs::write(f.root.join("local.json"), definition.to_string()).unwrap();
     let output = f
         .cargo_ai_command(&f.root)
+        .env("CODEX_HOME", f.root.join("synthetic-codex"))
         .args([
             "run",
             "local.json",
@@ -398,6 +406,7 @@ fn blocked_stream_pipe_cannot_prevent_cancellation_and_owned_child_cleanup() {
     fs::write(f.root.join("blocked.json"), definition.to_string()).unwrap();
     let mut child = f
         .cargo_ai_command(&f.root)
+        .env("CODEX_HOME", f.root.join("synthetic-codex"))
         .args([
             "run",
             "blocked.json",
@@ -465,6 +474,7 @@ fn cooperative_cancel_settles_parallel_lanes_before_terminal_cleanup_claim() {
     fs::write(f.root.join("parallel.json"),json!({"agent_definition_schema_version":"2026-03-03.r1","action_execution":"parallel","inputs":[{"type":"text","name":"job","text":"fixture"}],"agent_schema":{"type":"object","properties":{}},"actions":actions}).to_string()).unwrap();
     let mut child = f
         .cargo_ai_command(&f.root)
+        .env("CODEX_HOME", f.root.join("synthetic-codex"))
         .args([
             "run",
             "parallel.json",
@@ -569,6 +579,7 @@ fn source_backed_package_install_keeps_build_diagnostics_out_of_contract_output(
     let package = f.root.join("package");
     let assembled = f
         .cargo_ai_command(&project)
+        .env("CODEX_HOME", f.root.join("synthetic-codex"))
         .args([
             "package",
             "default",
@@ -625,4 +636,44 @@ fn runtime_deadline_and_child_output_limit_have_distinct_safe_errors() {
         assert_eq!(v["outcome"], "failed", "{v}");
         assert_eq!(v["error"]["code"], code);
     }
+}
+
+#[test]
+fn account_discovery_capabilities_and_error_contract_are_additive() {
+    let f = Fixture::new("machine-account-catalog");
+    let output = run(&f, &["capabilities"]);
+    let capabilities = response(&output);
+    let models = capabilities["data"]["contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|contract| contract["command"] == "models list")
+        .unwrap();
+    for variant in models["variants"].as_array().unwrap() {
+        assert_eq!(
+            variant["auth_modes"],
+            json!(["none", "api_key", "openai_account"])
+        );
+    }
+    let output = run(
+        &f,
+        &[
+            "models",
+            "list",
+            "--server",
+            "openai",
+            "--auth",
+            "openai_account",
+        ],
+    );
+    let result = response(&output);
+    assert_eq!(result["error"]["code"], "discovery.credentials_required");
+    assert_eq!(result["error"]["retryable"], false);
+    assert!(result["data"].is_null());
+    let schema: Value =
+        serde_json::from_str(include_str!("../docs/schemas/model-catalog-v1.json")).unwrap();
+    assert_eq!(
+        schema["properties"]["auth"]["enum"],
+        json!(["none", "api_key", "openai_account"])
+    );
 }

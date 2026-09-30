@@ -32,6 +32,32 @@ Account-session inference uses
 If the cached Codex session is missing, expired, or locally disabled, Cargo AI
 fails with login guidance instead of falling back to an API key.
 
+In a build containing account model discovery, list choices without knowing a
+valid current model:
+
+```bash
+cargo ai models list --profile openai-account
+# An existing Codex login also supports a draft without creating a profile:
+cargo ai models list --server openai --auth openai_account
+cargo ai profile set openai-account --model MODEL_ID
+```
+
+Use an exact ID returned by listing. Discovery performs one bounded live read
+of picker-visible models and does not infer invocation access or feature support.
+It reads the existing file-backed commercial Codex session without starting
+login, refreshing tokens or writing a cache. Missing/expired sessions, local
+logout, unknown account context and unsupported routing fail with safe guidance;
+manual model entry remains available. Keyring-only/ephemeral sessions, FedRAMP
+or alternate endpoints and custom account discovery URLs are unsupported.
+
+Account profiles follow the current Codex account/workspace. Separate Cargo AI
+homes keep their own settings/local logout but share Codex identity. Refresh
+the catalog after switching accounts; a relevant session change during listing
+fails safely. Native account text/image requests carry the selected context only
+to the trusted Codex HTTPS endpoint and refuse redirects. Rebuild generated
+agents to obtain this context handling. See the [machine contract](../machine-interface.md#models)
+for catalog and caller boundaries.
+
 Official OpenAI documentation describes ChatGPT sign-in as subscription access
 and lists `gpt-5.6-terra` as a current model balancing capability and cost.
 Workspace model availability can still differ. See

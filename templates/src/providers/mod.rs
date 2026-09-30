@@ -10,6 +10,8 @@ mod image;
 mod media;
 mod ollama;
 mod openai;
+#[cfg(test)]
+pub(crate) use openai::native_account_test_endpoint;
 mod openai_compatible;
 pub(crate) mod runtime;
 mod typesafe;
@@ -21,7 +23,7 @@ pub(crate) use error::{
     provider_error_messages, provider_url_origin, validate_provider_content_parts,
     validate_provider_request, AuthenticationPolicy, ProviderError, ProviderKind,
 };
-pub(crate) use image::send_image_request;
+pub(crate) use image::send_image_request_with_account_context;
 pub(crate) use media::{
     send_speech_request, send_transcription_request, valid_mp3, ProviderSpeechRequest,
     ProviderTranscriptionRequest,
@@ -32,10 +34,20 @@ pub(crate) use runtime::{
     ProviderTextRequest, ProviderUsage, ValidatedResponse,
 };
 
+#[cfg(test)]
 pub(crate) async fn send_text_request(
     provider: ProviderKind,
     url: &str,
     request: ProviderTextRequest<'_>,
+) -> Result<runtime::ProviderTextResponse, ProviderError> {
+    send_text_request_with_account_context(provider, url, request, None).await
+}
+
+pub(crate) async fn send_text_request_with_account_context(
+    provider: ProviderKind,
+    url: &str,
+    request: ProviderTextRequest<'_>,
+    account_id: Option<&str>,
 ) -> Result<runtime::ProviderTextResponse, ProviderError> {
     if provider == ProviderKind::TypeSafe {
         return typesafe::send_request(url, request).await;
@@ -60,7 +72,10 @@ pub(crate) async fn send_text_request(
             provider.transport(),
             error::ProviderTransport::OpenAiNative | error::ProviderTransport::OpenAiCompatibleChat
         ) {
-            return Err(ProviderError::invalid_request(provider, "Explicit profile temperature is unsupported by this transport; clear it with `profile set <name> --clear-temperature`."));
+            return Err(ProviderError::invalid_request(
+                provider,
+                "Explicit profile temperature is unsupported by this transport; clear it with `profile set <name> --clear-temperature`.",
+            ));
         }
     }
     match provider.transport() {
@@ -121,7 +136,7 @@ pub(crate) async fn send_text_request(
                     "strict": true
                 }
             });
-            openai::send_request(
+            openai::send_request_with_account_context(
                 &url.to_string(),
                 &request.model.to_string(),
                 request.content_parts,
@@ -129,6 +144,7 @@ pub(crate) async fn send_text_request(
                 &request.token.to_string(),
                 response_format,
                 request.temperature,
+                account_id,
             )
             .await
         }

@@ -21,7 +21,8 @@
     "auth": {
       "enum": [
         "none",
-        "api_key"
+        "api_key",
+        "openai_account"
       ]
     },
     "connection": {
@@ -111,6 +112,45 @@
               "resource_name": {
                 "type": "string",
                 "minLength": 1
+              },
+              "supported_reasoning_levels": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "effort": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    }
+                  },
+                  "required": [
+                    "effort"
+                  ],
+                  "additionalProperties": true
+                }
+              },
+              "default_reasoning_level": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "input_modalities": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "enum": [
+                    "text",
+                    "image",
+                    "audio"
+                  ]
+                }
               }
             },
             "required": [],
@@ -135,6 +175,10 @@
     },
     "invocation_access": {
       "const": "unverified"
+    },
+    "selection": {
+      "const": "picker_visible",
+      "description": "Account completeness covers validated picker-visible records, not entitlement or an immutable server snapshot."
     }
   },
   "required": [
@@ -190,6 +234,38 @@
             "additionalProperties": true
           }
         }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "auth": {
+            "const": "openai_account"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "provider": {
+            "const": "openai"
+          },
+          "complete": {
+            "const": true
+          },
+          "pages_fetched": {
+            "const": 1
+          },
+          "connection": {
+            "properties": {
+              "endpoint": {
+                "const": "https://chatgpt.com"
+              }
+            }
+          }
+        },
+        "required": [
+          "selection"
+        ]
       }
     }
   ],

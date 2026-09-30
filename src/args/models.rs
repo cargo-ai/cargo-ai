@@ -7,6 +7,7 @@ pub fn command() -> Command {
         .subcommand(
             Command::new("list")
                 .about("Read a live model catalog; listing does not prove invocation access")
+                .long_about("Read a live model catalog without invoking models. OpenAI account discovery uses the current file-backed commercial Codex session and fixed native endpoint, returning picker-visible IDs. Saved profiles follow the current Codex session; separate Cargo AI homes isolate settings and local logout, not Codex identity. Hidden IDs remain usable through manual selection. Listing does not prove invocation access.")
                 .arg(
                     Arg::new("profile")
                         .long("profile")
