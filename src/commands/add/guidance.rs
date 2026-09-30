@@ -552,8 +552,12 @@ mod tests {
 
         let bundle_entry = fs::read_to_string(&report.guidance_entry_path)
             .expect("bundle entry guidance should be readable");
-        assert!(bundle_entry.contains("Cargo AI Agent Authoring"));
-        assert!(!bundle_entry.contains("Codex"));
+        assert_eq!(
+            bundle_entry.lines().next(),
+            Some("# Cargo AI Agent Authoring")
+        );
+        assert!(bundle_entry.contains("models list --profile NAME"));
+        assert!(bundle_entry.contains("--server openai --auth openai_account"));
         assert!(bundle_entry.contains(".cargo-ai/guidance/start-here.md"));
         assert!(bundle_entry.contains(".cargo-ai/guidance/package-workflow.md"));
 
