@@ -270,3 +270,7 @@ Then run it with the intended input mode, runtime variables, profile, platform, 
 - [Troubleshooting](./troubleshooting.md)
 
 Updated child-agent runtimes also forward the root consuming-workspace context. Each child records its own package, location, environment and executable provenance. Direct provider usage is counted once under the executing agent; lifecycle durations can overlap across groups. See [local attribution](../templates/guidance/usage-ledger.md#local-attribution-and-dimension-queries) for query and legacy-runtime limitations.
+
+## Optional application lifecycle stream
+
+Selected `run --output-format ndjson` emits bounded typed operation, provider, action and child lifecycle records instead of the human renderer. Events from parallel actions may interleave within one global sequence. Decode complete lines incrementally, preserve IDs/sequence, and require a terminal outcome before claiming completion. Existing opaque generated children supply exit/diagnostic facts and report instrumentation unavailable; they do not acquire fabricated results or child telemetry. See [machine runtime contracts](machine-payloads.md#runtime-and-model-discovery) for frame schemas, content opt-in, produced-image metadata and cancellation/incomplete-output limits.

@@ -662,7 +662,7 @@ pub(crate) fn build_source_tool(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    let status = command.status().map_err(|error| {
+    let status = run_tool_cargo_build(&mut command).map_err(|error| {
         format!(
             "Failed to run cargo build for tool '{}': {}",
             tool_name, error
@@ -829,7 +829,7 @@ pub(crate) fn materialize_source_tool_for_package_runtime(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    let status = command.status().map_err(|error| {
+    let status = run_tool_cargo_build(&mut command).map_err(|error| {
         format!(
             "Failed to run locked Cargo build for packaged tool '{}': {}",
             tool_name, error
@@ -1565,6 +1565,22 @@ fn load_tool_describe_document(resolved: &ResolvedTool) -> Result<ToolDescribeDo
     })
 }
 
+fn run_tool_cargo_build(command: &mut Command) -> std::io::Result<std::process::ExitStatus> {
+    if !super::machine::selected() {
+        return command.status();
+    }
+    command.stdin(Stdio::null());
+    let output = super::machine_process::run_sync(command).map_err(|error| {
+        super::machine::record_process_error(&error);
+        error
+    })?;
+    super::machine::event(
+        "subprocess_completed",
+        serde_json::json!({"origin":"cargo_build","success":output.status.success(),"stdout_bytes":output.stdout.len(),"stderr_bytes":output.stderr.len(),"content_included":false}),
+    );
+    Ok(output.status)
+}
+
 fn run_tool_command_capture_stdout(
     binary_path: &Path,
     command: &str,
@@ -1577,6 +1593,14 @@ fn run_tool_command_capture_stdout(
         .stderr(Stdio::piped());
     if stdin.is_some() {
         child.stdin(Stdio::piped());
+    }
+
+    if super::machine::selected() {
+        return run_owned_tool_command_capture_stdout(
+            &mut child,
+            stdin,
+            std::time::Duration::from_secs(30),
+        );
     }
 
     let mut child = child.spawn().map_err(|error| {
@@ -1629,6 +1653,46 @@ fn run_tool_command_capture_stdout(
         });
     }
 
+    Ok(output.stdout)
+}
+
+fn run_owned_tool_command_capture_stdout(
+    command: &mut Command,
+    stdin: Option<&[u8]>,
+    remaining: std::time::Duration,
+) -> Result<Vec<u8>, String> {
+    if stdin.is_none() {
+        command.stdin(Stdio::null());
+    }
+    let output = super::machine_process::run_sync_with_input(command, remaining, stdin).map_err(
+        |error| {
+            let code = match error.kind() {
+                std::io::ErrorKind::Interrupted => "cli.canceled",
+                std::io::ErrorKind::TimedOut => "runtime.timeout",
+                std::io::ErrorKind::InvalidData => "runtime.output_limit",
+                _ => "runtime.tool_failed",
+            };
+            super::machine::record_error(super::machine::Failure::new(
+                code,
+                "Owned tool contract inspection did not complete.",
+            ));
+            "Owned tool contract inspection did not complete.".to_string()
+        },
+    )?;
+    super::machine::event(
+        "subprocess_completed",
+        serde_json::json!({"origin":"tool_contract","success":output.status.success(),"stdout_bytes":output.stdout.len(),"stderr_bytes":output.stderr.len(),"content_included":false}),
+    );
+    if !output.status.success() {
+        super::machine::record_error(super::machine::Failure::new(
+            "runtime.tool_failed",
+            "The tool contract inspection process failed.",
+        ));
+        return Err(
+            "The tool contract inspection process failed; private diagnostics were omitted."
+                .to_string(),
+        );
+    }
     Ok(output.stdout)
 }
 
@@ -2083,6 +2147,46 @@ mod tests {
             Some(path) => Command::new(path),
             None => Command::new("cargo"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_tool_capture_returns_stdout_and_omits_private_failure_diagnostics() {
+        let mut successful = Command::new("sh");
+        successful.args(["-c", "cat; printf private-success-diagnostic >&2"]);
+        let bytes = super::run_owned_tool_command_capture_stdout(
+            &mut successful,
+            Some(br#"{"protocol_version":1}"#),
+            std::time::Duration::from_secs(3),
+        )
+        .unwrap();
+        assert_eq!(bytes, br#"{"protocol_version":1}"#);
+        let mut failed = Command::new("sh");
+        failed.args(["-c", "printf private-failure-diagnostic >&2; exit 1"]);
+        let error = super::run_owned_tool_command_capture_stdout(
+            &mut failed,
+            None,
+            std::time::Duration::from_secs(3),
+        )
+        .unwrap_err();
+        assert!(!error.contains("private-failure-diagnostic"));
+        assert!(error.contains("private diagnostics were omitted"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_tool_capture_deadline_cleans_up_inherited_output_pipes() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        let started = std::time::Instant::now();
+        let error = super::run_owned_tool_command_capture_stdout(
+            &mut command,
+            None,
+            std::time::Duration::from_millis(150),
+        )
+        .unwrap_err();
+        assert_eq!(error, "Owned tool contract inspection did not complete.");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
     }
 
     #[cfg(unix)]

@@ -104,7 +104,7 @@ enum RuntimeInputMode {
     Prepend,
 }
 
-pub(crate) trait InvocationDefinition {
+pub(crate) trait InvocationDefinition: Sync {
     fn named_inputs(&self) -> Vec<crate::Input>;
     fn runtime_var_specs(&self) -> Vec<crate::RuntimeVarSpec>;
     fn action_execution(&self) -> crate::ActionExecutionMode;
@@ -284,6 +284,7 @@ fn format_recovery_value(value: &str) -> String {
 }
 
 fn print_runtime_failure(
+    code: &'static str,
     summary: &str,
     context: Option<&super::runtime_actions::ActionProviderContext>,
     problems: &[String],
@@ -291,6 +292,10 @@ fn print_runtime_failure(
     detail_lines: &[String],
     next_steps: &[(&str, String)],
 ) {
+    super::machine::record_error(super::machine::Failure::new(
+        code,
+        "Runtime execution did not satisfy the requested postcondition.",
+    ));
     for line in render_runtime_failure_lines(
         summary,
         context,
@@ -1146,6 +1151,10 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     let project_runtime_defaults = match load_project_runtime_defaults(project_root.as_deref()) {
         Ok(defaults) => defaults,
         Err(error) => {
+            super::machine::record_error(super::machine::Failure::new(
+                "runtime.configuration_invalid",
+                "Runtime setup could not satisfy this prerequisite.",
+            ));
             eprintln!("x {error}");
             return false;
         }
@@ -1174,6 +1183,10 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         }
         Ok(None) => {}
         Err(error) => {
+            super::machine::record_error(super::machine::Failure::new(
+                "runtime.profile_not_found",
+                "Runtime setup could not satisfy this prerequisite.",
+            ));
             eprintln!("x {error}");
             return false;
         }
@@ -1228,6 +1241,10 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     let provider = match ProviderKind::from_server_value(&server) {
         Some(provider) => provider,
         None => {
+            super::machine::record_error(super::machine::Failure::new(
+                "runtime.unsupported_provider",
+                "The runtime provider is unsupported.",
+            ));
             for line in unknown_server_messages(&server) {
                 eprintln!("{}", line);
             }
@@ -1256,6 +1273,10 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                 resolved_token.token
             }
             Err(error) => {
+                super::machine::record_error(super::machine::Failure::new(
+                    "runtime.credentials_required",
+                    "Runtime setup could not satisfy this prerequisite.",
+                ));
                 eprintln!("x {error}");
                 return false;
             }
@@ -1266,6 +1287,10 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                 match resolve_api_key_provider_token(provider, selected_profile.as_ref()) {
                     Ok(token) => token,
                     Err(error) => {
+                        super::machine::record_error(super::machine::Failure::new(
+                            "runtime.credentials_required",
+                            "Runtime setup could not satisfy this prerequisite.",
+                        ));
                         eprintln!("x {error}");
                         return false;
                     }
@@ -1275,6 +1300,10 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                 match resolve_optional_api_key_provider_token(provider, selected_profile.as_ref()) {
                     Ok(token) => token,
                     Err(error) => {
+                        super::machine::record_error(super::machine::Failure::new(
+                            "runtime.credential_store_failed",
+                            "Runtime setup could not satisfy this prerequisite.",
+                        ));
                         eprintln!("x {error}");
                         return false;
                     }
@@ -1368,6 +1397,10 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     let mut named_inputs = match resolved_named_inputs_for_run(sub_m, &named_inputs_template) {
         Ok(named_inputs) => named_inputs,
         Err(error) => {
+            super::machine::record_error(super::machine::Failure::new(
+                "runtime.invalid_input",
+                "Runtime setup could not satisfy this prerequisite.",
+            ));
             eprintln!("x {error}");
             return false;
         }
@@ -1381,6 +1414,10 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     let selected_inputs = match resolved_inputs_for_run(sub_m, &named_inputs) {
         Ok(selected_inputs) => selected_inputs,
         Err(error) => {
+            super::machine::record_error(super::machine::Failure::new(
+                "runtime.invalid_input",
+                "Runtime setup could not satisfy this prerequisite.",
+            ));
             eprintln!("x {error}");
             return false;
         }
@@ -1409,6 +1446,10 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     let runtime_vars = match resolved_runtime_vars_for_run(sub_m, &runtime_var_specs) {
         Ok(runtime_vars) => runtime_vars,
         Err(error) => {
+            super::machine::record_error(super::machine::Failure::new(
+                "runtime.invalid_input",
+                "Runtime setup could not satisfy this prerequisite.",
+            ));
             eprintln!("x {error}");
             return false;
         }
@@ -1474,6 +1515,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
             }
             Err(error) => {
                 print_runtime_failure(
+                    "runtime.action_failed",
                     "Action execution failed during run.",
                     Some(&action_provider_context),
                     &[error],
@@ -1488,6 +1530,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
 
     if let Err(validation_issues) = validate_provider_request(provider, &model, &url, &token) {
         print_runtime_failure(
+            "runtime.invalid_request",
             "Provider request settings are incomplete or invalid.",
             Some(&action_provider_context),
             &validation_issues,
@@ -1511,6 +1554,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         definition.rubric_enabled(),
     ) {
         print_runtime_failure(
+            "runtime.incompatible_definition",
             "Definition or inputs are incompatible with the selected provider.",
             Some(&action_provider_context),
             &[error.message().to_string()],
@@ -1527,6 +1571,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         Ok(resolved_inputs) => resolved_inputs,
         Err(error) => {
             print_runtime_failure(
+                "runtime.invalid_input",
                 "Runtime inputs could not be resolved.",
                 Some(&action_provider_context),
                 &[format!("Reason: {error}")],
@@ -1545,6 +1590,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         validate_provider_content_parts(provider, &url, &resolved_inputs)
     {
         print_runtime_failure(
+            "runtime.invalid_input",
             "Resolved inputs are not valid for the provider request.",
             Some(&action_provider_context),
             &validation_issues,
@@ -1630,6 +1676,10 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     .await;
     let response = match provider_result {
         Ok(Ok(response)) => {
+            super::machine::event(
+                "provider_completed",
+                serde_json::json!({"provider":provider.display_name(),"resolved_model":response.resolved_model,"success":true}),
+            );
             if let Some(resolved_model) = response.resolved_model.as_deref() {
                 println!("Provider response model: {resolved_model}");
             }
@@ -1661,6 +1711,30 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
             response.text
         }
         Ok(Err(error)) => {
+            let code = match error.kind() {
+                crate::providers::error::ProviderErrorKind::Unauthorized => {
+                    "provider.authentication_failed"
+                }
+                crate::providers::error::ProviderErrorKind::RateLimited => "provider.rate_limited",
+                crate::providers::error::ProviderErrorKind::Timeout => "provider.timeout",
+                crate::providers::error::ProviderErrorKind::Connectivity => {
+                    "provider.network_failed"
+                }
+                crate::providers::error::ProviderErrorKind::InvalidRequest => {
+                    "provider.invalid_request"
+                }
+                crate::providers::error::ProviderErrorKind::InvalidResponse => {
+                    "provider.invalid_response"
+                }
+                crate::providers::error::ProviderErrorKind::ModelNotFound => {
+                    "provider.model_not_found"
+                }
+                crate::providers::error::ProviderErrorKind::Unknown => "provider.failed",
+            };
+            super::machine::record_error(super::machine::Failure::new(
+                code,
+                "Provider execution did not complete successfully.",
+            ));
             if let (Some(usage_log), Some(attempt)) =
                 (usage_log_context.as_ref(), usage_attempt.as_ref())
             {
@@ -1692,6 +1766,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                 .map(|line| normalize_cli_issue(line))
                 .unwrap_or_else(|| "Issue communicating with the AI server.".to_string());
             print_runtime_failure(
+                code,
                 summary.as_str(),
                 Some(&action_provider_context),
                 &[],
@@ -1734,6 +1809,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                 });
             }
             print_runtime_failure(
+                "runtime.timeout",
                 "The provider did not return a response before the runtime budget expired.",
                 Some(&action_provider_context),
                 &[current_agent_runtime_timeout_message(
@@ -1755,6 +1831,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         Ok(output) => output,
         Err(problem) => {
             print_runtime_failure(
+                "runtime.invalid_response",
                 "Provider output did not match the required JSON schema.",
                 Some(&action_provider_context),
                 &[problem],
@@ -1773,6 +1850,9 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         }
     };
 
+    if super::runtime_actions::current_agent_action_depth() == 0 {
+        super::machine::record_result(&output);
+    }
     match super::runtime_actions::apply_actions_with_data(
         &output,
         &actions,
@@ -1797,6 +1877,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         }
         Err(error) => {
             print_runtime_failure(
+                "runtime.action_failed",
                 "Action execution failed during run.",
                 Some(&action_provider_context),
                 &[error],

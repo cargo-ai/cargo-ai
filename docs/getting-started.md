@@ -143,3 +143,9 @@ Tell the assistant what the agent should do, its inputs and outputs, and whether
 - [Projects and local tools](./projects-and-tools.md)
 - [Documentation home](./README.md)
 - [Public README](../README.md)
+
+## Application-managed profile setup
+
+Applications can select typed profile reads/mutations with `--output-format json --output-schema-version 1` after checking `cargo ai capabilities`. Existing terminal setup and output remain available. Profile edits still use one `profile set` update per invocation; keys go through `--stdin` or the established store. Selected removal requires `--yes`, while an add collision reports an interaction requirement. See the [profile payloads](machine-payloads.md#profiles-and-project-creation) for verified persistence, unknown token presence and redacted URL handling.
+
+`cargo ai models list --profile NAME --output-format json` discovers supported live catalog IDs without invoking a model. A saved API-key profile must explicitly use file storage; a draft key can instead use bounded stdin. A catalog entry does not prove inference access. Check [machine discovery](machine-interface.md#models) before relying on a connection's supported discovery shape.

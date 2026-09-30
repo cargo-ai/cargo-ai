@@ -20,6 +20,8 @@ Cargo AI turns readable JSON agent definitions into directly runnable workflows 
 - [Use accounts and share agent definitions](./accounts-and-sharing.md)
 - [Understand Cargo AI Home](./cargo-ai-home.md)
 
+- [Machine interface](machine-interface.md) — capability detection, optional JSON/NDJSON and connection model discovery.
+
 ## Help
 
 - [Troubleshoot common problems](./troubleshooting.md)

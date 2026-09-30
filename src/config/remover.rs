@@ -3,6 +3,18 @@ use crate::credentials::store;
 use std::fs;
 
 pub fn remove_profile(name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    remove_profile_impl(name, true).map(|_| ())
+}
+
+/// Reports credential cleanup separately from the persisted profile removal.
+pub(crate) fn remove_profile_noninteractive(
+    name: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    remove_profile_impl(name, false)
+}
+
+fn remove_profile_impl(name: &str, render: bool) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut cleanup_succeeded = true;
     if let Some(mut cfg) = load_config() {
         let before_count = cfg.profile.len();
 
@@ -16,28 +28,35 @@ pub fn remove_profile(name: &str) -> Result<(), Box<dyn std::error::Error>> {
         cfg.profile.retain(|p| p.name != name);
 
         if cfg.profile.len() == before_count {
-            println!("Profile '{}' not found.", name);
+            if render {
+                println!("Profile '{}' not found.", name);
+            }
         } else {
             let serialized = toml::to_string_pretty(&cfg)?;
             fs::write(config_path(), serialized)?;
             if let Err(error) = store::clear_profile_token(name) {
-                eprintln!(
-                    "⚠️ Profile removed from config, but token cleanup failed for '{}': {}",
-                    name, error
-                );
+                cleanup_succeeded = false;
+                if render {
+                    eprintln!(
+                        "⚠️ Profile removed from config, but token cleanup failed for '{}': {}",
+                        name, error
+                    );
+                }
             }
 
-            if removed_default {
+            if render && removed_default {
                 println!(
                     "Profile '{}' removed successfully (was default). Default profile cleared — this may affect agent behavior.",
                     name
                 );
-            } else {
+            } else if render {
                 println!("Profile '{}' removed successfully.", name);
             }
         }
     } else {
-        println!("No config file found.");
+        if render {
+            println!("No config file found.");
+        }
     }
-    Ok(())
+    Ok(cleanup_succeeded)
 }

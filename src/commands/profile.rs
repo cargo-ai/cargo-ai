@@ -294,6 +294,27 @@ fn run_show(show_m: &ArgMatches) -> bool {
     }
 }
 
+fn profile_from_add(
+    add_m: &ArgMatches,
+    name: &str,
+    server: &str,
+    model: &str,
+    auth_mode: ProfileAuthMode,
+) -> Profile {
+    Profile {
+        name: name.to_string(),
+        server: server.to_string(),
+        model: model.to_string(),
+        url: add_m.get_one::<String>("url").cloned(),
+        token: None,
+        timeout_in_sec: 60,
+        max_output_tokens: add_m.get_one::<u32>("max_output_tokens").copied(),
+        temperature: add_m.get_one::<f64>("temperature").copied(),
+        description: add_m.get_one::<String>("description").cloned(),
+        auth_mode,
+    }
+}
+
 fn run_add(add_m: &ArgMatches) -> bool {
     let Some(name) = add_m.get_one::<String>("name") else {
         eprintln!("Please provide a profile name. Example: cargo ai profile add <name> ...");
@@ -313,18 +334,7 @@ fn run_add(add_m: &ArgMatches) -> bool {
         .and_then(|raw_mode| parse_auth_mode(raw_mode))
         .unwrap_or(ProfileAuthMode::None);
 
-    let new_profile = Profile {
-        name: name.to_string(),
-        server: server.to_string(),
-        model: model.to_string(),
-        url: add_m.get_one::<String>("url").cloned(),
-        token: None,
-        timeout_in_sec: 60,
-        max_output_tokens: add_m.get_one::<u32>("max_output_tokens").copied(),
-        temperature: add_m.get_one::<f64>("temperature").copied(),
-        description: add_m.get_one::<String>("description").cloned(),
-        auth_mode,
-    };
+    let new_profile = profile_from_add(add_m, name, server, model, auth_mode);
 
     let set_as_default = add_m.get_flag("default");
 
@@ -341,13 +351,72 @@ fn run_set(set_m: &ArgMatches) -> bool {
     run_set_with_writer(set_m, write_config)
 }
 
+struct SetOutcome {
+    name: String,
+    metadata_changes: Vec<&'static str>,
+    token_change: Option<&'static str>,
+    auth_mode: ProfileAuthMode,
+    effects: Value,
+    expected_profile: Value,
+    expected_default: Option<String>,
+    expected_token: Option<String>,
+}
+impl std::fmt::Debug for SetOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetOutcome")
+            .field("metadata_changes", &self.metadata_changes)
+            .field("token_change", &self.token_change)
+            .field("effects", &self.effects)
+            .finish_non_exhaustive()
+    }
+}
+#[derive(Debug)]
+struct SetFailure {
+    code: &'static str,
+    legacy_message: String,
+    effects: Value,
+}
+impl SetFailure {
+    fn new(code: &'static str, legacy_message: &str, effects: Value) -> Self {
+        Self {
+            code,
+            legacy_message: legacy_message.to_owned(),
+            effects,
+        }
+    }
+}
 fn run_set_with_writer(
     set_m: &ArgMatches,
     persist_config: impl FnOnce(&crate::config::schema::Config) -> Result<(), String>,
 ) -> bool {
+    match set_outcome(set_m, persist_config) {
+        Ok(result) => {
+            ui::account_status::render_backend_ui(&profile_set_success_ui_response(
+                &result.name,
+                &result.metadata_changes,
+                result.token_change,
+                result.auth_mode,
+            ));
+            true
+        }
+        Err(error) => {
+            eprintln!("{}", error.legacy_message);
+            false
+        }
+    }
+}
+
+fn set_outcome(
+    set_m: &ArgMatches,
+    persist_config: impl FnOnce(&crate::config::schema::Config) -> Result<(), String>,
+) -> Result<SetOutcome, SetFailure> {
+    let mut effects = json!({"local":"unapplied","remote":"unapplied","credential":"unapplied","metadata":"unapplied","credential_migration":"unapplied"});
     let Some(name) = set_m.get_one::<String>("name") else {
-        eprintln!("x Missing profile name.");
-        return false;
+        return Err(SetFailure::new(
+            "input.invalid",
+            "x Missing profile name.",
+            effects,
+        ));
     };
 
     let token = if set_m.get_one::<String>("token").is_some()
@@ -357,29 +426,48 @@ fn run_set_with_writer(
         match resolve_token_input(set_m) {
             Ok(token) => Some(token),
             Err(error) => {
-                eprintln!("x Failed to read token input: {error}");
-                return false;
+                return Err(SetFailure::new(
+                    "input.invalid",
+                    &format!("x Failed to read token input: {error}"),
+                    effects,
+                ));
             }
         }
     } else {
         None
     };
-    if crate::credentials::migration::run_legacy_credential_migration().is_err() {
-        eprintln!("x Could not prepare existing credentials. Check the selected home, config and credential-store access; profile setup is incomplete.");
-        return false;
+    let preparation_config_before = fs::read(config_path()).ok();
+    let managed_backup_path = config_path().with_extension("toml.bak");
+    let preparation_backup_before = fs::symlink_metadata(&managed_backup_path).is_ok();
+    let migration = crate::credentials::migration::run_legacy_credential_migration().map_err(|_| {
+        effects["credential_migration"] = json!("unknown");
+        SetFailure::new("credentials.prepare_failed", "x Could not prepare existing credentials. Check the selected home, config and credential-store access; profile setup is incomplete.", effects.clone())
+    })?;
+    if migration.changed()
+        || preparation_config_before != fs::read(config_path()).ok()
+        || preparation_backup_before != fs::symlink_metadata(&managed_backup_path).is_ok()
+    {
+        effects["credential_migration"] = json!("applied");
+        effects["local"] = json!("applied");
     }
 
     let mut cfg = match load_config() {
         Some(cfg) => cfg,
         None => {
-            eprintln!("x No config file found.");
-            return false;
+            return Err(SetFailure::new(
+                "config.missing",
+                "x No config file found.",
+                effects,
+            ));
         }
     };
 
     let Some(profile) = cfg.profile.iter_mut().find(|profile| profile.name == *name) else {
-        eprintln!("x Profile '{}' not found.", name);
-        return false;
+        return Err(SetFailure::new(
+            "profile.not_found",
+            &format!("x Profile '{}' not found.", name),
+            effects,
+        ));
     };
 
     let mut metadata_changes: Vec<&str> = Vec::new();
@@ -396,11 +484,14 @@ fn run_set_with_writer(
 
     if let Some(raw_mode) = set_m.get_one::<String>("auth") {
         let Some(mode) = parse_auth_mode(raw_mode) else {
-            eprintln!(
-                "x Invalid auth mode '{}'. Use none|api_key|openai_account.",
-                raw_mode
-            );
-            return false;
+            return Err(SetFailure::new(
+                "input.invalid",
+                &format!(
+                    "x Invalid auth mode '{}'. Use none|api_key|openai_account.",
+                    raw_mode
+                ),
+                effects,
+            ));
         };
         profile.auth_mode = mode;
         metadata_changes.push("auth");
@@ -445,23 +536,32 @@ fn run_set_with_writer(
     let mut token_change: Option<&str> = None;
     if set_m.get_flag("clear_token") {
         if store::clear_profile_token(name).is_err() {
-            eprintln!("x Failed to clear the profile token. Check credential-store access and configuration.");
-            return false;
+            effects["credential"] = json!("unknown");
+            effects["local"] = json!("unknown");
+            return Err(SetFailure::new("credentials.persist_failed", "x Failed to clear the profile token. Check credential-store access and configuration.", effects));
         }
         token_change = Some("cleared");
-    } else if let Some(token) = token {
+    } else if let Some(ref token) = token {
         if store::store_profile_token(name, token.as_str()).is_err() {
-            eprintln!("x Failed to store the profile token. Check credential-store access and configuration; setup is incomplete.");
-            return false;
+            effects["credential"] = json!("unknown");
+            effects["local"] = json!("unknown");
+            return Err(SetFailure::new("credentials.persist_failed", "x Failed to store the profile token. Check credential-store access and configuration; setup is incomplete.", effects));
         }
         token_change = Some("updated");
     }
 
+    if token_change.is_some() {
+        effects["credential"] = json!("applied");
+        effects["local"] = json!("applied");
+    }
     if !metadata_changes.is_empty() {
         if persist_config(&cfg).is_err() {
-            eprintln!("x Failed to persist profile updates. A requested token change may already be saved; setup is incomplete. Check config write access before retrying.");
-            return false;
+            effects["metadata"] = json!("unknown");
+            effects["local"] = json!("unknown");
+            return Err(SetFailure::new("persistence.failed", "x Failed to persist profile updates. A requested token change may already be saved; setup is incomplete. Check config write access before retrying.", effects));
         }
+        effects["metadata"] = json!("applied");
+        effects["local"] = json!("applied");
     }
 
     let auth_mode = cfg
@@ -470,14 +570,18 @@ fn run_set_with_writer(
         .find(|profile| profile.name == *name)
         .map(|profile| profile.auth_mode)
         .unwrap_or(ProfileAuthMode::None);
-    ui::account_status::render_backend_ui(&profile_set_success_ui_response(
-        name,
-        metadata_changes.as_slice(),
+    let expected_profile =
+        serde_json::to_value(cfg.profile.iter().find(|p| p.name == *name).unwrap()).unwrap();
+    Ok(SetOutcome {
+        name: name.clone(),
+        metadata_changes,
         token_change,
         auth_mode,
-    ));
-
-    true
+        effects,
+        expected_profile,
+        expected_default: cfg.default_profile,
+        expected_token: token,
+    })
 }
 
 fn run_remove(remove_m: &ArgMatches) -> bool {
@@ -537,6 +641,259 @@ pub fn run(sub_m: &ArgMatches) -> bool {
     }
 }
 
+fn machine_config() -> Result<Option<crate::config::schema::Config>, super::machine::Failure> {
+    use crate::config::loader::{load_config_strict, ConfigLoad};
+    match load_config_strict().map_err(|_| {
+        super::machine::Failure::new(
+            "config.invalid",
+            "The selected config could not be read safely.",
+        )
+    })? {
+        ConfigLoad::Missing => Ok(None),
+        ConfigLoad::Loaded(loaded) => toml::from_str(loaded.original_contents())
+            .map(Some)
+            .map_err(|_| {
+                super::machine::Failure::new("config.invalid", "The selected config is invalid.")
+            }),
+    }
+}
+fn persisted_machine_config(
+    effects: &Value,
+) -> Result<crate::config::schema::Config, super::machine::Failure> {
+    machine_config().ok().flatten().ok_or_else(|| {
+        super::machine::Failure::new(
+            "persistence.unverified",
+            "The persisted profile state could not be verified.",
+        )
+        .with_data(json!({"effects":effects,"partial":true,"postconditions_verified":false}))
+    })
+}
+fn profile_payload(profile: &Profile, default: Option<&str>, token_state: &str) -> Value {
+    let redacted = profile.url.as_ref().is_some_and(|url| {
+        reqwest::Url::parse(url).map_or(true, |url| {
+            !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+        })
+    });
+    let safe_url = profile.url.as_deref().filter(|_| !redacted);
+    let origin = if redacted {
+        profile
+            .url
+            .as_deref()
+            .and_then(crate::providers::provider_url_origin)
+    } else {
+        None
+    };
+    json!({"name":profile.name,"server":profile.server,"model":profile.model,
+        "auth_mode":profile.auth_mode.as_str(),"is_default":default == Some(profile.name.as_str()),
+        "token_presence":token_state,"timeout_in_sec":profile.timeout_in_sec,
+        "temperature":profile.temperature,"max_output_tokens":profile.max_output_tokens,
+        "url_present":profile.url.is_some(),"url":safe_url,"url_redacted":redacted,"url_origin":origin,
+        "description":profile.description})
+}
+fn profile_payload_with_token(profile: &Profile, default: Option<&str>) -> Value {
+    let token = match store::load_profile_token(&profile.name) {
+        Ok(Some(_)) => "present",
+        Ok(None) if profile.token.is_some() => "present",
+        Ok(None) => "absent",
+        Err(_) if profile.token.is_some() => "present",
+        Err(_) => "unknown",
+    };
+    profile_payload(profile, default, token)
+}
+fn machine_profile(name: &str) -> Result<Value, super::machine::Failure> {
+    let cfg = machine_config()?.ok_or_else(|| {
+        super::machine::Failure::new("config.missing", "No selected config exists.")
+    })?;
+    let profile = find_profile(&cfg, name).ok_or_else(|| {
+        super::machine::Failure::new("profile.not_found", "The selected profile does not exist.")
+    })?;
+    Ok(profile_payload_with_token(
+        profile,
+        cfg.default_profile.as_deref(),
+    ))
+}
+
+/// Typed profile operations retain the same metadata/credential operation seams.
+pub(crate) fn machine_run(matches: &ArgMatches) -> Result<Value, super::machine::Failure> {
+    use super::machine::Failure;
+    let (command, args) = matches
+        .subcommand()
+        .ok_or_else(|| Failure::new("input.invalid", "A profile command is required."))?;
+    if command == "list" {
+        let cfg = machine_config()?
+            .ok_or_else(|| Failure::new("config.missing", "No selected config exists."))?;
+        let profiles: Vec<_> = cfg
+            .profile
+            .iter()
+            .map(|profile| {
+                profile_payload(profile, cfg.default_profile.as_deref(), "not_inspected")
+            })
+            .collect();
+        return Ok(
+            json!({"profiles":profiles,"default_profile":cfg.default_profile,"ordering":"configuration_order","complete":true,"next_cursor":null,
+            "effects":{"local":"unapplied","remote":"unapplied"}}),
+        );
+    }
+    let name = args
+        .get_one::<String>("name")
+        .ok_or_else(|| Failure::new("input.invalid", "A profile name is required."))?;
+    if command == "show" {
+        return Ok(
+            json!({"profile":machine_profile(name)?,"effects":{"local":"unapplied","remote":"unapplied"}}),
+        );
+    }
+    // Consent and secret transport are checked before credential migration or persistence.
+    if command == "remove" && !args.get_flag("yes") {
+        return Err(Failure::new(
+            "cli.interaction_required",
+            "Profile removal requires explicit --yes consent.",
+        )
+        .with_data(json!({"effects":{"local":"unapplied","remote":"unapplied"}})));
+    }
+    if command == "set" && args.get_one::<String>("token").is_some() {
+        return Err(Failure::new(
+            "input.secret_source",
+            "Machine mode requires a token through stdin or environment.",
+        )
+        .with_data(json!({"effects":{"local":"unapplied","remote":"unapplied"}})));
+    }
+    let cfg = machine_config()?;
+    match command {
+        "add" => {
+            if cfg
+                .as_ref()
+                .is_some_and(|cfg| find_profile(cfg, name).is_some())
+            {
+                return Err(Failure::new("cli.interaction_required", "Replacing a profile requires interaction; use separate profile set operations.")
+                    .with_data(json!({"effects":{"local":"unapplied","remote":"unapplied"}})));
+            }
+            let server = args
+                .get_one::<String>("server")
+                .ok_or_else(|| Failure::new("input.invalid", "A provider is required."))?;
+            let model = args
+                .get_one::<String>("model")
+                .ok_or_else(|| Failure::new("input.invalid", "A model is required."))?;
+            let auth = args
+                .get_one::<String>("auth")
+                .and_then(|v| parse_auth_mode(v))
+                .unwrap_or(ProfileAuthMode::None);
+            let profile = profile_from_add(args, name, server, model, auth);
+            let expected = serde_json::to_value(&profile).unwrap();
+            let managed_home = crate::config::paths::cargo_ai_root();
+            let create_home = !managed_home.exists();
+            if create_home {
+                fs::create_dir_all(&managed_home).map_err(|_| Failure::new("persistence.failed", "The selected home could not be created.")
+                    .with_data(json!({"effects":{"local":"unknown","remote":"unapplied","managed_home":"unknown","metadata":"unapplied"}})))?;
+            }
+            let home_effect = if create_home { "applied" } else { "unapplied" };
+            crate::config::adder::add_profile_noninteractive(profile, args.get_flag("default"))
+                .map_err(|_| Failure::new("persistence.failed", "Profile addition could not be persisted; inspect profiles before retrying.")
+                    .with_data(json!({"effects":{"local":"unknown","remote":"unapplied","managed_home":home_effect,"metadata":"unknown"},"partial":create_home})))?;
+            let effects = json!({"local":"applied","remote":"unapplied","metadata":"applied","credential":"unapplied","managed_home":home_effect});
+            let persisted = persisted_machine_config(&effects)?;
+            let verified = find_profile(&persisted, name)
+                .is_some_and(|p| serde_json::to_value(p).ok().as_ref() == Some(&expected))
+                && (!args.get_flag("default")
+                    || persisted.default_profile.as_deref() == Some(name));
+            let payload = find_profile(&persisted, name).map(|profile| {
+                profile_payload_with_token(profile, persisted.default_profile.as_deref())
+            });
+            let data =
+                json!({"profile":payload,"effects":effects,"postconditions_verified":verified});
+            if !verified {
+                return Err(Failure::new(
+                    "persistence.unverified",
+                    "The saved profile differs from the requested state.",
+                )
+                .with_data({
+                    let mut data = data;
+                    data["partial"] = json!(true);
+                    data
+                }));
+            }
+            Ok(data)
+        }
+        "set" => {
+            let result = set_outcome(args, write_config).map_err(|error| Failure::new(error.code, "Profile update did not complete; inspect the profile and credential state before retrying.")
+                .with_data(json!({"partial":error.effects.as_object().is_some_and(|effects| effects.values().any(|value| value == "applied")),"effects":error.effects})))?;
+            let persisted = persisted_machine_config(&result.effects)?;
+            if !find_profile(&persisted, name).is_some_and(|p| {
+                serde_json::to_value(p).ok().as_ref() == Some(&result.expected_profile)
+            }) || persisted.default_profile != result.expected_default
+            {
+                return Err(Failure::new(
+                    "persistence.unverified",
+                    "The updated profile differs from the requested state.",
+                )
+                .with_data(json!({"effects":result.effects,"partial":true,"postconditions_verified":false})));
+            }
+            let payload = profile_payload_with_token(
+                find_profile(&persisted, name).unwrap(),
+                persisted.default_profile.as_deref(),
+            );
+            if result.token_change.is_some() {
+                let credential_matches = store::load_profile_token(name)
+                    .is_ok_and(|saved| saved == result.expected_token);
+                if !credential_matches {
+                    return Err(Failure::new("persistence.unverified", "The profile credential state could not be verified.")
+                        .with_data(json!({"effects":result.effects,"profile":payload,"partial":true,"postconditions_verified":false})));
+                }
+            }
+            Ok(
+                json!({"profile":payload,"changed_fields":result.metadata_changes,"token_change":result.token_change,
+                "effects":result.effects,"postconditions_verified":true}),
+            )
+        }
+        "remove" => {
+            if !cfg
+                .as_ref()
+                .is_some_and(|cfg| find_profile(cfg, name).is_some())
+            {
+                return Err(Failure::new(
+                    "profile.not_found",
+                    "The selected profile does not exist.",
+                ));
+            }
+            let cleanup = crate::config::remover::remove_profile_noninteractive(name).map_err(|_| Failure::new("persistence.failed", "Profile removal failed; inspect the profile before retrying.")
+                .with_data(json!({"effects":{"local":"unknown","remote":"unapplied","metadata":"unknown","credential":"unapplied"}})))?;
+            let effects = json!({"local":"applied","remote":"unapplied","metadata":"applied","credential":if cleanup {"applied"} else {"unknown"}});
+            let persisted = persisted_machine_config(&effects)?;
+            let removed = find_profile(&persisted, name).is_none();
+            let data = json!({"removed":removed,"default_profile":persisted.default_profile,"effects":effects,"postconditions_verified":removed && cleanup});
+            if !cleanup {
+                return Err(Failure::new(
+                    "operation.partial",
+                    "The profile was removed but credential cleanup failed.",
+                )
+                .with_data({
+                    let mut data = data;
+                    data["partial"] = json!(true);
+                    data
+                }));
+            }
+            if !removed {
+                return Err(Failure::new(
+                    "persistence.unverified",
+                    "Profile removal could not be verified.",
+                )
+                .with_data({
+                    let mut data = data;
+                    data["partial"] = json!(true);
+                    data
+                }));
+            }
+            Ok(data)
+        }
+        _ => Err(Failure::new(
+            "contract.unsupported",
+            "This profile command has no selected finite contract.",
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -544,6 +901,175 @@ mod tests {
         profile_set_success_ui_response,
     };
     use crate::config::schema::ProfileAuthMode;
+
+    fn machine_args(words: &[&str]) -> clap::ArgMatches {
+        {
+            let all = std::iter::once("cargo-ai")
+                .chain(words.iter().copied())
+                .map(std::ffi::OsString::from)
+                .collect();
+            crate::args::parse_cli("cargo-ai", all)
+                .unwrap()
+                .subcommand_matches("profile")
+                .unwrap()
+                .clone()
+        }
+    }
+    #[test]
+    fn machine_contract_profile_consent_and_secret_transport_precede_effects() {
+        let home = crate::commands::secret_input::test_support::Home::new();
+        let before = std::fs::read(home.path.join("config.toml")).unwrap();
+        for words in [
+            vec!["profile", "remove", "example"],
+            vec![
+                "profile",
+                "set",
+                "example",
+                "--token",
+                "synthetic-private-secret",
+            ],
+        ] {
+            let error = super::machine_run(&machine_args(&words)).unwrap_err();
+            assert!(matches!(
+                error.code,
+                "cli.interaction_required" | "input.secret_source"
+            ));
+            assert_eq!(error.data["effects"]["local"], "unapplied");
+            assert!(!format!("{error:?}").contains("synthetic-private-secret"));
+            assert_eq!(
+                std::fs::read(home.path.join("config.toml")).unwrap(),
+                before
+            );
+        }
+    }
+    #[test]
+    fn machine_contract_profile_read_update_add_remove_use_persisted_state() {
+        let home = crate::commands::secret_input::test_support::Home::new();
+        let mut config = std::fs::read_to_string(home.path.join("config.toml")).unwrap();
+        config = config.replace("auth_mode = 'api_key'", "auth_mode = 'api_key'\nurl = 'https://private-user:private-pass@example.test/?api_key=private-key'");
+        std::fs::write(home.path.join("config.toml"), config).unwrap();
+        let shown = super::machine_run(&machine_args(&["profile", "show", "example"])).unwrap();
+        assert_eq!(shown["profile"]["url_present"], true);
+        assert!(!shown.to_string().contains("private-pass"));
+        assert_eq!(shown["profile"]["url"], serde_json::Value::Null);
+        assert_eq!(shown["profile"]["url_redacted"], true);
+        assert_eq!(shown["profile"]["url_origin"], "https://example.test");
+        let result = super::machine_run(&machine_args(&[
+            "profile",
+            "set",
+            "example",
+            "--model",
+            "updated-model",
+        ]))
+        .unwrap();
+        assert_eq!(result["profile"]["model"], "updated-model");
+        assert_eq!(result["effects"]["metadata"], "applied");
+        assert_eq!(result["postconditions_verified"], true);
+        let result = super::machine_run(&machine_args(&[
+            "profile", "add", "second", "--server", "ollama", "--model", "fixture",
+        ]))
+        .unwrap();
+        assert_eq!(result["profile"]["name"], "second");
+        let conflict = super::machine_run(&machine_args(&[
+            "profile", "add", "second", "--server", "openai", "--model", "other",
+        ]))
+        .unwrap_err();
+        assert_eq!(conflict.code, "cli.interaction_required");
+        let result =
+            super::machine_run(&machine_args(&["profile", "remove", "second", "--yes"])).unwrap();
+        assert_eq!(result["removed"], true);
+        let list = super::machine_run(&machine_args(&["profile", "list"])).unwrap();
+        assert_eq!(list["profiles"].as_array().unwrap().len(), 1);
+        assert_eq!(list["complete"], true);
+    }
+    #[test]
+    fn machine_contract_profile_first_add_creates_only_selected_home() {
+        let home = crate::commands::secret_input::test_support::Home::new();
+        std::fs::remove_dir_all(&home.path).unwrap();
+        let result = super::machine_run(&machine_args(&[
+            "profile",
+            "add",
+            "first",
+            "--server",
+            "ollama",
+            "--model",
+            "fixture",
+            "--url",
+            "http://localhost:11434/path",
+        ]))
+        .unwrap();
+        assert_eq!(result["effects"]["managed_home"], "applied");
+        assert_eq!(result["profile"]["is_default"], true);
+        assert_eq!(result["profile"]["url"], "http://localhost:11434/path");
+        assert_eq!(result["profile"]["url_redacted"], false);
+        assert!(home.path.join("config.toml").is_file());
+    }
+    #[test]
+    fn machine_contract_profile_remove_exposes_partial_credential_cleanup() {
+        let _home = crate::commands::secret_input::test_support::Home::new();
+        let path = crate::credentials::store::credentials_path();
+        std::fs::write(&path, "malformed private-secret credential document").unwrap();
+        let error = super::machine_run(&machine_args(&["profile", "remove", "example", "--yes"]))
+            .unwrap_err();
+        assert_eq!(error.code, "operation.partial");
+        assert_eq!(error.data["removed"], true);
+        assert_eq!(error.data["effects"]["metadata"], "applied");
+        assert_eq!(error.data["effects"]["credential"], "unknown");
+        assert!(!format!("{error:?}").contains("private-secret"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "malformed private-secret credential document"
+        );
+    }
+    #[test]
+    fn machine_contract_profile_environment_token_verifies_exact_value_then_clear() {
+        let _home = crate::commands::secret_input::test_support::Home::new();
+        let variable = "CARGO_AI_MACHINE_CONTRACT_FIXTURE_TOKEN";
+        let previous = std::env::var_os(variable);
+        std::env::set_var(variable, "machine-private-token");
+        let result = super::machine_run(&machine_args(&[
+            "profile", "set", "example", "--env", variable,
+        ]));
+        match previous {
+            Some(value) => std::env::set_var(variable, value),
+            None => std::env::remove_var(variable),
+        }
+        let result = result.unwrap();
+        assert_eq!(result["profile"]["token_presence"], "present");
+        assert_eq!(result["postconditions_verified"], true);
+        assert!(!result.to_string().contains("machine-private-token"));
+        assert_eq!(
+            crate::credentials::store::load_profile_token("example")
+                .unwrap()
+                .as_deref(),
+            Some("machine-private-token")
+        );
+        let result = super::machine_run(&machine_args(&[
+            "profile",
+            "set",
+            "example",
+            "--clear-token",
+        ]))
+        .unwrap();
+        assert_eq!(result["profile"]["token_presence"], "absent");
+        assert_eq!(result["postconditions_verified"], true);
+        assert!(crate::credentials::store::load_profile_token("example")
+            .unwrap()
+            .is_none());
+    }
+    #[test]
+    fn machine_contract_profile_core_failure_retains_exact_boundary_effects() {
+        let _home = crate::commands::secret_input::test_support::Home::new();
+        let args = machine_args(&["profile", "set", "example", "--default"]);
+        let error = super::set_outcome(args.subcommand_matches("set").unwrap(), |_| {
+            Err("synthetic-private-secret".into())
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "persistence.failed");
+        assert_eq!(error.effects["metadata"], "unknown");
+        assert_eq!(error.effects["credential"], "unapplied");
+        assert!(!error.legacy_message.contains("synthetic-private-secret"));
+    }
 
     #[test]
     fn secret_input_profile_metadata_failure_preserves_credentials_and_fails() {

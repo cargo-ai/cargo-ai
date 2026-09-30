@@ -5,3 +5,9 @@ use clap::ArgMatches;
 pub async fn run(sub_m: &ArgMatches) -> bool {
     crate::commands::account::run_agents(sub_m).await
 }
+
+pub(crate) async fn machine_run(
+    matches: &ArgMatches,
+) -> Result<serde_json::Value, crate::commands::machine::Failure> {
+    crate::commands::account::machine_agents(matches).await
+}

@@ -5,9 +5,26 @@ use std::fs;
 use std::io::{self, Write};
 
 pub fn add_profile(
+    new_profile: Profile,
+    overwrite: bool,
+    set_as_default: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    add_profile_impl(new_profile, overwrite, set_as_default, true)
+}
+
+/// Metadata-only addition without prompting or writing diagnostics.
+pub(crate) fn add_profile_noninteractive(
+    new_profile: Profile,
+    set_as_default: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    add_profile_impl(new_profile, false, set_as_default, false)
+}
+
+fn add_profile_impl(
     mut new_profile: Profile,
     overwrite: bool,
     set_as_default: bool,
+    render: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // `profile add` is metadata-only: secret writes are handled by
     // `cargo ai profile set ... --token`.
@@ -28,9 +45,14 @@ pub fn add_profile(
 
     if let Some(existing) = cfg.profile.iter().position(|p| p.name == new_profile.name) {
         if overwrite {
-            println!("Overwriting existing profile '{}'.", new_profile.name);
+            if render {
+                println!("Overwriting existing profile '{}'.", new_profile.name);
+            }
             cfg.profile[existing] = new_profile;
         } else {
+            if !render {
+                return Err("Profile replacement requires interaction".into());
+            }
             print!(
                 "Profile '{}' already exists. Replace? [y/N]: ",
                 cfg.profile[existing].name
@@ -48,21 +70,27 @@ pub fn add_profile(
         }
     } else {
         cfg.profile.push(new_profile);
-        println!("Added new profile '{}'.", cfg.profile.last().unwrap().name);
+        if render {
+            println!("Added new profile '{}'.", cfg.profile.last().unwrap().name);
+        }
     }
 
     // Handle setting or overwriting the default profile
     if set_as_default {
         let profile_name = cfg.profile.last().unwrap().name.clone();
         cfg.default_profile = Some(profile_name.clone());
-        println!("Profile '{}' set as default.", profile_name);
+        if render {
+            println!("Profile '{}' set as default.", profile_name);
+        }
     } else if cfg.default_profile.is_none() {
         let profile_name = cfg.profile.last().unwrap().name.clone();
         cfg.default_profile = Some(profile_name.clone());
-        println!(
-            "Profile '{}' set as default (first profile added).",
-            profile_name
-        );
+        if render {
+            println!(
+                "Profile '{}' set as default (first profile added).",
+                profile_name
+            );
+        }
     }
 
     let serialized = toml::to_string_pretty(&cfg)?;

@@ -200,3 +200,9 @@ See [Build and package workflows](./packages.md) for package identity, publisher
 ---
 
 [Documentation hub](./README.md) · [Cargo AI README](../README.md)
+
+## Optional application output
+
+After checking installed `capabilities`, add `--output-format json --output-schema-version 1` to supported account, package and agent leaves for the [typed application payloads](machine-payloads.md#account-and-authentication-leaves). Existing human output and command-specific JSON retain their formats. Selected registration requires existing `--yes` consent; confirmation uses a closed `--stdin` pipe, and selected deactivation requires `--yes` or the exact existing deletion confirmation. Acceptance of an email-code request does not establish delivery. Remote confirmation/publication can succeed before required local credential/receipt persistence fails; inspect the structured effect facts before retrying.
+
+Selected `auth login openai` returns an interaction requirement before helper launch. Complete its existing terminal/browser flow and verify with `auth status --json`; the new selector does not turn that helper's sensitive protocol into ordinary JSON diagnostics. Hosted reads may refresh/persist the current account session, so they are not credential-free passive inspection.

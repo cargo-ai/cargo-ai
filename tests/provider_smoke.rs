@@ -1432,6 +1432,44 @@ fn interpreted_audio_chain_writes_transcribes_and_forwards_exact_capture() {
 }
 
 #[test]
+fn selected_audio_chain_reports_written_artifact_without_child_result_or_private_text() {
+    let fixture = Fixture::new();
+    let mock = MediaServer::new(media_responses(MEDIA_TRANSCRIPT, true));
+    configure_media_fixture(&fixture, &mock.url);
+    let output = media_command(&fixture, env!("CARGO_BIN_EXE_cargo-ai"))
+        .args(["run", "--config"])
+        .arg(&fixture.definition)
+        .args([
+            "--profile",
+            "media-child",
+            "--output-format",
+            "json",
+            "--max-output-tokens",
+            "128",
+            "--inference-timeout-in-sec",
+            "10",
+        ])
+        .output()
+        .unwrap();
+    let requests = mock.finish();
+    assert_media_chain(&fixture, &output, &requests);
+    assert!(output.stderr.is_empty());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["outcome"], "succeeded", "{value}");
+    assert_eq!(value["data"]["result"]["availability"], "not_produced");
+    assert!(value["data"]["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["kind"] == "audio"
+            && a["state"] == "produced"
+            && a["content_included"] == false));
+    for private in [OPENAI_TEST_TOKEN, MEDIA_TRANSCRIPT] {
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(private));
+    }
+}
+
+#[test]
 fn interpreted_audio_chain_does_not_forward_empty_transcript() {
     let fixture = Fixture::new();
     let mock = MediaServer::new(media_responses("   ", false));

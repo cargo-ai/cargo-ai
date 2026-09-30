@@ -131,3 +131,9 @@ Confirmation succeeds only after server acceptance and valid required credential
 ## Local Data Ownership
 
 Inspect `.cargo-ai/project.toml` before choosing output paths. `cargo ai new` sets `[runtime] data_root = ".cargo-ai/data"`; `cargo ai init` leaves adoption explicit for existing work. Do not add or remove it silently. In an opted-in project, writing tools and Cargo AI-controlled outputs use the fixed project data root. Keep definitions, immutable inputs, and source code outside it. Read `tool-authoring.md`, `tool-child-agents.md`, and `package-workflow.md` before adapting older tool paths or shipping a project.
+
+## Optional application integration
+
+For a native wrapper or script integration, check installed `cargo ai capabilities --output-format json` before selecting `--output-format json --output-schema-version 1` or the advertised `run` NDJSON stream. Keep existing definition-input flags, consent and credential handling unchanged. `cargo ai models list --profile NAME --output-format json` can discover supported catalog IDs without inference; listing does not establish invocation access, and saved API-key discovery requires explicit file storage. Use draft bounded stdin or manual entry for unsupported stores/connections.
+
+The public [machine interface](https://github.com/cargo-ai/cargo-ai/blob/develop/docs/machine-interface.md) and [payload reference](https://github.com/cargo-ai/cargo-ai/blob/develop/docs/machine-payloads.md) describe these optional interfaces. Do not assume source documentation means an older installation or generated child has the capability.

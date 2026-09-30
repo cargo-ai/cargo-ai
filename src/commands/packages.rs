@@ -38,3 +38,25 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
 
     crate::commands::account::run_packages(sub_m).await
 }
+
+pub(crate) async fn machine_run(
+    matches: &ArgMatches,
+) -> Result<serde_json::Value, crate::commands::machine::Failure> {
+    if let Some(args) = matches.subcommand_matches("inspect") {
+        if args.get_one::<String>("account").is_some() {
+            return super::package_inspection::machine_run(args).await;
+        }
+    }
+    if let Some(args) = matches.subcommand_matches("list") {
+        if super::local_packages::account_handle_from_list_matches(args).is_some() {
+            return super::account::machine_packages(matches).await;
+        }
+    }
+    if matches!(
+        matches.subcommand_name(),
+        Some("list" | "inspect" | "install")
+    ) {
+        return super::local_packages::machine_run(matches).await;
+    }
+    super::account::machine_packages(matches).await
+}

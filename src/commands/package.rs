@@ -254,6 +254,34 @@ pub fn run(sub_m: &ArgMatches) -> bool {
     }
 }
 
+/// Assemble once through the normal package pipeline and expose its produced facts.
+pub(crate) fn machine_run(
+    args: &ArgMatches,
+) -> Result<serde_json::Value, crate::commands::machine::Failure> {
+    let profile = args
+        .get_one::<String>("profile")
+        .map(String::as_str)
+        .unwrap_or("default");
+    let package = assemble_current_project_package(
+        profile,
+        args.get_one::<String>("output_dir").map(String::as_str),
+        args.get_flag("force"),
+        false,
+    )
+    .map_err(|_| {
+        crate::commands::machine::Failure::new(
+            "package.assembly_failed",
+            "Package assembly did not complete.",
+        )
+        .with_data(serde_json::json!({"local_effect":"unknown","stage":"assemble"}))
+    })?;
+    Ok(
+        serde_json::json!({"output_path":package.root_path,"project_name":package.manifest_project_name,"project_version":package.manifest_project_version,
+        "profile":profile,"manifest":package.manifest_value,"assembled_size_bytes":package.assembled_size_bytes,"archive_size_bytes":package.archive_size_bytes,
+        "estimated_publish_request_size_bytes":package.estimated_publish_request_size_bytes,"archive_sha256":crate::commands::account::sha256_hex(&package.archive_bytes),"local_effect":"applied"}),
+    )
+}
+
 fn current_project_root() -> Result<Option<PathBuf>, String> {
     let current_dir = std::env::current_dir()
         .map_err(|error| format!("Failed to inspect the current project directory: {error}"))?;

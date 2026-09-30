@@ -286,3 +286,9 @@ You can add that guidance to a Cargo AI project with `cargo ai add guidance`; se
 - [Actions And Child Agents](./actions-and-child-agents.md)
 - [Projects And Local Tools](./projects-and-tools.md)
 - [Troubleshooting](./troubleshooting.md)
+
+## Optional application execution output
+
+For an embedding application, first check `cargo ai capabilities --output-format json`, then select `cargo ai run ./agent.json --output-format ndjson --max-runtime-in-sec 60`. Existing human rendering remains available. `run --json` still selects a definition input; it is independent of `--output-format`. See [runtime payloads](machine-payloads.md#runtime-and-model-discovery) for incremental framing, incomplete streams, known result/artifact availability and opaque generated children.
+
+Private validated root result content is returned only with explicit `--include-result-content`. The selector adds no result content to usage metadata or backup records. An execution status, a known result and a produced artifact are separate facts; do not infer any of them from console text or an arbitrary changed file.

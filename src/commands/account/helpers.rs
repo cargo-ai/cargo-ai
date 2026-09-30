@@ -96,15 +96,43 @@ pub fn persist_refreshed_access_token(
     refresh_token: &str,
     refreshed_expires_in: Option<i32>,
 ) {
-    if let Some(expires_in) = refreshed_expires_in {
-        if let Err(e) = set_account_tokens(
-            refreshed_access_token.to_string(),
-            refresh_token.to_string(),
-            expires_in,
-        ) {
-            eprintln!("⚠️ Failed to update account tokens in credential store: {e}");
-        }
+    if let Err(e) = persist_refreshed_access_token_result(
+        refreshed_access_token,
+        refresh_token,
+        refreshed_expires_in,
+    ) {
+        eprintln!("⚠️ Failed to update account tokens in credential store: {e}");
     }
+}
+
+pub(crate) fn persist_refreshed_access_token_result(
+    refreshed_access_token: &str,
+    refresh_token: &str,
+    refreshed_expires_in: Option<i32>,
+) -> Result<bool, String> {
+    if let Some(expires_in) = refreshed_expires_in {
+        set_account_tokens(
+            refreshed_access_token.to_owned(),
+            refresh_token.to_owned(),
+            expires_in,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Selected contracts require usable expiry metadata before persisting a refreshed session.
+pub(crate) fn persist_selected_refreshed_access_token(
+    access: &str,
+    refresh: &str,
+    expiry: Option<i32>,
+) -> Result<(), ()> {
+    let expiry = expiry.filter(|seconds| *seconds > 0).ok_or(())?;
+    persist_refreshed_access_token_result(access, refresh, Some(expiry))
+        .map(|_| ())
+        .map_err(|_| ())
 }
 
 /// Applies `--limit` output truncation to successful agents-list responses.
@@ -320,6 +348,33 @@ mod tests {
         extract_status_account_email,
     };
     use serde_json::json;
+
+    #[test]
+    fn machine_account_refresh_requires_valid_expiry_before_secret_persistence() {
+        let home = crate::commands::secret_input::test_support::Home::new();
+        for expiry in [None, Some(0), Some(-1)] {
+            assert!(super::persist_selected_refreshed_access_token(
+                "private-access",
+                "private-refresh",
+                expiry
+            )
+            .is_err());
+            assert!(!home.path.join("credentials.toml").exists());
+        }
+        assert!(super::persist_selected_refreshed_access_token(
+            "private-access",
+            "private-refresh",
+            Some(3600)
+        )
+        .is_ok());
+        assert_eq!(
+            crate::credentials::store::load_account_tokens()
+                .unwrap()
+                .unwrap()
+                .access_token,
+            "private-access"
+        );
+    }
 
     fn sample_agents_list_response() -> serde_json::Value {
         json!({

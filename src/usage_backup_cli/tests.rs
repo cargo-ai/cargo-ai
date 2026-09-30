@@ -672,3 +672,113 @@ async fn disable_reports_busy_without_claiming_to_override_an_active_consent_tra
     usage_backup::disable().unwrap();
     assert!(!usage_store::settings().unwrap().backup_enabled);
 }
+
+#[tokio::test]
+async fn machine_contract_backup_remote_acceptance_survives_local_persistence_failure() {
+    let mut server = Server::new_async().await;
+    let _home = Home::new(format!("{}/account", server.url()), true);
+    let binding = binding();
+    let status = reply(&mut server, "status", state(&binding), 1).await;
+    let enable = reply(&mut server, "enable", state(&binding), 1).await;
+    let error =
+        usage_backup::enable_outcome_with_writer(|_| Err("private-persistence-detail".into()))
+            .await
+            .unwrap_err();
+    assert_eq!(error.effects.remote, "applied");
+    assert_eq!(error.effects.local, "unknown");
+    assert_eq!(error.effects.binding, Some(binding));
+    assert_eq!(usage_backup::local_status().unwrap()["enabled"], false);
+    assert!(!error
+        .effects
+        .value()
+        .to_string()
+        .contains("private-persistence-detail"));
+    status.assert_async().await;
+    enable.assert_async().await;
+}
+
+#[tokio::test]
+async fn machine_contract_backup_disabled_status_and_sync_do_not_access_credentials() {
+    let mut server = Server::new_async().await;
+    let home = Home::new(format!("{}/account", server.url()), false);
+    let requests = server
+        .mock("POST", "/account")
+        .expect(0)
+        .create_async()
+        .await;
+    for leaf in ["status", "sync"] {
+        let args = super::command()
+            .try_get_matches_from(["backup", leaf])
+            .unwrap();
+        let result = super::machine_run(&args).await.unwrap();
+        assert_eq!(result["backup"]["enabled"], false);
+        assert_eq!(result["effects"]["remote"], "unapplied");
+    }
+    assert!(!home.path.exists());
+    requests.assert_async().await;
+}
+
+#[tokio::test]
+async fn machine_contract_backup_sync_preserves_prior_batches_when_next_transmission_fails() {
+    let mut server = Server::new_async().await;
+    let _home = Home::new(format!("{}/account", server.url()), true);
+    let binding = binding();
+    enable(&mut server, &binding).await;
+    let events: Vec<_> = (0..101).map(|_| append()).collect();
+    let ids: Vec<_> = events.iter().map(event_id).collect();
+    let status = reply(&mut server, "status", state(&binding), 1).await;
+    let first = acknowledge(&mut server, &binding, &ids[..100]).await;
+    let last = ids[100].clone();
+    let failed = server
+        .mock("POST", "/account")
+        .match_body(command("ingest"))
+        .match_request(move |request| {
+            serde_json::from_slice::<Value>(request.body().unwrap()).is_ok_and(|body| {
+                let records = body["usage_backup"]["records"].as_array().unwrap();
+                records.len() == 1 && records[0]["event_id"] == last
+            })
+        })
+        .with_status(500)
+        .with_body("private-server-failure")
+        .expect(1)
+        .create_async()
+        .await;
+    let args = super::command()
+        .try_get_matches_from(["backup", "sync"])
+        .unwrap();
+    let error = super::machine_run(&args).await.unwrap_err();
+    assert_eq!(error.code, "operation.partial");
+    assert_eq!(error.data["effects"]["uploaded_records"], "100");
+    assert_eq!(error.data["effects"]["remote_accepted_records"], "100");
+    assert_eq!(error.data["effects"]["remote"], "unknown");
+    assert!(!format!("{error:?}").contains("private-server-failure"));
+    let local = usage_backup::local_status().unwrap();
+    assert_eq!(local["acknowledged_records"], 100);
+    assert_eq!(local["pending_records"], 1);
+    first.assert_async().await;
+    failed.assert_async().await;
+    status.assert_async().await;
+}
+
+#[tokio::test]
+async fn machine_contract_backup_disable_retains_queue_pause_on_settings_failure() {
+    let mut server = Server::new_async().await;
+    let _home = Home::new(format!("{}/account", server.url()), true);
+    let binding = binding();
+    enable(&mut server, &binding).await;
+    append();
+    let error =
+        usage_backup::disable_outcome_with_writer(|_| Err("private-persistence-detail".into()))
+            .unwrap_err();
+    assert_eq!(error.effects.remote, "unapplied");
+    assert_eq!(error.effects.queue, "applied");
+    assert_eq!(error.effects.settings, "unknown");
+    assert_eq!(usage_backup::local_status().unwrap()["enabled"], true);
+    assert!(!error
+        .effects
+        .value()
+        .to_string()
+        .contains("private-persistence-detail"));
+    usage_backup::disable().unwrap();
+    assert_eq!(usage_backup::local_status().unwrap()["enabled"], false);
+}

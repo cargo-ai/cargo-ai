@@ -33,6 +33,12 @@ static CREDENTIALS_STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 thread_local! {
     static TEST_NEW_CREDENTIALS_DESTINATION_CONTENTS: std::cell::RefCell<Option<(PathBuf, String)>> =
         const { std::cell::RefCell::new(None) };
+    static DISCOVERY_KEYCHAIN_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn discovery_keychain_lookup_count() -> usize {
+    DISCOVERY_KEYCHAIN_LOOKUPS.with(std::cell::Cell::get)
 }
 
 #[derive(Debug, Clone)]
@@ -582,6 +588,8 @@ fn keyring_entry(account: &str) -> Result<keyring::Entry, String> {
     target_os = "openbsd"
 ))]
 fn keychain_get(account: &str) -> Result<Option<String>, String> {
+    #[cfg(test)]
+    DISCOVERY_KEYCHAIN_LOOKUPS.with(|count| count.set(count.get() + 1));
     if !keychain_enabled() {
         return Err("keychain usage is disabled by CARGO_AI_DISABLE_KEYCHAIN".to_string());
     }
@@ -609,6 +617,8 @@ fn keychain_get(account: &str) -> Result<Option<String>, String> {
     target_os = "openbsd"
 )))]
 fn keychain_get(_account: &str) -> Result<Option<String>, String> {
+    #[cfg(test)]
+    DISCOVERY_KEYCHAIN_LOOKUPS.with(|count| count.set(count.get() + 1));
     Err("keychain backend is unavailable on this platform".to_string())
 }
 
@@ -1273,6 +1283,20 @@ pub fn load_profile_token(profile_name: &str) -> Result<Option<String>, String> 
             }
         },
     }
+}
+
+/// Read only the file store in a previously validated configuration snapshot.
+/// This deliberately never resolves the current mode or enters a keychain fallback.
+pub(crate) fn load_scoped_file_profile_token(
+    loaded: &crate::config::loader::LoadedConfig,
+    profile_name: &str,
+) -> Result<Option<String>, &'static str> {
+    if loaded.config().secret_store != Some(SecretStoreMode::File) {
+        return Err("unsupported_secret_store");
+    }
+    let root = loaded.path().parent().ok_or("invalid_credentials")?;
+    load_profile_token_from_file_with_path(&root.join("credentials.toml"), profile_name)
+        .map_err(|_| "invalid_credentials")
 }
 
 pub fn store_profile_token(profile_name: &str, token: &str) -> Result<(), String> {
@@ -2060,5 +2084,62 @@ refresh_token="legacy-refresh"
             let result = load_profile_token_from_file_with_path(path, "openai-dev");
             assert!(result.is_err());
         });
+    }
+}
+
+#[cfg(test)]
+mod discovery_snapshot_tests {
+    use super::*;
+    use crate::config::loader::{load_config_from_path, ConfigLoad};
+    #[test]
+    fn discovery_file_snapshot_is_home_bound_and_never_re_resolves_mode() {
+        let mut homes = Vec::new();
+        let before = discovery_keychain_lookup_count();
+        for secret in ["synthetic-first", "synthetic-second"] {
+            let root =
+                std::env::temp_dir().join(format!("discovery-file-{}", uuid::Uuid::new_v4()));
+            fs::create_dir(&root).unwrap();
+            fs::write(
+                root.join("config.toml"),
+                "secret_store='file'\nprofile=[]\n",
+            )
+            .unwrap();
+            store_profile_token_in_file_with_path(
+                &root.join("credentials.toml"),
+                "same-name",
+                secret,
+            )
+            .unwrap();
+            let ConfigLoad::Loaded(loaded) =
+                load_config_from_path(&root.join("config.toml")).unwrap()
+            else {
+                panic!("snapshot missing")
+            };
+            fs::write(
+                root.join("config.toml"),
+                "secret_store='keychain'\nprofile=[]\n",
+            )
+            .unwrap();
+            assert_eq!(
+                load_scoped_file_profile_token(&loaded, "same-name")
+                    .unwrap()
+                    .as_deref(),
+                Some(secret)
+            );
+            let ConfigLoad::Loaded(changed) =
+                load_config_from_path(&root.join("config.toml")).unwrap()
+            else {
+                panic!("snapshot missing")
+            };
+            assert_eq!(
+                load_scoped_file_profile_token(&changed, "same-name").unwrap_err(),
+                "unsupported_secret_store"
+            );
+            homes.push(root);
+        }
+        assert_eq!(discovery_keychain_lookup_count(), before);
+        for home in homes {
+            fs::remove_dir_all(home).unwrap();
+        }
     }
 }

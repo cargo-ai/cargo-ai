@@ -4,7 +4,7 @@
 //! They are intentionally kept out of a public SDK contract.
 mod anthropic;
 mod compatibility;
-mod error;
+pub(crate) mod error;
 mod gemini;
 mod image;
 mod media;
@@ -284,3 +284,4 @@ mod usage_retention_tests {
         }
     }
 }
+pub(crate) mod discovery;

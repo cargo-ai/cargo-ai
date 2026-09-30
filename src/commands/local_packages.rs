@@ -260,6 +260,81 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     }
 }
 
+fn installed_payload(package: &InstalledPackageDocument) -> Value {
+    serde_json::json!({"alias":package.alias,"package_name":package.package_name,"package_version":package.package_version,
+        "profile":package.profile,"content_sha256":package.content_sha256,"installed_at":package.installed_at,
+        "source":{"kind":package.source.kind,"path":package.source.path,"hosted_source_id":package.source.hosted_source_id,"hosted_version_id":package.source.hosted_version_id,"owner_handle":package.source.owner_handle},
+        "permissions":package.permissions,"entrypoints":package.entrypoints,"capability_source":"installed_manifest"})
+}
+fn record_installed_result(
+    installed: &MaterializedPackageInstall,
+    report: &mut super::account::machine::Report,
+) {
+    let action = match installed.action {
+        InstallAction::New => "installed",
+        InstallAction::Upgrade => "upgraded",
+        InstallAction::Replace => "replaced",
+        InstallAction::Downgrade => "downgraded",
+        InstallAction::Noop => "unchanged",
+    };
+    match load_installed_package(&installed.alias) {
+        Ok(package) if package.package_name == installed.package_name && package.package_version == installed.package_version => {
+            report.accepted(serde_json::json!({"action":action,"installed_effect":if action=="unchanged" {"unchanged"} else {"applied"},"package":installed_payload(&package),"readback":"verified"}));
+        }
+        _ => report.fail("operation.partial", "Installation completed but its postcondition could not be read back.", serde_json::json!({"action":action,"alias":installed.alias,"installed_effect":if action=="unchanged" {"unchanged"} else {"applied"},"readback":"unavailable"})),
+    }
+}
+pub(crate) async fn machine_run(
+    matches: &ArgMatches,
+) -> Result<Value, crate::commands::machine::Failure> {
+    use crate::commands::machine::Failure;
+    match matches.subcommand() {
+        Some(("list", args)) => {
+            let mut packages = list_installed_packages().map_err(|_| {
+                Failure::new(
+                    "package.inventory_failed",
+                    "Installed packages could not be read.",
+                )
+            })?;
+            packages.sort_by(|a, b| a.alias.cmp(&b.alias));
+            let total = packages.len();
+            if !args.get_flag("all") {
+                packages.truncate(args.get_one::<u32>("limit").copied().unwrap_or(20) as usize);
+            }
+            Ok(
+                serde_json::json!({"items":packages.iter().map(installed_payload).collect::<Vec<_>>(),"count":packages.len(),"available_count":total,"complete":total==packages.len(),"next_cursor":null,"continuation":"repeat_with_all"}),
+            )
+        }
+        Some(("inspect", args)) => {
+            let alias = args
+                .get_one::<String>("alias")
+                .ok_or_else(|| Failure::new("input.invalid", "A package alias is required."))?;
+            let package = load_installed_package(alias).map_err(|_| {
+                Failure::new(
+                    "package.inspect_failed",
+                    "The installed package could not be read.",
+                )
+            })?;
+            Ok(
+                serde_json::json!({"package":installed_payload(&package),"data_root":installed_package_data_root(alias),"requirements_assessment":"not_performed"}),
+            )
+        }
+        Some(("install", args)) => {
+            let mut report = super::account::machine::Report::new(true);
+            if account_handle_from_install_matches(args).is_some() {
+                execute_hosted_install(args, &mut report).await;
+            } else {
+                let _ = install_local_package_observed(&install_request(args), &mut report);
+            }
+            report.result
+        }
+        _ => Err(Failure::new(
+            "contract.unsupported",
+            "This package command has no selected machine contract.",
+        )),
+    }
+}
+
 pub(crate) fn account_handle_from_list_matches(list_m: &ArgMatches) -> Option<Option<String>> {
     list_m.get_one::<String>("account").map(|value| {
         let trimmed = value.trim();
@@ -338,8 +413,8 @@ fn run_list(list_m: &ArgMatches) -> bool {
     }
 }
 
-fn run_install(install_m: &ArgMatches) -> bool {
-    let request = InstallRequest {
+fn install_request(install_m: &ArgMatches) -> InstallRequest {
+    InstallRequest {
         source: install_m
             .get_one::<String>("source")
             .map(|value| value.to_string()),
@@ -354,7 +429,11 @@ fn run_install(install_m: &ArgMatches) -> bool {
         downgrade: install_m.get_flag("downgrade"),
         keep_data: install_m.get_flag("keep_data"),
         delete_data: install_m.get_flag("delete_data"),
-    };
+    }
+}
+
+fn run_install(install_m: &ArgMatches) -> bool {
+    let request = install_request(install_m);
 
     match install_local_package(&request) {
         Ok(InstallAction::Noop) => true,
@@ -367,6 +446,12 @@ fn run_install(install_m: &ArgMatches) -> bool {
 }
 
 pub(crate) async fn run_hosted_install(install_m: &ArgMatches) -> bool {
+    execute_hosted_install(install_m, &mut super::account::machine::Report::new(false)).await
+}
+async fn execute_hosted_install(
+    install_m: &ArgMatches,
+    report: &mut super::account::machine::Report,
+) -> bool {
     let source_id = install_m.get_one::<String>("source_id").map(String::as_str);
     let version_id = install_m
         .get_one::<String>("version_id")
@@ -403,7 +488,15 @@ pub(crate) async fn run_hosted_install(install_m: &ArgMatches) -> bool {
         }
     }
 
-    match install_hosted_package(
+    if report.active && !install_m.get_flag("accept_permissions") {
+        report.fail(
+            "cli.interaction_required",
+            "Hosted package installation requires explicit permission acceptance.",
+            serde_json::json!({"installed_effect":"not_attempted"}),
+        );
+        return false;
+    }
+    match install_hosted_package_observed(
         package_name,
         owner_handle.as_deref(),
         version.as_deref(),
@@ -415,6 +508,7 @@ pub(crate) async fn run_hosted_install(install_m: &ArgMatches) -> bool {
         install_m.get_flag("accept_permissions"),
         install_m.get_flag("keep_data"),
         install_m.get_flag("delete_data"),
+        report,
     )
     .await
     {
@@ -594,10 +688,18 @@ fn run_uninstall(uninstall_m: &ArgMatches) -> bool {
 }
 
 fn install_local_package(request: &InstallRequest) -> Result<InstallAction, String> {
+    install_local_package_observed(request, &mut super::account::machine::Report::new(false))
+}
+fn install_local_package_observed(
+    request: &InstallRequest,
+    report: &mut super::account::machine::Report,
+) -> Result<InstallAction, String> {
+    report.fail("package.preparation_failed", "The local package could not be prepared.", serde_json::json!({"stage":"prepare","installed_effect":"not_attempted","staging_effect":"unknown"}));
     let prepared = match request.source.as_deref() {
         Some(source) => prepare_explicit_source(source)?,
         None => prepare_current_project(request.profile.as_str())?,
     };
+    report.fail("package.install_failed", "Package installation did not complete.", serde_json::json!({"stage":"materialize","installed_effect":"unknown","staging_effect":"unknown"}));
     let materialized = match materialize_prepared_package(
         &prepared,
         request.alias.as_deref(),
@@ -614,6 +716,9 @@ fn install_local_package(request: &InstallRequest) -> Result<InstallAction, Stri
         }
     };
     cleanup_prepared_package(&prepared);
+    if report.active {
+        record_installed_result(&materialized, report);
+    }
 
     if matches!(materialized.action, InstallAction::Noop) {
         println!(
@@ -780,7 +885,7 @@ fn materialize_prepared_package_under_lock(
     })
 }
 
-async fn install_hosted_package(
+async fn install_hosted_package_observed(
     package_name: &str,
     owner_handle: Option<&str>,
     version: Option<&str>,
@@ -792,12 +897,27 @@ async fn install_hosted_package(
     accept_permissions: bool,
     keep_data: bool,
     delete_data: bool,
+    report: &mut super::account::machine::Report,
 ) -> Result<InstallAction, String> {
-    let response =
-        pull_inspected_hosted_package(package_name, owner_handle, source_id, version, version_id)
-            .await?;
+    report.prerequisites();
+    report.fail(
+        "package.retrieval_failed",
+        "The selected hosted package could not be retrieved and validated.",
+        serde_json::json!({"stage":"retrieve","installed_effect":"not_attempted"}),
+    );
+    let response = pull_inspected_hosted_package_observed(
+        package_name,
+        owner_handle,
+        source_id,
+        version,
+        version_id,
+        report,
+    )
+    .await?;
+    report.fail("package.preparation_failed", "The downloaded package could not be prepared.", serde_json::json!({"stage":"prepare","installed_effect":"not_attempted","staging_effect":"unknown"}));
     let prepared = prepare_hosted_response(&response, owner_handle, source_id)?;
     print_permission_summary(&prepared.manifest.permissions);
+    report.fail("package.install_failed", "Package installation did not complete.", serde_json::json!({"stage":"materialize","installed_effect":"unknown","staging_effect":"unknown"}));
     let materialized = match materialize_prepared_package(
         &prepared,
         Some(alias),
@@ -814,6 +934,9 @@ async fn install_hosted_package(
         }
     };
     cleanup_prepared_package(&prepared);
+    if report.active {
+        record_installed_result(&materialized, report);
+    }
 
     if matches!(materialized.action, InstallAction::Noop) {
         println!(
@@ -1003,35 +1126,70 @@ pub(crate) async fn pull_inspected_hosted_package(
     version: Option<&str>,
     version_id: Option<&str>,
 ) -> Result<Value, String> {
-    let inspected =
-        read_hosted_package(package_name, owner, source, version, version_id, true).await?;
+    pull_inspected_hosted_package_observed(
+        package_name,
+        owner,
+        source,
+        version,
+        version_id,
+        &mut super::account::machine::Report::new(false),
+    )
+    .await
+}
+
+pub(crate) async fn pull_inspected_hosted_package_observed(
+    package_name: &str,
+    owner: Option<&str>,
+    source: Option<&str>,
+    version: Option<&str>,
+    version_id: Option<&str>,
+    report: &mut super::account::machine::Report,
+) -> Result<Value, String> {
+    let inspected = read_hosted_package_observed(
+        package_name,
+        owner,
+        source,
+        version,
+        version_id,
+        true,
+        report,
+    )
+    .await?;
     crate::commands::package_inspection::render_snapshot(&inspected)?;
     let source = required_response_string(&inspected, "hosted_source_id")?;
     let exact = required_response_string(&inspected, "hosted_version_id")?;
     let downloaded =
-        read_hosted_package("", None, Some(&source), None, Some(&exact), false).await?;
+        read_hosted_package_observed("", None, Some(&source), None, Some(&exact), false, report)
+            .await?;
     crate::commands::package_inspection::validate_same_snapshot(&inspected, &downloaded)?;
     Ok(downloaded)
 }
 
-pub(crate) async fn read_hosted_package(
+pub(crate) async fn read_hosted_package_observed(
     package_name: &str,
     owner_handle: Option<&str>,
     hosted_source_id: Option<&str>,
     version: Option<&str>,
     version_id: Option<&str>,
     inspect: bool,
+    report: &mut super::account::machine::Report,
 ) -> Result<Value, String> {
     use crate::commands::account::helpers::{
         load_account_auth, persist_refreshed_access_token, refresh_access_token_for_retry,
         RefreshAccessError, INFRA_BASE_URL,
     };
 
+    report.prerequisites();
     let auth = load_account_auth()
         .map_err(|message| crate::ui::account_status::normalize_leading_glyph(message.as_str()))?;
+    report.protect(&auth.access_token);
+    if let Some(secret) = auth.refresh_token.as_deref() {
+        report.protect(secret);
+    }
     let access_token_owned = auth.access_token;
     let refresh_token = auth.refresh_token;
 
+    report.transmitting(false);
     let mut response = crate::infra_api::account::projects::read_project(
         INFRA_BASE_URL,
         access_token_owned.as_str(),
@@ -1070,12 +1228,25 @@ pub(crate) async fn read_hosted_package(
                 ));
             }
             Ok((retry_access_token, refreshed_expires_in)) => {
+                report.protect(&retry_access_token);
                 if let Some(rt) = refresh_token.as_deref() {
-                    persist_refreshed_access_token(
-                        retry_access_token.as_str(),
-                        rt,
-                        refreshed_expires_in,
-                    );
+                    if report.active {
+                        report.session_persistence =
+                            match super::account::helpers::persist_selected_refreshed_access_token(
+                                &retry_access_token,
+                                rt,
+                                refreshed_expires_in,
+                            ) {
+                                Ok(()) => "persisted",
+                                Err(_) => "failed",
+                            };
+                    } else {
+                        persist_refreshed_access_token(
+                            &retry_access_token,
+                            rt,
+                            refreshed_expires_in,
+                        );
+                    }
                 }
                 response = crate::infra_api::account::projects::read_project(
                     INFRA_BASE_URL,
@@ -1099,11 +1270,20 @@ pub(crate) async fn read_hosted_package(
         "account_projects_pull_succeeded"
     };
     if response["status"] != "success" || response["type"] != expected_type {
+        if report.active {
+            report.result = super::account::machine::response_ok(&response, expected_type)
+                .map(|()| Value::Null);
+        }
         return Err(backend_response_message(
             &response,
             "Hosted package pull did not succeed.",
         ));
     }
+    report.fail(
+        "response.invalid",
+        "The hosted response did not match the selected package or integrity contract.",
+        serde_json::json!({"installed_effect":"not_attempted"}),
+    );
     let selected_name = if hosted_source_id.is_some() {
         ""
     } else {
@@ -3877,6 +4057,52 @@ assets = ["schemas/customer.sql"]
         std::fs::write(root.join("agents/daily_digest.json"), "{}")
             .expect("hatch definition should be writable");
         root
+    }
+
+    #[tokio::test]
+    async fn machine_packages_local_inventory_preserves_default_limit_and_install_readback() {
+        let _home = crate::commands::secret_input::test_support::Home::new();
+        let _store = PackagesRootGuard::new("machine-inventory");
+        let package_root = temp_package_root("machine-inventory");
+        for index in 0..21 {
+            let request = InstallRequest {
+                source: Some(package_root.to_string_lossy().into_owned()),
+                alias: Some(format!("fixture{index:02}")),
+                profile: "default".into(),
+                replace: false,
+                downgrade: false,
+                keep_data: false,
+                delete_data: false,
+            };
+            let mut report = crate::commands::account::machine::Report::new(true);
+            super::install_local_package_observed(&request, &mut report).unwrap();
+            let data = report.result.unwrap();
+            assert_eq!(data["readback"], "verified");
+            assert_eq!(data["package"]["alias"], format!("fixture{index:02}"));
+        }
+        let args =
+            crate::commands::account::machine::fixture_args(&["cargo-ai", "packages", "list"]);
+        let data = super::machine_run(args.subcommand_matches("packages").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(data["count"], 20);
+        assert_eq!(data["available_count"], 21);
+        assert_eq!(data["complete"], false);
+        let args = crate::commands::account::machine::fixture_args(&[
+            "cargo-ai",
+            "packages",
+            "inspect",
+            "fixture20",
+        ]);
+        let data = super::machine_run(args.subcommand_matches("packages").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(data["package"]["alias"], "fixture20");
+        assert_eq!(
+            data["package"]["content_sha256"].as_str().unwrap().len(),
+            64
+        );
+        std::fs::remove_dir_all(package_root).unwrap();
     }
 
     #[test]

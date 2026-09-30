@@ -10,6 +10,7 @@ mod consent;
 mod deactivate;
 mod handle;
 pub(crate) mod helpers;
+pub(crate) mod machine;
 mod mail;
 mod projects;
 mod register;
@@ -40,4 +41,30 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         );
         false
     }
+}
+
+/// Execute an explicitly selected machine contract using the account handlers.
+pub(crate) async fn machine_run(
+    matches: &ArgMatches,
+) -> Result<serde_json::Value, crate::commands::machine::Failure> {
+    match matches.subcommand() {
+        Some(("status", _)) => status::machine_run().await,
+        Some(("register", args)) => register::machine_run(args).await,
+        Some(("confirm", args)) => confirm::machine_run(args).await,
+        Some(("deactivate", args)) => deactivate::machine_run(args).await,
+        _ => Err(crate::commands::machine::Failure::new(
+            "contract.unsupported",
+            "This account command has no selected machine contract.",
+        )),
+    }
+}
+pub(crate) async fn machine_agents(
+    matches: &ArgMatches,
+) -> Result<serde_json::Value, crate::commands::machine::Failure> {
+    agents::machine_run(matches).await
+}
+pub(crate) async fn machine_packages(
+    matches: &ArgMatches,
+) -> Result<serde_json::Value, crate::commands::machine::Failure> {
+    projects::machine_run(matches).await
 }

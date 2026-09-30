@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/machine-response-v1.json",
+  "title": "Cargo AI application response v1",
+  "$comment": "Validate the outer frame here and the command-specific data contract in docs/machine-payloads.md separately. Enforce the 8388608-byte UTF-8 output bound outside JSON Schema. Unknown added fields are allowed; unknown terminal outcomes are rejected.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "payload_schema": {
+      "type": "string",
+      "pattern": "^cargo-ai\\.[a-z][a-z0-9_.-]*\\.v1$"
+    },
+    "command": {
+      "type": "string",
+      "minLength": 1
+    },
+    "build": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "developer_tools": {
+          "type": "boolean"
+        },
+        "target_os": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_arch": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "version",
+        "developer_tools",
+        "target_os",
+        "target_arch"
+      ],
+      "additionalProperties": true
+    },
+    "request_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "context": {
+      "type": "object",
+      "properties": {
+        "home_selection": {
+          "enum": [
+            "explicit",
+            "default"
+          ]
+        },
+        "keychain_scope": {
+          "const": "shared_profile_name_not_home_isolated"
+        }
+      },
+      "required": [
+        "home_selection",
+        "keychain_scope"
+      ],
+      "additionalProperties": true
+    },
+    "outcome": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "partial",
+        "canceled",
+        "requires_interaction"
+      ]
+    },
+    "data": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "error": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "minLength": 1
+            },
+            "message": {
+              "type": "string"
+            },
+            "retryable": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "completion": {
+      "type": "object",
+      "properties": {
+        "terminal": {
+          "const": true
+        },
+        "complete": {
+          "const": true
+        }
+      },
+      "required": [
+        "terminal",
+        "complete"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "schema_version",
+    "payload_schema",
+    "command",
+    "build",
+    "request_id",
+    "context",
+    "outcome",
+    "data",
+    "warnings",
+    "error",
+    "completion"
+  ],
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "succeeded"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "error": {
+            "type": "null"
+          },
+          "data": {
+            "type": "object"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "minLength": 1
+              },
+              "message": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "retryable"
+            ],
+            "additionalProperties": true
+          }
+        }
+      }
+    }
+  ],
+  "examples": [
+    {
+      "schema_version": 1,
+      "payload_schema": "cargo-ai.profile.list.v1",
+      "command": "profile list",
+      "build": {
+        "version": "0.4.5",
+        "developer_tools": true,
+        "target_os": "macos",
+        "target_arch": "aarch64"
+      },
+      "request_id": "00000000-0000-4000-8000-000000000001",
+      "context": {
+        "home_selection": "explicit",
+        "keychain_scope": "shared_profile_name_not_home_isolated"
+      },
+      "outcome": "succeeded",
+      "data": {
+        "profiles": [],
+        "default_profile": null,
+        "ordering": "configuration_order",
+        "complete": true,
+        "next_cursor": null,
+        "effects": {
+          "local": "unapplied",
+          "remote": "unapplied"
+        }
+      },
+      "warnings": [],
+      "error": null,
+      "completion": {
+        "terminal": true,
+        "complete": true
+      }
+    }
+  ]
+}

@@ -3,6 +3,16 @@ use clap::ArgMatches;
 use serde_json::Value;
 
 pub(crate) async fn run(matches: &ArgMatches) -> bool {
+    execute(matches, &mut super::account::machine::Report::new(false)).await
+}
+pub(crate) async fn machine_run(
+    matches: &ArgMatches,
+) -> Result<Value, crate::commands::machine::Failure> {
+    let mut report = super::account::machine::Report::new(true);
+    execute(matches, &mut report).await;
+    report.result
+}
+async fn execute(matches: &ArgMatches, report: &mut super::account::machine::Report) -> bool {
     let account = matches
         .get_one::<String>("account")
         .map(String::as_str)
@@ -20,17 +30,45 @@ pub(crate) async fn run(matches: &ArgMatches) -> bool {
         eprintln!("x --source-id identifies its owner; omit the account handle.");
         return false;
     }
-    match super::local_packages::read_hosted_package(
+    report.prerequisites();
+    report.transmitting(false);
+    match super::local_packages::read_hosted_package_observed(
         name,
         account,
         source,
         matches.get_one::<String>("version").map(String::as_str),
         matches.get_one::<String>("version_id").map(String::as_str),
         true,
+        report,
     )
     .await
     {
         Ok(snapshot) => {
+            if report.active {
+                if validate_snapshot(&snapshot).is_err() {
+                    report.fail(
+                        "response.invalid",
+                        "Hosted inspection returned invalid package integrity facts.",
+                        serde_json::json!({"retrieved":false}),
+                    );
+                    return false;
+                }
+                let mut data = super::account::machine::fields(
+                    &snapshot,
+                    &[
+                        "project",
+                        "project_version",
+                        "owner_handle",
+                        "hosted_source_id",
+                        "hosted_version_id",
+                        "package_sha256",
+                        "package_size_bytes",
+                    ],
+                );
+                data["package_manifest"] = snapshot["package_manifest"].clone();
+                report.accepted(data);
+                return true;
+            }
             let result = if matches.get_flag("json") {
                 validate_snapshot(&snapshot)
                     .map(|()| println!("{}", serde_json::to_string_pretty(&snapshot).unwrap()))

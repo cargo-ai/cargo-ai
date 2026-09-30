@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/model-catalog-v1.json",
+  "title": "Cargo AI live model catalog payload v1",
+  "$comment": "This validates the catalog payload, not its machine envelope. Complete catalogs are response.data; bounded partial catalogs are response.data.catalog with a partial outcome. Model ID uniqueness and first-seen provider ordering are consumer invariants. Listing never proves inference access.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "provider": {
+      "enum": [
+        "openai",
+        "anthropic",
+        "gemini",
+        "mistral",
+        "xai",
+        "ollama"
+      ]
+    },
+    "auth": {
+      "enum": [
+        "none",
+        "api_key"
+      ]
+    },
+    "connection": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "endpoint",
+        "profile"
+      ],
+      "additionalProperties": true
+    },
+    "fetched_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "source": {
+      "const": "live"
+    },
+    "cache": {
+      "const": null
+    },
+    "complete": {
+      "type": "boolean"
+    },
+    "continuation": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "available": {
+              "const": false
+            },
+            "reason": {
+              "enum": [
+                "page_budget_exhausted",
+                "time_budget_exhausted"
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "reason"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "pages_fetched": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "metadata": {
+            "type": "object",
+            "properties": {
+              "resource_name": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [],
+            "additionalProperties": true
+          },
+          "metadata_source": {
+            "const": "provider"
+          },
+          "invocation_access": {
+            "const": "unverified"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "metadata",
+          "metadata_source",
+          "invocation_access"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "invocation_access": {
+      "const": "unverified"
+    }
+  },
+  "required": [
+    "schema_version",
+    "provider",
+    "auth",
+    "connection",
+    "fetched_at",
+    "source",
+    "cache",
+    "complete",
+    "continuation",
+    "pages_fetched",
+    "models",
+    "invocation_access"
+  ],
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "complete": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "continuation": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "continuation": {
+            "type": "object",
+            "properties": {
+              "available": {
+                "const": false
+              },
+              "reason": {
+                "enum": [
+                  "page_budget_exhausted",
+                  "time_budget_exhausted"
+                ]
+              }
+            },
+            "required": [
+              "available",
+              "reason"
+            ],
+            "additionalProperties": true
+          }
+        }
+      }
+    }
+  ],
+  "examples": [
+    {
+      "schema_version": 1,
+      "provider": "ollama",
+      "auth": "none",
+      "connection": {
+        "endpoint": "http://localhost:11434",
+        "profile": null
+      },
+      "fetched_at": "2026-09-29T12:00:00Z",
+      "source": "live",
+      "cache": null,
+      "complete": true,
+      "continuation": null,
+      "pages_fetched": 1,
+      "models": [
+        {
+          "id": "fixture-model:latest",
+          "name": null,
+          "metadata": {},
+          "metadata_source": "provider",
+          "invocation_access": "unverified"
+        }
+      ],
+      "invocation_access": "unverified"
+    },
+    {
+      "schema_version": 1,
+      "provider": "anthropic",
+      "auth": "api_key",
+      "connection": {
+        "endpoint": "https://api.anthropic.com",
+        "profile": "fixture"
+      },
+      "fetched_at": "2026-09-29T12:00:00Z",
+      "source": "live",
+      "cache": null,
+      "complete": false,
+      "continuation": {
+        "available": false,
+        "reason": "page_budget_exhausted"
+      },
+      "pages_fetched": 20,
+      "models": [
+        {
+          "id": "fixture-model:latest",
+          "name": null,
+          "metadata": {},
+          "metadata_source": "provider",
+          "invocation_access": "unverified"
+        }
+      ],
+      "invocation_access": "unverified"
+    }
+  ]
+}

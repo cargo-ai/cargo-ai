@@ -13,6 +13,23 @@ use crate::config::settings as config_settings;
 use crate::credentials::{openai_oauth, store};
 use crate::ui;
 
+/// Browser login retains its terminal protocol; application callers receive a
+/// safe interaction request before any helper or local persistence is started.
+pub(crate) async fn machine_run(matches: &ArgMatches) -> Result<Value, super::machine::Failure> {
+    if matches
+        .subcommand_matches("login")
+        .and_then(|m| m.subcommand_matches("openai"))
+        .is_some()
+    {
+        return Err(super::machine::Failure::new("cli.interaction_required", "OpenAI browser login requires the existing terminal authentication flow.")
+            .with_data(json!({"effects":{"helper":"not_attempted","local":"unapplied"},"interaction":{"kind":"terminal_authentication","command":"cargo ai auth login openai","verification":"cargo ai auth status --json"},"format_exception":"interactive_helper_protocol"})));
+    }
+    Err(super::machine::Failure::new(
+        "cli.unsupported_contract",
+        "This authentication command has no selected application envelope.",
+    ))
+}
+
 #[derive(Debug, Serialize)]
 struct AuthStatusJson {
     provider: &'static str,

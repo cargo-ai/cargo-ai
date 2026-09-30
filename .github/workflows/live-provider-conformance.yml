@@ -16,6 +16,14 @@ on:
           - mistral
           - typesafe
           - all
+      mode:
+        description: Existing generation probe or bounded read-only model discovery
+        required: true
+        default: generation
+        type: choice
+        options:
+          - generation
+          - discovery
       cargo_ai_sha:
         description: Expected commit of the selected workflow ref (defaults to its snapshot)
         required: false
@@ -85,16 +93,26 @@ jobs:
       - name: Configure isolated Cargo AI Home
         shell: bash
         run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Build discovery verifier before credential input
+        if: ${{ inputs.mode == 'discovery' }}
+        run: cargo build --locked --example qualification-gate
       - name: Run one representative OpenAI check
         env:
           CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DISCOVERY_MODE: ${{ inputs.mode || 'generation' }}
           OPENAI_MODEL: ${{ inputs.openai_model || vars.OPENAI_MODEL }}
         run: |
           set -euo pipefail
           [[ -n "${OPENAI_API_KEY:-}" ]] || { echo "OPENAI_API_KEY is required" >&2; exit 1; }
-          [[ -n "${OPENAI_MODEL:-}" ]] || { echo "OPENAI_MODEL is required" >&2; exit 1; }
-          cargo run --locked --example qualification-gate -- probe openai
+          if [[ "$DISCOVERY_MODE" == "discovery" ]]; then
+            target/debug/examples/qualification-gate discover openai
+          elif [[ "$DISCOVERY_MODE" == "generation" ]]; then
+            [[ -n "${OPENAI_MODEL:-}" ]] || { echo "OPENAI_MODEL is required" >&2; exit 1; }
+            cargo run --locked --example qualification-gate -- probe openai
+          else
+            echo "Unsupported live verification mode" >&2; exit 1
+          fi
 
   anthropic:
     name: Live Anthropic conformance
@@ -131,16 +149,26 @@ jobs:
       - name: Configure isolated Cargo AI Home
         shell: bash
         run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Build discovery verifier before credential input
+        if: ${{ inputs.mode == 'discovery' }}
+        run: cargo build --locked --example qualification-gate
       - name: Run one representative Anthropic check
         env:
           CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DISCOVERY_MODE: ${{ inputs.mode || 'generation' }}
           ANTHROPIC_MODEL: ${{ inputs.anthropic_model || vars.ANTHROPIC_MODEL }}
         run: |
           set -euo pipefail
           [[ -n "${ANTHROPIC_API_KEY:-}" ]] || { echo "ANTHROPIC_API_KEY is required for enrolled Anthropic" >&2; exit 1; }
-          [[ -n "${ANTHROPIC_MODEL:-}" ]] || { echo "ANTHROPIC_MODEL is required for enrolled Anthropic" >&2; exit 1; }
-          cargo run --locked --example qualification-gate -- probe anthropic
+          if [[ "$DISCOVERY_MODE" == "discovery" ]]; then
+            target/debug/examples/qualification-gate discover anthropic
+          elif [[ "$DISCOVERY_MODE" == "generation" ]]; then
+            [[ -n "${ANTHROPIC_MODEL:-}" ]] || { echo "ANTHROPIC_MODEL is required for enrolled Anthropic" >&2; exit 1; }
+            cargo run --locked --example qualification-gate -- probe anthropic
+          else
+            echo "Unsupported live verification mode" >&2; exit 1
+          fi
 
   gemini:
     name: Live Gemini conformance
@@ -184,16 +212,26 @@ jobs:
       - name: Configure isolated Cargo AI Home
         shell: bash
         run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Build discovery verifier before credential input
+        if: ${{ inputs.mode == 'discovery' }}
+        run: cargo build --locked --example qualification-gate
       - name: Run one representative Gemini check
         env:
           CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DISCOVERY_MODE: ${{ inputs.mode || 'generation' }}
           GEMINI_MODEL: ${{ inputs.gemini_model || vars.GEMINI_MODEL }}
         run: |
           set -euo pipefail
           [[ -n "${GEMINI_API_KEY:-}" ]] || { echo "GEMINI_API_KEY is required for enrolled Gemini" >&2; exit 1; }
-          [[ -n "${GEMINI_MODEL:-}" ]] || { echo "GEMINI_MODEL is required for enrolled Gemini" >&2; exit 1; }
-          cargo run --locked --example qualification-gate -- probe gemini
+          if [[ "$DISCOVERY_MODE" == "discovery" ]]; then
+            target/debug/examples/qualification-gate discover gemini
+          elif [[ "$DISCOVERY_MODE" == "generation" ]]; then
+            [[ -n "${GEMINI_MODEL:-}" ]] || { echo "GEMINI_MODEL is required for enrolled Gemini" >&2; exit 1; }
+            cargo run --locked --example qualification-gate -- probe gemini
+          else
+            echo "Unsupported live verification mode" >&2; exit 1
+          fi
 
   xai:
     name: Live xAI conformance
@@ -237,16 +275,26 @@ jobs:
       - name: Configure isolated Cargo AI Home
         shell: bash
         run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Build discovery verifier before credential input
+        if: ${{ inputs.mode == 'discovery' }}
+        run: cargo build --locked --example qualification-gate
       - name: Run one representative xAI check
         env:
           CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          DISCOVERY_MODE: ${{ inputs.mode || 'generation' }}
           XAI_MODEL: ${{ inputs.xai_model || vars.XAI_MODEL }}
         run: |
           set -euo pipefail
           [[ -n "${XAI_API_KEY:-}" ]] || { echo "XAI_API_KEY is required for enrolled xAI" >&2; exit 1; }
-          [[ -n "${XAI_MODEL:-}" ]] || { echo "XAI_MODEL is required for enrolled xAI" >&2; exit 1; }
-          cargo run --locked --example qualification-gate -- probe xai
+          if [[ "$DISCOVERY_MODE" == "discovery" ]]; then
+            target/debug/examples/qualification-gate discover xai
+          elif [[ "$DISCOVERY_MODE" == "generation" ]]; then
+            [[ -n "${XAI_MODEL:-}" ]] || { echo "XAI_MODEL is required for enrolled xAI" >&2; exit 1; }
+            cargo run --locked --example qualification-gate -- probe xai
+          else
+            echo "Unsupported live verification mode" >&2; exit 1
+          fi
 
   mistral:
     name: Live Mistral conformance
@@ -290,20 +338,30 @@ jobs:
       - name: Configure isolated Cargo AI Home
         shell: bash
         run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
+      - name: Build discovery verifier before credential input
+        if: ${{ inputs.mode == 'discovery' }}
+        run: cargo build --locked --example qualification-gate
       - name: Run one representative Mistral check
         env:
           CARGO_AI_SHA: ${{ inputs.cargo_ai_sha || github.sha }}
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          DISCOVERY_MODE: ${{ inputs.mode || 'generation' }}
           MISTRAL_MODEL: ${{ inputs.mistral_model || vars.MISTRAL_MODEL }}
         run: |
           set -euo pipefail
           [[ -n "${MISTRAL_API_KEY:-}" ]] || { echo "MISTRAL_API_KEY is required for enrolled Mistral" >&2; exit 1; }
-          [[ -n "${MISTRAL_MODEL:-}" ]] || { echo "MISTRAL_MODEL is required for enrolled Mistral" >&2; exit 1; }
-          cargo run --locked --example qualification-gate -- probe mistral
+          if [[ "$DISCOVERY_MODE" == "discovery" ]]; then
+            target/debug/examples/qualification-gate discover mistral
+          elif [[ "$DISCOVERY_MODE" == "generation" ]]; then
+            [[ -n "${MISTRAL_MODEL:-}" ]] || { echo "MISTRAL_MODEL is required for enrolled Mistral" >&2; exit 1; }
+            cargo run --locked --example qualification-gate -- probe mistral
+          else
+            echo "Unsupported live verification mode" >&2; exit 1
+          fi
 
   typesafe:
     name: Live TypeSafe Jev conformance
-    if: ${{ inputs.provider == 'typesafe' || (inputs.provider == 'all' && vars.LIVE_TYPESAFE_ENABLED != '' && vars.LIVE_TYPESAFE_ENABLED != 'false') }}
+    if: ${{ inputs.provider == 'typesafe' || (inputs.provider == 'all' && inputs.mode != 'discovery' && vars.LIVE_TYPESAFE_ENABLED != '' && vars.LIVE_TYPESAFE_ENABLED != 'false') }}
     runs-on: ubuntu-latest
     environment: live-provider-ci
     timeout-minutes: 30
@@ -311,9 +369,11 @@ jobs:
       - name: Validate TypeSafe Jev enrollment
         shell: bash
         env:
+          VERIFICATION_MODE: ${{ inputs.mode || 'generation' }}
           PROVIDER_ENABLED: ${{ vars.LIVE_TYPESAFE_ENABLED }}
         run: |
           set -euo pipefail
+          [[ "$VERIFICATION_MODE" == "generation" ]] || { echo "TypeSafe model discovery is unsupported; no generation probe was run" >&2; exit 1; }
           [[ "$PROVIDER_ENABLED" == "true" ]] || { echo "LIVE_TYPESAFE_ENABLED must equal true" >&2; exit 1; }
       - name: Validate provider selection
         shell: bash

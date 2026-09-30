@@ -152,33 +152,7 @@ pub(crate) fn record_terminal(
     digest: &str,
     response: &serde_json::Value,
 ) -> Result<(), String> {
-    let opaque = |key: &str| -> Result<String, String> {
-        let id = response[key].as_str().unwrap_or("");
-        if id.is_empty()
-            || id.len() > 128
-            || !id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
-            return Err("Publication response has an invalid immutable identity; preserve the request for retry.".into());
-        }
-        Ok(id.into())
-    };
-    if uuid::Uuid::parse_str(request_id).is_err()
-        || response["package_sha256"] != digest
-        || response["project_version"] != version
-    {
-        return Err(
-            "Publication response differs from its request; preserve the request for retry.".into(),
-        );
-    }
-    let terminal = Terminal {
-        request_id: request_id.into(),
-        hosted_source_id: opaque("hosted_source_id")?,
-        hosted_version_id: opaque("hosted_version_id")?,
-        project_version: version.into(),
-        package_sha256: digest.into(),
-    };
+    let terminal = terminal_from_response(request_id, version, digest, response)?;
     let mut directory = root.to_path_buf();
     for part in [".cargo-ai", "publish-requests"] {
         directory.push(part);
@@ -210,6 +184,49 @@ pub(crate) fn record_terminal(
             "Publication succeeded but its terminal receipt could not be written: {e}"
         )),
     }
+}
+
+fn terminal_from_response(
+    request_id: &str,
+    version: &str,
+    digest: &str,
+    response: &serde_json::Value,
+) -> Result<Terminal, String> {
+    let opaque = |key: &str| -> Result<String, String> {
+        let id = response[key].as_str().unwrap_or("");
+        if id.is_empty()
+            || id.len() > 128
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err("Publication response has an invalid immutable identity; preserve the request for retry.".into());
+        }
+        Ok(id.into())
+    };
+    if uuid::Uuid::parse_str(request_id).is_err()
+        || response["package_sha256"] != digest
+        || response["project_version"] != version
+    {
+        return Err(
+            "Publication response differs from its request; preserve the request for retry.".into(),
+        );
+    }
+    Ok(Terminal {
+        request_id: request_id.into(),
+        hosted_source_id: opaque("hosted_source_id")?,
+        hosted_version_id: opaque("hosted_version_id")?,
+        project_version: version.into(),
+        package_sha256: digest.into(),
+    })
+}
+pub(crate) fn validate_terminal_response(
+    request_id: &str,
+    version: &str,
+    digest: &str,
+    response: &serde_json::Value,
+) -> Result<(), String> {
+    terminal_from_response(request_id, version, digest, response).map(|_| ())
 }
 
 fn sync_directory(path: &Path) -> Result<(), String> {

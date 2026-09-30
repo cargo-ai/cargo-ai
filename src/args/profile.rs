@@ -253,6 +253,8 @@ pub fn command() -> Command {
         .subcommand(
             Command::new("remove")
                 .about("Remove an existing connection profile by name")
+                .arg(Arg::new("yes").long("yes").action(ArgAction::SetTrue)
+                    .help("Explicitly consent to removal in selected machine output mode"))
                 .arg(
                     Arg::new("name")
                         .help("Name of the profile to remove")

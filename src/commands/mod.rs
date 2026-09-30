@@ -15,7 +15,10 @@ mod hatch_compatibility;
 pub mod hatch_pipeline;
 pub mod init;
 pub mod local_packages;
+pub(crate) mod machine;
+pub(crate) mod machine_process;
 pub mod mail;
+pub mod models;
 pub mod new;
 #[cfg(feature = "developer-tools")]
 pub mod package;

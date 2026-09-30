@@ -407,6 +407,7 @@ pub(super) async fn run_audio_step(
                 .ok_or_else(|| "No audio returned.".to_string())?,
             format,
         )?;
+        note_runtime_artifact("audio", &path);
         print_action_line(
             action_index,
             action_name,
