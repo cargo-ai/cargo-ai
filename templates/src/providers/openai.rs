@@ -10,7 +10,89 @@ use reqwest::ClientBuilder;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-const CHATGPT_CODEX_ENDPOINT_MARKER: &str = "chatgpt.com/backend-api/codex";
+fn trusted_native_account_endpoint(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str() == Some("chatgpt.com")
+            && url.port_or_known_default() == Some(443)
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && matches!(
+                url.path(),
+                "/backend-api/codex" | "/backend-api/codex/responses"
+            )
+    })
+}
+
+// Test transport substitutes only the destination of a validated native URL.
+#[cfg(test)]
+thread_local! {
+    static NATIVE_ACCOUNT_TEST_ENDPOINT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct NativeAccountTestEndpoint;
+#[cfg(test)]
+impl Drop for NativeAccountTestEndpoint {
+    fn drop(&mut self) {
+        NATIVE_ACCOUNT_TEST_ENDPOINT.with(|endpoint| *endpoint.borrow_mut() = None);
+    }
+}
+#[cfg(test)]
+pub(crate) fn native_account_test_endpoint(endpoint: String) -> NativeAccountTestEndpoint {
+    NATIVE_ACCOUNT_TEST_ENDPOINT.with(|value| *value.borrow_mut() = Some(endpoint));
+    NativeAccountTestEndpoint
+}
+
+fn native_account_transport_endpoint(url: &str) -> String {
+    #[cfg(test)]
+    if trusted_native_account_endpoint(url) {
+        if let Some(endpoint) = NATIVE_ACCOUNT_TEST_ENDPOINT.with(|value| value.borrow().clone()) {
+            return endpoint;
+        }
+    }
+    normalize_chatgpt_responses_url(url)
+}
+
+fn codex_client_builder(url: &str, timeout_in_sec: u64) -> ClientBuilder {
+    let builder = ClientBuilder::new().timeout(Duration::from_secs(timeout_in_sec));
+    if trusted_native_account_endpoint(url) {
+        builder
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+    } else {
+        builder
+    }
+}
+
+fn native_account_request(
+    client: &reqwest::Client,
+    endpoint: &str,
+    token: &str,
+    account_id: Option<&str>,
+    native: bool,
+) -> reqwest::RequestBuilder {
+    let request = client
+        .post(endpoint)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json");
+    let request = if native {
+        request
+            .header(
+                "User-Agent",
+                concat!("cargo-ai/", env!("CARGO_PKG_VERSION")),
+            )
+            .header("originator", "cargo-ai")
+    } else {
+        request
+    };
+    match account_id {
+        Some(account_id) => request.header("ChatGPT-Account-ID", account_id),
+        None => request,
+    }
+}
 
 #[derive(Serialize, Debug)]
 pub struct ChatCompletionsRequest {
@@ -121,7 +203,8 @@ pub struct Usage {
 }
 
 fn is_chatgpt_codex_responses_endpoint(url: &str) -> bool {
-    url.contains(CHATGPT_CODEX_ENDPOINT_MARKER)
+    // Preserve custom Responses wire routing; this does not grant account context or native trust.
+    url.contains("chatgpt.com/backend-api/codex")
 }
 
 fn normalize_chatgpt_responses_url(url: &str) -> String {
@@ -393,11 +476,15 @@ async fn send_chatgpt_codex_responses_request(
     timeout_in_sec: u64,
     token: &String,
     response_format: serde_json::Value,
+    account_id: Option<&str>,
 ) -> Result<ProviderTextResponse, ProviderError> {
-    let client = ClientBuilder::new()
-        .timeout(Duration::from_secs(timeout_in_sec))
+    let client = codex_client_builder(url, timeout_in_sec)
         .build()
-        .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
+        .map_err(|error| {
+            ProviderError::from_reqwest(ProviderKind::OpenAi, error)
+                .redact_token(token)
+                .redact_token(account_id.unwrap_or(""))
+        })?;
 
     let request_payload = serde_json::json!({
         "model": model,
@@ -415,16 +502,29 @@ async fn send_chatgpt_codex_responses_request(
         "stream": true
     });
 
-    let endpoint = normalize_chatgpt_responses_url(url);
-    let http_resp = client
-        .post(endpoint.as_str())
-        .header("Authorization", format!("Bearer {}", token))
-        .header("Content-Type", "application/json")
-        .json(&request_payload)
-        .send()
-        .await
-        .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
+    let endpoint = native_account_transport_endpoint(url);
+    let http_resp = native_account_request(
+        &client,
+        endpoint.as_str(),
+        token,
+        account_id,
+        trusted_native_account_endpoint(url),
+    )
+    .json(&request_payload)
+    .send()
+    .await
+    .map_err(|error| {
+        ProviderError::from_reqwest(ProviderKind::OpenAi, error)
+            .redact_token(token)
+            .redact_token(account_id.unwrap_or(""))
+    })?;
 
+    if trusted_native_account_endpoint(url) && http_resp.status().is_redirection() {
+        return Err(ProviderError::invalid_response(
+            ProviderKind::OpenAi,
+            "OpenAI account transport refused a redirect.",
+        ));
+    }
     let response_id = http_resp
         .headers()
         .get("x-request-id")
@@ -433,22 +533,30 @@ async fn send_chatgpt_codex_responses_request(
         .map(str::to_string);
     let status = http_resp.status();
     if !status.is_success() {
-        let raw = http_resp
-            .text()
-            .await
-            .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
+        let raw = http_resp.text().await.map_err(|error| {
+            ProviderError::from_reqwest(ProviderKind::OpenAi, error)
+                .redact_token(token)
+                .redact_token(account_id.unwrap_or(""))
+        })?;
         return Err(ProviderError::from_http_status(
             ProviderKind::OpenAi,
             status,
             &super::error::sanitized_http_error_body(ProviderKind::OpenAi, raw.as_bytes()),
         )
-        .with_request_id(response_id.as_deref(), token));
+        .with_request_id(
+            response_id
+                .filter(|id| !account_id.is_some_and(|account| id.contains(account)))
+                .as_deref(),
+            token,
+        )
+        .redact_token(account_id.unwrap_or("")));
     }
 
-    let raw_stream = http_resp
-        .text()
-        .await
-        .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
+    let raw_stream = http_resp.text().await.map_err(|error| {
+        ProviderError::from_reqwest(ProviderKind::OpenAi, error)
+            .redact_token(token)
+            .redact_token(account_id.unwrap_or(""))
+    })?;
 
     let mut facts = super::runtime::ProviderFacts::default()
         .with_request_id(response_id.as_deref())
@@ -544,8 +652,27 @@ async fn send_chatgpt_codex_responses_request(
             "OpenAI stream completed without output text.",
         ))
     })()
-    .map(|response| facts.text(response))
-    .map_err(|error: ProviderError| facts.error(error.redact_token(token)))
+    .and_then(|response: ProviderTextResponse| {
+        if (!token.is_empty() && response.text.contains(token))
+            || account_id.is_some_and(|account| response.text.contains(account))
+        {
+            return Err(ProviderError::invalid_response(
+                ProviderKind::OpenAi,
+                "Provider response contained credential material; details omitted.",
+            ));
+        }
+        Ok(facts
+            .clone()
+            .redact_token(account_id.unwrap_or(""))
+            .text(response))
+    })
+    .map_err(|error: ProviderError| {
+        facts.clone().redact_token(account_id.unwrap_or("")).error(
+            error
+                .redact_token(token)
+                .redact_token(account_id.unwrap_or("")),
+        )
+    })
 }
 
 async fn send_chatgpt_codex_image_request(
@@ -556,11 +683,15 @@ async fn send_chatgpt_codex_image_request(
     token: &String,
     output_format: &str,
     reference_images: &[ImageReference],
+    account_id: Option<&str>,
 ) -> Result<ProviderImageResponse, ProviderError> {
-    let client = ClientBuilder::new()
-        .timeout(Duration::from_secs(timeout_in_sec))
+    let client = codex_client_builder(url, timeout_in_sec)
         .build()
-        .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
+        .map_err(|error| {
+            ProviderError::from_reqwest(ProviderKind::OpenAi, error)
+                .redact_token(token)
+                .redact_token(account_id.unwrap_or(""))
+        })?;
 
     let mut content = Vec::with_capacity(reference_images.len() + 1);
     content.push(serde_json::json!({
@@ -593,16 +724,29 @@ async fn send_chatgpt_codex_image_request(
         "stream": true
     });
 
-    let endpoint = normalize_chatgpt_responses_url(url);
-    let http_resp = client
-        .post(endpoint.as_str())
-        .header("Authorization", format!("Bearer {}", token))
-        .header("Content-Type", "application/json")
-        .json(&request_payload)
-        .send()
-        .await
-        .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
+    let endpoint = native_account_transport_endpoint(url);
+    let http_resp = native_account_request(
+        &client,
+        endpoint.as_str(),
+        token,
+        account_id,
+        trusted_native_account_endpoint(url),
+    )
+    .json(&request_payload)
+    .send()
+    .await
+    .map_err(|error| {
+        ProviderError::from_reqwest(ProviderKind::OpenAi, error)
+            .redact_token(token)
+            .redact_token(account_id.unwrap_or(""))
+    })?;
 
+    if trusted_native_account_endpoint(url) && http_resp.status().is_redirection() {
+        return Err(ProviderError::invalid_response(
+            ProviderKind::OpenAi,
+            "OpenAI account transport refused a redirect.",
+        ));
+    }
     let response_id = http_resp
         .headers()
         .get("x-request-id")
@@ -610,10 +754,11 @@ async fn send_chatgpt_codex_image_request(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     let status = http_resp.status();
-    let raw_stream = http_resp
-        .text()
-        .await
-        .map_err(|error| ProviderError::from_reqwest(ProviderKind::OpenAi, error))?;
+    let raw_stream = http_resp.text().await.map_err(|error| {
+        ProviderError::from_reqwest(ProviderKind::OpenAi, error)
+            .redact_token(token)
+            .redact_token(account_id.unwrap_or(""))
+    })?;
 
     if !status.is_success() {
         return Err(ProviderError::from_http_status(
@@ -621,7 +766,13 @@ async fn send_chatgpt_codex_image_request(
             status,
             &super::error::sanitized_http_error_body(ProviderKind::OpenAi, raw_stream.as_bytes()),
         )
-        .with_request_id(response_id.as_deref(), token));
+        .with_request_id(
+            response_id
+                .filter(|id| !account_id.is_some_and(|account| id.contains(account)))
+                .as_deref(),
+            token,
+        )
+        .redact_token(account_id.unwrap_or("")));
     }
 
     let mut facts = super::runtime::ProviderFacts::default()
@@ -703,8 +854,19 @@ async fn send_chatgpt_codex_image_request(
             usage,
         })
     })()
-    .map(|response| facts.image(response))
-    .map_err(|error: ProviderError| facts.error(error.redact_token(token)))
+    .map(|response| {
+        facts
+            .clone()
+            .redact_token(account_id.unwrap_or(""))
+            .image(response)
+    })
+    .map_err(|error: ProviderError| {
+        facts.clone().redact_token(account_id.unwrap_or("")).error(
+            error
+                .redact_token(token)
+                .redact_token(account_id.unwrap_or("")),
+        )
+    })
 }
 
 async fn send_image_edit_request(
@@ -891,6 +1053,7 @@ async fn decode_image_generation_response(
     .map_err(|error: ProviderError| facts.error(error.redact_token(token)))
 }
 
+#[cfg(test)]
 pub async fn send_request(
     url: &String,
     model: &String,
@@ -900,9 +1063,36 @@ pub async fn send_request(
     response_format: serde_json::Value,
     temperature: Option<f64>,
 ) -> Result<ProviderTextResponse, ProviderError> {
+    send_request_with_account_context(
+        url,
+        model,
+        content_parts,
+        timeout_in_sec,
+        token,
+        response_format,
+        temperature,
+        None,
+    )
+    .await
+}
+
+pub async fn send_request_with_account_context(
+    url: &String,
+    model: &String,
+    content_parts: &[ContentPart],
+    timeout_in_sec: u64,
+    token: &String,
+    response_format: serde_json::Value,
+    temperature: Option<f64>,
+    account_id: Option<&str>,
+) -> Result<ProviderTextResponse, ProviderError> {
+    let account_id = account_id.filter(|_| trusted_native_account_endpoint(url));
     if is_chatgpt_codex_responses_endpoint(url) {
         if temperature.is_some() {
-            return Err(ProviderError::invalid_request(ProviderKind::OpenAi, "Explicit profile temperature is unsupported by the OpenAI account transport; clear it with `profile set <name> --clear-temperature`."));
+            return Err(ProviderError::invalid_request(
+                ProviderKind::OpenAi,
+                "Explicit profile temperature is unsupported by the OpenAI account transport; clear it with `profile set <name> --clear-temperature`.",
+            ));
         }
         send_chatgpt_codex_responses_request(
             url,
@@ -911,6 +1101,7 @@ pub async fn send_request(
             timeout_in_sec,
             token,
             response_format,
+            account_id,
         )
         .await
     } else {
@@ -927,6 +1118,7 @@ pub async fn send_request(
     }
 }
 
+#[cfg(test)]
 pub async fn send_image_request(
     url: &String,
     model: &String,
@@ -936,6 +1128,30 @@ pub async fn send_image_request(
     output_format: &str,
     reference_images: &[ImageReference],
 ) -> Result<ProviderImageResponse, ProviderError> {
+    send_image_request_with_account_context(
+        url,
+        model,
+        prompt,
+        timeout_in_sec,
+        token,
+        output_format,
+        reference_images,
+        None,
+    )
+    .await
+}
+
+pub async fn send_image_request_with_account_context(
+    url: &String,
+    model: &String,
+    prompt: &str,
+    timeout_in_sec: u64,
+    token: &String,
+    output_format: &str,
+    reference_images: &[ImageReference],
+    account_id: Option<&str>,
+) -> Result<ProviderImageResponse, ProviderError> {
+    let account_id = account_id.filter(|_| trusted_native_account_endpoint(url));
     if is_chatgpt_codex_responses_endpoint(url) {
         return send_chatgpt_codex_image_request(
             url,
@@ -945,6 +1161,7 @@ pub async fn send_image_request(
             token,
             output_format,
             reference_images,
+            account_id,
         )
         .await;
     }
@@ -1386,6 +1603,234 @@ mod temperature_tests {
                 None => assert!(value.get("temperature").is_none()),
                 Some(expected) => assert_eq!(value["temperature"], expected),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_account_transport_tests {
+    use super::*;
+
+    const NATIVE: &str = "https://chatgpt.com/backend-api/codex/responses";
+    const ACCOUNT: &str = "synthetic-selected-workspace";
+    const TOKEN: &str = "synthetic-codex-access";
+
+    #[test]
+    fn native_account_context_requires_exact_origin_and_path() {
+        for url in [NATIVE, "https://chatgpt.com:443/backend-api/codex"] {
+            assert!(trusted_native_account_endpoint(url));
+        }
+        for url in [
+            "http://chatgpt.com/backend-api/codex/responses",
+            "https://chatgpt.com.evil.test/backend-api/codex/responses",
+            "https://custom.test/chatgpt.com/backend-api/codex/responses",
+            "https://chatgpt.com:444/backend-api/codex/responses",
+            "https://user@chatgpt.com/backend-api/codex/responses",
+            "https://chatgpt.com/backend-api/codex/models",
+            "https://chatgpt.com/backend-api/codex/responses?other=1",
+            "https://chatgpt.com/backend-api/codex/responses#fragment",
+        ] {
+            assert!(!trusted_native_account_endpoint(url), "{url}");
+        }
+    }
+
+    async fn request(image: bool, account: Option<&str>) -> Result<String, ProviderError> {
+        if image {
+            send_image_request_with_account_context(
+                &NATIVE.into(),
+                &"selected-model".into(),
+                "draw",
+                3,
+                &TOKEN.into(),
+                "png",
+                &[],
+                account,
+            )
+            .await
+            .map(|response| String::from_utf8(response.bytes).unwrap())
+        } else {
+            send_request_with_account_context(
+                &NATIVE.into(),
+                &"selected-model".into(),
+                &[ContentPart::Text("short answer".into())],
+                3,
+                &TOKEN.into(),
+                serde_json::json!({"type":"json_object"}),
+                None,
+                account,
+            )
+            .await
+            .map(|response| response.text)
+        }
+    }
+
+    #[tokio::test]
+    async fn native_account_text_image_and_explicit_token_context() {
+        for image in [false, true] {
+            for account in [Some(ACCOUNT), None] {
+                let mut server = mockito::Server::new_async().await;
+                let body = if image {
+                    format!(
+                        "data: {{\"item\":{{\"type\":\"image_generation_call\",\"result\":\"{}\"}}}}\n\n",
+                        BASE64_STANDARD.encode(b"safe-image")
+                    )
+                } else {
+                    "data: {\"type\":\"response.output_text.done\",\"text\":\"safe-text\"}\n\n"
+                        .into()
+                };
+                let mock = server
+                    .mock("POST", "/native")
+                    .match_header("authorization", format!("Bearer {TOKEN}").as_str())
+                    .match_header(
+                        "chatgpt-account-id",
+                        account.map_or(mockito::Matcher::Missing, |value| {
+                            mockito::Matcher::Exact(value.into())
+                        }),
+                    )
+                    .with_status(200)
+                    .with_body(body)
+                    .create_async()
+                    .await;
+                let _endpoint = native_account_test_endpoint(format!("{}/native", server.url()));
+                assert_eq!(
+                    request(image, account).await.unwrap(),
+                    if image { "safe-image" } else { "safe-text" }
+                );
+                mock.assert_async().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_account_redirects_never_reach_either_target() {
+        for image in [false, true] {
+            for same_origin in [false, true] {
+                let mut source = mockito::Server::new_async().await;
+                let mut target = mockito::Server::new_async().await;
+                let same_target = source
+                    .mock("POST", "/alternate")
+                    .match_query(mockito::Matcher::Any)
+                    .expect(0)
+                    .create_async()
+                    .await;
+                let cross_target = target
+                    .mock("POST", "/alternate")
+                    .match_query(mockito::Matcher::Any)
+                    .expect(0)
+                    .create_async()
+                    .await;
+                let same_get_target = source
+                    .mock("GET", "/alternate")
+                    .match_query(mockito::Matcher::Any)
+                    .expect(0)
+                    .create_async()
+                    .await;
+                let cross_get_target = target
+                    .mock("GET", "/alternate")
+                    .match_query(mockito::Matcher::Any)
+                    .expect(0)
+                    .create_async()
+                    .await;
+                let location = format!(
+                    "{}/alternate?private={ACCOUNT}-{TOKEN}",
+                    if same_origin {
+                        source.url()
+                    } else {
+                        target.url()
+                    }
+                );
+                let redirect = source
+                    .mock("POST", "/native")
+                    .match_header("chatgpt-account-id", ACCOUNT)
+                    .with_status(307)
+                    .with_header("Location", &location)
+                    .with_body(format!("private-{ACCOUNT}-{TOKEN}"))
+                    .create_async()
+                    .await;
+                let _endpoint = native_account_test_endpoint(format!("{}/native", source.url()));
+                let error = request(image, Some(ACCOUNT)).await.unwrap_err();
+                assert!(error.message().contains("refused a redirect"));
+                for excluded in [&location, ACCOUNT, TOKEN] {
+                    assert!(!format!("{error:?}").contains(excluded));
+                }
+                redirect.assert_async().await;
+                same_target.assert_async().await;
+                cross_target.assert_async().await;
+                same_get_target.assert_async().await;
+                cross_get_target.assert_async().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_account_context_and_tokens_are_redacted_from_errors_and_metadata() {
+        for image in [false, true] {
+            let mut server = mockito::Server::new_async().await;
+            let mock = server
+                .mock("POST", "/native")
+                .with_status(400)
+                .with_header("x-request-id", ACCOUNT)
+                .with_body(
+                    serde_json::json!({"error":{"message":format!("private-{ACCOUNT}-{TOKEN}")}})
+                        .to_string(),
+                )
+                .create_async()
+                .await;
+            let _endpoint = native_account_test_endpoint(format!("{}/native", server.url()));
+            let error = request(image, Some(ACCOUNT)).await.unwrap_err();
+            let rendered = format!("{error:?}");
+            assert!(!rendered.contains(ACCOUNT));
+            assert!(!rendered.contains(TOKEN));
+            assert!(error.provider_request_id.is_none());
+            mock.assert_async().await;
+        }
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/native")
+            .with_status(200)
+            .with_body(format!(
+                "data: {{\"type\":\"response.output_text.done\",\"text\":\"{ACCOUNT}\"}}\n\n"
+            ))
+            .create_async()
+            .await;
+        let _endpoint = native_account_test_endpoint(format!("{}/native", server.url()));
+        let error = request(false, Some(ACCOUNT)).await.unwrap_err();
+        assert!(!format!("{error:?}").contains(ACCOUNT));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn native_account_context_is_never_sent_to_custom_or_api_key_origins() {
+        let mut server = mockito::Server::new_async().await;
+        for path in [
+            "/v1/chat/completions",
+            "/chatgpt.com/backend-api/codex/responses",
+        ] {
+            let body = if path.starts_with("/v1/") {
+                serde_json::json!({"id":"safe","object":"chat.completion","created":1,"model":"safe","choices":[{"index":0,"message":{"role":"assistant","content":"safe"},"finish_reason":"stop"}]}).to_string()
+            } else {
+                "data: {\"type\":\"response.output_text.done\",\"text\":\"safe\"}\n\n".into()
+            };
+            let mock = server
+                .mock("POST", path)
+                .match_header("chatgpt-account-id", mockito::Matcher::Missing)
+                .with_status(200)
+                .with_body(body)
+                .create_async()
+                .await;
+            send_request_with_account_context(
+                &format!("{}{path}", server.url()),
+                &"model".into(),
+                &[ContentPart::Text("short".into())],
+                3,
+                &TOKEN.into(),
+                serde_json::json!({"type":"json_object"}),
+                None,
+                Some(ACCOUNT),
+            )
+            .await
+            .unwrap();
+            mock.assert_async().await;
         }
     }
 }

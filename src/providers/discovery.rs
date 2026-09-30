@@ -24,7 +24,7 @@ impl DiscoveryError {
             retryable: false,
         }
     }
-    fn malformed() -> Self {
+    pub(crate) fn malformed() -> Self {
         Self::new(
             "invalid_provider_response",
             "The provider returned an invalid model catalog.",
@@ -38,6 +38,7 @@ pub(crate) struct Connection {
     pub endpoint: Url,
     pub token: String,
     pub profile: Option<String>,
+    pub account: Option<super::account_discovery::Snapshot>,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,7 +71,16 @@ pub(crate) fn endpoint(
     raw: Option<&str>,
     auth: ProfileAuthMode,
 ) -> Result<Url, DiscoveryError> {
-    if provider == ProviderKind::TypeSafe || auth == ProfileAuthMode::OpenaiAccount {
+    if auth == ProfileAuthMode::OpenaiAccount {
+        if provider != ProviderKind::OpenAi {
+            return Err(DiscoveryError::new(
+                "unsupported_connection",
+                "OpenAI account discovery requires the OpenAI provider.",
+            ));
+        }
+        return super::account_discovery::endpoint(raw);
+    }
+    if provider == ProviderKind::TypeSafe {
         return Err(DiscoveryError::new(
             "unsupported_connection",
             "Model discovery is unsupported for this provider or authentication mode.",
@@ -319,6 +329,15 @@ async fn fetch_page(
 }
 
 pub(crate) async fn list(connection: Connection, page_limit: u32) -> Result<Value, DiscoveryError> {
+    if connection.auth == ProfileAuthMode::OpenaiAccount {
+        if page_limit == 0 || page_limit > MAX_PAGES {
+            return Err(DiscoveryError::new(
+                "invalid_request",
+                "Page limit must be between 1 and 20.",
+            ));
+        }
+        return super::account_discovery::list(connection).await;
+    }
     list_with_budget(connection, page_limit, Duration::from_secs(TOTAL_SECONDS)).await
 }
 
@@ -416,6 +435,7 @@ mod tests {
             endpoint: Url::parse(&url).unwrap(),
             token: "synthetic-key".to_owned(),
             profile: None,
+            account: None,
         }
     }
     #[test]
@@ -441,7 +461,7 @@ mod tests {
                 assert!(endpoint(provider, Some(raw), ProfileAuthMode::ApiKey).is_err());
             }
         }
-        assert!(endpoint(ProviderKind::OpenAi, None, ProfileAuthMode::OpenaiAccount).is_err());
+        assert!(endpoint(ProviderKind::OpenAi, None, ProfileAuthMode::OpenaiAccount).is_ok());
         assert!(endpoint(ProviderKind::TypeSafe, None, ProfileAuthMode::ApiKey).is_err());
         assert!(endpoint(
             ProviderKind::OpenAi,

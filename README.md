@@ -75,6 +75,12 @@ The Cargo AI login command starts Codex's browser sign-in, verifies the resultin
 
 If that model is not available to your plan, choose another current model exposed by your Codex account. Direct OpenAI API keys and every alternative provider are documented under [Model providers](./docs/providers/README.md).
 
+Development builds containing account discovery can list exact model choices
+with `cargo ai models list --profile openai-account`, or use
+`cargo ai models list --server openai --auth openai_account` with an existing
+Codex login before creating a profile. Listing does not start login or prove
+inference access. See [account discovery boundaries](./docs/providers/openai.md#option-1-openai-account-session).
+
 ### 3. Create `agent.json`
 
 ```json

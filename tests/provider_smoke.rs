@@ -93,6 +93,7 @@ impl Fixture {
             .current_dir(&self.root)
             .env("CARGO_AI_HOME", &self.home)
             .env("CARGO_AI_DISABLE_KEYCHAIN", "1")
+            .env("CODEX_HOME", self.root.join("codex"))
             // Generated workspaces own their outputs independently of the test runner.
             .env_remove("CARGO_TARGET_DIR");
         command
@@ -1802,6 +1803,80 @@ fn generated_ollama_case(fixture: &Fixture) {
 
 #[test]
 #[ignore = "run explicitly in the provider smoke CI lane"]
+fn generated_native_account_runtime_isolated_and_deterministic() {
+    generated_native_account_case(&Fixture::new());
+}
+
+fn generated_native_account_case(fixture: &Fixture) {
+    let name = "native_account_provider_smoke";
+    let hatch = fixture
+        .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
+        .args(["--no-update-check", "hatch", name, "--config"])
+        .arg(&fixture.definition)
+        .arg("--output-dir")
+        .arg(fixture.root.join("dist"))
+        .args(["--force", "--keep-project"])
+        .output()
+        .expect("native account hatch should start");
+    assert!(
+        hatch.status.success(),
+        "native account hatch failed\n{}\n{}",
+        String::from_utf8_lossy(&hatch.stdout),
+        String::from_utf8_lossy(&hatch.stderr)
+    );
+    if fixture.home.join("batch-seed-marker").exists() {
+        assert!(
+            String::from_utf8_lossy(&hatch.stdout).contains("Reused warmed template"),
+            "native account case should reuse copied seed"
+        );
+    }
+    let workspace = fixture.home.join("agents").join(name);
+    assert!(
+        workspace.join("Cargo.toml").is_file(),
+        "actual emitted workspace must exist"
+    );
+    let target =
+        provider_cache::CacheIdentity::current(Path::new(env!("CARGO_BIN_EXE_cargo-ai"))).target;
+    let output = fixture
+        .isolated_command("cargo")
+        .current_dir(&workspace)
+        .args([
+            "test",
+            "--locked",
+            "--release",
+            "--target",
+            &target,
+            "native_account_",
+            "--",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .output()
+        .expect("actual emitted native account tests should start");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "actual emitted native account tests failed\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for required in [
+        "native_account_selected_session_text_image_override_and_legacy",
+        "native_account_context_requires_exact_origin_and_path",
+        "native_account_text_image_and_explicit_token_context",
+        "native_account_redirects_never_reach_either_target",
+        "native_account_context_is_never_sent_to_custom_or_api_key_origins",
+    ] {
+        assert!(
+            stdout.contains(required),
+            "emitted proof missed {required}: {stdout}"
+        );
+    }
+    assert!(!stdout.contains("running 0 tests"));
+    eprintln!("actual emitted native-account text/image/override, selected-session/legacy, explicit-token/custom isolation and redirect target zero-request proof passed");
+}
+
+#[test]
+#[ignore = "run explicitly in the provider smoke CI lane"]
 fn generated_provider_batch_isolated_and_deterministic() {
     let seed = Fixture::new();
     let identity =
@@ -1832,12 +1907,13 @@ fn generated_provider_batch_isolated_and_deterministic() {
         "generated-provider neutral-seed: {:.2}s",
         started.elapsed().as_secs_f64()
     );
-    let cases: [(&str, fn(&Fixture)); 8] = [
+    let cases: [(&str, fn(&Fixture)); 9] = [
         ("anthropic", generated_anthropic_case),
         ("gemini", generated_gemini_case),
         ("mistral", generated_mistral_case),
         ("xai", generated_xai_case),
         ("openai", generated_openai_case),
+        ("native-account", generated_native_account_case),
         ("ollama", generated_ollama_case),
         ("typesafe", typesafe_smoke::generated_typesafe_case),
         ("media-chain", generated_audio_chain_case),
@@ -1883,13 +1959,14 @@ fn generated_provider_batch_isolated_and_deterministic() {
             "mistral",
             "xai",
             "openai",
+            "native-account",
             "ollama",
             "typesafe",
             "media-chain"
         ]
     );
     eprintln!(
-        "generated-provider batch: 8/8 passed in {:.2}s",
+        "generated-provider batch: 9/9 passed in {:.2}s",
         started.elapsed().as_secs_f64()
     );
 }

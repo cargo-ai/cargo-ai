@@ -36,10 +36,17 @@ Selected execution owns child process groups on Unix and native jobs on Windows,
 cargo ai models list --profile example --output-format json
 # Supply a draft key through a closed stdin pipe, never in argv:
 cargo ai models list --server openai --auth api_key --stdin --output-format json
+cargo ai models list --server openai --auth openai_account --output-format json
 cargo ai models list --server ollama --auth none --output-format json
 ```
 
-Saved API-key discovery requires explicit `secret_store = "file"`. Keychain and legacy/unset stores are refused before lookup; use a draft stdin key or manual model entry. No-auth discovery reads no credentials. OpenAI account login, TypeSafe and unsupported custom endpoint layouts currently require manual entry. Saved profiles need no valid current model. Draft discovery creates no profile or home and persists no credentials/cache.
+Saved API-key discovery requires explicit `secret_store = "file"`. Keychain and legacy/unset stores are refused before lookup; use a draft stdin key or manual model entry. No-auth discovery reads no credentials. TypeSafe and unsupported custom endpoint layouts require manual entry. Saved profiles need no valid current model. Draft discovery creates no profile or home and persists no credentials/cache.
+
+OpenAI account discovery uses the existing file-backed Codex session for the default commercial Codex endpoint. It requires a valid, sufficiently fresh token and known selected account context; it never starts login or refreshes credentials. Account drafts omit `--stdin`; API keys are not interchangeable with account sessions. Keyring-only or ephemeral sessions, unsupported layouts, FedRAMP/alternate routing and custom account discovery URLs are unsupported. Local Cargo AI logout is honored for the selected home.
+
+Account catalogs come from one direct network response, with `source:"live"` and `cache:null`; no bundled/app-server fallback is used. Only records explicitly marked picker-visible are returned. Exact slugs remain selectable IDs, including provider ordering and first-seen deduplication. Missing capability metadata stays unknown, and invocation access remains unverified. Completeness describes this visible selection, not every hidden/manual model or an immutable server snapshot. Empty visible catalogs succeed; invalid responses fail without a guessed or partially parsed account catalog.
+
+Profiles follow the current shared Codex session; separate `CARGO_AI_HOME` values isolate settings/local logout, not Codex identity. Switching the Codex account requires a fresh listing. A relevant session/configuration change during listing causes a safe changed-connection failure without retry. Catalog output contains no account ID or credential-derived fingerprint; callers must not treat a saved profile name or earlier catalog as a permanent account binding. Native account execution carries the same selected context for its invocation and refuses redirects. Existing generated agents require rebuilding to obtain that behavior.
 
 Adapters list OpenAI, Anthropic, Gemini, Mistral, xAI and native Ollama catalogs. Fixture-qualified transport support is distinct from live-qualified access. Listing returns exact selectable IDs in provider order, optional provider metadata, live freshness, pages fetched and completeness; it never infers capabilities from model names or proves inference access. Gemini resource names are retained while its selectable ID removes the documented `models/` prefix. Complete empty lists are successful. Partial results are explicitly identified.
 

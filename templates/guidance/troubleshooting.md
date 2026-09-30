@@ -127,6 +127,16 @@ Check for:
 - expecting `url=...` to appear for the standard OpenAI API or ChatGPT account transports; custom endpoints show only their origin (scheme, host and optional port), omitting credentials, path, query and fragment
 - assuming a child inherited the same context just because the parent emitted `child: started ...`; if the child changed context, look for a later child `using:` line
 
+### OpenAI account model discovery
+
+Check for:
+- expecting listing to start Codex login, refresh an expired session or invoke a model; complete login separately and list again
+- expecting a Cargo AI home or profile name to pin a Codex workspace; the current shared Codex session determines the account context
+- using account `--stdin`, a custom catalog URL, keyring-only/ephemeral auth, or unsupported FedRAMP/alternate routing; use a supported file-backed commercial session or retain manual model entry
+- treating visible model IDs as proof of inference access or image/reasoning capabilities; listing preserves unknowns and does not certify every model
+- using a cached picker result after an account switch, or ignoring a changed-connection error; make a fresh listing
+- expecting an older generated agent to gain context/redirect handling without rebuilding
+
 ### Anthropic provider confusion
 
 Check for:

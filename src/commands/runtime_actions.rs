@@ -778,7 +778,7 @@ pub(crate) struct InvocationRuntimeBudget {
     pub(crate) deadline_ms: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct ActionProviderContext {
     pub(crate) project_data: Option<super::runtime_data::DataRoot>,
     pub(crate) provider: crate::providers::ProviderKind,
@@ -787,11 +787,22 @@ pub(crate) struct ActionProviderContext {
     pub(crate) model: String,
     pub(crate) url: String,
     pub(crate) token: String,
+    pub(crate) openai_account_id: Option<String>,
     pub(crate) inference_timeout_in_sec: u64,
     pub(crate) tool_resolver: Option<std::sync::Arc<crate::commands::tools::ToolResolver>>,
     pub(crate) package_context:
         Option<crate::commands::local_packages::InstalledPackageRuntimeContext>,
     pub(crate) usage_log: Option<crate::usage_log::UsageLogContext>,
+}
+
+impl std::fmt::Debug for ActionProviderContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActionProviderContext")
+            .field("credential_present", &!self.token.is_empty())
+            .field("account_context_present", &self.openai_account_id.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ActionProviderContext {
@@ -2180,6 +2191,31 @@ fn audio_output_path(context: &ActionProviderContext, relative: &Path) -> Result
     super::runtime_data::confined_path(&root, &relative, "Audio output")
 }
 
+#[cfg(test)]
+pub(crate) async fn test_run_generate_image_step(
+    step: &crate::RunStep,
+    data: &serde_json::Value,
+    named_inputs: &BTreeMap<String, crate::Input>,
+    action_index: usize,
+    action_name: &str,
+    step_index: usize,
+    provider_context: &ActionProviderContext,
+    runtime_budget: InvocationRuntimeBudget,
+) -> Result<(), String> {
+    run_generate_image_step(
+        step,
+        data,
+        named_inputs,
+        action_index,
+        action_name,
+        step_index,
+        provider_context,
+        runtime_budget,
+    )
+    .await
+    .map(|_| ())
+}
+
 async fn run_generate_image_step(
     step: &crate::RunStep,
     data: &serde_json::Value,
@@ -2314,7 +2350,7 @@ async fn run_generate_image_step(
 
     let provider_started_at = Instant::now();
     let image_response = match tokio::time::timeout(remaining, async {
-        crate::providers::send_image_request(
+        crate::providers::send_image_request_with_account_context(
             effective_provider_context.provider,
             &effective_provider_context.url,
             &model,
@@ -2323,6 +2359,7 @@ async fn run_generate_image_step(
             &effective_provider_context.token,
             output_format,
             &reference_images,
+            effective_provider_context.openai_account_id.as_deref(),
         )
         .await
     })
@@ -2553,7 +2590,7 @@ fn resolve_profile_api_token_for_action_step(
     }
 }
 
-async fn resolve_generate_image_step_profile_context(
+pub(crate) async fn resolve_generate_image_step_profile_context(
     profile: Option<&crate::RunArg>,
     data: &serde_json::Value,
     action_name: &str,
@@ -2612,6 +2649,7 @@ async fn resolve_media_step_profile_context(
         ));
     }
     let mut url = profile.url.clone().unwrap_or_default();
+    let mut openai_account_id = None;
     let token = match profile.auth_mode {
         ProfileAuthMode::ApiKey => resolve_profile_api_token_for_action_step(profile)?,
         ProfileAuthMode::OpenaiAccount => {
@@ -2627,9 +2665,9 @@ async fn resolve_media_step_profile_context(
                 ));
             }
             url = openai_oauth::OPENAI_ACCOUNT_RESPONSES_URL.to_string();
-            openai_oauth::resolve_session_for_runtime()
-                .await
-                .map(|session| session.access_token)?
+            let session = openai_oauth::resolve_session_for_runtime().await?;
+            openai_account_id = session.account_id;
+            session.access_token
         }
         ProfileAuthMode::None => match provider {
             crate::providers::ProviderKind::TypeSafe => {
@@ -2706,6 +2744,7 @@ async fn resolve_media_step_profile_context(
         model: profile.model.clone(),
         url,
         token,
+        openai_account_id,
         inference_timeout_in_sec: invocation_timeout_in_sec,
         tool_resolver: None,
         package_context: None,
@@ -3117,6 +3156,7 @@ async fn run_agent_step(
             .default_url()
             .to_string(),
         token: String::new(),
+        openai_account_id: None,
         inference_timeout_in_sec: 60,
         tool_resolver: None,
         package_context: None,
@@ -5290,6 +5330,7 @@ mod tests {
             model: "gpt-5.2".to_string(),
             url: "https://api.openai.com/v1/chat/completions".to_string(),
             token: "test-token".to_string(),
+            openai_account_id: None,
             inference_timeout_in_sec: 60,
             tool_resolver: None,
             package_context: None,
@@ -5410,6 +5451,7 @@ auth_mode = "{auth_mode}"
             model: model.to_string(),
             url: server_url.to_string(),
             token: String::new(),
+            openai_account_id: None,
             inference_timeout_in_sec: 60,
             tool_resolver: None,
             package_context: None,
@@ -6388,6 +6430,7 @@ auth_mode = "{auth_mode}"
             model: "gpt-5.2".to_string(),
             url: openai_oauth::OPENAI_ACCOUNT_RESPONSES_URL.to_string(),
             token: "test-token".to_string(),
+            openai_account_id: None,
             inference_timeout_in_sec: 60,
             tool_resolver: None,
             package_context: None,
@@ -6410,6 +6453,7 @@ auth_mode = "{auth_mode}"
             model: "gpt-5.2".to_string(),
             url: "https://synthetic-user:synthetic-password@custom.example.test/synthetic-path?key=synthetic-query#synthetic-fragment".to_string(),
             token: "test-token".to_string(),
+            openai_account_id: None,
             inference_timeout_in_sec: 60,
             tool_resolver: None,
             package_context: None,
@@ -6666,6 +6710,7 @@ auth_mode = "{auth_mode}"
             model: "gpt-5.2".to_string(),
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
+            openai_account_id: None,
             inference_timeout_in_sec: 60,
             tool_resolver: None,
             package_context: None,
@@ -6804,6 +6849,7 @@ auth_mode = "{auth_mode}"
             model: "gpt-5.2".to_string(),
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
+            openai_account_id: None,
             inference_timeout_in_sec: 60,
             tool_resolver: None,
             package_context: None,
@@ -6957,6 +7003,7 @@ auth_mode = "{auth_mode}"
             model: "gpt-5.2".to_string(),
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
+            openai_account_id: None,
             inference_timeout_in_sec: 60,
             tool_resolver: None,
             package_context: None,
@@ -7055,6 +7102,7 @@ auth_mode = "{auth_mode}"
             model: "gpt-image-1.5".to_string(),
             url: format!("{}/v1/chat/completions", server.url()),
             token: "test-token".to_string(),
+            openai_account_id: None,
             inference_timeout_in_sec: 60,
             tool_resolver: None,
             package_context: None,
@@ -7128,6 +7176,7 @@ auth_mode = "{auth_mode}"
             model: String::new(),
             url: "https://api.openai.com/v1/chat/completions".to_string(),
             token: "test-token".to_string(),
+            openai_account_id: None,
             inference_timeout_in_sec: 60,
             tool_resolver: None,
             package_context: None,

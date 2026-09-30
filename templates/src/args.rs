@@ -3,8 +3,11 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 
 pub fn build_cli() -> ArgMatches {
     // Collect the original command-line arguments
-    let mut args: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = std::env::args().collect();
+    build_cli_from(args)
+}
 
+pub(crate) fn build_cli_from(mut args: Vec<String>) -> ArgMatches {
     let mut bin_name = "cargo-ai";
     // Check if runing as a cargo subcommand, i.e. cargo ai
     if let Some(first_arg) = args.get(1) {

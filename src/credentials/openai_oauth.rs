@@ -9,24 +9,30 @@ use crate::config::settings as config_settings;
 use crate::credentials::store;
 use serde_json::Value;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub const OPENAI_ACCOUNT_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 pub const OPENAI_REFRESH_BUFFER_SEC: i64 = 30;
+pub(crate) const MAX_AUTH_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_TOKEN_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_ACCOUNT_ID_BYTES: usize = 256;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CodexSession {
     pub access_token: String,
+    pub account_id: Option<String>,
     pub refresh_token: Option<String>,
     pub access_token_expires_at_unix: Option<i64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ResolvedSession {
     pub access_token: String,
+    pub account_id: Option<String>,
 }
 
-fn now_unix_seconds() -> i64 {
+pub(crate) fn now_unix_seconds() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
@@ -105,38 +111,94 @@ pub fn codex_auth_path() -> Result<PathBuf, String> {
     Ok(home_dir.join(".codex").join("auth.json"))
 }
 
+impl std::fmt::Debug for CodexSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodexSession")
+            .field("access_token", &"[redacted]")
+            .field("account_id_present", &self.account_id.is_some())
+            .field("refresh_token_present", &self.refresh_token.is_some())
+            .field(
+                "access_token_expires_at_unix",
+                &self.access_token_expires_at_unix,
+            )
+            .finish()
+    }
+}
+impl std::fmt::Debug for ResolvedSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedSession")
+            .field("access_token", &"[redacted]")
+            .field("account_id_present", &self.account_id.is_some())
+            .finish()
+    }
+}
+
+pub(crate) fn bounded_header(value: &str, limit: usize) -> bool {
+    !value.is_empty() && value.len() <= limit && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+pub(crate) fn read_auth_snapshot(path: &Path) -> Result<Option<String>, String> {
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_file() {
+                return Err("Codex auth storage is not a supported regular file.".into());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Codex auth storage could not be read.".into()),
+    }
+    let file =
+        fs::File::open(path).map_err(|_| "Codex auth storage could not be read.".to_string())?;
+    let mut bytes = Vec::new();
+    file.take((MAX_AUTH_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Codex auth storage could not be read.".to_string())?;
+    if bytes.len() > MAX_AUTH_BYTES {
+        return Err("Codex auth storage exceeds the 64 KiB limit.".into());
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| "Codex auth storage is not UTF-8 JSON.".into())
+}
+
 pub fn parse_codex_auth_payload(raw: &str) -> Result<CodexSession, String> {
+    if raw.len() > MAX_AUTH_BYTES {
+        return Err("Codex auth storage exceeds the 64 KiB limit.".into());
+    }
     let parsed = serde_json::from_str::<Value>(raw)
-        .map_err(|error| format!("failed to parse Codex auth JSON: {error}"))?;
+        .map_err(|_| "Codex auth JSON is invalid. Re-run `codex login`.".to_string())?;
 
     let tokens = parsed.get("tokens").ok_or_else(|| {
         "Codex auth payload did not include a `tokens` object. Re-run `codex login`.".to_string()
     })?;
 
     let access_token = parse_access_token(tokens)?;
+    if !bounded_header(&access_token, MAX_TOKEN_BYTES) {
+        return Err("Codex access token is invalid bounded credential input.".into());
+    }
+    let account_id = match tokens.get("account_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if bounded_header(value, MAX_ACCOUNT_ID_BYTES) => {
+            Some(value.clone())
+        }
+        _ => return Err("Codex selected account context is invalid.".into()),
+    };
     let refresh_token = parse_non_empty_token(tokens, "refresh_token");
     let access_token_expires_at_unix = parse_access_token_expires_at_unix(tokens);
 
     Ok(CodexSession {
         access_token,
+        account_id,
         refresh_token,
         access_token_expires_at_unix,
     })
 }
 
-fn load_codex_auth_tokens_from_file(path: &Path) -> Result<CodexSession, String> {
-    let raw = fs::read_to_string(path)
-        .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
-    parse_codex_auth_payload(raw.as_str())
-}
-
 pub fn load_codex_session() -> Result<Option<CodexSession>, String> {
     let path = codex_auth_path()?;
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    load_codex_auth_tokens_from_file(path.as_path()).map(Some)
+    read_auth_snapshot(&path)?
+        .map(|raw| parse_codex_auth_payload(&raw))
+        .transpose()
 }
 
 pub fn access_token_expired_or_near(access_token_expires_at_unix: Option<i64>, now: i64) -> bool {
@@ -177,6 +239,7 @@ pub async fn resolve_session_for_runtime() -> Result<ResolvedSession, String> {
 
     Ok(ResolvedSession {
         access_token: session.access_token,
+        account_id: session.account_id,
     })
 }
 
@@ -241,5 +304,81 @@ mod tests {
         // safety buffer is 30, threshold is 130
         assert!(!access_token_expired_or_near(Some(160), 129));
         assert!(access_token_expired_or_near(Some(160), 130));
+    }
+}
+
+#[cfg(test)]
+mod bounded_session_tests {
+    use super::*;
+    #[test]
+    fn runtime_legacy_session_and_optional_selected_context_remain_compatible() {
+        let legacy =
+            parse_codex_auth_payload(r#"{"tokens":{"access_token":"legacy-token"}}"#).unwrap();
+        assert_eq!(legacy.account_id, None);
+        assert!(!access_token_expired_or_near(
+            legacy.access_token_expires_at_unix,
+            now_unix_seconds()
+        ));
+        let selected = parse_codex_auth_payload(
+            r#"{"tokens":{"access_token":"legacy-token","account_id":"synthetic-workspace"}}"#,
+        )
+        .unwrap();
+        assert_eq!(selected.account_id.as_deref(), Some("synthetic-workspace"));
+        let debug = format!("{selected:?}");
+        assert!(!debug.contains("legacy-token"));
+        assert!(!debug.contains("synthetic-workspace"));
+        for account in ["", "bad\nheader", "nonascii-é"] {
+            let error = parse_codex_auth_payload(
+                &serde_json::json!({"tokens":{"access_token":"legacy-token","account_id":account}})
+                    .to_string(),
+            )
+            .unwrap_err();
+            assert_eq!(error, "Codex selected account context is invalid.");
+        }
+        assert!(parse_codex_auth_payload(
+            &serde_json::json!({"tokens":{"access_token":"x".repeat(MAX_TOKEN_BYTES+1)}})
+                .to_string()
+        )
+        .is_err());
+        assert!(!parse_codex_auth_payload("{secret-invalid-json")
+            .unwrap_err()
+            .contains("secret-invalid-json"));
+    }
+    #[test]
+    fn auth_snapshot_is_bounded_read_only_and_preserves_selected_links() {
+        let root =
+            std::env::temp_dir().join(format!("cargo-ai-session-bound-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("auth.json");
+        assert_eq!(read_auth_snapshot(&path).unwrap(), None);
+        std::fs::write(&path, vec![b'x'; MAX_AUTH_BYTES + 1]).unwrap();
+        assert!(read_auth_snapshot(&path).unwrap_err().contains("64 KiB"));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            (MAX_AUTH_BYTES + 1) as u64
+        );
+        #[cfg(unix)]
+        {
+            let link = root.join("linked.json");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(read_auth_snapshot(&link).unwrap_err().contains("64 KiB"));
+            let raw = r#"{"tokens":{"access_token":"synthetic-linked-token"}}"#;
+            std::fs::write(&path, raw).unwrap();
+            assert_eq!(read_auth_snapshot(&link).unwrap().as_deref(), Some(raw));
+            assert!(std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            let linked_home = root.join("linked-home");
+            std::os::unix::fs::symlink(&root, &linked_home).unwrap();
+            assert_eq!(
+                read_auth_snapshot(&linked_home.join("auth.json"))
+                    .unwrap()
+                    .as_deref(),
+                Some(raw)
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

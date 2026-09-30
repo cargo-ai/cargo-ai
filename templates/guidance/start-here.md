@@ -54,6 +54,7 @@ When selecting a model provider:
 - for real Mistral or xAI credentials, create the provider API profile first and pipe the key to `cargo ai profile set <name> --stdin`; never put a key in agent JSON or guidance
 - a Claude.ai paid plan and Anthropic Console API billing are separate; do not imply that the consumer subscription supplies an API key or credits
 - choose a current model available to the user's provider account instead of inventing a model ID or treating examples as a built-in allowlist
+- In a build advertising account discovery, `cargo ai models list --profile NAME` or explicit `--server openai --auth openai_account` can supply picker-visible exact IDs from an existing file-backed commercial Codex session. Listing needs no valid current model, performs no login/refresh/inference, and does not prove capability or invocation access. Profiles follow the current shared Codex session; separate Cargo AI homes do not isolate it. Refresh after account switches and retain manual selection when discovery is unavailable.
 - preserve the authored output schema and fail closed if the provider rejects it or returns invalid JSON; never weaken constraints, switch models, or fall back to another provider silently
 - a parent may use one provider while a media or child-agent step selects another saved profile explicitly
 
