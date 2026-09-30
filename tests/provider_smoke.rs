@@ -1932,6 +1932,17 @@ fn generated_native_account_case(fixture: &Fixture) {
         invalid_config
     );
     eprintln!("actual emitted inspect/version provenance dispatch passed with invalid isolated runtime config/auth");
+    // Compile the integration fixture only into its matching generated definition.
+    let main_source = workspace.join("src/main.rs");
+    let emitted_source = fs::read_to_string(&main_source).unwrap();
+    fs::write(
+        &main_source,
+        format!(
+            "{emitted_source}\n{}",
+            include_str!("fixtures/native_account_runtime_tests.rs")
+        ),
+    )
+    .unwrap();
     let output = fixture
         .isolated_command("cargo")
         .current_dir(&workspace)
