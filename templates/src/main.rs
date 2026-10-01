@@ -6,6 +6,8 @@ mod definition_validation;
 mod providers;
 mod runtime_data;
 mod runtime_media;
+mod runtime_thinking;
+mod generated_capabilities;
 mod usage_attribution;
 mod usage_backup;
 mod usage_backup_host;
@@ -18,6 +20,9 @@ use serde::{Deserialize, Serialize};
 // Generated agents retain their established output protocol. The interpreted
 // CLI supplies the optional observer for this shared production write hook.
 fn note_runtime_artifact(_kind: &str, _path: &std::path::Path) {}
+fn note_runtime_thinking(_scope: serde_json::Value, outcome: &crate::providers::thinking::ThinkingOutcome) {
+    if let Some(notice) = outcome.notice() { eprintln!("{notice}"); }
+}
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
@@ -137,11 +142,6 @@ impl ActionOutput {
         let (mode, startup_notice) =
             resolve_action_render_mode_for_capability(requested_mode, live_dashboard_supported());
         Self::new_for_mode_with_notice(action_execution, mode, startup_notice, run_started_at)
-    }
-
-    #[cfg(test)]
-    fn new_for_mode(action_execution: ActionExecutionMode, mode: ActionOutputMode) -> Self {
-        Self::new_for_mode_with_notice(action_execution, mode, None, Instant::now())
     }
 
     fn new_for_mode_with_notice(
@@ -803,19 +803,22 @@ impl std::fmt::Debug for ResolvedOpenAiToken {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct InvocationRuntimeBudget {
+pub(crate) struct InvocationRuntimeBudget {
     max_runtime_secs: u64,
     started_at_ms: u64,
     deadline_ms: u64,
 }
 
 #[derive(Clone)]
-struct ActionProviderContext {
+pub(crate) struct ActionProviderContext {
     project_data: Option<runtime_data::DataRoot>,
     provider: ProviderKind,
     profile_name: Option<String>,
     auth_mode: String,
     model: String,
+    thinking: Option<crate::providers::thinking::ThinkingSetting>,
+    thinking_source: String,
+    max_output_tokens: Option<u32>,
     url: String,
     token: String,
     openai_account_id: Option<String>,
@@ -3229,6 +3232,8 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
     let token: String;
     let mut max_output_tokens: Option<u32> = None;
     let mut temperature = None;
+    let mut thinking = None;
+    let mut thinking_source = "provider_default".to_string();
     let mut inference_timeout_in_sec: u64 = DEFAULT_INFERENCE_TIMEOUT_IN_SEC;
     let mut selected_profile: Option<SelectedProfile> = None;
     let mut loaded_profile_message: Option<(LoadedProfileKind, String)> = None;
@@ -3238,6 +3243,8 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
     let explicit_profile_name = cmd_args.get_one::<String>("profile").map(String::as_str);
     match resolve_loaded_profile(config.as_ref(), explicit_profile_name) {
         Ok(Some((profile, kind))) => {
+            thinking = profile.thinking.clone();
+            if thinking.is_some() { thinking_source = "profile".into(); }
             selected_profile = Some(apply_profile(
                 profile,
                 &mut server,
@@ -3265,6 +3272,11 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
 
     if let Some(server_arg) = cmd_args.get_one::<String>("server") {
         server = server_arg.to_lowercase();
+    }
+
+    if let Some(setting) = runtime_thinking::invocation_setting(&cmd_args) {
+        thinking = Some(setting);
+        thinking_source = "invocation".into();
     }
 
     if let Some(model_arg) = cmd_args.get_one::<String>("model") {
@@ -3452,6 +3464,9 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
         }
     };
     let action_provider_context = ActionProviderContext {
+        thinking,
+        thinking_source,
+        max_output_tokens,
         project_data,
         provider,
         profile_name: selected_profile
@@ -3578,7 +3593,6 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
         crate::providers::AgentCargo::<Output>::new(resolved_inputs, static_context.to_string());
 
     let content_parts = ai_cargo.content_parts();
-    let mut response = String::new();
 
     let _remaining = match remaining_runtime_duration(runtime_budget, "before starting inference") {
         Ok(remaining) => remaining,
@@ -3590,6 +3604,12 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
             exit_failure!();
         }
     };
+    let thinking_outcome = match runtime_thinking::resolve_for_request(
+        action_provider_context.thinking.as_ref(), &action_provider_context.thinking_source,
+        &action_provider_context, &model, crate::providers::thinking_metadata::ThinkingRequestKind::Text,
+        runtime_budget,
+    ).await { Ok(outcome) => outcome, Err(error) => { eprintln!("{error}"); exit_failure!(); } };
+    note_runtime_thinking(serde_json::json!({"kind":"invocation"}), &thinking_outcome);
     let usage_attempt = usage_log_context.as_ref().map(|usage_log| {
         usage_log.start_provider_request(
             provider,
@@ -3635,6 +3655,7 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
                 rubric_enabled: rubric_enabled(),
                 max_output_tokens,
                 temperature,
+                thinking: thinking_outcome.applied_choice(),
             },
             openai_account_id.as_deref(),
         ),
@@ -3848,6 +3869,7 @@ mod tests {
 
     fn profile(name: &str) -> Profile {
         Profile {
+            thinking: None,
             name: name.to_string(),
             server: "openai".to_string(),
             model: "gpt-5.2".to_string(),
@@ -5126,6 +5148,15 @@ async fn run_generate_image_step(
         action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
     })?;
 
+    let (thinking_setting, thinking_source) = runtime_thinking::step_setting(
+        step, data, step_profile_context.as_ref(), provider_context,
+    )?;
+    let thinking_outcome = runtime_thinking::resolve_for_request(
+        thinking_setting.as_ref(), &thinking_source, effective_provider_context, &model,
+        crate::providers::thinking_metadata::ThinkingRequestKind::Image, runtime_budget,
+    ).await?;
+    note_runtime_thinking(runtime_thinking::step_scope(action_index, action_name, step_index), &thinking_outcome);
+
     let usage_attempt = provider_context.usage_log.as_ref().map(|usage_log| {
         usage_log.start_provider_request(
             effective_provider_context.provider,
@@ -5164,6 +5195,8 @@ async fn run_generate_image_step(
             output_format,
             &reference_images,
             effective_provider_context.openai_account_id.as_deref(),
+            thinking_outcome.applied_choice(),
+            effective_provider_context.max_output_tokens,
         )
         .await
     })
@@ -5486,6 +5519,9 @@ async fn resolve_media_step_profile_context(
     }
 
     Ok(Some(ActionProviderContext {
+        thinking: profile.thinking.clone(),
+        thinking_source: "profile".into(),
+        max_output_tokens: profile.max_output_tokens,
         project_data: None,
         provider,
         profile_name: Some(profile.name.clone()),
@@ -5603,6 +5639,17 @@ async fn run_agent_step(
 
     let invocation = resolve_child_artifact_invocation(artifact, action_name)?;
     let mut command = child_artifact_command(&invocation, artifact);
+    if let Some(setting) = runtime_thinking::explicit_step_setting(step.thinking.as_ref(), data)? {
+        let record = runtime_thinking::child_thinking(
+            &invocation, &setting, &mut command,
+            runtime_thinking::step_scope(action_index, action_name, step_index),
+        );
+        if record["disposition"] == "not_forwarded" {
+            print_action_line(action_index, action_name,
+                "Thinking override was not forwarded: the child does not declare support. Its existing configuration is preserved; effective thinking is unverified.");
+        }
+    }
+
     if artifact.split_once("::").is_some() {
         command.current_dir(package_child_project_root(artifact, action_name)?);
     }
@@ -5911,11 +5958,6 @@ fn child_artifact_command(
             command
         }
     }
-}
-
-#[cfg(test)]
-fn resolve_child_usage_log_path(raw_path: &str, action_name: &str) -> Result<PathBuf, String> {
-    resolve_child_usage_log_path_with_data(raw_path, action_name, None)
 }
 
 fn resolve_child_usage_log_path_with_data(
@@ -6385,28 +6427,6 @@ fn matching_run_steps<'a>(
         .collect()
 }
 
-#[cfg(test)]
-fn child_input_args(
-    run_vars: Option<&[ActionRunVar]>,
-    input_overrides: Option<&[ActionInputOverride]>,
-    input_mode: Option<ActionInputMode>,
-    inputs: Option<&[ActionInput]>,
-    data: &serde_json::Value,
-    action_name: &str,
-    named_inputs: &BTreeMap<String, Input>,
-) -> Result<(Vec<String>, Vec<String>), String> {
-    child_input_args_with_data(
-        run_vars,
-        input_overrides,
-        input_mode,
-        inputs,
-        data,
-        action_name,
-        named_inputs,
-        None,
-    )
-}
-
 fn child_input_args_with_data(
     run_vars: Option<&[ActionRunVar]>,
     input_overrides: Option<&[ActionInputOverride]>,
@@ -6792,23 +6812,6 @@ fn validate_generate_image_output_format_for_provider(
     Ok(())
 }
 
-#[cfg(test)]
-fn resolve_generate_image_reference_images(
-    references: Option<&[GenerateImageReference]>,
-    data: &serde_json::Value,
-    action_name: &str,
-    named_inputs: &BTreeMap<String, Input>,
-) -> Result<Vec<providers::ImageReference>, String> {
-    resolve_generate_image_reference_images_with_data(
-        references,
-        data,
-        action_name,
-        named_inputs,
-        None,
-        false,
-    )
-}
-
 fn resolve_generate_image_reference_images_with_data(
     references: Option<&[GenerateImageReference]>,
     data: &serde_json::Value,
@@ -7075,11 +7078,6 @@ fn inherited_agent_action_runtime_budget() -> Option<InvocationRuntimeBudget> {
     })
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-fn configured_agent_action_runtime_budget(cli_override: Option<u64>) -> InvocationRuntimeBudget {
-    configured_agent_action_runtime_budget_with_project_default(cli_override, None)
-}
-
 fn configured_agent_action_runtime_budget_with_project_default(
     cli_override: Option<u64>,
     project_default: Option<u64>,
@@ -7141,11 +7139,6 @@ fn inherited_agent_action_max_depth() -> Option<u32> {
     std::env::var(AGENT_ACTION_MAX_DEPTH_ENV)
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn configured_agent_action_max_depth(cli_override: Option<u32>) -> u32 {
-    configured_agent_action_max_depth_with_project_default(cli_override, None)
 }
 
 fn configured_agent_action_max_depth_with_project_default(

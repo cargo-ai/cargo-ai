@@ -12,6 +12,7 @@
       "enum": [
         "operation_started",
         "provider_completed",
+        "thinking_resolved",
         "action_started",
         "action_completed",
         "child_started",
@@ -58,6 +59,22 @@
   ],
   "additionalProperties": true,
   "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "thinking_resolved"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "model-thinking-v1.json#/$defs/record"
+          }
+        }
+      }
+    },
     {
       "if": {
         "properties": {

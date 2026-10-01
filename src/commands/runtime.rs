@@ -1162,6 +1162,8 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     let token: String;
     let mut max_output_tokens: Option<u32> = None;
     let mut temperature = None;
+    let mut thinking = None;
+    let mut thinking_source = "provider_default".to_string();
     let project_runtime_defaults = match load_project_runtime_defaults(project_root.as_deref()) {
         Ok(defaults) => defaults,
         Err(error) => {
@@ -1183,6 +1185,10 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     let explicit_profile_name = sub_m.get_one::<String>("profile").map(String::as_str);
     match resolve_loaded_profile(config.as_ref(), explicit_profile_name) {
         Ok(Some((profile, kind))) => {
+            thinking = profile.thinking.clone();
+            if thinking.is_some() {
+                thinking_source = "profile".into();
+            }
             server = profile.server.clone().to_lowercase();
             model = profile.model.clone();
             inference_timeout_in_sec = profile.timeout_in_sec;
@@ -1217,6 +1223,11 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     // 2️⃣ Allow command-line args to override profile values
     if let Some(server_arg) = sub_m.get_one::<String>("server") {
         server = server_arg.to_lowercase();
+    }
+
+    if let Some(setting) = super::runtime_actions::runtime_thinking::invocation_setting(sub_m) {
+        thinking = Some(setting);
+        thinking_source = "invocation".into();
     }
 
     if let Some(model_arg) = sub_m.get_one::<String>("model") {
@@ -1439,6 +1450,9 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         }
     };
     let action_provider_context = super::runtime_actions::ActionProviderContext {
+        thinking,
+        thinking_source,
+        max_output_tokens,
         project_data,
         provider,
         profile_name: selected_profile
@@ -1642,6 +1656,26 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
             return false;
         }
     };
+    let thinking_outcome = match super::runtime_actions::runtime_thinking::resolve_for_request(
+        action_provider_context.thinking.as_ref(),
+        &action_provider_context.thinking_source,
+        &action_provider_context,
+        &model,
+        crate::providers::thinking_metadata::ThinkingRequestKind::Text,
+        runtime_budget,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            eprintln!("x {error}");
+            return false;
+        }
+    };
+    super::runtime_actions::note_runtime_thinking(
+        serde_json::json!({"kind":"invocation"}),
+        &thinking_outcome,
+    );
     let usage_attempt = usage_log_context.as_ref().map(|usage_log| {
         usage_log.start_provider_request(
             provider,
@@ -1687,6 +1721,7 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                 rubric_enabled: definition.rubric_enabled(),
                 max_output_tokens,
                 temperature,
+                thinking: thinking_outcome.applied_choice(),
             },
             openai_account_id.as_deref(),
         ),
@@ -2425,6 +2460,9 @@ mod tests {
     #[test]
     fn render_runtime_failure_lines_include_context_and_recovery() {
         let context = crate::commands::runtime_actions::ActionProviderContext {
+            thinking: None,
+            thinking_source: "provider_default".into(),
+            max_output_tokens: None,
             project_data: None,
             provider: ProviderKind::OpenAi,
             profile_name: Some("my_open_ai".to_string()),

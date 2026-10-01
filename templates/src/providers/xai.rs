@@ -17,6 +17,8 @@ struct Request<'a> {
     store: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Debug)]
@@ -137,6 +139,7 @@ fn normalize_usage(usage: Option<Usage>) -> Option<ProviderUsage> {
     })
 }
 
+#[cfg(test)]
 pub(crate) async fn send_request(
     url: &str,
     model: &str,
@@ -145,6 +148,19 @@ pub(crate) async fn send_request(
     token: &str,
     response_schema: &serde_json::Value,
     max_output_tokens: Option<u32>,
+ ) -> Result<ProviderTextResponse, ProviderError> {
+    send_request_with_thinking(url, model, content_parts, timeout_in_sec, token, response_schema, max_output_tokens, None).await
+}
+
+pub(crate) async fn send_request_with_thinking(
+    url: &str,
+    model: &str,
+    content_parts: &[ContentPart],
+    timeout_in_sec: u64,
+    token: &str,
+    response_schema: &serde_json::Value,
+    max_output_tokens: Option<u32>,
+    thinking: Option<&str>,
 ) -> Result<ProviderTextResponse, ProviderError> {
     let request = Request {
         model,
@@ -162,6 +178,7 @@ pub(crate) async fn send_request(
         },
         store: false,
         max_output_tokens,
+        reasoning: thinking.map(|effort| serde_json::json!({"effort":effort})),
     };
 
     let client = ClientBuilder::new()

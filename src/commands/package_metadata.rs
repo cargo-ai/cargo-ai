@@ -1,11 +1,16 @@
 //! Generate inventory from assembled bytes without executing publisher code.
 #[path = "../../templates/package_metadata.rs"]
 mod contract;
-pub(crate) use contract::{validate_manifest_metadata, InspectionMetadata, PublisherStatements};
-use contract::{DeclaredEffects, InventoryFile};
+#[cfg(feature = "developer-tools")]
+use contract::DeclaredEffects;
+use contract::InventoryFile;
+#[cfg(feature = "developer-tools")]
+pub(crate) use contract::PublisherStatements;
+pub(crate) use contract::{validate_manifest_metadata, InspectionMetadata};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
 
+#[cfg(feature = "developer-tools")]
 pub(crate) fn generate(
     root: &Path,
     publisher: PublisherStatements,

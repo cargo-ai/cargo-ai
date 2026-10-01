@@ -89,6 +89,12 @@ fn generated_agent_definition_json_value() -> serde_json::Value {
 
 #[allow(dead_code)]
 fn generated_agent_inspect_value() -> serde_json::Value {
+    let runtime_capabilities = crate::generated_capabilities::decode_record(std::hint::black_box(
+        &AGENT_RUNTIME_CAPABILITY_RECORD,
+    ))
+    .ok()
+    .and_then(|capabilities| serde_json::to_value(capabilities).ok())
+    .unwrap_or(serde_json::Value::Null);
     serde_json::json!({
         "generated_by_cargo_ai_version": GENERATED_BY_CARGO_AI_VERSION,
         "generated_with_template_schema_version": GENERATED_WITH_TEMPLATE_SCHEMA_VERSION,
@@ -96,7 +102,8 @@ fn generated_agent_inspect_value() -> serde_json::Value {
         "target_triple": AGENT_TARGET_TRIPLE,
         "definition_sha256": AGENT_DEFINITION_SHA256,
         "embedded_definition_json": generated_agent_definition_json_value(),
-        "build_timestamp_utc": AGENT_BUILD_TIMESTAMP_UTC
+        "build_timestamp_utc": AGENT_BUILD_TIMESTAMP_UTC,
+        "runtime_capabilities": runtime_capabilities
     })
 }
 

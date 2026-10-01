@@ -1,0 +1,462 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/model-thinking-v1.json",
+  "title": "Cargo AI thinking query payload v1",
+  "$comment": "Query data for cargo-ai.models.thinking.v1; $defs also describe returned profile selections, runtime records and passive capability declarations. Compatible added output fields are allowed. Configuration/definition input validators separately reject unknown fields. Choice names are exact opaque strings. Capability declarations and metadata do not prove invocation access. Byte bounds and request/effective consistency are enforced separately.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "provider": {
+      "enum": [
+        "openai",
+        "anthropic",
+        "gemini",
+        "mistral",
+        "xai",
+        "ollama",
+        "typesafe"
+      ]
+    },
+    "auth": {
+      "enum": [
+        "none",
+        "api_key",
+        "openai_account"
+      ]
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "connection": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "endpoint",
+        "profile"
+      ],
+      "additionalProperties": true
+    },
+    "fetched_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "thinking": {
+      "$ref": "#/$defs/support"
+    },
+    "invocation_access": {
+      "const": "unverified"
+    }
+  },
+  "required": [
+    "schema_version",
+    "provider",
+    "auth",
+    "model",
+    "connection",
+    "fetched_at",
+    "thinking",
+    "invocation_access"
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "setting": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "provider_default"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "choice"
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "mode",
+            "value"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "support": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "configurable"
+            },
+            "choices": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "description": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "value",
+                  "description"
+                ],
+                "additionalProperties": true
+              }
+            },
+            "default": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evidence": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "choices",
+            "default",
+            "evidence"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "unsupported"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "evidence": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "evidence"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "unknown"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "evidence": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "evidence"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "scope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "invocation"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "action_step"
+            },
+            "action_index": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "action": {
+              "type": "string"
+            },
+            "step_index": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "action_index",
+            "action",
+            "step_index"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "outcome": {
+      "type": "object",
+      "properties": {
+        "requested": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/setting"
+            }
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "support": {
+          "$ref": "#/$defs/support"
+        },
+        "applied": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effective": {
+          "$ref": "#/$defs/setting"
+        },
+        "fallback": {
+          "enum": [
+            null,
+            "unavailable_choice",
+            "unsupported_control",
+            "unknown_support"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "requested",
+        "source",
+        "support",
+        "applied",
+        "effective",
+        "fallback",
+        "reason"
+      ],
+      "additionalProperties": true
+    },
+    "record": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "$ref": "#/$defs/scope"
+            },
+            "outcome": {
+              "$ref": "#/$defs/outcome"
+            }
+          },
+          "required": [
+            "scope",
+            "outcome"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "$ref": "#/$defs/scope"
+            },
+            "kind": {
+              "const": "child_forwarding"
+            },
+            "requested": {
+              "$ref": "#/$defs/setting"
+            },
+            "disposition": {
+              "enum": [
+                "forwarded",
+                "not_forwarded"
+              ]
+            },
+            "declaration_source": {
+              "enum": [
+                "embedded_artifact",
+                "unavailable"
+              ]
+            },
+            "effective": {
+              "const": "child_unverified"
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "requested",
+            "disposition",
+            "declaration_source",
+            "effective"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "collection": {
+      "type": "object",
+      "properties": {
+        "records": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/record"
+          }
+        },
+        "omitted_records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "coverage": {
+          "enum": [
+            "complete_observed_scopes",
+            "bounded_partial"
+          ]
+        }
+      },
+      "required": [
+        "records",
+        "omitted_records",
+        "coverage"
+      ],
+      "additionalProperties": true
+    },
+    "runtime_capabilities": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "runtime": {
+              "enum": [
+                "cargo-ai.generated-runtime",
+                "cargo-ai.cli-run-runtime"
+              ]
+            },
+            "revision": {
+              "const": 1
+            },
+            "thinking": {
+              "type": "object",
+              "properties": {
+                "flags": {
+                  "const": [
+                    "--thinking",
+                    "--thinking-provider-default"
+                  ]
+                },
+                "settings": {
+                  "const": [
+                    "choice",
+                    "provider_default"
+                  ]
+                }
+              },
+              "required": [
+                "flags",
+                "settings"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "runtime",
+            "revision",
+            "thinking"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    }
+  },
+  "examples": [
+    {
+      "schema_version": 1,
+      "provider": "typesafe",
+      "auth": "api_key",
+      "model": "example",
+      "connection": {
+        "endpoint": "https://example.test",
+        "profile": "saved"
+      },
+      "fetched_at": "2026-10-01T12:00:00Z",
+      "thinking": {
+        "status": "unsupported",
+        "reason": "The selected service has no named thinking control.",
+        "evidence": null
+      },
+      "invocation_access": "unverified"
+    }
+  ]
+}

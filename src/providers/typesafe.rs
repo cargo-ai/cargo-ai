@@ -520,6 +520,7 @@ mod tests {
                 response_schema: &schema,
                 max_output_tokens: None,
                 temperature: None,
+                thinking: None,
                 rubric_enabled: true,
             },
         )
@@ -545,6 +546,7 @@ mod tests {
                     response_schema: &schema(),
                     max_output_tokens: None,
                     temperature: None,
+                    thinking: None,
                     rubric_enabled: true,
                 },
             )
@@ -575,6 +577,7 @@ mod tests {
                 response_schema: &schema(),
                 max_output_tokens: None,
                 temperature: None,
+                thinking: None,
                 rubric_enabled: true,
             },
         )
@@ -608,6 +611,7 @@ mod tests {
                 response_schema: &schema(),
                 max_output_tokens: None,
                 temperature: None,
+                thinking: None,
                 rubric_enabled: true,
             },
         )

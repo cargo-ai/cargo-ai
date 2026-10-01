@@ -2,6 +2,10 @@
 
 Use this file when a user opens a blank folder and wants help creating their first Cargo AI agent that hatches into a CLI tool.
 
+## Thinking Controls
+
+Model selection works without a thinking setting. When a user requests one, inspect installed capabilities, then query exact choices with `cargo ai models thinking --profile NAME --model MODEL_ID --output-format json`. A profile or invocation may use `--thinking VALUE` or `--thinking-provider-default`; profile set also supports `--clear-thinking`. Choices depend on the model/connection and have no universal ordering. Unavailable choices use provider default with an explanation. See [Thinking Selection](agent-definition-contract.md#thinking-selection) for action revision `2026-10-01.r1`, inheritance, child forwarding and rebuild limits.
+
 ## First-Run Goal
 
 Do not start by asking the user to choose between a single agent, an action agent, or a parent/child setup.

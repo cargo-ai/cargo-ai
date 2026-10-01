@@ -57,6 +57,8 @@ pub fn command() -> Command {
                         .value_name("URL"),
                 )
                 .arg(temperature_arg())
+                .arg(thinking_arg())
+                .arg(thinking_provider_default_arg())
                 .arg(
                     Arg::new("max_output_tokens")
                         .long("max-output-tokens")
@@ -95,6 +97,9 @@ pub fn command() -> Command {
                             "clear_max_output_tokens",
                             "temperature",
                             "clear_temperature",
+                            "thinking",
+                            "thinking_provider_default",
+                            "clear_thinking",
                             "description",
                             "clear_description",
                             "token",
@@ -124,6 +129,13 @@ pub fn command() -> Command {
                     Arg::new("clear_temperature")
                         .long("clear-temperature")
                         .help("Use the provider default temperature")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("clear_thinking")
+                        .long("clear-thinking")
+                        .help("Clear this profile's thinking override and restore inheritance")
+                        .conflicts_with_all(["thinking", "thinking_provider_default"])
                         .action(ArgAction::SetTrue),
                 )
                 .group(
@@ -181,6 +193,8 @@ pub fn command() -> Command {
                         .action(ArgAction::SetTrue),
                 )
                 .arg(temperature_arg())
+                .arg(thinking_arg())
+                .arg(thinking_provider_default_arg())
                 .arg(
                     Arg::new("max_output_tokens")
                         .long("max-output-tokens")
@@ -264,6 +278,28 @@ pub fn command() -> Command {
         )
 }
 
+fn thinking_arg() -> Arg {
+    Arg::new("thinking")
+        .long("thinking")
+        .value_name("VALUE")
+        .help("Store an exact provider/model thinking choice; support is checked when running")
+        .conflicts_with("thinking_provider_default")
+        .value_parser(|value: &str| {
+            if value.trim().is_empty() {
+                Err("thinking choice must be nonempty".to_string())
+            } else {
+                Ok(value.to_string())
+            }
+        })
+}
+
+fn thinking_provider_default_arg() -> Arg {
+    Arg::new("thinking_provider_default")
+        .long("thinking-provider-default")
+        .help("Explicitly use provider-default thinking instead of an inherited choice")
+        .action(ArgAction::SetTrue)
+}
+
 fn temperature_arg() -> Arg {
     Arg::new("temperature")
         .long("temperature")
@@ -282,6 +318,56 @@ fn temperature_arg() -> Arg {
 
 #[cfg(test)]
 mod temperature_tests {
+    #[test]
+    fn thinking_flags_allow_override_default_and_clear_without_model() {
+        for words in [
+            vec!["profile", "set", "example", "--thinking", "high"],
+            vec!["profile", "set", "example", "--thinking-provider-default"],
+            vec!["profile", "set", "example", "--clear-thinking"],
+            vec![
+                "profile",
+                "add",
+                "example",
+                "--server",
+                "ollama",
+                "--model",
+                "fixture",
+                "--thinking",
+                "max",
+            ],
+        ] {
+            assert!(super::command().try_get_matches_from(words).is_ok());
+        }
+        for words in [
+            vec!["profile", "set", "example", "--thinking", " "],
+            vec![
+                "profile",
+                "set",
+                "example",
+                "--thinking",
+                "high",
+                "--thinking-provider-default",
+            ],
+            vec![
+                "profile",
+                "set",
+                "example",
+                "--thinking",
+                "high",
+                "--clear-thinking",
+            ],
+            vec![
+                "profile",
+                "set",
+                "example",
+                "--thinking-provider-default",
+                "--clear-thinking",
+            ],
+        ] {
+            assert!(super::command().try_get_matches_from(words).is_err());
+        }
+    }
+
     #[test]
     fn temperature_arguments_validate_and_clear() {
         for value in ["0", "0.7", "12"] {

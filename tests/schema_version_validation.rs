@@ -1,3 +1,6 @@
+#[path = "../src/generated_capabilities/record.rs"]
+mod generated_capability_record;
+
 #[path = "../templates/build_support.rs"]
 #[allow(dead_code)]
 mod build_support;
@@ -124,7 +127,7 @@ fn preserves_older_date_revisions_and_unknown_root_fields() {
 
 #[test]
 fn both_supported_strict_revisions_keep_unknown_keyword_rejection() {
-    for version in ["2026-09-09.r1", "2026-09-19.r1"] {
+    for version in ["2026-09-09.r1", "2026-09-19.r1", "2026-10-01.r1"] {
         assert!(build_support::generate_agent_model_from_str(&minimal_agentcfg(version)).is_ok());
         let config = minimal_agentcfg_with_header(&format!(
             r#""agent_definition_schema_version": "{version}", "unknown_root_field": true"#
@@ -151,6 +154,7 @@ fn unrecognized_revisions_after_strict_cutoff_never_become_legacy() {
         "2026-09-10.r1",
         "2026-09-19.r2",
         "2026-09-20.r1",
+        "2026-10-01.r2",
     ] {
         let error = build_support::generate_agent_model_from_str(&minimal_agentcfg(version))
             .unwrap_err()

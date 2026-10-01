@@ -107,6 +107,13 @@ pub struct Profile {
     )]
     pub temperature: Option<f64>,
 
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_thinking"
+    )]
+    pub thinking: Option<crate::providers::thinking::ThinkingSetting>,
+
     #[serde(default)]
     pub description: Option<String>,
 
@@ -194,6 +201,17 @@ fn default_timeout() -> u64 {
     60
 }
 
+fn deserialize_thinking<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<crate::providers::thinking::ThinkingSetting>, D::Error> {
+    use crate::providers::thinking::ThinkingSetting;
+    let setting = Option::<ThinkingSetting>::deserialize(deserializer)?;
+    if matches!(&setting, Some(ThinkingSetting::Choice { value }) if value.trim().is_empty()) {
+        return Err(serde::de::Error::custom("thinking choice must be nonempty"));
+    }
+    Ok(setting)
+}
+
 fn deserialize_temperature<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<f64>, D::Error> {
@@ -209,6 +227,38 @@ fn deserialize_temperature<'de, D: serde::Deserializer<'de>>(
 #[cfg(test)]
 mod temperature_tests {
     use super::Profile;
+    #[test]
+    fn thinking_profile_roundtrip_preserves_absence_default_and_exact_choice() {
+        let base = serde_json::json!({"name":"local", "server":"openai", "model":"example"});
+        let inherited: Profile = serde_json::from_value(base.clone()).unwrap();
+        assert!(inherited.thinking.is_none());
+        assert!(serde_json::to_value(inherited)
+            .unwrap()
+            .get("thinking")
+            .is_none());
+        for setting in [
+            serde_json::json!({"mode":"provider_default"}),
+            serde_json::json!({"mode":"choice", "value":"default"}),
+            serde_json::json!({"mode":"choice", "value":"max"}),
+        ] {
+            let mut value = base.clone();
+            value["thinking"] = setting.clone();
+            let profile: Profile = serde_json::from_value(value).unwrap();
+            assert_eq!(serde_json::to_value(profile).unwrap()["thinking"], setting);
+        }
+        for setting in [
+            serde_json::json!({"mode":"choice", "value":""}),
+            serde_json::json!({"mode":"choice", "value":1}),
+            serde_json::json!({"mode":"choice"}),
+            serde_json::json!({"mode":"unknown"}),
+            serde_json::json!({"mode":"provider_default", "value":"high"}),
+        ] {
+            let mut value = base.clone();
+            value["thinking"] = setting;
+            assert!(serde_json::from_value::<Profile>(value).is_err());
+        }
+    }
+
     #[test]
     fn temperature_profile_roundtrip_and_validation() {
         let base = serde_json::json!({"name":"local", "server":"openai", "model":"example"});

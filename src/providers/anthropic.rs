@@ -16,6 +16,8 @@ struct Request<'a> {
     max_tokens: u32,
     messages: Vec<RequestMessage>,
     output_config: OutputConfig<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -41,6 +43,8 @@ struct ImageSource {
 #[derive(Debug, Serialize)]
 struct OutputConfig<'a> {
     format: OutputFormat<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -214,6 +218,7 @@ fn error_message(body: &[u8]) -> String {
         .unwrap_or_else(|_| "Anthropic returned an HTTP error response.".to_string())
 }
 
+#[cfg(test)]
 pub(crate) async fn send_request(
     url: &str,
     model: &str,
@@ -222,6 +227,29 @@ pub(crate) async fn send_request(
     token: &str,
     response_schema: &serde_json::Value,
     max_output_tokens: Option<u32>,
+) -> Result<ProviderTextResponse, ProviderError> {
+    send_request_with_thinking(
+        url,
+        model,
+        content_parts,
+        timeout_in_sec,
+        token,
+        response_schema,
+        max_output_tokens,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn send_request_with_thinking(
+    url: &str,
+    model: &str,
+    content_parts: &[ContentPart],
+    timeout_in_sec: u64,
+    token: &str,
+    response_schema: &serde_json::Value,
+    max_output_tokens: Option<u32>,
+    thinking: Option<&str>,
 ) -> Result<ProviderTextResponse, ProviderError> {
     validate_response_schema(response_schema)?;
     let request = Request {
@@ -232,11 +260,15 @@ pub(crate) async fn send_request(
             content: request_content_blocks(content_parts)?,
         }],
         output_config: OutputConfig {
+            effort: thinking,
             format: OutputFormat {
                 r#type: "json_schema",
                 schema: response_schema,
             },
         },
+        thinking: thinking
+            .filter(|_| matches!(model, "claude-opus-4-6" | "claude-sonnet-4-6"))
+            .map(|_| serde_json::json!({"type":"adaptive"})),
     };
 
     let client = ClientBuilder::new()

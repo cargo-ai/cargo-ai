@@ -7,6 +7,8 @@ use std::sync::{mpsc, Mutex};
 
 const RESPONSE_LIMIT: usize = 8 * 1024 * 1024;
 const EVENT_LIMIT: usize = 64 * 1024;
+const THINKING_RECORD_LIMIT: usize = 256;
+const THINKING_BYTES_LIMIT: usize = 512 * 1024;
 static SELECTED: AtomicBool = AtomicBool::new(false);
 static CANCELED: AtomicBool = AtomicBool::new(false);
 static ACTIVE_LANES: AtomicUsize = AtomicUsize::new(0);
@@ -43,6 +45,9 @@ struct Observer {
     output: Option<Value>,
     error: Option<Failure>,
     artifacts: Vec<Value>,
+    thinking: Vec<Value>,
+    thinking_bytes: usize,
+    thinking_omitted: usize,
     child_instrumentation: bool,
     truncated: bool,
 }
@@ -277,6 +282,15 @@ async fn writer_ack(receiver: &mpsc::Receiver<bool>) -> bool {
         }
     }
 }
+fn progress_capacity(observer: &mut Observer) -> bool {
+    if observer.sequence >= 63 {
+        observer.truncated = true;
+        false
+    } else {
+        true
+    }
+}
+
 pub(crate) fn event(kind: &'static str, data: Value) {
     if !selected() || canceled() {
         return;
@@ -288,8 +302,7 @@ pub(crate) fn event(kind: &'static str, data: Value) {
         }
         // Reserving one queue slot keeps essential terminal state independent
         // of progress volume. Slow pipes never hold the observer mutex.
-        if o.sequence >= 63 {
-            o.truncated = true;
+        if !progress_capacity(o) {
             return;
         }
         let value = json!({"schema_version":1,"event_type":kind,"operation_id":o.id,"root_invocation_id":o.id,"invocation_id":o.id,"sequence":o.sequence,"timestamp":timestamp(),"data":data});
@@ -381,6 +394,77 @@ pub(crate) fn record_artifact(value: Value) {
         }
     }
 }
+
+pub(crate) fn record_thinking(value: Value) {
+    if !selected() {
+        return;
+    }
+    let retained = {
+        let mut guard = OBSERVER.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(observer) = guard.as_mut() else {
+            return;
+        };
+        retain_thinking(observer, &value)
+    };
+    if retained {
+        event("thinking_resolved", value);
+    }
+}
+
+fn retain_thinking(observer: &mut Observer, value: &Value) -> bool {
+    let size = serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len());
+    if size <= 16 * 1024
+        && observer.thinking.len() < THINKING_RECORD_LIMIT
+        && size <= THINKING_BYTES_LIMIT.saturating_sub(observer.thinking_bytes)
+    {
+        observer.thinking_bytes += size;
+        observer.thinking.push(value.clone());
+        true
+    } else {
+        observer.thinking_omitted += 1;
+        false
+    }
+}
+
+fn thinking_data(observer: &Observer) -> Value {
+    json!({"records":observer.thinking,"omitted_records":observer.thinking_omitted,
+        "coverage":if observer.thinking_omitted == 0 {"complete_observed_scopes"} else {"bounded_partial"}})
+}
+
+fn merge_thinking(mut data: Value, observer: &Observer) -> Value {
+    if observer.thinking.is_empty() && observer.thinking_omitted == 0 {
+        return data;
+    }
+    if !data.is_object() {
+        data = json!({"operation_data":data});
+    }
+    data["thinking"] = thinking_data(observer);
+    data
+}
+
+fn thinking_warnings(observer: &Observer) -> Vec<Value> {
+    let mut warnings = Vec::new();
+    for record in &observer.thinking {
+        if let Some(fallback) = record.pointer("/outcome/fallback").and_then(Value::as_str) {
+            let code = match fallback {
+                "unavailable_choice" => "thinking.choice_unavailable",
+                "unsupported_control" => "thinking.control_unsupported",
+                _ => "thinking.support_unknown",
+            };
+            warnings.push(json!({"code":code,"message":"The requested thinking choice was not applied; provider default is used.",
+                "scope":record.get("scope"),"requested":record.pointer("/outcome/requested"),
+                "reason":fallback,"effective":{"mode":"provider_default"}}));
+        } else if record.get("disposition").and_then(Value::as_str) == Some("not_forwarded") {
+            warnings.push(json!({"code":"thinking.child_capability_unavailable",
+                "message":"The child does not declare thinking override support; its existing configuration is preserved and its effective setting is unverified.",
+                "scope":record.get("scope"),"requested":record.get("requested"),"effective":"child_unverified"}));
+        }
+    }
+    if observer.thinking_omitted != 0 {
+        warnings.push(json!({"code":"thinking.outcomes_truncated","message":"Some thinking outcomes exceeded the collection bound.","omitted_records":observer.thinking_omitted}));
+    }
+    warnings
+}
 pub(crate) fn opaque_child() {
     if selected() {
         if let Some(o) = OBSERVER.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
@@ -425,13 +509,14 @@ fn contracts() -> Vec<Value> {
         "usage backup sync",
         "usage backup include-history",
         "models list",
+        "models thinking",
     ];
     let mut values: Vec<Value> = finite.iter().map(|name| {
         let effects=match *name {
             "capabilities"|"version"=>vec!["none"],
             "profile list"=>vec!["configuration_read"],
             "profile show"=>vec!["configuration_read","credential_presence_lookup"],
-            "models list"=>vec!["connection_read","provider_catalog_read"],
+            "models list"|"models thinking"=>vec!["connection_read","provider_catalog_read"],
             "profile add"|"profile set"|"profile remove"=>vec!["configuration_or_credentials_mutation"],
             "new"|"package"=>vec!["project_files_mutation"],
             "account status"=>vec!["account_read","possible_session_refresh_and_persistence"],
@@ -444,21 +529,25 @@ fn contracts() -> Vec<Value> {
         let variants=match *name {
             "packages list"=>json!([{"selector":"installed","pagination":"limit_and_all","legacy_default_limit":20},{"selector":"account","pagination":"all_and_existing_limit"}]),
             "packages inspect"=>json!([{"selector":"installed_alias"},{"selector":"account_name_and_optional_version"}]),
-            "models list"=>json!([{"selector":"saved_profile","api_key_store":"explicit_file_only","auth_modes":["none","api_key","openai_account"]},{"selector":"draft_server_auth","api_key_input":"stdin","auth_modes":["none","api_key","openai_account"],"account_provider":"openai"}]),
+            "models list"|"models thinking"=>json!([{"selector":"saved_profile","api_key_store":"explicit_file_only","auth_modes":["none","api_key","openai_account"]},{"selector":"draft_server_auth","api_key_input":"stdin","auth_modes":["none","api_key","openai_account"],"account_provider":"openai"}]),
             "usage summary"|"usage runs"|"usage show"=>json!([{"domain_schema_version":1},{"domain_schema_version":2}]),
             "account deactivate"=>json!([{"deletion_request":false},{"deletion_request":true,"requires":"matching_confirm_email"}]),
             _=>json!([]),
         };
         json!({"command":name,"payload_schema":format!("cargo-ai.{}.v1",name.replace(' ',".")),"formats":["json"],"schema_versions":[1],"effects":effects,"variants":variants,"interaction":if *name=="auth login openai"{"existing_terminal_protocol_exception"}else{"noninteractive_explicit_consent_required_when_applicable"}})
     }).collect();
-    values.push(json!({"command":"run","formats":["json","ndjson"],"schema_versions":[1],"private_content":"explicit_opt_in","opaque_children":"exit_status_only"}));
+    values.push(json!({"command":"run","formats":["json","ndjson"],"schema_versions":[1],"private_content":"explicit_opt_in","opaque_children":"exit_status_only","thinking":{"selection":"tagged_provider_default_or_exact_choice","terminal_outcomes":true,"action_definition_revision":"2026-10-01.r1"}}));
     if cfg!(feature = "developer-tools") {
         values.push(json!({"command":"package","formats":["json"],"schema_versions":[1]}));
     }
     values
 }
 pub(crate) fn capabilities() -> Value {
-    json!({"build":build(),"contracts":contracts(),"installed_capability_is_not_live_access":true,"legacy_formats":{"version_and_help":"text","usage_json":"unchanged_v1_v2","agent_pull_stdout":"raw_definition_json","run_json":"input_definition"},"limits":{"response_bytes":RESPONSE_LIMIT,"event_bytes":EVENT_LIMIT,"progress_records":63,"private_result_bytes":4*1024*1024,"terminal_delivery_seconds":2},"storage":{"keychain":"shared_profile_name","discovery_saved_api_key":"explicit_file_only"},"interaction":"noninteractive_by_default","generated_children":"instrumentation_unavailable_unless_explicitly_supported"})
+    let runtime_capabilities = crate::generated_capabilities::decode_record(std::hint::black_box(
+        &crate::CLI_RUN_RUNTIME_CAPABILITY_RECORD,
+    ))
+    .ok();
+    json!({"build":build(),"contracts":contracts(),"runtime_capabilities":runtime_capabilities,"installed_capability_is_not_live_access":true,"legacy_formats":{"version_and_help":"text","usage_json":"unchanged_v1_v2","agent_pull_stdout":"raw_definition_json","run_json":"input_definition"},"limits":{"response_bytes":RESPONSE_LIMIT,"event_bytes":EVENT_LIMIT,"progress_records":63,"private_result_bytes":4*1024*1024,"terminal_delivery_seconds":2},"storage":{"keychain":"shared_profile_name","discovery_saved_api_key":"explicit_file_only"},"interaction":"noninteractive_by_default","generated_children":"instrumentation_unavailable_unless_explicitly_supported"})
 }
 
 pub(crate) async fn dispatch(matches: &ArgMatches) -> Option<i32> {
@@ -466,7 +555,12 @@ pub(crate) async fn dispatch(matches: &ArgMatches) -> Option<i32> {
     let selected_format = matches
         .get_one::<String>("output_format")
         .map(String::as_str);
-    if selected_format.is_none() && !matches!(path.as_str(), "capabilities" | "models list") {
+    if selected_format.is_none()
+        && !matches!(
+            path.as_str(),
+            "capabilities" | "models list" | "models thinking"
+        )
+    {
         return None;
     }
     SELECTED.store(true, Ordering::Relaxed);
@@ -499,6 +593,9 @@ pub(crate) async fn dispatch(matches: &ArgMatches) -> Option<i32> {
         output: None,
         error: None,
         artifacts: vec![],
+        thinking: vec![],
+        thinking_bytes: 0,
+        thinking_omitted: 0,
         child_instrumentation: true,
         truncated: false,
     });
@@ -539,14 +636,17 @@ pub(crate) async fn dispatch(matches: &ArgMatches) -> Option<i32> {
         Ok(data) => (data, None),
         Err(e) => (e.data.clone(), Some(e)),
     };
-    let warnings = if observer.truncated {
-        vec![
-            json!({"code":"cli.output_truncated","message":"Some bounded diagnostic or artifact metadata was omitted."}),
-        ]
-    } else {
-        vec![]
-    };
-    let value = envelope(&path, &id, data, error.as_ref(), warnings);
+    let mut warnings = thinking_warnings(&observer);
+    if observer.truncated {
+        warnings.push(json!({"code":"cli.output_truncated","message":"Some bounded diagnostic or artifact metadata was omitted."}));
+    }
+    let value = envelope(
+        &path,
+        &id,
+        merge_thinking(data, &observer),
+        error.as_ref(),
+        warnings,
+    );
     let output = if format == "ndjson" {
         json!({"schema_version":1,"event_type":"operation_completed","operation_id":id,"root_invocation_id":id,"invocation_id":id,"sequence":observer.sequence,"timestamp":timestamp(),"data":value})
     } else {
@@ -561,7 +661,13 @@ pub(crate) async fn dispatch(matches: &ArgMatches) -> Option<i32> {
                 "cli.output_limit",
                 "Response exceeds its output bound; operation effects require reconciliation.",
             );
-            let value = envelope(&path, &id, Value::Null, Some(&failure), vec![]);
+            let value = envelope(
+                &path,
+                &id,
+                merge_thinking(Value::Null, &observer),
+                Some(&failure),
+                thinking_warnings(&observer),
+            );
             let fallback = if format == "ndjson" {
                 json!({"schema_version":1,"event_type":"operation_completed","operation_id":id,"root_invocation_id":id,"invocation_id":id,"sequence":observer.sequence,"timestamp":timestamp(),"data":value})
             } else {
@@ -610,7 +716,7 @@ async fn execute(matches: &ArgMatches) -> Result<Value, Failure> {
             }
         }
         Some(("models", m)) => {
-            let data = super::models::run(m.subcommand_matches("list").unwrap())
+            let data = super::models::run(m.subcommand().unwrap().1)
                 .await
                 .map_err(|e| Failure {
                     code: discovery_code(e.code),
@@ -690,5 +796,79 @@ pub(crate) fn runtime_outcome(succeeded: bool) -> Result<Value, Failure> {
             failure.data["partial"] = Value::Bool(true);
         }
         Err(failure)
+    }
+}
+
+#[cfg(test)]
+mod thinking_tests {
+    use super::*;
+
+    fn observer() -> Observer {
+        let (sender, _) = mpsc::sync_channel(64);
+        Observer {
+            id: "fixture".into(),
+            sender,
+            stream: true,
+            content: false,
+            sequence: 63,
+            output: None,
+            error: None,
+            artifacts: vec![],
+            thinking: vec![],
+            thinking_bytes: 0,
+            thinking_omitted: 0,
+            child_instrumentation: true,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn terminal_thinking_retains_fallback_after_dropped_progress_and_failure() {
+        let outcome = crate::providers::thinking::resolve(
+            Some(&crate::providers::thinking::ThinkingSetting::Choice {
+                value: "max".into(),
+            }),
+            "invocation",
+            crate::providers::thinking::ThinkingSupport::Unsupported {
+                reason: "fixture has no named control".into(),
+                evidence: None,
+            },
+        );
+        let mut o = observer();
+        assert!(retain_thinking(
+            &mut o,
+            &json!({"scope":{"kind":"invocation"},"outcome":outcome})
+        ));
+        assert!(!progress_capacity(&mut o));
+        assert!(o.truncated);
+        let failure = Failure::new("runtime.provider_failed", "Fixture inference failed.");
+        let response = envelope(
+            "run",
+            "fixture",
+            merge_thinking(failure.data.clone(), &o),
+            Some(&failure),
+            thinking_warnings(&o),
+        );
+        assert_eq!(response["outcome"], "failed");
+        assert_eq!(
+            response["data"]["thinking"]["records"][0]["outcome"]["effective"]["mode"],
+            "provider_default"
+        );
+        assert_eq!(
+            response["warnings"][0]["code"],
+            "thinking.control_unsupported"
+        );
+        assert_eq!(response["data"]["thinking"]["omitted_records"], 0);
+    }
+
+    #[test]
+    fn terminal_thinking_discloses_bounded_collection_omissions() {
+        let mut o = observer();
+        assert!(!retain_thinking(
+            &mut o,
+            &json!({"oversized":"x".repeat(17*1024)})
+        ));
+        assert_eq!(thinking_data(&o)["coverage"], "bounded_partial");
+        assert_eq!(thinking_warnings(&o)[0]["omitted_records"], 1);
     }
 }

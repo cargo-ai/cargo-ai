@@ -89,6 +89,28 @@ cargo ai run ./my_agent.json --profile PROFILE_NAME
 
 Authoring-host access, runtime-provider access, and optional Cargo AI hosting are separate. Access to the assistant that authors an agent does not automatically provide provider credentials for the resulting CLI. A Cargo AI hosted account is not required for local execution and does not supply runtime-provider credentials.
 
+## Thinking Selection
+
+Thinking choices belong to the exact model, connection and request capability. Query the selected text model before choosing a value:
+
+```bash
+cargo ai models thinking --profile PROFILE_NAME --model MODEL_ID --output-format json
+cargo ai profile set PROFILE_NAME --thinking VALUE
+cargo ai run ./my_agent.json --profile PROFILE_NAME --thinking VALUE
+cargo ai profile set PROFILE_NAME --thinking-provider-default
+cargo ai profile set PROFILE_NAME --clear-thinking
+```
+
+`models thinking` uses the same saved-profile or explicit server/auth connection selectors as `models list`, plus required `--model`. Draft API keys use closed stdin. The result distinguishes `configurable`, `unsupported` and `unknown`; configurable choices contain exact `value` strings and optional descriptions/default metadata. It describes text-request support, not media support or invocation access. Inspect the installed [machine capabilities](../machine-interface.md) before using these flags.
+
+`profile add` also accepts `--thinking VALUE` or `--thinking-provider-default`. Adding without either leaves thinking unset. Profile changes are local: they preserve the selected choice when model, server, URL or authentication changes, and do not discover or invoke a model. Show/list expose the stored selection. One `profile set` call updates one field; use separate calls to change the connection and its selection.
+
+An unset selection inherits. Invocation thinking overrides profile thinking independently of `--model`. Explicit provider default stops inheritance and omits the provider parameter; `--clear-thinking` removes the local profile override. Provider default is distinct from a provider's literal `none`, `off` or `default` choice. Choices are opaque and exact, with no universal ordering or nearest-level substitution.
+
+Cargo AI applies a qualified supported choice. If `max` is unavailable, the control is unsupported, or applicability is unknown, it omits the override and explains provider-default fallback while keeping the stored choice. Missing or malformed enumeration is unknown; it does not invalidate support established by the qualified adapter. Default execution does not require thinking discovery. Unrelated authentication, input and provider failures keep their existing behavior. A setting promises no quality, latency, cost or hidden-reasoning disclosure.
+
+Media steps use step thinking, then step-profile thinking, then invocation thinking, after selecting their actual model and endpoint. Child steps forward only an explicit step setting and require a passive runtime declaration; see [action thinking](../actions-and-child-agents.md#thinking-overrides). Action fields require definition revision `2026-10-01.r1`. Existing standalone agents must be rebuilt with a supporting CLI to acquire the flags/resolver; local source support does not establish released or hosted availability.
+
 ## Profile Temperature
 
 Temperature is an optional profile setting for text and image-analysis requests:

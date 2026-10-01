@@ -35,6 +35,156 @@ fn configure(f: &Fixture) {
 }
 
 #[test]
+fn thinking_choices_and_default_fallback_survive_json_and_ndjson_terminals() {
+    for format in ["json", "ndjson"] {
+        for (choice, applied) in [("high", true), ("max", false)] {
+            let f = Fixture::new("machine-thinking");
+            configure(&f);
+            fs::write(f.root.join("answer.json"), json!({
+                "agent_definition_schema_version":"2026-03-03.r1",
+                "inputs":[{"type":"text","text":"fixture"}],
+                "agent_schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false},"actions":[]
+            }).to_string()).unwrap();
+            let mut server = mockito::Server::new();
+            let metadata = server
+                .mock("POST", "/api/show")
+                .with_body(
+                    r#"{"model":"fixture","thinking":{"values":["low","high"],"default":"low"}}"#,
+                )
+                .create();
+            let inference = server
+                .mock("POST", "/v1/chat/completions")
+                .match_request(move |request| {
+                    let body: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+                    if applied {
+                        body["reasoning_effort"] == "high"
+                    } else {
+                        body.get("reasoning_effort").is_none()
+                    }
+                })
+                .with_body(r#"{"choices":[{"message":{"content":"{\"answer\":\"fixture\"}"}}]}"#)
+                .create();
+            let output = f
+                .cargo_ai_command(&f.root)
+                .args([
+                    "run",
+                    "answer.json",
+                    "--server",
+                    "ollama",
+                    "--model",
+                    "fixture",
+                    "--url",
+                    &format!("{}/v1/chat/completions", server.url()),
+                    "--thinking",
+                    choice,
+                    "--output-format",
+                    format,
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(output.stderr.is_empty());
+            let frames: Vec<Value> = String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let terminal = if format == "ndjson" {
+                &frames.last().unwrap()["data"]
+            } else {
+                &frames[0]
+            };
+            let result = &terminal["data"]["thinking"]["records"][0]["outcome"];
+            assert_eq!(result["requested"]["value"], choice);
+            assert_eq!(
+                result["effective"]["mode"],
+                if applied {
+                    "choice"
+                } else {
+                    "provider_default"
+                }
+            );
+            assert_eq!(terminal["warnings"].as_array().unwrap().is_empty(), applied);
+            if !applied {
+                assert_eq!(
+                    terminal["warnings"][0]["code"],
+                    "thinking.choice_unavailable"
+                );
+            }
+            metadata.assert();
+            inference.assert();
+        }
+    }
+}
+
+#[test]
+fn thinking_fallback_survives_a_later_provider_failure() {
+    for format in ["json", "ndjson"] {
+        let f = Fixture::new("machine-thinking-failure");
+        configure(&f);
+        fs::write(f.root.join("answer.json"), json!({
+            "agent_definition_schema_version":"2026-03-03.r1", "inputs":[{"type":"text","text":"fixture"}],
+            "agent_schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false},"actions":[]
+        }).to_string()).unwrap();
+        let mut server = mockito::Server::new();
+        let metadata = server.mock("POST", "/api/show").with_body("{}").create();
+        let inference = server
+            .mock("POST", "/v1/chat/completions")
+            .match_request(|request| {
+                let body: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+                body.get("reasoning_effort").is_none()
+            })
+            .with_body(r#"{"choices":[]}"#)
+            .create();
+        let output = f
+            .cargo_ai_command(&f.root)
+            .args([
+                "run",
+                "answer.json",
+                "--server",
+                "ollama",
+                "--model",
+                "custom-model",
+                "--url",
+                &format!("{}/v1/chat/completions", server.url()),
+                "--thinking",
+                "max",
+                "--output-format",
+                format,
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stderr.is_empty());
+        let frames: Vec<Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let terminal = if format == "ndjson" {
+            &frames.last().unwrap()["data"]
+        } else {
+            &frames[0]
+        };
+        assert_eq!(terminal["outcome"], "failed");
+        assert_eq!(
+            terminal["data"]["thinking"]["records"][0]["outcome"]["fallback"], "unknown_support",
+            "{terminal}"
+        );
+        assert_eq!(
+            terminal["warnings"][0]["effective"]["mode"],
+            "provider_default"
+        );
+        metadata.assert();
+        inference.assert();
+    }
+}
+
+#[test]
 fn capabilities_and_rejected_negotiation_are_passive_and_secret_safe() {
     let f = Fixture::new("machine-passive");
     let absent = f.root.join("absent");

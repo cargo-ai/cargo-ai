@@ -18,7 +18,7 @@ For broader shape and validation rules, also read:
 
 `agent_definition_schema_version` identifies the Cargo AI contract used to interpret the definition. It is not an agent or package version; copy it from the current Cargo AI template or guidance rather than inventing a value from the current date or another version surface.
 
-The current strict revision is `2026-09-09.r1`. Valid earlier revisions keep legacy parsing behavior; every other revision at or after the cutoff is unsupported. Strict stable objects reject additional keys. `inputs` is optional, and `actions: []` is valid for a model-only definition. Each declared action has exactly `name`, `logic`, and a nonempty `run` array.
+Ordinary scaffolds use strict revision `2026-09-09.r1`; opt-in `2026-09-19.r1` adds rubric outputs, and `2026-10-01.r1` retains rubric and adds action thinking. Valid earlier revisions keep legacy parsing behavior; every other revision at or after the cutoff is unsupported. Strict stable objects reject additional keys. `inputs` is optional, and `actions: []` is valid for a model-only definition. Each declared action has exactly `name`, `logic`, and a nonempty `run` array.
 
 Each `logic` or `when` object contains one supported operator. Use the exhaustive operator list in `agent-definition-contract.md`; unknown operators and `literal` are rejected. For an unconditional true gate, use `{ "==": [1, 1] }`. Existing scalar-reference, flat-variable and comparison-type rules still apply.
 
@@ -55,7 +55,7 @@ Media actions require a compatible model and API project with access to the sele
   - Required: `kind`, `program`, `args`
 - `agent`
   - Required: `kind`, exactly one of `artifact` or legacy alias `agent`
-  - Optional: `profile`, `usage_log`, `inputs`, `input_mode`, `input_overrides`, `run_vars`, `ignore_tools`
+  - Optional: `profile`, `usage_log`, `inputs`, `input_mode`, `input_overrides`, `run_vars`, `ignore_tools`; `thinking` is also optional in `2026-10-01.r1`
 - `tool`
   - Required: `kind`, `name`
   - Optional: `params`, `output_variable`
@@ -68,7 +68,7 @@ Media actions require a compatible model and API project with access to the sele
   - Required: `kind`, `subject`, `text`
 - `generate_image`
   - Required: `kind`, `prompt`, `path`
-  - Optional: `model`, `profile`, `reference_images`
+  - Optional: `model`, `profile`, `reference_images`; `thinking` is also optional in `2026-10-01.r1`
   - OpenAI image transport (API key or account), Gemini, Mistral, xAI, and Ollama's experimental image transport have provider-specific formats and reference limits.
   - If `model` is omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override.
   - If `profile` is present, Cargo AI resolves that profile at step runtime and uses it for the image step's provider/url/token context.
@@ -112,7 +112,7 @@ Media actions require a compatible model and API project with access to the sele
   ```
 
 - `generate_audio` (speech from supplied text)
-  - Required: `kind`, `text`, `voice`, `path`; optional: `profile`, `model` except for xAI's fixed speech service.
+  - Required: `kind`, `text`, `voice`, `path`; optional: `profile`, `model` except for xAI's fixed speech service. Also accepts `thinking` in `2026-10-01.r1`.
   - `text` and `path` accept a literal string or ordered string/variable parts. `voice` accepts a nonempty literal or one string variable reference. Voice IDs belong to the selected provider; there is no cross-provider voice mapping.
   - A model-selecting route uses explicit step `model`, then the selected step-profile model, then the invocation model. An incompatible inherited model fails; Cargo AI does not choose another speech model.
   - OpenAI API-key, Gemini, Mistral, and xAI API-key profiles are supported. Anthropic, Ollama, TypeSafe, and OpenAI account transport are unsupported for this step.
@@ -120,12 +120,22 @@ Media actions require a compatible model and API project with access to the sele
   - Mistral requires an existing saved voice ID accessible to the selected account. Cargo AI does not create, clone, or upload a voice. xAI accepts no step `model`; its fixed speech service uses the adapter's `language: auto` value.
   - Generated audio is limited to 20 MiB. A successful step writes one complete local file. The destination is staged and replaced only after generation and validation succeed; an existing file survives a provider or write failure.
 - `transcribe_audio` (local speech file to text)
-  - Required: `kind`, `audio: { "path": ... }`, `output_variable`; optional: `profile`, `model`.
+  - Required: `kind`, `audio: { "path": ... }`, `output_variable`; optional: `profile`, `model`. Also accepts `thinking` in `2026-10-01.r1`.
   - `audio.path` is a literal relative path or a single `{ "var": "runtime.audio_path" }` reference to a string. It accepts `.wav` and `.mp3` files up to 10 MiB. It is a step-owned source, not a generic parent `file` input.
   - Its model precedence is explicit step `model`, selected step-profile model, then invocation model. The effective model must support the provider's native transcription route.
   - OpenAI API-key, Gemini, Mistral, and xAI API-key profiles use native transcription routes. Anthropic, Ollama, TypeSafe, and OpenAI account transport are unsupported.
   - A nonempty transcript is captured as text in `output_variable` for later steps in the same action. An empty or whitespace-only transcript fails without setting the capture. Transcription does not feed an earlier root inference pass.
   - For a transcript-to-child workflow, use an action-only coordinator with empty `agent_schema.properties`, then pass the captured variable to a text-compatible child `agent` step.
+
+## Thinking Overrides
+
+Only definition revision `2026-10-01.r1` permits tagged `thinking` on `agent`, `generate_image`, `generate_audio` and `transcribe_audio`. Use `{"mode":"provider_default"}` or `{"mode":"choice","value":"VALUE"}`; choice value may be an available string `{"var":"runtime.thinking"}` reference. Values resolve to nonblank strings with the same exact-choice semantics as profile and invocation settings. No scalar coercion, rank conversion or nearest-choice mapping is allowed.
+
+Media precedence is explicit step thinking, step-profile thinking, then invocation thinking. Explicit provider default stops inheritance. Resolve support only after selecting the actual provider, model and request endpoint. An unavailable or inapplicable choice preserves execution with provider-default fallback and an explanation.
+
+Child overrides must be explicit in the step; parent CLI model/thinking overrides do not automatically propagate. Child JSON profile inheritance and compiled-child profile behavior remain unchanged. Direct child `model` is unsupported. Forward settings only to an executable with the matching passive runtime declaration; older or opaque children receive no unsupported flags. Report forwarding separately from effective thinking, which remains `child_unverified`. Do not probe by executing/replaying a child.
+
+Earlier strict revisions reject the field; ignored legacy fields remain inactive. Keep ordinary scaffolds unchanged and rebuild standalone applications with a supporting CLI. See [Thinking Selection](agent-definition-contract.md#thinking-selection) for profile flags, discovery, compatibility and hosted limits.
 
 ## Optional Control Fields
 

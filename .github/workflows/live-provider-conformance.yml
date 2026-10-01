@@ -17,13 +17,26 @@ on:
           - typesafe
           - all
       mode:
-        description: Existing generation probe or bounded read-only model discovery
+        description: Generation, read-only discovery, or four bounded thinking cases
         required: true
         default: generation
         type: choice
         options:
           - generation
           - discovery
+          - thinking
+      thinking_choice:
+        description: Exact advertised thinking choice (required in thinking mode)
+        required: false
+        type: string
+      gemini_image_model:
+        description: Optional exact Gemini image model for two additional thinking requests
+        required: false
+        type: string
+      gemini_image_choice:
+        description: Optional exact image thinking choice; requires gemini_image_model
+        required: false
+        type: string
       cargo_ai_sha:
         description: Expected commit of the selected workflow ref (defaults to its snapshot)
         required: false
@@ -93,8 +106,8 @@ jobs:
       - name: Configure isolated Cargo AI Home
         shell: bash
         run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
-      - name: Build discovery verifier before credential input
-        if: ${{ inputs.mode == 'discovery' }}
+      - name: Build verifier before credential input
+        if: ${{ inputs.mode == 'discovery' || inputs.mode == 'thinking' }}
         run: cargo build --locked --example qualification-gate
       - name: Run one representative OpenAI check
         env:
@@ -102,11 +115,16 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DISCOVERY_MODE: ${{ inputs.mode || 'generation' }}
           OPENAI_MODEL: ${{ inputs.openai_model || vars.OPENAI_MODEL }}
+          CARGO_AI_THINKING_MODEL: ${{ inputs.openai_model }}
+          CARGO_AI_THINKING_CHOICE: ${{ inputs.thinking_choice }}
         run: |
           set -euo pipefail
           [[ -n "${OPENAI_API_KEY:-}" ]] || { echo "OPENAI_API_KEY is required" >&2; exit 1; }
           if [[ "$DISCOVERY_MODE" == "discovery" ]]; then
             target/debug/examples/qualification-gate discover openai
+          elif [[ "$DISCOVERY_MODE" == "thinking" ]]; then
+            [[ -n "${CARGO_AI_THINKING_MODEL:-}" && -n "${CARGO_AI_THINKING_CHOICE:-}" ]] || { echo "Thinking mode requires an explicit exact model and thinking choice" >&2; exit 1; }
+            target/debug/examples/qualification-gate thinking openai
           elif [[ "$DISCOVERY_MODE" == "generation" ]]; then
             [[ -n "${OPENAI_MODEL:-}" ]] || { echo "OPENAI_MODEL is required" >&2; exit 1; }
             cargo run --locked --example qualification-gate -- probe openai
@@ -149,8 +167,8 @@ jobs:
       - name: Configure isolated Cargo AI Home
         shell: bash
         run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
-      - name: Build discovery verifier before credential input
-        if: ${{ inputs.mode == 'discovery' }}
+      - name: Build verifier before credential input
+        if: ${{ inputs.mode == 'discovery' || inputs.mode == 'thinking' }}
         run: cargo build --locked --example qualification-gate
       - name: Run one representative Anthropic check
         env:
@@ -158,11 +176,16 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DISCOVERY_MODE: ${{ inputs.mode || 'generation' }}
           ANTHROPIC_MODEL: ${{ inputs.anthropic_model || vars.ANTHROPIC_MODEL }}
+          CARGO_AI_THINKING_MODEL: ${{ inputs.anthropic_model }}
+          CARGO_AI_THINKING_CHOICE: ${{ inputs.thinking_choice }}
         run: |
           set -euo pipefail
           [[ -n "${ANTHROPIC_API_KEY:-}" ]] || { echo "ANTHROPIC_API_KEY is required for enrolled Anthropic" >&2; exit 1; }
           if [[ "$DISCOVERY_MODE" == "discovery" ]]; then
             target/debug/examples/qualification-gate discover anthropic
+          elif [[ "$DISCOVERY_MODE" == "thinking" ]]; then
+            [[ -n "${CARGO_AI_THINKING_MODEL:-}" && -n "${CARGO_AI_THINKING_CHOICE:-}" ]] || { echo "Thinking mode requires an explicit exact model and thinking choice" >&2; exit 1; }
+            target/debug/examples/qualification-gate thinking anthropic
           elif [[ "$DISCOVERY_MODE" == "generation" ]]; then
             [[ -n "${ANTHROPIC_MODEL:-}" ]] || { echo "ANTHROPIC_MODEL is required for enrolled Anthropic" >&2; exit 1; }
             cargo run --locked --example qualification-gate -- probe anthropic
@@ -212,8 +235,8 @@ jobs:
       - name: Configure isolated Cargo AI Home
         shell: bash
         run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
-      - name: Build discovery verifier before credential input
-        if: ${{ inputs.mode == 'discovery' }}
+      - name: Build verifier before credential input
+        if: ${{ inputs.mode == 'discovery' || inputs.mode == 'thinking' }}
         run: cargo build --locked --example qualification-gate
       - name: Run one representative Gemini check
         env:
@@ -221,11 +244,18 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DISCOVERY_MODE: ${{ inputs.mode || 'generation' }}
           GEMINI_MODEL: ${{ inputs.gemini_model || vars.GEMINI_MODEL }}
+          CARGO_AI_THINKING_MODEL: ${{ inputs.gemini_model }}
+          CARGO_AI_THINKING_CHOICE: ${{ inputs.thinking_choice }}
+          CARGO_AI_THINKING_IMAGE_MODEL: ${{ inputs.gemini_image_model }}
+          CARGO_AI_THINKING_IMAGE_CHOICE: ${{ inputs.gemini_image_choice }}
         run: |
           set -euo pipefail
           [[ -n "${GEMINI_API_KEY:-}" ]] || { echo "GEMINI_API_KEY is required for enrolled Gemini" >&2; exit 1; }
           if [[ "$DISCOVERY_MODE" == "discovery" ]]; then
             target/debug/examples/qualification-gate discover gemini
+          elif [[ "$DISCOVERY_MODE" == "thinking" ]]; then
+            [[ -n "${CARGO_AI_THINKING_MODEL:-}" && -n "${CARGO_AI_THINKING_CHOICE:-}" ]] || { echo "Thinking mode requires an explicit exact model and thinking choice" >&2; exit 1; }
+            target/debug/examples/qualification-gate thinking gemini
           elif [[ "$DISCOVERY_MODE" == "generation" ]]; then
             [[ -n "${GEMINI_MODEL:-}" ]] || { echo "GEMINI_MODEL is required for enrolled Gemini" >&2; exit 1; }
             cargo run --locked --example qualification-gate -- probe gemini
@@ -275,8 +305,8 @@ jobs:
       - name: Configure isolated Cargo AI Home
         shell: bash
         run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
-      - name: Build discovery verifier before credential input
-        if: ${{ inputs.mode == 'discovery' }}
+      - name: Build verifier before credential input
+        if: ${{ inputs.mode == 'discovery' || inputs.mode == 'thinking' }}
         run: cargo build --locked --example qualification-gate
       - name: Run one representative xAI check
         env:
@@ -284,11 +314,16 @@ jobs:
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           DISCOVERY_MODE: ${{ inputs.mode || 'generation' }}
           XAI_MODEL: ${{ inputs.xai_model || vars.XAI_MODEL }}
+          CARGO_AI_THINKING_MODEL: ${{ inputs.xai_model }}
+          CARGO_AI_THINKING_CHOICE: ${{ inputs.thinking_choice }}
         run: |
           set -euo pipefail
           [[ -n "${XAI_API_KEY:-}" ]] || { echo "XAI_API_KEY is required for enrolled xAI" >&2; exit 1; }
           if [[ "$DISCOVERY_MODE" == "discovery" ]]; then
             target/debug/examples/qualification-gate discover xai
+          elif [[ "$DISCOVERY_MODE" == "thinking" ]]; then
+            [[ -n "${CARGO_AI_THINKING_MODEL:-}" && -n "${CARGO_AI_THINKING_CHOICE:-}" ]] || { echo "Thinking mode requires an explicit exact model and thinking choice" >&2; exit 1; }
+            target/debug/examples/qualification-gate thinking xai
           elif [[ "$DISCOVERY_MODE" == "generation" ]]; then
             [[ -n "${XAI_MODEL:-}" ]] || { echo "XAI_MODEL is required for enrolled xAI" >&2; exit 1; }
             cargo run --locked --example qualification-gate -- probe xai
@@ -338,8 +373,8 @@ jobs:
       - name: Configure isolated Cargo AI Home
         shell: bash
         run: echo "CARGO_AI_HOME=$RUNNER_TEMP/cargo-ai-home" >> "$GITHUB_ENV"
-      - name: Build discovery verifier before credential input
-        if: ${{ inputs.mode == 'discovery' }}
+      - name: Build verifier before credential input
+        if: ${{ inputs.mode == 'discovery' || inputs.mode == 'thinking' }}
         run: cargo build --locked --example qualification-gate
       - name: Run one representative Mistral check
         env:
@@ -347,11 +382,16 @@ jobs:
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
           DISCOVERY_MODE: ${{ inputs.mode || 'generation' }}
           MISTRAL_MODEL: ${{ inputs.mistral_model || vars.MISTRAL_MODEL }}
+          CARGO_AI_THINKING_MODEL: ${{ inputs.mistral_model }}
+          CARGO_AI_THINKING_CHOICE: ${{ inputs.thinking_choice }}
         run: |
           set -euo pipefail
           [[ -n "${MISTRAL_API_KEY:-}" ]] || { echo "MISTRAL_API_KEY is required for enrolled Mistral" >&2; exit 1; }
           if [[ "$DISCOVERY_MODE" == "discovery" ]]; then
             target/debug/examples/qualification-gate discover mistral
+          elif [[ "$DISCOVERY_MODE" == "thinking" ]]; then
+            [[ -n "${CARGO_AI_THINKING_MODEL:-}" && -n "${CARGO_AI_THINKING_CHOICE:-}" ]] || { echo "Thinking mode requires an explicit exact model and thinking choice" >&2; exit 1; }
+            target/debug/examples/qualification-gate thinking mistral
           elif [[ "$DISCOVERY_MODE" == "generation" ]]; then
             [[ -n "${MISTRAL_MODEL:-}" ]] || { echo "MISTRAL_MODEL is required for enrolled Mistral" >&2; exit 1; }
             cargo run --locked --example qualification-gate -- probe mistral
@@ -361,7 +401,7 @@ jobs:
 
   typesafe:
     name: Live TypeSafe Jev conformance
-    if: ${{ inputs.provider == 'typesafe' || (inputs.provider == 'all' && inputs.mode != 'discovery' && vars.LIVE_TYPESAFE_ENABLED != '' && vars.LIVE_TYPESAFE_ENABLED != 'false') }}
+    if: ${{ inputs.provider == 'typesafe' || (inputs.provider == 'all' && inputs.mode == 'generation' && vars.LIVE_TYPESAFE_ENABLED != '' && vars.LIVE_TYPESAFE_ENABLED != 'false') }}
     runs-on: ubuntu-latest
     environment: live-provider-ci
     timeout-minutes: 30

@@ -81,6 +81,14 @@ with `cargo ai models list --profile openai-account`, or use
 Codex login before creating a profile. Listing does not start login or prove
 inference access. See [account discovery boundaries](./docs/providers/openai.md#option-1-openai-account-session).
 
+Builds advertising `models thinking` can query exact choices with
+`cargo ai models thinking --profile openai-account --model MODEL_ID --output-format json`.
+Save a choice with `cargo ai profile set openai-account --thinking VALUE`, or override
+one run with `cargo ai run ./agent.json --profile openai-account --thinking VALUE`.
+An unavailable choice uses provider default with an explicit explanation.
+See [thinking selection and inheritance](./docs/providers/README.md#thinking-selection)
+for explicit default, clearing, action overrides and rebuild requirements.
+
 ### 3. Create `agent.json`
 
 ```json

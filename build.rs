@@ -4,6 +4,8 @@
 //! root build and scaffolded-agent build stay behavior-identical.
 #[path = "templates/build_support.rs"]
 mod build_support;
+#[path = "src/generated_capabilities/record.rs"]
+mod generated_capability_record;
 
 use build_support::TemplateSource;
 
@@ -20,6 +22,30 @@ const BUILD_RERUN_PATHS: &[&str] = &[
 ];
 
 const TEMPLATE_SOURCES: &[TemplateSource] = &[
+    TemplateSource {
+        destination: "src/providers/thinking.rs",
+        source: "../src/providers/thinking.rs",
+    },
+    TemplateSource {
+        destination: "src/providers/thinking_metadata.rs",
+        source: "../src/providers/thinking_metadata.rs",
+    },
+    TemplateSource {
+        destination: "src/providers/thinking_image.rs",
+        source: "../src/providers/thinking_image.rs",
+    },
+    TemplateSource {
+        destination: "src/runtime_thinking.rs",
+        source: "src/runtime_thinking.rs",
+    },
+    TemplateSource {
+        destination: "src/generated_capabilities.rs",
+        source: "../src/generated_capabilities.rs",
+    },
+    TemplateSource {
+        destination: "src/generated_capabilities/record.rs",
+        source: "../src/generated_capabilities/record.rs",
+    },
     TemplateSource {
         destination: "src/usage_backup.rs",
         source: "src/usage_backup.rs",
@@ -171,7 +197,34 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
 ];
 
 fn main() -> Result<(), build_support::BuildError> {
+    println!("cargo:rustc-check-cfg=cfg(cargo_ai_cli)");
+    println!("cargo:rustc-cfg=cargo_ai_cli");
     build_support::run_agent_codegen(BUILD_RERUN_PATHS)?;
+    let record = generated_capability_record::encoded_record(true);
+    let bytes = record
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!(
+        "static CLI_RUN_RUNTIME_CAPABILITY_RECORD: [u8; {}] = [{bytes}];\n",
+        record.len()
+    );
+    std::fs::write(
+        std::path::PathBuf::from(std::env::var("OUT_DIR").map_err(|source| {
+            build_support::BuildError::EnvVar {
+                name: "OUT_DIR",
+                source,
+            }
+        })?)
+        .join("cli_run_runtime_capabilities.rs"),
+        source,
+    )
+    .map_err(|source| build_support::BuildError::Io {
+        context: "Failed to write runtime capability source".into(),
+        source,
+    })?;
+
     build_support::write_generated_templates(TEMPLATE_SOURCES)?;
     Ok(())
 }

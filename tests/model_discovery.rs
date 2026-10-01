@@ -89,6 +89,196 @@ fn args(base: &[&'static str]) -> Vec<&'static str> {
 }
 
 #[tokio::test]
+async fn thinking_discovery_is_exact_read_only_and_preserves_unknown_vs_unsupported() {
+    let mut server = mockito::Server::new_async().await;
+    let home = Home::new();
+    home.configure(Some("keychain"), "none", &server.url(), "unused-token");
+    fs::write(home.0.join("credentials.toml"), "unreadable sentinel").unwrap();
+    let before = home.snapshot();
+    for (metadata, status) in [
+        (
+            serde_json::json!({"thinking":{"values":["fast","deliberate"],"default":"fast"}}),
+            "configurable",
+        ),
+        (
+            serde_json::json!({"thinking":{"values":[true,false],"default":true}}),
+            "unsupported",
+        ),
+        (serde_json::json!({}), "unknown"),
+        (
+            serde_json::json!({"thinking":{"values":["fast"],"default":"missing"}}),
+            "unknown",
+        ),
+    ] {
+        let mock = server
+            .mock("POST", "/api/show")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .match_body(mockito::Matcher::Json(
+                serde_json::json!({"model":"manual:exact"}),
+            ))
+            .with_body(metadata.to_string())
+            .create_async()
+            .await;
+        let output = home.run(
+            &args(&[
+                "models",
+                "thinking",
+                "--profile",
+                "fixture",
+                "--model",
+                "manual:exact",
+            ]),
+            b"",
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let response = body(&output);
+        assert_eq!(response["data"]["model"], "manual:exact");
+        assert_eq!(response["data"]["thinking"]["status"], status);
+        if status == "configurable" {
+            assert_eq!(
+                response["data"]["thinking"]["choices"][1]["value"],
+                "deliberate"
+            );
+            assert_eq!(response["data"]["thinking"]["default"], "fast");
+        }
+        assert_eq!(home.snapshot(), before);
+        mock.assert_async().await;
+        mock.remove_async().await;
+    }
+}
+
+#[tokio::test]
+async fn thinking_discovery_reports_categorical_transport_errors_without_state_changes() {
+    let mut server = mockito::Server::new_async().await;
+    let home = Home::new();
+    let token = "synthetic-thinking-query-key";
+    home.configure(Some("file"), "api_key", &server.url(), token);
+    let before = home.snapshot();
+    for (status, code) in [
+        (401, "authentication_failed"),
+        (403, "authorization_failed"),
+        (429, "rate_limited"),
+        (302, "redirect_blocked"),
+        (500, "provider_failed"),
+    ] {
+        let mock = server
+            .mock("POST", "/api/show")
+            .match_header("authorization", format!("Bearer {token}").as_str())
+            .match_body(mockito::Matcher::Json(
+                serde_json::json!({"model":"manual:exact"}),
+            ))
+            .with_status(status)
+            .with_header("location", "/must-not-follow")
+            .with_body(format!("private provider details {token}"))
+            .expect(1)
+            .create_async()
+            .await;
+        let redirected = server
+            .mock("POST", "/must-not-follow")
+            .expect(0)
+            .create_async()
+            .await;
+        let output = home.run(
+            &args(&[
+                "models",
+                "thinking",
+                "--profile",
+                "fixture",
+                "--model",
+                "manual:exact",
+            ]),
+            b"",
+        );
+        assert!(!output.status.success());
+        let response = body(&output);
+        assert_eq!(response["error"]["code"], format!("discovery.{code}"));
+        assert_eq!(response["error"]["retryable"], false);
+        assert!(response["data"].is_null());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(token));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("private provider details"));
+        assert_eq!(home.snapshot(), before);
+        mock.assert_async().await;
+        redirected.assert_async().await;
+        mock.remove_async().await;
+        redirected.remove_async().await;
+    }
+    let oversized = server
+        .mock("POST", "/api/show")
+        .with_body(vec![b'x'; 1024 * 1024 + 1])
+        .expect(1)
+        .create_async()
+        .await;
+    let output = home.run(
+        &args(&[
+            "models",
+            "thinking",
+            "--profile",
+            "fixture",
+            "--model",
+            "manual:exact",
+        ]),
+        b"",
+    );
+    assert!(!output.status.success());
+    assert_eq!(body(&output)["error"]["code"], "discovery.response_limit");
+    assert_eq!(home.snapshot(), before);
+    oversized.assert_async().await;
+    oversized.remove_async().await;
+
+    let malformed = server
+        .mock("POST", "/api/show")
+        .with_body("{malformed metadata")
+        .expect(1)
+        .create_async()
+        .await;
+    let output = home.run(
+        &args(&[
+            "models",
+            "thinking",
+            "--profile",
+            "fixture",
+            "--model",
+            "manual:exact",
+        ]),
+        b"",
+    );
+    assert!(output.status.success());
+    assert_eq!(body(&output)["data"]["thinking"]["status"], "unknown");
+    assert_eq!(home.snapshot(), before);
+    malformed.assert_async().await;
+}
+
+#[test]
+fn thinking_discovery_refused_connection_is_categorical_and_read_only() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let home = Home::new();
+    home.configure(Some("file"), "none", &url, "unused-token");
+    let before = home.snapshot();
+    let output = home.run(
+        &args(&[
+            "models",
+            "thinking",
+            "--profile",
+            "fixture",
+            "--model",
+            "manual:exact",
+        ]),
+        b"",
+    );
+    assert!(!output.status.success());
+    let response = body(&output);
+    assert_eq!(response["error"]["code"], "discovery.network_failed");
+    assert_eq!(response["error"]["retryable"], false);
+    assert_eq!(home.snapshot(), before);
+}
+
+#[tokio::test]
 async fn saved_discovery_is_home_scoped_read_only_and_ignores_model() {
     let mut server = mockito::Server::new_async().await;
     for token in ["synthetic-first-key", "synthetic-second-key"] {

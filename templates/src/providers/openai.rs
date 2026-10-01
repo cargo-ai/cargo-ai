@@ -101,6 +101,10 @@ pub struct ChatCompletionsRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     pub response_format: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
 }
 
 #[derive(Serialize, Debug)]
@@ -383,6 +387,8 @@ async fn send_chat_completions_request(
     token: &String,
     response_format: serde_json::Value,
     temperature: Option<f64>,
+    thinking: Option<&str>,
+    max_output_tokens: Option<u32>,
 ) -> Result<ProviderTextResponse, ProviderError> {
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))
@@ -399,6 +405,8 @@ async fn send_chat_completions_request(
         messages: vec![message],
         temperature,
         response_format,
+        reasoning_effort: thinking.map(str::to_owned),
+        max_completion_tokens: max_output_tokens,
     };
 
     let http_resp = client
@@ -477,6 +485,7 @@ async fn send_chatgpt_codex_responses_request(
     token: &String,
     response_format: serde_json::Value,
     account_id: Option<&str>,
+    thinking: Option<&str>,
 ) -> Result<ProviderTextResponse, ProviderError> {
     let client = codex_client_builder(url, timeout_in_sec)
         .build()
@@ -486,7 +495,7 @@ async fn send_chatgpt_codex_responses_request(
                 .redact_token(account_id.unwrap_or(""))
         })?;
 
-    let request_payload = serde_json::json!({
+    let mut request_payload = serde_json::json!({
         "model": model,
         "instructions": "Return a valid response for the provided prompt.",
         "input": [
@@ -501,6 +510,9 @@ async fn send_chatgpt_codex_responses_request(
         "store": false,
         "stream": true
     });
+    if let Some(effort) = thinking {
+        request_payload["reasoning"] = serde_json::json!({"effort":effort});
+    }
 
     let endpoint = native_account_transport_endpoint(url);
     let http_resp = native_account_request(
@@ -684,6 +696,7 @@ async fn send_chatgpt_codex_image_request(
     output_format: &str,
     reference_images: &[ImageReference],
     account_id: Option<&str>,
+    thinking: Option<&str>,
 ) -> Result<ProviderImageResponse, ProviderError> {
     let client = codex_client_builder(url, timeout_in_sec)
         .build()
@@ -705,7 +718,7 @@ async fn send_chatgpt_codex_image_request(
         }));
     }
 
-    let request_payload = serde_json::json!({
+    let mut request_payload = serde_json::json!({
         "model": model,
         "instructions": "Generate the requested image and return it using the image_generation tool.",
         "input": [
@@ -723,6 +736,9 @@ async fn send_chatgpt_codex_image_request(
         "store": false,
         "stream": true
     });
+    if let Some(effort) = thinking {
+        request_payload["reasoning"] = serde_json::json!({"effort":effort});
+    }
 
     let endpoint = native_account_transport_endpoint(url);
     let http_resp = native_account_request(
@@ -1072,6 +1088,8 @@ pub async fn send_request(
         response_format,
         temperature,
         None,
+        None,
+        None,
     )
     .await
 }
@@ -1085,14 +1103,13 @@ pub async fn send_request_with_account_context(
     response_format: serde_json::Value,
     temperature: Option<f64>,
     account_id: Option<&str>,
+    thinking: Option<&str>,
+    max_output_tokens: Option<u32>,
 ) -> Result<ProviderTextResponse, ProviderError> {
     let account_id = account_id.filter(|_| trusted_native_account_endpoint(url));
     if is_chatgpt_codex_responses_endpoint(url) {
         if temperature.is_some() {
-            return Err(ProviderError::invalid_request(
-                ProviderKind::OpenAi,
-                "Explicit profile temperature is unsupported by the OpenAI account transport; clear it with `profile set <name> --clear-temperature`.",
-            ));
+            return Err(ProviderError::invalid_request(ProviderKind::OpenAi, "Explicit profile temperature is unsupported by the OpenAI account transport; clear it with `profile set <name> --clear-temperature`."));
         }
         send_chatgpt_codex_responses_request(
             url,
@@ -1102,6 +1119,7 @@ pub async fn send_request_with_account_context(
             token,
             response_format,
             account_id,
+            thinking,
         )
         .await
     } else {
@@ -1113,6 +1131,8 @@ pub async fn send_request_with_account_context(
             token,
             response_format,
             temperature,
+            thinking,
+            max_output_tokens,
         )
         .await
     }
@@ -1137,6 +1157,7 @@ pub async fn send_image_request(
         output_format,
         reference_images,
         None,
+        None,
     )
     .await
 }
@@ -1150,6 +1171,7 @@ pub async fn send_image_request_with_account_context(
     output_format: &str,
     reference_images: &[ImageReference],
     account_id: Option<&str>,
+    thinking: Option<&str>,
 ) -> Result<ProviderImageResponse, ProviderError> {
     let account_id = account_id.filter(|_| trusted_native_account_endpoint(url));
     if is_chatgpt_codex_responses_endpoint(url) {
@@ -1162,6 +1184,7 @@ pub async fn send_image_request_with_account_context(
             output_format,
             reference_images,
             account_id,
+            thinking,
         )
         .await;
     }
@@ -1588,6 +1611,49 @@ data: [DONE]\n",
 }
 
 #[cfg(test)]
+mod completion_budget_tests {
+    use super::*;
+    #[tokio::test]
+    async fn chat_budget_and_choice_are_forwarded_independently_and_absence_omits_both() {
+        for cap in [None, Some(8192)] {
+            for thinking in [None, Some("high")] {
+                let mut server = mockito::Server::new_async().await;
+                let mock = server.mock("POST", "/v1/chat/completions")
+                    .match_request(move |request| {
+                        let value: serde_json::Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+                        let budget_matches = match cap {
+                            Some(expected) => value["max_completion_tokens"] == expected,
+                            None => value.get("max_completion_tokens").is_none(),
+                        };
+                        let choice_matches = match thinking {
+                            Some(expected) => value["reasoning_effort"] == expected,
+                            None => value.get("reasoning_effort").is_none(),
+                        };
+                        budget_matches && choice_matches && value.get("max_tokens").is_none()
+                    })
+                    .with_body(r#"{"id":"safe","object":"chat.completion","created":1,"model":"gpt-5.6-luna","choices":[{"index":0,"message":{"role":"assistant","content":"safe"},"finish_reason":"stop"}]}"#)
+                    .create_async().await;
+                send_request_with_account_context(
+                    &format!("{}/v1/chat/completions", server.url()),
+                    &"gpt-5.6-luna".into(),
+                    &[ContentPart::Text("fixture".into())],
+                    5,
+                    &"fixture-token".into(),
+                    serde_json::json!({"type":"json_object"}),
+                    None,
+                    None,
+                    thinking,
+                    cap,
+                )
+                .await
+                .unwrap();
+                mock.assert_async().await;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod temperature_tests {
     #[test]
     fn temperature_request_omission_and_explicit_values() {
@@ -1597,6 +1663,8 @@ mod temperature_tests {
                 messages: vec![],
                 temperature,
                 response_format: serde_json::json!({}),
+                reasoning_effort: None,
+                max_completion_tokens: None,
             };
             let value = serde_json::to_value(request).unwrap();
             match temperature {
@@ -1610,6 +1678,63 @@ mod temperature_tests {
 #[cfg(test)]
 mod native_account_transport_tests {
     use super::*;
+    #[tokio::test]
+    async fn named_account_thinking_is_exact_for_text_and_image_and_default_omits_it() {
+        for image in [false, true] {
+            for thinking in [None, Some("deliberate")] {
+                let mut server = mockito::Server::new_async().await;
+                let _endpoint = native_account_test_endpoint(format!("{}/responses", server.url()));
+                let mock = server
+                    .mock("POST", "/responses")
+                    .match_request(move |request| {
+                        let value: serde_json::Value =
+                            serde_json::from_slice(request.body().unwrap()).unwrap();
+                        let exact = match thinking {
+                            Some(choice) => value["reasoning"]["effort"] == choice,
+                            None => value.get("reasoning").is_none(),
+                        };
+                        exact
+                            && value.get("max_completion_tokens").is_none()
+                            && value.get("max_output_tokens").is_none()
+                    })
+                    .with_body(
+                        "data: {\"type\":\"response.output_text.done\",\"text\":\"safe\"}\n\n",
+                    )
+                    .create_async()
+                    .await;
+                let url = "https://chatgpt.com/backend-api/codex/responses".to_owned();
+                if image {
+                    let _ = send_image_request_with_account_context(
+                        &url,
+                        &"selected-model".into(),
+                        "draw",
+                        5,
+                        &"fixture-token".into(),
+                        "png",
+                        &[],
+                        Some("fixture-account"),
+                        thinking,
+                    )
+                    .await;
+                } else {
+                    let _ = send_request_with_account_context(
+                        &url,
+                        &"selected-model".into(),
+                        &[ContentPart::Text("fixture".into())],
+                        5,
+                        &"fixture-token".into(),
+                        serde_json::json!({"type":"json_object"}),
+                        None,
+                        Some("fixture-account"),
+                        thinking,
+                        Some(8192),
+                    )
+                    .await;
+                }
+                mock.assert_async().await;
+            }
+        }
+    }
 
     const NATIVE: &str = "https://chatgpt.com/backend-api/codex/responses";
     const ACCOUNT: &str = "synthetic-selected-workspace";
@@ -1645,6 +1770,7 @@ mod native_account_transport_tests {
                 "png",
                 &[],
                 account,
+                None,
             )
             .await
             .map(|response| String::from_utf8(response.bytes).unwrap())
@@ -1658,6 +1784,8 @@ mod native_account_transport_tests {
                 serde_json::json!({"type":"json_object"}),
                 None,
                 account,
+                None,
+                None,
             )
             .await
             .map(|response| response.text)
@@ -1670,10 +1798,7 @@ mod native_account_transport_tests {
             for account in [Some(ACCOUNT), None] {
                 let mut server = mockito::Server::new_async().await;
                 let body = if image {
-                    format!(
-                        "data: {{\"item\":{{\"type\":\"image_generation_call\",\"result\":\"{}\"}}}}\n\n",
-                        BASE64_STANDARD.encode(b"safe-image")
-                    )
+                    format!("data: {{\"item\":{{\"type\":\"image_generation_call\",\"result\":\"{}\"}}}}\n\n", BASE64_STANDARD.encode(b"safe-image"))
                 } else {
                     "data: {\"type\":\"response.output_text.done\",\"text\":\"safe-text\"}\n\n"
                         .into()
@@ -1827,6 +1952,8 @@ mod native_account_transport_tests {
                 serde_json::json!({"type":"json_object"}),
                 None,
                 Some(ACCOUNT),
+                None,
+                None,
             )
             .await
             .unwrap();

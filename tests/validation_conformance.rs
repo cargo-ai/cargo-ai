@@ -474,6 +474,13 @@ fn interpreted_and_emitted_outputs_preserve_authority_and_reject_before_consumpt
         .expect("emitted workspace unit suite should start");
     assert_success(&unit_suite, "actual emitted workspace unit suite");
     let unit_text = output_text(&unit_suite);
+    assert!(
+        !unit_text
+            .lines()
+            .any(|line| line.trim_start().starts_with("warning:")
+                || line.trim_start().starts_with("warning[")),
+        "emitted workspace must compile without warnings\n{unit_text}"
+    );
     assert!(unit_text.contains("test result: ok."));
     for module in ["providers::openai::tests::", "providers::ollama::tests::"] {
         assert!(

@@ -325,6 +325,17 @@ fn extract(label: String, document: &Value) -> AgentReport {
                             ));
                         }
                     }
+                    if let Some(setting) = step.get("thinking") {
+                        let choice = match setting.get("mode").and_then(Value::as_str) {
+                            Some("provider_default") => "provider default".to_string(),
+                            Some("choice") => setting
+                                .get("value")
+                                .map(literal_or_unknown)
+                                .unwrap_or_else(|| "unknown".into()),
+                            _ => "unknown".to_string(),
+                        };
+                        detail.push_str(&format!("; declared thinking {choice}; runtime support and application unverified"));
+                    }
                     if action.get("logic").is_some() || step.get("when").is_some() {
                         detail.push_str("; conditional applicability unknown");
                     }
@@ -492,6 +503,25 @@ fn render(title: &str, agents: &[AgentReport], tools: &[String], assets: &[Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thinking_requirements_report_choices_defaults_and_dynamic_values_without_claiming_support() {
+        let source = serde_json::json!({"agent_schema":{"properties":{}},
+        "actions":[{"name":"delegate","run":[
+            {"kind":"agent","artifact":"./child.json","thinking":{"mode":"choice","value":"max"}},
+            {"kind":"generate_audio","thinking":{"mode":"provider_default"}},
+            {"kind":"generate_image","thinking":{"mode":"choice","value":{"var":"runtime.effort"}}}
+        ]}]});
+        let report = render("fixture", &[extract("parent".into(), &source)], &[], &[]);
+        for value in [
+            "declared thinking max",
+            "declared thinking provider default",
+            "declared thinking dynamic (runtime.effort)",
+            "runtime support and application unverified",
+        ] {
+            assert!(report.contains(value), "missing {value}: {report}");
+        }
+    }
 
     #[test]
     fn media_requirements_and_structured_choices_keep_their_distinctions() {

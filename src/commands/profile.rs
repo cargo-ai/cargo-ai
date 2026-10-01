@@ -21,6 +21,28 @@ fn parse_auth_mode(raw: &str) -> Option<ProfileAuthMode> {
     }
 }
 
+fn thinking_from_args(args: &ArgMatches) -> Option<crate::providers::thinking::ThinkingSetting> {
+    use crate::providers::thinking::ThinkingSetting;
+    if let Some(value) = args.get_one::<String>("thinking") {
+        Some(ThinkingSetting::Choice {
+            value: value.clone(),
+        })
+    } else if args.get_flag("thinking_provider_default") {
+        Some(ThinkingSetting::ProviderDefault)
+    } else {
+        None
+    }
+}
+
+fn thinking_label(setting: Option<&crate::providers::thinking::ThinkingSetting>) -> &str {
+    use crate::providers::thinking::ThinkingSetting;
+    match setting {
+        Some(ThinkingSetting::Choice { value }) => value,
+        Some(ThinkingSetting::ProviderDefault) => "provider default (explicit)",
+        None => "inherited/provider default",
+    }
+}
+
 fn profile_exists(name: &str) -> bool {
     load_config()
         .map(|cfg| cfg.profile.iter().any(|profile| profile.name == name))
@@ -202,8 +224,8 @@ fn run_list() -> bool {
     if let Some(cfg) = load_config() {
         println!("Configured profiles:");
         println!(
-            "{:<20} {:<10} {:<20} {:<15} {}",
-            "Name", "Server", "Auth mode", "Model", "Default"
+            "{:<20} {:<10} {:<20} {:<15} {:<30} {}",
+            "Name", "Server", "Auth mode", "Model", "Thinking", "Default"
         );
         println!("{:-<90}", "");
 
@@ -217,11 +239,12 @@ fn run_list() -> bool {
             let mark = if is_default { "✓" } else { "" };
 
             println!(
-                "{:<20} {:<10} {:<20} {:<15} {}",
+                "{:<20} {:<10} {:<20} {:<15} {:<30} {}",
                 profile.name,
                 profile.server,
                 profile.auth_mode.as_str(),
                 profile.model,
+                thinking_label(profile.thinking.as_ref()),
                 mark
             );
         }
@@ -245,6 +268,7 @@ fn run_show(show_m: &ArgMatches) -> bool {
                 println!("Default: {}", if is_default { "Yes" } else { "No" });
                 println!("Server:  {}", profile.server);
                 println!("Model:   {}", profile.model);
+                println!("Thinking: {}", thinking_label(profile.thinking.as_ref()));
                 println!("Auth:    {}", profile.auth_mode.as_str());
                 let token_available = match store::load_profile_token(&profile.name) {
                     Ok(Some(_)) => true,
@@ -310,6 +334,7 @@ fn profile_from_add(
         timeout_in_sec: 60,
         max_output_tokens: add_m.get_one::<u32>("max_output_tokens").copied(),
         temperature: add_m.get_one::<f64>("temperature").copied(),
+        thinking: thinking_from_args(add_m),
         description: add_m.get_one::<String>("description").cloned(),
         auth_mode,
     }
@@ -512,6 +537,13 @@ fn set_outcome(
         profile.temperature = None;
         metadata_changes.push("temperature");
     }
+    if let Some(thinking) = thinking_from_args(set_m) {
+        profile.thinking = Some(thinking);
+        metadata_changes.push("thinking");
+    } else if set_m.get_flag("clear_thinking") {
+        profile.thinking = None;
+        metadata_changes.push("thinking");
+    }
     if let Some(max_output_tokens) = set_m.get_one::<u32>("max_output_tokens") {
         profile.max_output_tokens = Some(*max_output_tokens);
         metadata_changes.push("max_output_tokens");
@@ -689,7 +721,7 @@ fn profile_payload(profile: &Profile, default: Option<&str>, token_state: &str) 
     json!({"name":profile.name,"server":profile.server,"model":profile.model,
         "auth_mode":profile.auth_mode.as_str(),"is_default":default == Some(profile.name.as_str()),
         "token_presence":token_state,"timeout_in_sec":profile.timeout_in_sec,
-        "temperature":profile.temperature,"max_output_tokens":profile.max_output_tokens,
+        "temperature":profile.temperature,"thinking":profile.thinking,"max_output_tokens":profile.max_output_tokens,
         "url_present":profile.url.is_some(),"url":safe_url,"url_redacted":redacted,"url_origin":origin,
         "description":profile.description})
 }
@@ -915,6 +947,61 @@ mod tests {
                 .clone()
         }
     }
+    #[test]
+    fn thinking_profile_mutations_are_local_and_preserve_choice_on_connection_change() {
+        let _home = crate::commands::secret_input::test_support::Home::new();
+        let setting = serde_json::json!({"mode":"choice", "value":"max"});
+        let result = super::machine_run(&machine_args(&[
+            "profile",
+            "set",
+            "example",
+            "--thinking",
+            "max",
+        ]))
+        .unwrap();
+        assert_eq!(result["profile"]["thinking"], setting);
+        assert_eq!(result["effects"]["remote"], "unapplied");
+        for (flag, value) in [
+            ("--server", "ollama"),
+            ("--model", "different"),
+            ("--auth", "none"),
+        ] {
+            let result =
+                super::machine_run(&machine_args(&["profile", "set", "example", flag, value]))
+                    .unwrap();
+            assert_eq!(result["profile"]["thinking"], setting);
+        }
+        let shown = super::machine_run(&machine_args(&["profile", "show", "example"])).unwrap();
+        assert_eq!(shown["profile"]["thinking"], setting);
+        let listed = super::machine_run(&machine_args(&["profile", "list"])).unwrap();
+        assert_eq!(listed["profiles"][0]["thinking"], setting);
+        let result = super::machine_run(&machine_args(&[
+            "profile",
+            "set",
+            "example",
+            "--thinking-provider-default",
+        ]))
+        .unwrap();
+        assert_eq!(
+            result["profile"]["thinking"],
+            serde_json::json!({"mode":"provider_default"})
+        );
+        let result = super::machine_run(&machine_args(&[
+            "profile",
+            "set",
+            "example",
+            "--clear-thinking",
+        ]))
+        .unwrap();
+        assert_eq!(result["profile"]["thinking"], serde_json::Value::Null);
+        let result = super::machine_run(&machine_args(&[
+            "profile", "add", "unset", "--server", "ollama", "--model", "manual",
+        ]))
+        .unwrap();
+        assert_eq!(result["profile"]["thinking"], serde_json::Value::Null);
+        assert_eq!(result["effects"]["remote"], "unapplied");
+    }
+
     #[test]
     fn machine_contract_profile_consent_and_secret_transport_precede_effects() {
         let home = crate::commands::secret_input::test_support::Home::new();

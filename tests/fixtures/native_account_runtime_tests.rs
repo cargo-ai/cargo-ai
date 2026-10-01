@@ -166,7 +166,7 @@ mod native_account_runtime_tests {
                     .with_body(body)
                     .create_async()
                     .await;
-                let _endpoint = crate::providers::native_account_test_endpoint(format!(
+                let _endpoint = crate::providers::openai::native_account_test_endpoint(format!(
                     "{}/native",
                     server.url()
                 ));
@@ -189,7 +189,7 @@ mod native_account_runtime_tests {
                         "image",
                         1,
                         &parent_context,
-                        configured_agent_action_runtime_budget(Some(9)),
+                        configured_agent_action_runtime_budget_with_project_default(Some(9), None),
                     )
                     .await
                     .unwrap();

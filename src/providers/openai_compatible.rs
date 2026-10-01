@@ -18,6 +18,8 @@ struct Request {
     response_format: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -169,6 +171,7 @@ fn response_text(content: &serde_json::Value) -> Option<String> {
     (!text.trim().is_empty()).then(|| text.trim().to_string())
 }
 
+#[cfg(test)]
 pub(crate) async fn send_request(
     provider: ProviderKind,
     url: &str,
@@ -180,6 +183,33 @@ pub(crate) async fn send_request(
     max_output_tokens: Option<u32>,
     temperature: Option<f64>,
 ) -> Result<ProviderTextResponse, ProviderError> {
+    send_request_with_thinking(
+        provider,
+        url,
+        model,
+        content_parts,
+        timeout_in_sec,
+        token,
+        response_schema,
+        max_output_tokens,
+        temperature,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn send_request_with_thinking(
+    provider: ProviderKind,
+    url: &str,
+    model: &str,
+    content_parts: &[ContentPart],
+    timeout_in_sec: u64,
+    token: &str,
+    response_schema: &serde_json::Value,
+    max_output_tokens: Option<u32>,
+    temperature: Option<f64>,
+    thinking: Option<&str>,
+) -> Result<ProviderTextResponse, ProviderError> {
     let request = Request {
         model: model.to_string(),
         messages: vec![RequestMessage {
@@ -189,6 +219,7 @@ pub(crate) async fn send_request(
         temperature,
         response_format: response_format(response_schema),
         max_tokens: max_output_tokens,
+        reasoning_effort: thinking.map(str::to_owned),
     };
 
     let client = ClientBuilder::new()
@@ -283,6 +314,16 @@ mod tests {
             "required": ["answer"],
             "additionalProperties": false
         })
+    }
+
+    #[test]
+    fn final_text_excludes_mistral_thinking_chunks() {
+        let content = serde_json::json!([
+            {"type":"thinking","thinking":[{"type":"text","text":"private thought"}],"text":"never expose"},
+            {"type":"text","text":"final "},
+            {"type":"text","text":"answer"}
+        ]);
+        assert_eq!(response_text(&content).as_deref(), Some("final answer"));
     }
 
     #[tokio::test]
@@ -442,6 +483,7 @@ mod temperature_tests {
                 temperature,
                 response_format: serde_json::json!({}),
                 max_tokens: None,
+                reasoning_effort: None,
             };
             let value = serde_json::to_value(request).unwrap();
             match temperature {

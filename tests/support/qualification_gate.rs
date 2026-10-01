@@ -369,6 +369,330 @@ fn discover(provider: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct ThinkingCase {
+    case: String,
+    outcome: String,
+    requests: u32,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct ThinkingReport {
+    schema_version: u32,
+    candidate: String,
+    run_id: String,
+    run_attempt: String,
+    probe_id: String,
+    provider: String,
+    model: String,
+    choice: String,
+    outcome: String,
+    requests_started: u32,
+    max_output_tokens: u32,
+    cases: Vec<ThinkingCase>,
+    image: Option<ThinkingImageReport>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct ThinkingImageReport {
+    model: String,
+    choice: String,
+    outcome: String,
+    requests_started: u32,
+    cases: Vec<ThinkingCase>,
+}
+
+impl ThinkingReport {
+    fn matches(
+        &self,
+        identity: &Identity<'_>,
+        provider: &str,
+        model: &str,
+        choice: &str,
+        image: Option<(&str, &str)>,
+    ) -> bool {
+        let expected = [
+            "interpreted_choice",
+            "generated_choice",
+            "interpreted_unavailable",
+            "generated_provider_default",
+        ];
+        let image_matches = match (&self.image, image) {
+            (None, None) => true,
+            (Some(report), Some((model, choice))) => {
+                provider == "gemini"
+                    && report.model == model
+                    && report.choice == choice
+                    && report.outcome == "pass"
+                    && report.requests_started == 2
+                    && report.cases.len() == 2
+                    && report
+                        .cases
+                        .iter()
+                        .zip(["interpreted_image_choice", "generated_image_choice"])
+                        .all(|(case, name)| {
+                            case.case == name && case.outcome == "pass" && case.requests == 1
+                        })
+            }
+            _ => false,
+        };
+        self.schema_version == 1
+            && self.candidate == identity.candidate
+            && self.run_id == identity.run_id
+            && self.run_attempt == identity.run_attempt
+            && Some(self.probe_id.as_str()) == identity.probe_id
+            && self.provider == provider
+            && self.model == model
+            && self.choice == choice
+            && self.outcome == "pass"
+            && self.requests_started == (if image.is_some() { 6 } else { 4 })
+            && self.max_output_tokens == 8192
+            && self.cases.len() == expected.len()
+            && self.cases.iter().zip(expected).all(|(case, name)| {
+                case.case == name && case.outcome == "pass" && case.requests == 1
+            })
+            && image_matches
+    }
+}
+
+/// Four requests, no retry, exact named choices and actual emitted applications.
+fn thinking(provider: &str) -> Result<()> {
+    if !["openai", "anthropic", "gemini", "xai", "mistral"].contains(&provider) {
+        return Err("unsupported thinking qualification provider");
+    }
+    let candidate = variable("CARGO_AI_SHA")?;
+    let run_id = variable("GITHUB_RUN_ID")?;
+    let run_attempt = variable("GITHUB_RUN_ATTEMPT")?;
+    let model = variable("CARGO_AI_THINKING_MODEL")?;
+    let choice = variable("CARGO_AI_THINKING_CHOICE")?;
+    let image_model = env::var("CARGO_AI_THINKING_IMAGE_MODEL").unwrap_or_default();
+    let image_choice = env::var("CARGO_AI_THINKING_IMAGE_CHOICE").unwrap_or_default();
+    let image = match (image_model.is_empty(), image_choice.is_empty()) {
+        (true, true) => None,
+        (false, false) if provider == "gemini" => {
+            Some((image_model.as_str(), image_choice.as_str()))
+        }
+        _ => return Err("image thinking requires Gemini and both explicit inputs"),
+    };
+    if !qualification_policy::hexadecimal(&candidate, 40)
+        || [&model, &choice]
+            .into_iter()
+            .map(String::as_str)
+            .chain(
+                image
+                    .into_iter()
+                    .flat_map(|(model, choice)| [model, choice]),
+            )
+            .any(|value| {
+                value.trim().is_empty() || value.len() > 1024 || value.chars().any(char::is_control)
+            })
+    {
+        return Err("invalid explicit thinking qualification inputs");
+    }
+    qualification_policy::positive(&run_id)?;
+    qualification_policy::positive(&run_attempt)?;
+    let checkout = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|_| "cannot verify thinking candidate")?;
+    if !checkout.status.success()
+        || String::from_utf8(checkout.stdout)
+            .map_err(|_| "invalid thinking checkout identity")?
+            .trim()
+            != candidate
+    {
+        return Err("thinking checkout does not match candidate");
+    }
+    let directory = ProbeDirectory::new()?;
+    // Cargo and build scripts receive no enrolled provider credentials. Run the
+    // resulting test executable directly after compilation has completed.
+    let mut build = Command::new("cargo");
+    let output = without_provider_keys(&mut build)
+        .args([
+            "test",
+            "--locked",
+            "--no-run",
+            "--test",
+            "thinking_live",
+            "--message-format",
+            "json",
+        ])
+        .output()
+        .map_err(|_| "cannot build thinking qualification harness")?;
+    if !output.status.success() {
+        return Err("thinking qualification harness build failed");
+    }
+    let executables: Vec<_> = String::from_utf8(output.stdout)
+        .map_err(|_| "invalid thinking build output")?
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|artifact| {
+            artifact["reason"] == "compiler-artifact"
+                && artifact["target"]["name"] == "thinking_live"
+                && artifact["profile"]["test"] == true
+        })
+        .filter_map(|artifact| artifact["executable"].as_str().map(PathBuf::from))
+        .collect();
+    if executables.len() != 1 || !executables[0].is_absolute() || !executables[0].is_file() {
+        return Err("missing compiled thinking qualification executable");
+    }
+    let report_path = directory.0.join("thinking.json");
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let output = Command::new(&executables[0])
+        .args([
+            "live_thinking_journey_uses_isolated_stdin_credentials",
+            "--ignored",
+            "--exact",
+        ])
+        .env("CARGO_AI_THINKING_PROVIDER", provider)
+        .env("CARGO_AI_QUALIFICATION_REPORT", &report_path)
+        .env("CARGO_AI_QUALIFICATION_PROBE", &nonce)
+        .output()
+        .map_err(|_| "cannot execute thinking qualification harness")?;
+    if !output.status.success() {
+        return Err("thinking qualification journey failed; no automatic retry");
+    }
+    let raw = read(&report_path, 8192)?;
+    let report: ThinkingReport =
+        serde_json::from_str(&raw).map_err(|_| "invalid typed thinking qualification evidence")?;
+    if !report.matches(
+        &Identity {
+            candidate: &candidate,
+            run_id: &run_id,
+            run_attempt: &run_attempt,
+            probe_id: Some(&nonce),
+        },
+        provider,
+        &model,
+        &choice,
+        image,
+    ) {
+        return Err("thinking qualification identity or request budget mismatch");
+    }
+    for name in PROVIDER_KEYS {
+        if env::var(name).is_ok_and(|key| !key.is_empty() && raw.contains(&key)) {
+            return Err("thinking qualification report failed redaction");
+        }
+    }
+    let encoded =
+        serde_json::to_string(&report).map_err(|_| "cannot encode typed thinking evidence")?;
+    append("GITHUB_OUTPUT", &format!("evidence={encoded}\n"))?;
+    append("GITHUB_STEP_SUMMARY", &format!("- {provider}: exact thinking choice verified in interpreted and emitted applications; unavailable-choice fallback and explicit provider default verified; 4 requests, at most 8192 output tokens each; no retries; candidate `{candidate}`.\n"))?;
+    if image.is_some() {
+        append("GITHUB_STEP_SUMMARY", "- Gemini image thinking: separately qualified exact choice verified in interpreted and emitted applications; 2 additional requests, at most 8192 output tokens each; no retries; private JPEGs removed, no artifacts uploaded.\n")?;
+    }
+    println!("Thinking {provider}: four bounded cases passed; sanitized evidence recorded.");
+    Ok(())
+}
+
+#[cfg(test)]
+mod thinking_tests {
+    use super::*;
+    fn report() -> ThinkingReport {
+        ThinkingReport {
+            schema_version: 1,
+            candidate: "a".repeat(40),
+            run_id: "1".into(),
+            run_attempt: "1".into(),
+            probe_id: "b".repeat(32),
+            provider: "gemini".into(),
+            model: "exact-model".into(),
+            choice: "high".into(),
+            outcome: "pass".into(),
+            requests_started: 4,
+            max_output_tokens: 8192,
+            image: None,
+            cases: [
+                "interpreted_choice",
+                "generated_choice",
+                "interpreted_unavailable",
+                "generated_provider_default",
+            ]
+            .into_iter()
+            .map(|name| ThinkingCase {
+                case: name.into(),
+                outcome: "pass".into(),
+                requests: 1,
+            })
+            .collect(),
+        }
+    }
+    #[test]
+    fn thinking_report_rejects_injected_identity_and_excess_requests() {
+        let candidate = "a".repeat(40);
+        let nonce = "b".repeat(32);
+        let identity = Identity {
+            candidate: &candidate,
+            run_id: "1",
+            run_attempt: "1",
+            probe_id: Some(&nonce),
+        };
+        let mut report = report();
+        assert!(report.matches(&identity, "gemini", "exact-model", "high", None));
+        report.requests_started = 5;
+        assert!(!report.matches(&identity, "gemini", "exact-model", "high", None));
+        report.requests_started = 4;
+        report.probe_id = "c".repeat(32);
+        assert!(!report.matches(&identity, "gemini", "exact-model", "high", None));
+        report.probe_id = nonce.clone();
+        report.cases[0].requests = 2;
+        assert!(!report.matches(&identity, "gemini", "exact-model", "high", None));
+    }
+    #[test]
+    fn image_report_requires_explicit_separate_connection_and_two_cases() {
+        let candidate = "a".repeat(40);
+        let nonce = "b".repeat(32);
+        let identity = Identity {
+            candidate: &candidate,
+            run_id: "1",
+            run_attempt: "1",
+            probe_id: Some(&nonce),
+        };
+        let mut report = report();
+        report.requests_started = 6;
+        report.image = Some(ThinkingImageReport {
+            model: "image-model".into(),
+            choice: "minimal".into(),
+            outcome: "pass".into(),
+            requests_started: 2,
+            cases: ["interpreted_image_choice", "generated_image_choice"]
+                .into_iter()
+                .map(|name| ThinkingCase {
+                    case: name.into(),
+                    outcome: "pass".into(),
+                    requests: 1,
+                })
+                .collect(),
+        });
+        assert!(report.matches(
+            &identity,
+            "gemini",
+            "exact-model",
+            "high",
+            Some(("image-model", "minimal"))
+        ));
+        assert!(!report.matches(&identity, "gemini", "exact-model", "high", None));
+        assert!(!report.matches(
+            &identity,
+            "gemini",
+            "exact-model",
+            "high",
+            Some(("other-image", "minimal"))
+        ));
+        report.image.as_mut().unwrap().requests_started = 3;
+        assert!(!report.matches(
+            &identity,
+            "gemini",
+            "exact-model",
+            "high",
+            Some(("image-model", "minimal"))
+        ));
+    }
+}
+
 fn aggregate() -> Result<()> {
     let rendered = (|| {
         let inputs = qualification_dashboard::Inputs {
@@ -431,10 +755,11 @@ fn main() {
     let result = match args.as_slice() {
         [mode, provider] if mode == "probe" => probe(provider),
         [mode, provider] if mode == "discover" => discover(provider),
+        [mode, provider] if mode == "thinking" => thinking(provider),
         [mode] if mode == "aggregate" => aggregate(),
         [mode] if mode == "catalog" => catalog(),
         [mode] if mode == "package-root" => package_root(),
-        _ => Err("usage: qualification-gate probe <provider> | discover <provider> | aggregate | catalog | package-root"),
+        _ => Err("usage: qualification-gate probe <provider> | discover <provider> | thinking <provider> | aggregate | catalog | package-root"),
     };
     if let Err(message) = result {
         // Errors are fixed descriptions, never raw evidence, environment or service responses.

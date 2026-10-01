@@ -201,6 +201,7 @@ fn hatch(fixture: &Fixture, name: &str) -> PathBuf {
         .output()
         .unwrap();
     assert!(output.status.success(), "{}", text(&output));
+    assert_warning_free_build(&output, "TypeSafe hatch");
     if fixture.home.join("batch-seed-marker").exists() {
         assert!(
             text(&output).contains("Reused warmed template"),
