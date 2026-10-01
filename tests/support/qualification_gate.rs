@@ -71,7 +71,10 @@ impl ProbeDirectory {
             "provider-qualification-{}",
             uuid::Uuid::new_v4().simple()
         ));
+        #[cfg(unix)]
         let mut builder = fs::DirBuilder::new();
+        #[cfg(not(unix))]
+        let builder = fs::DirBuilder::new();
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;

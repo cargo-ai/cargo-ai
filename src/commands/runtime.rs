@@ -1922,16 +1922,19 @@ fn runtime_current_platform_label() -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::audit_runtime_actions_for_tools;
     use super::{
-        audit_runtime_actions_for_tools, cli_override_descriptions,
-        effective_action_execution_for_run, profile_selection_messages,
+        cli_override_descriptions, effective_action_execution_for_run, profile_selection_messages,
         render_runtime_failure_lines, resolve_runtime_vars_from_specs,
         resolved_action_execution_override_for_run, resolved_render_mode_for_run,
         runtime_tool_resolver, unknown_server_messages, validate_structural_action_only_inputs,
         LoadedProfileKind,
     };
     use crate::commands::runtime_actions::RequestedActionRenderMode;
-    use crate::commands::tools::{ToolResolver, ToolScope};
+    #[cfg(unix)]
+    use crate::commands::tools::ToolResolver;
+    use crate::commands::tools::ToolScope;
     use crate::providers::ProviderKind;
     use clap::Command;
     use serde_json::json;
@@ -2102,6 +2105,7 @@ mod tests {
         .expect("test runtime definition should parse")
     }
 
+    #[cfg(unix)]
     fn test_tool_runtime_definition() -> crate::runtime_definition::RuntimeAgentDefinition {
         crate::runtime_definition::RuntimeAgentDefinition::from_str(
             r#"{

@@ -2118,6 +2118,8 @@ mod tests {
                 .unwrap_err();
         assert!(error.contains("string_bytes"));
     }
+    #[cfg(unix)]
+    use super::ToolResolver;
     use super::{
         lint_project_source_tool, materialize_source_tool_for_package_runtime,
         maybe_find_project_root, render_binary_tool_manifest_json,
@@ -2125,7 +2127,7 @@ mod tests {
         validate_describe_document, validate_local_tool_name, validate_package_runtime_tools,
         validate_tool_identifier, ResolvedTool, ToolDescribeDocument, ToolDescribeExamples,
         ToolDescribeParam, ToolDescribeResourceProfile, ToolDescribeResult, ToolDescribeSelfTest,
-        ToolResolver, ToolScope,
+        ToolScope,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
