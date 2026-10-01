@@ -576,7 +576,6 @@ impl UsageAgentRunGuard {
         self.finish(UsageStatus::Success);
     }
 
-    #[cfg(test)]
     pub(crate) fn finish_failed(&mut self) {
         self.finish(UsageStatus::Failed);
     }
@@ -594,7 +593,7 @@ impl UsageAgentRunGuard {
 impl Drop for UsageAgentRunGuard {
     fn drop(&mut self) {
         if !self.completed {
-            self.finish(UsageStatus::Failed);
+            self.finish_failed();
         }
     }
 }
