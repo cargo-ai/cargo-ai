@@ -107,6 +107,7 @@ async fn saved_discovery_is_home_scoped_read_only_and_ignores_model() {
         let response = body(&output);
         assert_eq!(response["data"]["models"][0]["id"], "custom:exact");
         assert_eq!(response["data"]["complete"], true);
+        assert!(response["data"].get("compatibility").is_none());
         assert!(!String::from_utf8_lossy(&output.stdout).contains(token));
         assert_eq!(home.snapshot(), before);
         mock.assert_async().await;
@@ -146,6 +147,7 @@ async fn discovery_rejects_unscoped_stores_and_no_auth_never_reads_credentials()
     let output = home.run(&args(&["models", "list", "--profile", "fixture"]), b"");
     assert!(output.status.success());
     assert_eq!(body(&output)["data"]["models"], serde_json::json!([]));
+    assert!(body(&output)["data"].get("compatibility").is_none());
     assert_eq!(home.snapshot(), before);
     mock.assert_async().await;
 }

@@ -284,6 +284,7 @@ fn insert_event_inner(connection: &Connection, event: &Value) -> Result<bool, St
     Ok(changed != 0)
 }
 
+#[cfg(test)]
 pub(crate) fn persist(event: &Value) -> Result<(), String> {
     let connection = open_database(true)?.ok_or("Usage database unavailable")?;
     insert_event(&connection, event)?;

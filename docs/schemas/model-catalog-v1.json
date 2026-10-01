@@ -179,6 +179,24 @@
     "selection": {
       "const": "picker_visible",
       "description": "Account completeness covers validated picker-visible records, not entitlement or an immutable server snapshot."
+    },
+    "compatibility": {
+      "type": "object",
+      "description": "Optional adapter request provenance; not an installed CLI version or proof of model availability.",
+      "properties": {
+        "kind": {
+          "const": "codex_backend"
+        },
+        "client_version": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "client_version"
+      ],
+      "additionalProperties": true
     }
   },
   "required": [
@@ -322,6 +340,36 @@
         }
       ],
       "invocation_access": "unverified"
+    },
+    {
+      "schema_version": 1,
+      "provider": "openai",
+      "auth": "openai_account",
+      "connection": {
+        "endpoint": "https://chatgpt.com",
+        "profile": "account-fixture"
+      },
+      "fetched_at": "2026-09-29T12:00:00Z",
+      "source": "live",
+      "cache": null,
+      "complete": true,
+      "continuation": null,
+      "pages_fetched": 1,
+      "models": [
+        {
+          "id": "fixture-model:latest",
+          "name": null,
+          "metadata": {},
+          "metadata_source": "provider",
+          "invocation_access": "unverified"
+        }
+      ],
+      "invocation_access": "unverified",
+      "selection": "picker_visible",
+      "compatibility": {
+        "kind": "codex_backend",
+        "client_version": "0.159.2"
+      }
     }
   ]
 }

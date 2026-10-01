@@ -676,4 +676,16 @@ fn account_discovery_capabilities_and_error_contract_are_additive() {
         schema["properties"]["auth"]["enum"],
         json!(["none", "api_key", "openai_account"])
     );
+    assert!(!schema["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("compatibility")));
+    assert_eq!(
+        schema["properties"]["compatibility"]["properties"]["kind"]["const"],
+        "codex_backend"
+    );
+    assert_eq!(
+        schema["properties"]["compatibility"]["required"],
+        json!(["kind", "client_version"])
+    );
 }
