@@ -6,12 +6,14 @@ use crate::providers::thinking_metadata::{request_support, ThinkingRequestKind};
 pub(crate) fn invocation_setting(matches: &clap::ArgMatches) -> Option<ThinkingSetting> {
     if matches.get_flag("thinking_provider_default") {
         Some(ThinkingSetting::ProviderDefault)
+    } else if let Some(value) = matches.get_one::<String>("thinking_choice") {
+        Some(ThinkingSetting::Choice {
+            value: value.clone(),
+        })
     } else {
         matches
             .get_one::<String>("thinking")
-            .map(|value| ThinkingSetting::Choice {
-                value: value.clone(),
-            })
+            .map(|value| ThinkingSetting::from_cli(value))
     }
 }
 
@@ -22,6 +24,8 @@ pub(crate) fn explicit_step_setting(
     match setting {
         None => Ok(None),
         Some(ThinkingSetting::ProviderDefault) => Ok(Some(ThinkingSetting::ProviderDefault)),
+        Some(ThinkingSetting::On) => Ok(Some(ThinkingSetting::On)),
+        Some(ThinkingSetting::Off) => Ok(Some(ThinkingSetting::Off)),
         Some(ThinkingSetting::Choice { value }) => {
             let value = match value {
                 crate::RunArg::Literal(value) => value.clone(),
@@ -66,7 +70,9 @@ pub(crate) async fn resolve_for_request(
     kind: ThinkingRequestKind,
     budget: InvocationRuntimeBudget,
 ) -> Result<ThinkingOutcome, String> {
-    let support = if matches!(selection, Some(ThinkingSetting::Choice { .. })) {
+    let support = if selection
+        .is_some_and(|setting| !matches!(setting, ThinkingSetting::ProviderDefault))
+    {
         let remaining = remaining_runtime_duration(budget, "before resolving thinking support")?;
         tokio::time::timeout(
             remaining,
@@ -133,25 +139,41 @@ pub(super) fn child_thinking(
             (cargo_ai_artifact_on_path(), true)
         }
     };
-    let capable = artifact
+    let declaration = artifact
         .as_deref()
         .and_then(|path| crate::generated_capabilities::capabilities_for_artifact(path).ok())
-        .is_some_and(|capability| {
-            capability.supports_thinking() && capability.is_cli_run() == cli_run
-        });
+        .filter(|capability| capability.supports_thinking() && capability.is_cli_run() == cli_run);
+    let capable = declaration.is_some_and(|capability| {
+        !matches!(setting, ThinkingSetting::On | ThinkingSetting::Off)
+            || capability.supports_toggle()
+    });
     if capable {
         match setting {
             ThinkingSetting::ProviderDefault => {
                 command.arg("--thinking-provider-default");
             }
             ThinkingSetting::Choice { value } => {
-                command.arg("--thinking").arg(value);
+                let exact =
+                    declaration.is_some_and(|capability| capability.supports_exact_choice_flag());
+                command
+                    .arg(if exact {
+                        "--thinking-choice"
+                    } else {
+                        "--thinking"
+                    })
+                    .arg(value);
+            }
+            ThinkingSetting::On => {
+                command.args(["--thinking", "on"]);
+            }
+            ThinkingSetting::Off => {
+                command.args(["--thinking", "off"]);
             }
         }
     }
     serde_json::json!({"scope":scope,"kind":"child_forwarding","requested":setting,
         "disposition":if capable {"forwarded"} else {"not_forwarded"},
-        "declaration_source":if capable {"embedded_artifact"} else {"unavailable"},
+        "declaration_source":if declaration.is_some() {"embedded_artifact"} else {"unavailable"},
         "effective":"child_unverified"})
 }
 
@@ -215,6 +237,7 @@ mod tests {
                 }],
                 default: None,
                 evidence: None,
+                toggle: None,
             };
             let applied = thinking::resolve(Some(&selection), "step", support);
             assert_eq!(applied.applied_choice(), Some(choice.as_str()));
@@ -228,6 +251,7 @@ mod tests {
                     }],
                     default: None,
                     evidence: None,
+                    toggle: None,
                 },
             );
             assert_eq!(unavailable.effective, ThinkingSetting::ProviderDefault);

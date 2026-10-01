@@ -451,12 +451,12 @@ fn thinking_warnings(observer: &Observer) -> Vec<Value> {
                 "unsupported_control" => "thinking.control_unsupported",
                 _ => "thinking.support_unknown",
             };
-            warnings.push(json!({"code":code,"message":"The requested thinking choice was not applied; provider default is used.",
+            warnings.push(json!({"code":code,"message":"The requested thinking setting was not applied; provider default is used.",
                 "scope":record.get("scope"),"requested":record.pointer("/outcome/requested"),
                 "reason":fallback,"effective":{"mode":"provider_default"}}));
         } else if record.get("disposition").and_then(Value::as_str) == Some("not_forwarded") {
             warnings.push(json!({"code":"thinking.child_capability_unavailable",
-                "message":"The child does not declare thinking override support; its existing configuration is preserved and its effective setting is unverified.",
+                "message":"The child does not declare support for the requested thinking setting; its existing configuration is preserved and its effective setting is unverified.",
                 "scope":record.get("scope"),"requested":record.get("requested"),"effective":"child_unverified"}));
         }
     }
@@ -536,7 +536,7 @@ fn contracts() -> Vec<Value> {
         };
         json!({"command":name,"payload_schema":format!("cargo-ai.{}.v1",name.replace(' ',".")),"formats":["json"],"schema_versions":[1],"effects":effects,"variants":variants,"interaction":if *name=="auth login openai"{"existing_terminal_protocol_exception"}else{"noninteractive_explicit_consent_required_when_applicable"}})
     }).collect();
-    values.push(json!({"command":"run","formats":["json","ndjson"],"schema_versions":[1],"private_content":"explicit_opt_in","opaque_children":"exit_status_only","thinking":{"selection":"tagged_provider_default_or_exact_choice","terminal_outcomes":true,"action_definition_revision":"2026-10-01.r1"}}));
+    values.push(json!({"command":"run","formats":["json","ndjson"],"schema_versions":[1],"private_content":"explicit_opt_in","opaque_children":"exit_status_only","thinking":{"selection":"tagged_provider_default_or_exact_choice","settings":["choice","provider_default","on","off"],"flags":["--thinking","--thinking-provider-default","--thinking-choice"],"terminal_outcomes":true,"action_definition_revision":"2026-10-01.r1"}}));
     if cfg!(feature = "developer-tools") {
         values.push(json!({"command":"package","formats":["json"],"schema_versions":[1]}));
     }

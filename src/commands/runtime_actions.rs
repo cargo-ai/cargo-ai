@@ -2386,7 +2386,9 @@ async fn run_generate_image_step(
             output_format,
             &reference_images,
             effective_provider_context.openai_account_id.as_deref(),
-            thinking_outcome.applied_choice(),
+            thinking_outcome.provider_value(
+                effective_provider_context.provider == crate::providers::ProviderKind::Ollama,
+            ),
             effective_provider_context.max_output_tokens,
         )
         .await

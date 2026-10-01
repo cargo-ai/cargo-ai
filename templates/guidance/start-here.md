@@ -143,3 +143,6 @@ Inspect `.cargo-ai/project.toml` before choosing output paths. `cargo ai new` se
 For a native wrapper or script integration, check installed `cargo ai capabilities --output-format json` before selecting `--output-format json --output-schema-version 1` or the advertised `run` NDJSON stream. Keep existing definition-input flags, consent and credential handling unchanged. `cargo ai models list --profile NAME --output-format json` can discover supported catalog IDs without inference; listing does not establish invocation access, and saved API-key discovery requires explicit file storage. Use draft bounded stdin or manual entry for unsupported stores/connections.
 
 The public [machine interface](https://github.com/cargo-ai/cargo-ai/blob/develop/docs/machine-interface.md) and [payload reference](https://github.com/cargo-ai/cargo-ai/blob/develop/docs/machine-payloads.md) describe these optional interfaces. Do not assume source documentation means an older installation or generated child has the capability.
+
+
+Use case-insensitive `--thinking on` / `off` for qualified Boolean controls, or `--thinking-choice VALUE` for an exact name such as literal `on`. Discovery supplies Boolean availability/default separately from named levels. Unsupported selections use provider default with a notice. See [Thinking Selection](agent-definition-contract.md#thinking-selection).

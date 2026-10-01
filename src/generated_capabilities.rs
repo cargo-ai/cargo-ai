@@ -23,8 +23,8 @@ pub struct RuntimeCapabilities {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 struct ThinkingCapabilities {
-    flags: [&'static str; 2],
-    settings: [&'static str; 2],
+    flags: &'static [&'static str],
+    settings: &'static [&'static str],
 }
 
 impl RuntimeCapabilities {
@@ -33,9 +33,15 @@ impl RuntimeCapabilities {
     }
 
     pub fn supports_thinking(self) -> bool {
+        matches!(self.revision, 1 | REVISION)
+    }
+
+    pub fn supports_toggle(self) -> bool {
         self.revision == REVISION
-            && self.thinking.flags == ["--thinking", "--thinking-provider-default"]
-            && self.thinking.settings == ["choice", "provider_default"]
+    }
+
+    pub fn supports_exact_choice_flag(self) -> bool {
+        self.revision == REVISION
     }
 }
 
@@ -64,7 +70,10 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
     };
     let payload = OPEN.len() + IDENTITY.len();
     let revision = u32::from_le_bytes(record[payload..payload + 4].try_into().unwrap());
-    if record != encoded_record(cli_run) {
+    let mut legacy = encoded_record(cli_run);
+    legacy[payload..payload + 4].copy_from_slice(&1u32.to_le_bytes());
+    legacy[payload + 4..payload + 8].copy_from_slice(&0b1111u32.to_le_bytes());
+    if record != encoded_record(cli_run) && record != legacy {
         return Err(CapabilityReadError::Unsupported);
     }
     Ok(RuntimeCapabilities {
@@ -75,8 +84,20 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
         },
         revision,
         thinking: ThinkingCapabilities {
-            flags: ["--thinking", "--thinking-provider-default"],
-            settings: ["choice", "provider_default"],
+            flags: if revision == 1 {
+                &["--thinking", "--thinking-provider-default"]
+            } else {
+                &[
+                    "--thinking",
+                    "--thinking-provider-default",
+                    "--thinking-choice",
+                ]
+            },
+            settings: if revision == 1 {
+                &["choice", "provider_default"]
+            } else {
+                &["choice", "provider_default", "on", "off"]
+            },
         },
     })
 }
@@ -155,13 +176,28 @@ mod tests {
             serde_json::to_value(caps).unwrap(),
             serde_json::json!({
                 "runtime": "cargo-ai.generated-runtime",
-                "revision": 1,
+                "revision": 2,
                 "thinking": {
-                    "flags": ["--thinking", "--thinking-provider-default"],
-                    "settings": ["choice", "provider_default"]
+                    "flags": ["--thinking", "--thinking-provider-default", "--thinking-choice"],
+                    "settings": ["choice", "provider_default", "on", "off"]
                 }
             })
         );
+    }
+
+    #[test]
+    fn legacy_named_only_declaration_does_not_establish_boolean_support() {
+        let mut record = encoded_record(false);
+        let payload = OPEN.len() + IDENTITY.len();
+        record[payload..payload + 4].copy_from_slice(&1u32.to_le_bytes());
+        record[payload + 4..payload + 8].copy_from_slice(&0b1111u32.to_le_bytes());
+        let legacy = decode_record(&record).unwrap();
+        assert!(legacy.supports_thinking());
+        assert!(!legacy.supports_toggle());
+        assert!(!legacy.supports_exact_choice_flag());
+        assert!(decode_record(&encoded_record(false))
+            .unwrap()
+            .supports_toggle());
     }
 
     #[test]

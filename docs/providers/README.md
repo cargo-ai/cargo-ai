@@ -161,3 +161,14 @@ operator-controlled.
 - [Testing and Product Qualification](../testing-and-release-qualification.md)
 - [Documentation home](../README.md)
 - [Public README](../../README.md)
+
+
+### Boolean thinking controls
+
+The shared `--thinking on` / `--thinking off` selection recognizes only these Boolean aliases case-insensitively. Other values remain exact provider names. Use `--thinking-choice on` to request a literal named choice instead; tagged action/profile values `{"mode":"choice","value":"on"}` also remain literal. Actions use `{"mode":"on"}` or `{"mode":"off"}` in revision `2026-10-01.r1`. All forms use the same inheritance, explicit Provider default reset and fallback rules.
+
+Discovery's optional `thinking.toggle` contains qualified Boolean `values` and an optional `default`; named `choices` and `default` remain separate. Missing toggle metadata does not prove either Boolean is available. On does not imply High, and Off does not imply Low. Unsupported or unknown selections use provider default with the requested setting and reason in human/machine outcomes. Named-only adapters do not advertise independent toggles without authoritative model/endpoint evidence.
+
+For Ollama Boolean metadata, the existing compatible Chat request uses `reasoning_effort: "medium"` to request true and `"none"` to request false, only if that value is advertised. These wire values are not named levels on a Boolean model. `[false]` identifies a non-thinking model; missing metadata is Unknown. A named-only model still requires its exact supported name. No native route migration or hidden reasoning access is implied.
+
+Passive runtime declaration revision2 adds On/Off and `--thinking-choice`. Revision1 children still accept exact named/default forwarding using their original flags; they receive no Boolean override. Revision2 children use the exact-choice flag for literal names. Opaque children remain unverified. Rebuild generated applications to obtain the new behavior.

@@ -83,6 +83,9 @@ inference access. See [account discovery boundaries](./docs/providers/openai.md#
 
 Builds advertising `models thinking` can query exact choices with
 `cargo ai models thinking --profile openai-account --model MODEL_ID --output-format json`.
+`--thinking on` and `--thinking off` select qualified Boolean controls, case-insensitively.
+Use `--thinking-choice VALUE` for a literal exact name such as `on`; unavailable settings use provider default with an explanation.
+
 Save a choice with `cargo ai profile set openai-account --thinking VALUE`, or override
 one run with `cargo ai run ./agent.json --profile openai-account --thinking VALUE`.
 An unavailable choice uses provider default with an explicit explanation.

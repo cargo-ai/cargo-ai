@@ -23,10 +23,12 @@ fn parse_auth_mode(raw: &str) -> Option<ProfileAuthMode> {
 
 fn thinking_from_args(args: &ArgMatches) -> Option<crate::providers::thinking::ThinkingSetting> {
     use crate::providers::thinking::ThinkingSetting;
-    if let Some(value) = args.get_one::<String>("thinking") {
+    if let Some(value) = args.get_one::<String>("thinking_choice") {
         Some(ThinkingSetting::Choice {
             value: value.clone(),
         })
+    } else if let Some(value) = args.get_one::<String>("thinking") {
+        Some(ThinkingSetting::from_cli(value))
     } else if args.get_flag("thinking_provider_default") {
         Some(ThinkingSetting::ProviderDefault)
     } else {
@@ -39,6 +41,8 @@ fn thinking_label(setting: Option<&crate::providers::thinking::ThinkingSetting>)
     match setting {
         Some(ThinkingSetting::Choice { value }) => value,
         Some(ThinkingSetting::ProviderDefault) => "provider default (explicit)",
+        Some(ThinkingSetting::On) => "on",
+        Some(ThinkingSetting::Off) => "off",
         None => "inherited/provider default",
     }
 }
@@ -947,6 +951,30 @@ mod tests {
                 .clone()
         }
     }
+    #[test]
+    fn thinking_boolean_profile_round_trip_and_exact_choice_escape() {
+        let _home = crate::commands::secret_input::test_support::Home::new();
+        for (flag, value, expected) in [
+            ("--thinking", "ON", serde_json::json!({"mode":"on"})),
+            ("--thinking", "oFf", serde_json::json!({"mode":"off"})),
+            (
+                "--thinking-choice",
+                "on",
+                serde_json::json!({"mode":"choice","value":"on"}),
+            ),
+        ] {
+            let changed =
+                super::machine_run(&machine_args(&["profile", "set", "example", flag, value]))
+                    .unwrap();
+            assert_eq!(changed["profile"]["thinking"], expected);
+            let shown = super::machine_run(&machine_args(&["profile", "show", "example"])).unwrap();
+            assert_eq!(shown["profile"]["thinking"], expected);
+            let listed = super::machine_run(&machine_args(&["profile", "list"])).unwrap();
+            assert_eq!(listed["profiles"][0]["thinking"], expected);
+            assert_eq!(changed["effects"]["remote"], "unapplied");
+        }
+    }
+
     #[test]
     fn thinking_profile_mutations_are_local_and_preserve_choice_on_connection_change() {
         let _home = crate::commands::secret_input::test_support::Home::new();

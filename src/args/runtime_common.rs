@@ -37,8 +37,22 @@ pub(crate) fn runtime_command(name: &'static str, about: &'static str) -> Comman
             Arg::new("thinking")
                 .long("thinking")
                 .value_name("VALUE")
-                .help("Request an exact provider/model thinking choice")
-                .conflicts_with("thinking_provider_default")
+                .help("Request On/Off (case insensitive) or an exact provider/model thinking choice")
+                .conflicts_with_all(["thinking_provider_default", "thinking_choice"])
+                .value_parser(|value: &str| {
+                    if value.trim().is_empty() {
+                        Err("thinking choice must be nonempty".to_string())
+                    } else {
+                        Ok(value.to_string())
+                    }
+                }),
+        )
+        .arg(
+            Arg::new("thinking_choice")
+                .long("thinking-choice")
+                .value_name("VALUE")
+                .help("Request an exact named choice, including literal on/off")
+                .conflicts_with_all(["thinking", "thinking_provider_default"])
                 .value_parser(|value: &str| {
                     if value.trim().is_empty() {
                         Err("thinking choice must be nonempty".to_string())

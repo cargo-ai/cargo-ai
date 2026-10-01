@@ -128,6 +128,7 @@ enum Declaration {
     Opaque,
     Generated,
     CliRun,
+    LegacyGenerated,
     Conflicting,
 }
 
@@ -144,6 +145,14 @@ fn argument_capture_child(fixture: &Fixture, artifact: &Path, declaration: Decla
         Declaration::Opaque => {}
         Declaration::Generated => script.extend(generated_capability_record::encoded_record(false)),
         Declaration::CliRun => script.extend(generated_capability_record::encoded_record(true)),
+        Declaration::LegacyGenerated => {
+            let mut record = generated_capability_record::encoded_record(false);
+            let offset = generated_capability_record::OPEN.len()
+                + generated_capability_record::IDENTITY.len();
+            record[offset..offset + 4].copy_from_slice(&1u32.to_le_bytes());
+            record[offset + 4..offset + 8].copy_from_slice(&0b1111u32.to_le_bytes());
+            script.extend(record);
+        }
         Declaration::Conflicting => {
             script.extend(generated_capability_record::encoded_record(false));
             script.extend(generated_capability_record::encoded_record(true));
@@ -250,8 +259,9 @@ fn assert_child_case(
         .iter()
         .enumerate()
         .filter_map(|(index, value)| {
-            (value.starts_with("--thinking") || index > 0 && arguments[index - 1] == "--thinking")
-                .then_some(*value)
+            (value.starts_with("--thinking")
+                || index > 0 && matches!(arguments[index - 1], "--thinking" | "--thinking-choice"))
+            .then_some(*value)
         })
         .collect();
     assert_eq!(thinking_flags, expected_flags, "{declaration:?}");
@@ -277,6 +287,9 @@ fn assert_child_case(
                     "not_forwarded"
                 }
             );
+            if matches!(declaration, Declaration::LegacyGenerated) {
+                assert_eq!(forwarding[0]["declaration_source"], "embedded_artifact");
+            }
             assert_eq!(forwarding[0]["effective"], "child_unverified");
             assert_eq!(
                 terminal["warnings"]
@@ -317,7 +330,7 @@ fn compiled_children_forward_only_explicit_settings_to_generated_runtime_declara
         false,
         Declaration::Generated,
         Some(json!({"mode":"choice","value":"Ultra"})),
-        &["--thinking", "Ultra"],
+        &["--thinking-choice", "Ultra"],
         Some(true),
     );
     assert_child_case(
@@ -333,7 +346,7 @@ fn compiled_children_forward_only_explicit_settings_to_generated_runtime_declara
         false,
         Declaration::Generated,
         Some(json!({"mode":"choice","value":choice})),
-        &["--thinking", &choice],
+        &["--thinking-choice", &choice],
         Some(true),
     );
 }
@@ -365,7 +378,7 @@ fn json_children_forward_only_explicit_settings_to_selected_cli_run_declarations
         true,
         Declaration::CliRun,
         Some(json!({"mode":"choice","value":"Ultra"})),
-        &["--thinking", "Ultra"],
+        &["--thinking-choice", "Ultra"],
         Some(true),
     );
     assert_child_case(
@@ -381,14 +394,65 @@ fn json_children_forward_only_explicit_settings_to_selected_cli_run_declarations
         true,
         Declaration::CliRun,
         Some(json!({"mode":"choice","value":{"var":"status"}})),
-        &["--thinking", &choice],
+        &["--thinking-choice", &choice],
         Some(true),
     );
     assert_child_case(
         true,
         Declaration::CliRun,
         Some(json!({"mode":"choice","value":choice})),
-        &["--thinking", &choice],
+        &["--thinking-choice", &choice],
+        Some(true),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn boolean_and_literal_choice_forwarding_respect_old_runtime_boundaries() {
+    for json_child in [false, true] {
+        let declaration = if json_child {
+            Declaration::CliRun
+        } else {
+            Declaration::Generated
+        };
+        for mode in ["on", "off"] {
+            assert_child_case(
+                json_child,
+                declaration,
+                Some(json!({"mode":mode})),
+                &["--thinking", mode],
+                Some(true),
+            );
+        }
+        assert_child_case(
+            json_child,
+            declaration,
+            Some(json!({"mode":"choice","value":"on"})),
+            &["--thinking-choice", "on"],
+            Some(true),
+        );
+    }
+    for mode in ["on", "off"] {
+        assert_child_case(
+            false,
+            Declaration::LegacyGenerated,
+            Some(json!({"mode":mode})),
+            &[],
+            Some(false),
+        );
+    }
+    assert_child_case(
+        false,
+        Declaration::LegacyGenerated,
+        Some(json!({"mode":"choice","value":"on"})),
+        &["--thinking", "on"],
+        Some(true),
+    );
+    assert_child_case(
+        false,
+        Declaration::LegacyGenerated,
+        Some(json!({"mode":"provider_default"})),
+        &["--thinking-provider-default"],
         Some(true),
     );
 }

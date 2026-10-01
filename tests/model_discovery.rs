@@ -102,7 +102,7 @@ async fn thinking_discovery_is_exact_read_only_and_preserves_unknown_vs_unsuppor
         ),
         (
             serde_json::json!({"thinking":{"values":[true,false],"default":true}}),
-            "unsupported",
+            "configurable",
         ),
         (serde_json::json!({}), "unknown"),
         (
@@ -138,7 +138,17 @@ async fn thinking_discovery_is_exact_read_only_and_preserves_unknown_vs_unsuppor
         let response = body(&output);
         assert_eq!(response["data"]["model"], "manual:exact");
         assert_eq!(response["data"]["thinking"]["status"], status);
-        if status == "configurable" {
+        if metadata["thinking"]["values"][0].is_boolean() {
+            assert_eq!(
+                response["data"]["thinking"]["toggle"]["values"],
+                serde_json::json!([false, true])
+            );
+            assert_eq!(response["data"]["thinking"]["toggle"]["default"], true);
+            assert_eq!(
+                response["data"]["thinking"]["choices"],
+                serde_json::json!([])
+            );
+        } else if status == "configurable" {
             assert_eq!(
                 response["data"]["thinking"]["choices"][1]["value"],
                 "deliberate"

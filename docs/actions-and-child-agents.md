@@ -294,3 +294,6 @@ Updated child-agent runtimes also forward the root consuming-workspace context. 
 ## Optional application lifecycle stream
 
 Selected `run --output-format ndjson` emits bounded typed operation, provider, action and child lifecycle records instead of the human renderer. Events from parallel actions may interleave within one global sequence. Decode complete lines incrementally, preserve IDs/sequence, and require a terminal outcome before claiming completion. Existing opaque generated children supply exit/diagnostic facts and report instrumentation unavailable; they do not acquire fabricated results or child telemetry. See [machine runtime contracts](machine-payloads.md#runtime-and-model-discovery) for frame schemas, content opt-in, produced-image metadata and cancellation/incomplete-output limits.
+
+
+Use tagged `{"mode":"on"}` or `{"mode":"off"}` for a qualified Boolean control. Tagged Choice stays exact even for literal `on`/`off`; only the generic CLI aliases are case insensitive. Runtime declaration revision2 adds toggles and exact-choice escaping; revision1 children retain named/default forwarding and receive no Boolean override. [Shared selection and discovery rules](providers/README.md#thinking-selection) apply.

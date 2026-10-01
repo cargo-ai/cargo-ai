@@ -1259,7 +1259,7 @@ fn thinking_setting(value: &Value, path: &str, available: &BTreeMap<String, Kind
     let map = object(value, path)?;
     let mode = string(required(map, "mode", path)?, &field_path(path, "mode"))?;
     match mode {
-        "provider_default" => keys(map, &["mode"], path, false),
+        "provider_default" | "on" | "off" => keys(map, &["mode"], path, false),
         "choice" => {
             keys(map, &["mode", "value"], path, false)?;
             scalar_or_reference(
@@ -1271,7 +1271,7 @@ fn thinking_setting(value: &Value, path: &str, available: &BTreeMap<String, Kind
         }
         _ => Err(invalid(
             &field_path(path, "mode"),
-            "Expected provider_default or choice.",
+            "Expected provider_default, choice, on or off.",
         )),
     }
 }

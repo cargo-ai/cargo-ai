@@ -1,6 +1,6 @@
 //! Bounded thinking metadata for an already resolved connection.
 use super::{
-    thinking::{ThinkingChoice, ThinkingSupport},
+    thinking::{ThinkingChoice, ThinkingSupport, ThinkingToggle},
     ProviderKind,
 };
 use reqwest::{Client, Url};
@@ -55,6 +55,7 @@ fn choices(values: &[&str], default: Option<&str>, evidence: &str) -> ThinkingSu
             .collect(),
         default: default.map(str::to_owned),
         evidence: Some(evidence.into()),
+        toggle: None,
     }
 }
 fn bounded_text(value: &Value) -> Option<&str> {
@@ -110,6 +111,7 @@ pub(crate) fn account_record_support(record: &Value) -> ThinkingSupport {
             choices,
             default,
             evidence: Some(evidence.into()),
+            toggle: None,
         }
     }
 }
@@ -151,16 +153,28 @@ pub(crate) fn ollama_support(value: &Value, model: &str) -> ThinkingSupport {
     };
     let evidence = "https://docs.ollama.com/capabilities/thinking";
     if values.iter().all(Value::is_boolean) {
+        let retained: BTreeSet<bool> = values.iter().filter_map(Value::as_bool).collect();
+        if retained.len() != values.len() {
+            return unknown("duplicate Ollama Boolean thinking values");
+        }
         if thinking
             .get("default")
             .is_some_and(|default| !values.contains(default))
         {
             return unknown("Ollama thinking default is inconsistent with its choices");
         }
-        return unsupported(
-            "the model exposes only a boolean thinking control",
-            evidence,
-        );
+        if !retained.contains(&true) {
+            return unsupported("the model does not support thinking", evidence);
+        }
+        return ThinkingSupport::Configurable {
+            choices: Vec::new(),
+            default: None,
+            evidence: Some("https://docs.ollama.com/api/openai-compatibility".into()),
+            toggle: Some(ThinkingToggle {
+                values: retained.into_iter().collect(),
+                default: thinking.get("default").and_then(Value::as_bool),
+            }),
+        };
     }
     let mut seen = BTreeSet::new();
     let mut retained = Vec::new();
@@ -187,6 +201,7 @@ pub(crate) fn ollama_support(value: &Value, model: &str) -> ThinkingSupport {
         choices: retained,
         default,
         evidence: Some(evidence.into()),
+        toggle: None,
     }
 }
 
@@ -805,6 +820,58 @@ mod tests {
     }
 
     #[test]
+    fn boolean_metadata_retains_membership_default_and_nonthinking_distinction() {
+        for (values, default) in [
+            (serde_json::json!([false, true]), false),
+            (serde_json::json!([true]), true),
+        ] {
+            let support = ollama_support(
+                &serde_json::json!({"thinking":{"values":values,"default":default}}),
+                "fixture",
+            );
+            let ThinkingSupport::Configurable {
+                choices,
+                default: named_default,
+                toggle: Some(toggle),
+                ..
+            } = support
+            else {
+                panic!("Boolean metadata must qualify")
+            };
+            assert!(choices.is_empty());
+            assert!(named_default.is_none());
+            assert_eq!(toggle.default, Some(default));
+            assert_eq!(
+                toggle.values,
+                values
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_bool().unwrap())
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(matches!(
+            ollama_support(
+                &serde_json::json!({"thinking":{"values":[false],"default":false}}),
+                "fixture"
+            ),
+            ThinkingSupport::Unsupported { .. }
+        ));
+        for metadata in [
+            serde_json::json!({"values":[true,true]}),
+            serde_json::json!({"values":[true],"default":false}),
+            serde_json::json!({"values":[true,"high"]}),
+            serde_json::json!({"values":[false],"default":"off"}),
+        ] {
+            assert!(matches!(
+                ollama_support(&serde_json::json!({"thinking":metadata}), "fixture"),
+                ThinkingSupport::Unknown { .. }
+            ));
+        }
+    }
+
+    #[test]
     fn exact_claude_models_preserve_documented_effort_distinctions() {
         let setting = super::super::thinking::ThinkingSetting::Choice {
             value: "max".into(),
@@ -871,7 +938,7 @@ mod tests {
                 &json!({"thinking":{"values":[true,false],"default":true}}),
                 "fixture"
             ),
-            ThinkingSupport::Unsupported { .. }
+            ThinkingSupport::Configurable { .. }
         ));
         for value in [
             json!({}),

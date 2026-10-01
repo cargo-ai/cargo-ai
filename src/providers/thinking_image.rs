@@ -27,6 +27,7 @@ pub(crate) fn gemini_support(raw: &str, model: &str) -> ThinkingSupport {
                 .collect(),
             default: Some("minimal".into()),
             evidence: Some("https://ai.google.dev/gemini-api/docs/image-generation".into()),
+            toggle: None,
         }
     } else {
         ThinkingSupport::Unknown {

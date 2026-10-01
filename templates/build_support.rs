@@ -163,6 +163,8 @@ enum ToolParamValue {
 enum ThinkingSpec {
     ProviderDefault,
     Choice { value: RunArg },
+    On,
+    Off,
 }
 
 #[derive(Debug, Clone)]
@@ -2348,6 +2350,8 @@ fn parse_thinking(
     let setting = expect_object(value, &path)?;
     match get_required_string(setting, "mode", &path)? {
         "provider_default" => Ok(Some(ThinkingSpec::ProviderDefault)),
+        "on" => Ok(Some(ThinkingSpec::On)),
+        "off" => Ok(Some(ThinkingSpec::Off)),
         "choice" => Ok(Some(ThinkingSpec::Choice {
             value: parse_required_string_run_arg_field(
                 setting,
@@ -2358,7 +2362,7 @@ fn parse_thinking(
         })),
         _ => Err(BuildError::config(
             format!("{path}.mode"),
-            "expected `provider_default` or `choice`",
+            "expected `provider_default`, `choice`, `on`, or `off`",
         )),
     }
 }
@@ -4479,6 +4483,8 @@ fn render_agent_model(config: &AgentConfig) -> String {
                 let thinking = match &run_step.thinking {
                     None => "None".to_string(),
                     Some(ThinkingSpec::ProviderDefault) => "Some(crate::providers::thinking::ThinkingSetting::ProviderDefault)".to_string(),
+                    Some(ThinkingSpec::On) => "Some(crate::providers::thinking::ThinkingSetting::On)".to_string(),
+                    Some(ThinkingSpec::Off) => "Some(crate::providers::thinking::ThinkingSetting::Off)".to_string(),
                     Some(ThinkingSpec::Choice { value }) => format!("Some(crate::providers::thinking::ThinkingSetting::Choice {{ value: {} }})", render_run_arg(value)),
                 };
                 let voice = run_step

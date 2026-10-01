@@ -1721,7 +1721,8 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
                 rubric_enabled: definition.rubric_enabled(),
                 max_output_tokens,
                 temperature,
-                thinking: thinking_outcome.applied_choice(),
+                thinking: thinking_outcome
+                    .provider_value(provider == crate::providers::ProviderKind::Ollama),
             },
             openai_account_id.as_deref(),
         ),

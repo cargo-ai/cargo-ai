@@ -58,6 +58,7 @@ pub fn command() -> Command {
                 )
                 .arg(temperature_arg())
                 .arg(thinking_arg())
+                .arg(thinking_choice_arg())
                 .arg(thinking_provider_default_arg())
                 .arg(
                     Arg::new("max_output_tokens")
@@ -100,6 +101,7 @@ pub fn command() -> Command {
                             "thinking",
                             "thinking_provider_default",
                             "clear_thinking",
+                            "thinking_choice",
                             "description",
                             "clear_description",
                             "token",
@@ -135,7 +137,7 @@ pub fn command() -> Command {
                     Arg::new("clear_thinking")
                         .long("clear-thinking")
                         .help("Clear this profile's thinking override and restore inheritance")
-                        .conflicts_with_all(["thinking", "thinking_provider_default"])
+                        .conflicts_with_all(["thinking", "thinking_choice", "thinking_provider_default"])
                         .action(ArgAction::SetTrue),
                 )
                 .group(
@@ -194,6 +196,7 @@ pub fn command() -> Command {
                 )
                 .arg(temperature_arg())
                 .arg(thinking_arg())
+                .arg(thinking_choice_arg())
                 .arg(thinking_provider_default_arg())
                 .arg(
                     Arg::new("max_output_tokens")
@@ -282,8 +285,23 @@ fn thinking_arg() -> Arg {
     Arg::new("thinking")
         .long("thinking")
         .value_name("VALUE")
-        .help("Store an exact provider/model thinking choice; support is checked when running")
-        .conflicts_with("thinking_provider_default")
+        .help("Store On/Off (case insensitive) or an exact thinking choice; checked when running")
+        .conflicts_with_all(["thinking_provider_default", "thinking_choice"])
+        .value_parser(|value: &str| {
+            if value.trim().is_empty() {
+                Err("thinking choice must be nonempty".to_string())
+            } else {
+                Ok(value.to_string())
+            }
+        })
+}
+
+fn thinking_choice_arg() -> Arg {
+    Arg::new("thinking_choice")
+        .long("thinking-choice")
+        .value_name("VALUE")
+        .help("Store an exact named choice, including literal on/off")
+        .conflicts_with_all(["thinking", "thinking_provider_default"])
         .value_parser(|value: &str| {
             if value.trim().is_empty() {
                 Err("thinking choice must be nonempty".to_string())

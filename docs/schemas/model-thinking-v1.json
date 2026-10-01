@@ -105,6 +105,30 @@
             "value"
           ],
           "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "on"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "off"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": true
         }
       ]
     },
@@ -150,6 +174,31 @@
                 "string",
                 "null"
               ]
+            },
+            "toggle": {
+              "type": "object",
+              "properties": {
+                "values": {
+                  "type": "array",
+                  "items": {
+                    "type": "boolean"
+                  },
+                  "minItems": 1,
+                  "maxItems": 2,
+                  "uniqueItems": true
+                },
+                "default": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "values",
+                "default"
+              ],
+              "additionalProperties": true
             }
           },
           "required": [
@@ -420,6 +469,51 @@
                   "const": [
                     "choice",
                     "provider_default"
+                  ]
+                }
+              },
+              "required": [
+                "flags",
+                "settings"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "runtime",
+            "revision",
+            "thinking"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "runtime": {
+              "enum": [
+                "cargo-ai.generated-runtime",
+                "cargo-ai.cli-run-runtime"
+              ]
+            },
+            "revision": {
+              "const": 2
+            },
+            "thinking": {
+              "type": "object",
+              "properties": {
+                "flags": {
+                  "const": [
+                    "--thinking",
+                    "--thinking-provider-default",
+                    "--thinking-choice"
+                  ]
+                },
+                "settings": {
+                  "const": [
+                    "choice",
+                    "provider_default",
+                    "on",
+                    "off"
                   ]
                 }
               },

@@ -129,7 +129,7 @@ Media actions require a compatible model and API project with access to the sele
 
 ## Thinking Overrides
 
-Only definition revision `2026-10-01.r1` permits tagged `thinking` on `agent`, `generate_image`, `generate_audio` and `transcribe_audio`. Use `{"mode":"provider_default"}` or `{"mode":"choice","value":"VALUE"}`; choice value may be an available string `{"var":"runtime.thinking"}` reference. Values resolve to nonblank strings with the same exact-choice semantics as profile and invocation settings. No scalar coercion, rank conversion or nearest-choice mapping is allowed.
+Only definition revision `2026-10-01.r1` permits tagged `thinking` on `agent`, `generate_image`, `generate_audio` and `transcribe_audio`. Use `{"mode":"provider_default"}`, `{"mode":"on"}`, `{"mode":"off"}` or `{"mode":"choice","value":"VALUE"}`; choice value may be an available string `{"var":"runtime.thinking"}` reference. Values resolve to nonblank strings with the same exact-choice semantics as profile and invocation settings. No scalar coercion, rank conversion or nearest-choice mapping is allowed.
 
 Media precedence is explicit step thinking, step-profile thinking, then invocation thinking. Explicit provider default stops inheritance. Resolve support only after selecting the actual provider, model and request endpoint. An unavailable or inapplicable choice preserves execution with provider-default fallback and an explanation.
 
@@ -275,3 +275,6 @@ For installed package entrypoints, that relative `usage_log` path resolves under
 2. Run `cargo ai hatch <agent-name> --config <config.json> --check`.
 3. Fix validation errors before building.
 4. Build only after `--check` passes.
+
+
+Tagged `{"mode":"on"}` and `{"mode":"off"}` request qualified Boolean controls. Choice values stay exact, including literal `on`/`off`; only generic CLI aliases are case insensitive. Revision2 runtime declarations add toggles and `--thinking-choice`; revision1 children retain named/default forwarding but receive no Boolean override. See [Thinking Selection](agent-definition-contract.md#thinking-selection).

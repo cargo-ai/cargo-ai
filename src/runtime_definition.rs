@@ -911,11 +911,13 @@ fn parse_thinking(
     let setting = expect_object(value, &path)?;
     match required_string(setting, "mode", &path)? {
         "provider_default" => Ok(Some(ThinkingSetting::ProviderDefault)),
+        "on" => Ok(Some(ThinkingSetting::On)),
+        "off" => Ok(Some(ThinkingSetting::Off)),
         "choice" => Ok(Some(ThinkingSetting::Choice {
             value: required_string_run_arg(setting, "value", &path)?,
         })),
         _ => Err(format!(
-            "{path}.mode: expected `provider_default` or `choice`"
+            "{path}.mode: expected `provider_default`, `choice`, `on`, or `off`"
         )),
     }
 }
@@ -2608,6 +2610,10 @@ mod tests {
             "actions":[{"name":"run","logic":{"==":[1,1]}, "run":[
                 {"kind":"agent","artifact":"./child","thinking":{"mode":"choice","value":{"var":"level"}}},
                 {"kind":"generate_image","prompt":"draw","path":"out.png","thinking":{"mode":"provider_default"}},
+                {"kind":"generate_audio","text":"speak","voice":"voice","path":"out.mp3","thinking":{"mode":"on"}},
+                {"kind":"transcribe_audio","audio":{"path":"input.mp3"},"output_variable":"transcript","thinking":{"mode":"off"}},
+                {"kind":"agent","artifact":"./child","thinking":{"mode":"choice","value":"on"}},
+                {"kind":"agent","artifact":"./child","thinking":{"mode":"choice","value":"off"}},
             ]}],
         });
         let parsed = assert_runtime_and_codegen_accept(&definition.to_string());
@@ -2618,8 +2624,37 @@ mod tests {
             &parsed.actions[0].run[1].thinking,
             Some(ThinkingSetting::ProviderDefault)
         ));
+        assert!(matches!(
+            &parsed.actions[0].run[2].thinking,
+            Some(ThinkingSetting::On)
+        ));
+        assert!(matches!(
+            &parsed.actions[0].run[3].thinking,
+            Some(ThinkingSetting::Off)
+        ));
+        for (index, expected) in [(4, "on"), (5, "off")] {
+            assert!(matches!(
+                &parsed.actions[0].run[index].thinking,
+                Some(ThinkingSetting::Choice { value: crate::RunArg::Literal(value) }) if value == expected
+            ));
+        }
         definition["agent_definition_schema_version"] = json!("2026-09-08.r42");
-        let legacy = assert_runtime_and_codegen_accept(&definition.to_string());
+        for index in [2, 3] {
+            let mut legacy_media = definition.clone();
+            legacy_media["actions"][0]["run"] =
+                json!([definition["actions"][0]["run"][index].clone()]);
+            let (build, runtime) = assert_runtime_and_codegen_reject(&legacy_media.to_string());
+            assert!(build.contains(".thinking"));
+            assert!(runtime.contains(".thinking"));
+        }
+        let mut legacy_definition = definition.clone();
+        for index in [2, 3] {
+            legacy_definition["actions"][0]["run"][index]
+                .as_object_mut()
+                .unwrap()
+                .remove("thinking");
+        }
+        let legacy = assert_runtime_and_codegen_accept(&legacy_definition.to_string());
         assert!(legacy.actions[0]
             .run
             .iter()
@@ -2635,6 +2670,16 @@ mod tests {
             json!({"mode":"choice"}),
             json!({"mode":"provider_default","value":"max"}),
             json!({"mode":"choice","value":{"var":"missing"}}),
+            json!({"mode":"on","value":true}),
+            json!({"mode":"off","value":false}),
+            json!({"mode":"on","extra":true}),
+            json!({"mode":"off","extra":true}),
+            json!({"mode":"On"}),
+            json!({"mode":false}),
+            json!({}),
+            json!(false),
+            json!("off"),
+            json!(null),
         ] {
             definition["actions"][0]["run"][0]["thinking"] = invalid;
             let (build, runtime) = assert_runtime_and_codegen_reject(&definition.to_string());

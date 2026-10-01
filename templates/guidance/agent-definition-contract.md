@@ -284,11 +284,11 @@ If `logic` evaluates true, the action's `run` steps execute in order.
 
 ## Thinking Selection
 
-Saved profiles and invocations accept `--thinking VALUE` or mutually exclusive `--thinking-provider-default`. Profile set additionally accepts `--clear-thinking`, conflicting with both. Profile mutations are local, preserve the stored choice across model/connection changes, and require no discovery or inference. Unset thinking inherits; invocation overrides profile independently of `--model`. Explicit provider default stops inheritance and omits the request parameter. A provider's exact `none`, `off` or `default` choice is different from provider default.
+Saved profiles and invocations accept mutually exclusive `--thinking VALUE`, `--thinking-choice VALUE` or `--thinking-provider-default`. Profile set additionally accepts `--clear-thinking`, conflicting with all three. Profile mutations are local, preserve the stored choice across model/connection changes, and require no discovery or inference. Unset thinking inherits; invocation overrides profile independently of `--model`. Explicit provider default stops inheritance and omits the request parameter. A provider's exact `none`, `off` or `default` choice is different from provider default.
 
 Query exact text-model support with `cargo ai models thinking --profile NAME --model MODEL_ID --output-format json`, or use the same draft server/auth selectors as `models list`. Support is `configurable`, `unsupported` or `unknown`, with optional descriptions/default/evidence. A model name or missing list is insufficient to infer support. A qualified supported choice is applied; unavailable choices, unsupported control and unknown applicability use provider default with an explicit explanation. Choices are opaque, case-sensitive values with no ordering or nearest-choice substitution.
 
-Only `2026-10-01.r1` adds optional `thinking` to `agent`, `generate_image`, `generate_audio` and `transcribe_audio`. Its exact shape is `{"mode":"provider_default"}` or `{"mode":"choice","value":"high"}`. Choice `value` may instead be one existing `{"var":"runtime.thinking"}` reference. Declare referenced runtime/output strings or use an earlier available string capture. Runtime values must be nonblank strings with the same exact-choice semantics as profile and invocation settings; scalar coercion is prohibited. Missing/unknown fields and modes or invalid references remain errors. `exec`, `email_me` and `tool` reject the field.
+Only `2026-10-01.r1` adds optional `thinking` to `agent`, `generate_image`, `generate_audio` and `transcribe_audio`. Its exact shape is `{"mode":"provider_default"}`, `{"mode":"on"}`, `{"mode":"off"}` or `{"mode":"choice","value":"high"}`. Choice `value` may instead be one existing `{"var":"runtime.thinking"}` reference. Declare referenced runtime/output strings or use an earlier available string capture. Runtime values must be nonblank strings with the same exact-choice semantics as profile and invocation settings; scalar coercion is prohibited. Missing/unknown fields and modes or invalid references remain errors. `exec`, `email_me` and `tool` reject the field.
 
 Media precedence is step thinking, step-profile thinking, then invocation thinking, after resolving the actual provider/model/endpoint. Text controls do not imply media support. Child JSON definitions retain parent/step profile selection; compiled children retain their existing profile behavior. Parent CLI model/thinking overrides do not implicitly propagate; use an explicit child step selection to forward one. Direct child `model` remains unsupported.
 
@@ -714,3 +714,14 @@ For onboarding and pattern selection, read:
 - `start-here.md`
 - `pattern-selection.md`
 - `examples/README.md`
+
+
+### Boolean thinking controls
+
+The shared `--thinking on` / `--thinking off` selection recognizes only these Boolean aliases case-insensitively. Other values remain exact provider names. Use `--thinking-choice on` to request a literal named choice instead; tagged action/profile values `{"mode":"choice","value":"on"}` also remain literal. Actions use `{"mode":"on"}` or `{"mode":"off"}` in revision `2026-10-01.r1`. All forms use the same inheritance, explicit Provider default reset and fallback rules.
+
+Discovery's optional `thinking.toggle` contains qualified Boolean `values` and an optional `default`; named `choices` and `default` remain separate. Missing toggle metadata does not prove either Boolean is available. On does not imply High, and Off does not imply Low. Unsupported or unknown selections use provider default with the requested setting and reason in human/machine outcomes. Named-only adapters do not advertise independent toggles without authoritative model/endpoint evidence.
+
+For Ollama Boolean metadata, the existing compatible Chat request uses `reasoning_effort: "medium"` to request true and `"none"` to request false, only if that value is advertised. These wire values are not named levels on a Boolean model. `[false]` identifies a non-thinking model; missing metadata is Unknown. A named-only model still requires its exact supported name. No native route migration or hidden reasoning access is implied.
+
+Passive runtime declaration revision2 adds On/Off and `--thinking-choice`. Revision1 children still accept exact named/default forwarding using their original flags; they receive no Boolean override. Revision2 children use the exact-choice flag for literal names. Opaque children remain unverified. Rebuild generated applications to obtain the new behavior.

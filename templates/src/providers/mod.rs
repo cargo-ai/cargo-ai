@@ -233,6 +233,24 @@ mod thinking_request_tests {
             }
         }
     }
+    #[tokio::test]
+    async fn boolean_thinking_uses_qualified_compatible_payloads_and_omits_unavailable_choice() {
+        for (setting, expected) in [(thinking::ThinkingSetting::On,Some("medium")),(thinking::ThinkingSetting::Off,Some("none")),(thinking::ThinkingSetting::Choice { value:"high".into() },None),(thinking::ThinkingSetting::ProviderDefault,None)] {
+            let support = thinking_metadata::ollama_support(&json!({"thinking":{"values":[false,true],"default":true}}), "fixture");
+            let outcome = thinking::resolve(Some(&setting), "run", support);
+            assert_eq!(outcome.provider_value(true),expected);
+            let mut server=mockito::Server::new_async().await;
+            let request=server.mock("POST","/v1/chat/completions").match_request(move |request| {
+                let value: Value=serde_json::from_slice(request.body().unwrap()).unwrap();
+                value.get("reasoning_effort").and_then(Value::as_str)==expected && value.get("think").is_none()
+            }).with_status(200).with_body(r#"{"choices":[{"message":{"content":"{}"}}],"usage":{}}"#).create_async().await;
+            let _=send_text_request(ProviderKind::Ollama,&format!("{}/v1/chat/completions",server.url()),ProviderTextRequest {
+                rubric_enabled:false,model:"fixture",content_parts:&[runtime::ContentPart::Text("fixture".into())],timeout_in_sec:5,token:"",response_schema:&json!({"type":"object","properties":{},"additionalProperties":false}),max_output_tokens:Some(8192),temperature:None,thinking:outcome.provider_value(true),
+            }).await;
+            request.assert_async().await;
+        }
+    }
+
     #[test]
     fn unavailable_mistral_choice_uses_provider_default_without_substitution() {
         let setting = thinking::ThinkingSetting::Choice {

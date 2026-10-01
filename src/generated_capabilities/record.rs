@@ -8,9 +8,9 @@ pub const CLOSE: [u8; 16] = [
 ];
 pub const IDENTITY: &[u8; 26] = b"cargo-ai.generated-runtime";
 pub const CLI_IDENTITY: &[u8; 26] = b"cargo-ai.cli-run-runtime\0\0";
-pub const REVISION: u32 = 1;
-// Both invocation flags and both tagged setting forms are required together.
-pub const THINKING_CAPABILITIES: u32 = 0b1111;
+pub const REVISION: u32 = 2;
+// Three invocation flags and four tagged setting forms are required together.
+pub const THINKING_CAPABILITIES: u32 = 0b111_1111;
 pub const RECORD_LEN: usize = OPEN.len() + IDENTITY.len() + 8 + CLOSE.len();
 
 /// Emits numeric source data; template/source text is not a binary declaration.

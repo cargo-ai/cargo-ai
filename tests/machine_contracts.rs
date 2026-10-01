@@ -37,7 +37,13 @@ fn configure(f: &Fixture) {
 #[test]
 fn thinking_choices_and_default_fallback_survive_json_and_ndjson_terminals() {
     for format in ["json", "ndjson"] {
-        for (choice, applied) in [("high", true), ("max", false)] {
+        for (choice, applied, boolean_model) in [
+            ("high", true, false),
+            ("max", false, false),
+            ("ON", true, true),
+            ("oFf", true, true),
+            ("on", false, false),
+        ] {
             let f = Fixture::new("machine-thinking");
             configure(&f);
             fs::write(f.root.join("answer.json"), json!({
@@ -48,16 +54,27 @@ fn thinking_choices_and_default_fallback_survive_json_and_ndjson_terminals() {
             let mut server = mockito::Server::new();
             let metadata = server
                 .mock("POST", "/api/show")
-                .with_body(
-                    r#"{"model":"fixture","thinking":{"values":["low","high"],"default":"low"}}"#,
-                )
+                .with_body(if boolean_model {
+                    r#"{"model":"fixture","thinking":{"values":[false,true],"default":true}}"#
+                } else {
+                    r#"{"model":"fixture","thinking":{"values":["low","high"],"default":"low"}}"#
+                })
                 .create();
             let inference = server
                 .mock("POST", "/v1/chat/completions")
                 .match_request(move |request| {
                     let body: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
                     if applied {
-                        body["reasoning_effort"] == "high"
+                        body["reasoning_effort"]
+                            == if boolean_model {
+                                if choice.eq_ignore_ascii_case("on") {
+                                    "medium"
+                                } else {
+                                    "none"
+                                }
+                            } else {
+                                "high"
+                            }
                     } else {
                         body.get("reasoning_effort").is_none()
                     }
@@ -99,14 +116,20 @@ fn thinking_choices_and_default_fallback_survive_json_and_ndjson_terminals() {
                 &frames[0]
             };
             let result = &terminal["data"]["thinking"]["records"][0]["outcome"];
-            assert_eq!(result["requested"]["value"], choice);
+            let mode = if choice.eq_ignore_ascii_case("on") {
+                "on"
+            } else if choice.eq_ignore_ascii_case("off") {
+                "off"
+            } else {
+                "choice"
+            };
+            assert_eq!(result["requested"]["mode"], mode);
+            if mode == "choice" {
+                assert_eq!(result["requested"]["value"], choice);
+            }
             assert_eq!(
                 result["effective"]["mode"],
-                if applied {
-                    "choice"
-                } else {
-                    "provider_default"
-                }
+                if applied { mode } else { "provider_default" }
             );
             assert_eq!(terminal["warnings"].as_array().unwrap().is_empty(), applied);
             if !applied {

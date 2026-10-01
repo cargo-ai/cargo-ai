@@ -3655,7 +3655,7 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
                 rubric_enabled: rubric_enabled(),
                 max_output_tokens,
                 temperature,
-                thinking: thinking_outcome.applied_choice(),
+                thinking: thinking_outcome.provider_value(action_provider_context.provider == crate::providers::ProviderKind::Ollama),
             },
             openai_account_id.as_deref(),
         ),
@@ -5195,7 +5195,7 @@ async fn run_generate_image_step(
             output_format,
             &reference_images,
             effective_provider_context.openai_account_id.as_deref(),
-            thinking_outcome.applied_choice(),
+            thinking_outcome.provider_value(effective_provider_context.provider == crate::providers::ProviderKind::Ollama),
             effective_provider_context.max_output_tokens,
         )
         .await
