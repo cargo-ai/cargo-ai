@@ -88,8 +88,17 @@ pub(crate) async fn thinking(connection: Connection, model: &str) -> Result<Valu
     if connection.auth == ProfileAuthMode::OpenaiAccount {
         return super::account_discovery::thinking(connection, model).await;
     }
+    let kind = if connection.provider == ProviderKind::Gemini
+        && matches!(
+            super::thinking_image::gemini_support(&connection.request_endpoint, model),
+            super::thinking::ThinkingSupport::Configurable { .. }
+        ) {
+        super::thinking_metadata::ThinkingRequestKind::Image
+    } else {
+        super::thinking_metadata::ThinkingRequestKind::Text
+    };
     let support = tokio::select! {
-        support = super::thinking_metadata::query_support(connection.provider,&connection.request_endpoint,model,&connection.token,None,super::thinking_metadata::ThinkingRequestKind::Text) => support.map_err(thinking_metadata_error)?,
+        support = super::thinking_metadata::query_support(connection.provider,&connection.request_endpoint,model,&connection.token,None,kind) => support.map_err(thinking_metadata_error)?,
         result = tokio::signal::ctrl_c() => { let _ = result; return Err(DiscoveryError::new("cancelled","Thinking discovery was cancelled.")); },
     };
     Ok(thinking_value(&connection, model, support))

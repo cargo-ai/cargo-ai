@@ -88,6 +88,74 @@ fn args(base: &[&'static str]) -> Vec<&'static str> {
     [base, FORMAT].concat()
 }
 
+#[test]
+fn thinking_discovery_includes_exact_gemini_image_models_without_state_changes() {
+    let home = Home::new();
+    let before = home.snapshot();
+    for (model, url, expected) in [
+        (
+            "gemini-3.1-flash-image",
+            None,
+            Some((vec!["minimal", "high"], "minimal")),
+        ),
+        (
+            "gemini-3.1-flash-lite-image",
+            None,
+            Some((vec!["minimal", "high"], "minimal")),
+        ),
+        (
+            "gemini-3-flash-preview",
+            None,
+            Some((vec!["minimal", "low", "medium", "high"], "high")),
+        ),
+        ("gemini-3.1-flash-image-preview", None, None),
+        (
+            "gemini-3.1-flash-image",
+            Some("https://fixture.invalid/v1beta/interactions"),
+            None,
+        ),
+    ] {
+        let mut command = vec![
+            "models", "thinking", "--server", "gemini", "--auth", "api_key", "--stdin", "--model",
+            model,
+        ];
+        if let Some(url) = url {
+            command.extend(["--url", url]);
+        }
+        command.extend(FORMAT);
+        let output = home.run(&command, b"synthetic-image-discovery-key\n");
+        assert!(output.status.success());
+        let response = body(&output);
+        assert_eq!(response["payload_schema"], "cargo-ai.models.thinking.v1");
+        assert_eq!(response["data"]["model"], model);
+        assert_eq!(response["data"]["invocation_access"], "unverified");
+        let support = &response["data"]["thinking"];
+        if let Some((choices, default)) = expected {
+            assert_eq!(support["status"], "configurable");
+            assert_eq!(support["default"], default);
+            assert_eq!(
+                support["choices"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|c| c["value"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                choices
+            );
+            if model.ends_with("-image") {
+                assert_eq!(
+                    support["evidence"],
+                    "https://ai.google.dev/gemini-api/docs/image-generation"
+                );
+            }
+        } else {
+            assert_eq!(support["status"], "unknown");
+        }
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-image-discovery-key"));
+        assert_eq!(home.snapshot(), before);
+    }
+}
+
 #[tokio::test]
 async fn thinking_discovery_is_exact_read_only_and_preserves_unknown_vs_unsupported() {
     let mut server = mockito::Server::new_async().await;
