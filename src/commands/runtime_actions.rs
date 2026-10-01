@@ -972,6 +972,7 @@ enum RefreshAccessError {
 }
 
 /// Applies configured action rules to model output and executes matching steps.
+#[cfg(any(not(test), unix))]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn apply_actions(
     output: &crate::Output,
@@ -5104,19 +5105,22 @@ fn lookup_action_variable<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        action_completion_summary, action_execution_header, action_lane_prefix, apply_actions,
-        child_input_args, configured_agent_action_runtime_budget, format_backend_error_message,
-        format_backend_ui_message, format_elapsed_duration, insert_action_output_variable,
-        matching_run_steps,
+        action_completion_summary, action_execution_header, action_lane_prefix, child_input_args,
+        configured_agent_action_runtime_budget, format_backend_error_message,
+        format_backend_ui_message, format_elapsed_duration, matching_run_steps,
         resolve_action_render_mode_for_capability as resolve_action_output_mode_for_capability,
         resolve_child_artifact_invocation, resolve_generate_image_reference_images,
         resolve_generate_image_step_profile_context, resolve_installed_child_input_path,
-        resolve_run_args, resolve_string_parts, run_agent_step,
-        run_agent_step_with_provider_context, run_completion_message_for_depth, run_exec_step,
-        run_generate_image_step, run_header_line, run_tool_step, step_matches_platform,
+        resolve_run_args, resolve_string_parts, run_agent_step, run_completion_message_for_depth,
+        run_generate_image_step, run_header_line, step_matches_platform,
         validate_agent_action_depth, ActionOutput, ActionOutputMode, ActionProviderContext,
         ChildArtifactInvocation, RequestedActionRenderMode as RequestedActionOutputMode,
         StepExecutionOutcome, ACTION_OUTPUT,
+    };
+    #[cfg(unix)]
+    use super::{
+        apply_actions, insert_action_output_variable, run_agent_step_with_provider_context,
+        run_exec_step, run_tool_step,
     };
     use crate::credentials::openai_oauth;
     use crate::providers::ProviderKind;
@@ -5124,7 +5128,9 @@ mod tests {
     use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, MutexGuard};
+    #[cfg(unix)]
+    use std::sync::Arc;
+    use std::sync::MutexGuard;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     struct TestCargoHome {
@@ -5182,12 +5188,14 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     struct TestPathCommands {
         _guard: MutexGuard<'static, ()>,
         original_path: Option<OsString>,
         root: PathBuf,
     }
 
+    #[cfg(unix)]
     impl TestPathCommands {
         fn new() -> Self {
             let guard = super::TEST_ENV_LOCK
@@ -5235,6 +5243,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for TestPathCommands {
         fn drop(&mut self) {
             match &self.original_path {
@@ -5246,6 +5255,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn seed_passthrough_rustc(root: &Path, original_path: Option<&OsString>) {
         let Some(rustc_path) = find_command_on_path(original_path, "rustc") else {
             return;
@@ -5264,6 +5274,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn find_command_on_path(path: Option<&OsString>, command: &str) -> Option<PathBuf> {
         let Some(path) = path else {
             return None;
@@ -5468,6 +5479,7 @@ auth_mode = "{auth_mode}"
         )
     }
 
+    #[cfg(unix)]
     fn action(run: Vec<crate::RunStep>) -> crate::Action {
         crate::Action {
             name: "demo".to_string(),
@@ -5476,6 +5488,7 @@ auth_mode = "{auth_mode}"
         }
     }
 
+    #[cfg(unix)]
     fn runtime_vars(
         entries: &[(&str, serde_json::Value)],
     ) -> serde_json::Map<String, serde_json::Value> {

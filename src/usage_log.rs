@@ -119,6 +119,7 @@ pub(crate) struct UsageToolRunGuard {
 }
 
 impl UsageLogContext {
+    #[cfg(test)]
     pub(crate) fn from_runtime(
         explicit_path: Option<&str>,
         depth: u32,
@@ -592,7 +593,7 @@ impl UsageAgentRunGuard {
 impl Drop for UsageAgentRunGuard {
     fn drop(&mut self) {
         if !self.completed {
-            self.finish(UsageStatus::Failed);
+            self.finish_failed();
         }
     }
 }

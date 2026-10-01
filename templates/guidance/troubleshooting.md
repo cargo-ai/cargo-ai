@@ -131,6 +131,8 @@ Check for:
 
 Check for:
 - expecting listing to start Codex login, refresh an expired session or invoke a model; complete login separately and list again
+- assuming a newer/older/missing Codex executable determines the catalog query; Cargo AI uses its maintained adapter policy and supported existing file-backed session, independently of the executable
+- assuming a missing model proves a version mismatch; inspect optional JSON `compatibility.client_version` and current selected-account results, retain manual entry, and distinguish visibility from invocation access
 - expecting a Cargo AI home or profile name to pin a Codex workspace; the current shared Codex session determines the account context
 - using account `--stdin`, a custom catalog URL, keyring-only/ephemeral auth, or unsupported FedRAMP/alternate routing; use a supported file-backed commercial session or retain manual model entry
 - treating visible model IDs as proof of inference access or image/reasoning capabilities; listing preserves unknowns and does not certify every model

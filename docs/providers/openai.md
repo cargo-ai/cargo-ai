@@ -50,6 +50,35 @@ logout, unknown account context and unsupported routing fail with safe guidance;
 manual model entry remains available. Keyring-only/ephemeral sessions, FedRAMP
 or alternate endpoints and custom account discovery URLs are unsupported.
 
+Discovery does not locate or run the Codex CLI. With a supported existing
+file-backed session, an absent, older or differently installed executable does
+not change the request. The inspected session representation is shared by
+Codex 0.158.0 and 0.159.2; this does not promise every past or future auth format.
+Model IDs come from the provider, without a built-in model list or count cap.
+
+### Catalog compatibility policy
+
+Cargo AI selects an explicit adapter compatibility version, currently `0.159.2`,
+and sends it as `client_version`. JSON catalogs expose the same value under
+`compatibility: {"kind":"codex_backend","client_version":"0.159.2"}`. This is
+the adapter's request contract, not the installed CLI version. Updating Codex
+alone does not change it. The backend's version-selection rules are not a
+documented third-party API guarantee, and a newer value alone cannot establish
+model availability for an account.
+
+The contract was inspected against [Codex source at rust-v0.159.2](https://github.com/openai/codex/tree/ff6aec96948b70d94983af2641a6b67c94faeff5),
+including `codex-api/src/endpoint/models.rs`, `models-manager/src/lib.rs`,
+`login/src/token_data.rs` and `protocol/src/openai_models.rs` under `codex-rs/`.
+When upstream request/response behavior changes or a missing-model report
+suggests a compatibility gap, maintainers review those contracts, update the
+single `CATALOG_COMPATIBILITY_VERSION` policy if justified, and verify supported
+session/catalog fixtures plus bounded account evidence before claiming a fix.
+Do not copy a version from PATH, guess negotiation rules, or add missing IDs
+from a bundled catalog. If discovery cannot supply a desired model, manual
+entry remains available; listing and successful invocation are separate checks.
+
+### Selected account context
+
 Account profiles follow the current Codex account/workspace. Separate Cargo AI
 homes keep their own settings/local logout but share Codex identity. Refresh
 the catalog after switching accounts; a relevant session change during listing

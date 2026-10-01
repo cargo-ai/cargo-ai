@@ -12,7 +12,9 @@ use std::{
     time::Duration,
 };
 
-pub(crate) const CLIENT_VERSION: &str = "0.158.0";
+// Wire contract inspected at openai/codex rust-v0.159.2 (ff6aec96948b).
+// Maintain with the provider compatibility policy; do not infer it from PATH.
+const CATALOG_COMPATIBILITY_VERSION: &str = "0.159.2";
 const CATALOG_URL: &str = "https://chatgpt.com/backend-api/codex/models";
 const AUTH_NAMESPACE: &str = "https://api.openai.com/auth";
 
@@ -344,7 +346,7 @@ fn request(
     }
     client
         .get(connection.endpoint.clone())
-        .query(&[("client_version", CLIENT_VERSION)])
+        .query(&[("client_version", CATALOG_COMPATIBILITY_VERSION)])
         .bearer_auth(&snapshot.session.access_token)
         .header(
             "ChatGPT-Account-ID",
@@ -490,6 +492,7 @@ where
             "connection":{"endpoint":"https://chatgpt.com","profile":connection.profile},
             "fetched_at":time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
             "source":"live","cache":null,"complete":true,"continuation":null,"pages_fetched":1,
+            "compatibility":{"kind":"codex_backend","client_version":CATALOG_COMPATIBILITY_VERSION},
             "selection":"picker_visible","models":models,"invocation_access":"unverified"}),
         )
     };
@@ -660,7 +663,7 @@ mod tests {
                 .clone();
             let result = list_with_fetch(connection, &Client::new(), |request| async move {
                 assert_eq!(request.method(), reqwest::Method::GET);
-                assert_eq!(request.url().as_str(), format!("{CATALOG_URL}?client_version={CLIENT_VERSION}"));
+                assert_eq!(request.url().as_str(), format!("{CATALOG_URL}?client_version=0.159.2"));
                 assert_eq!(request.headers()["authorization"], format!("Bearer {token}"));
                 assert_eq!(request.headers()["ChatGPT-Account-ID"], account);
                 assert_eq!(request.headers()["originator"], "cargo-ai");
@@ -678,6 +681,10 @@ mod tests {
             assert_eq!(result["source"], "live");
             assert_eq!(result["selection"], "picker_visible");
             assert_eq!(result["cache"], Value::Null);
+            assert_eq!(
+                result["compatibility"],
+                json!({"kind":"codex_backend","client_version":"0.159.2"})
+            );
             assert_eq!(result["invocation_access"], "unverified");
             for secret in [
                 account,
@@ -692,6 +699,131 @@ mod tests {
             );
             assert!(!fixture.root.join("absent-home").exists());
             assert!(!format!("{:?}", fixture.connection().account).contains(account));
+        }
+    }
+    #[tokio::test]
+    async fn supported_session_variants_preserve_dynamic_catalogs_and_state() {
+        let fixture = Fixture::new("synthetic-layout-context");
+        // The inspected older/current layouts share this representation.
+        let common: Value = serde_json::from_str(&auth("synthetic-layout-context")).unwrap();
+        let mut legacy = common.clone();
+        legacy.as_object_mut().unwrap().remove("auth_mode");
+        legacy.as_object_mut().unwrap().remove("OPENAI_API_KEY");
+        legacy["tokens"]
+            .as_object_mut()
+            .unwrap()
+            .remove("refresh_token");
+        let mut additive = common.clone();
+        additive["last_refresh"] = json!("2026-09-30T12:00:00Z");
+        additive["future_session_metadata"] = json!({"unknown":true});
+        additive["tokens"]["future_token_metadata"] = json!("ignored");
+        let ids: Vec<_> = (0..12)
+            .map(|index| format!("future/model-{index}:exact"))
+            .collect();
+        let mut records: Vec<_> = ids
+            .iter()
+            .map(|id| json!({"slug":id,"visibility":"list","future_capability":{"unknown":true}}))
+            .collect();
+        records.push(records[0].clone());
+        records.push(json!({"slug":"manual-only","visibility":"hide"}));
+        let body = json!({"models":records,"future_catalog_field":true}).to_string();
+        for payload in [common, legacy, additive] {
+            let raw = payload.to_string();
+            std::fs::write(fixture.root.join("auth.json"), &raw).unwrap();
+            let catalog = list_with_fetch(fixture.connection(), &Client::new(), |_| async {
+                Ok(body.as_bytes().to_vec())
+            })
+            .await
+            .unwrap();
+            let actual: Vec<_> = catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|model| model["id"].as_str().unwrap())
+                .collect();
+            assert_eq!(actual, ids);
+            assert!(catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|model| model["metadata"] == json!({})));
+            assert_eq!(
+                std::fs::read_to_string(fixture.root.join("auth.json")).unwrap(),
+                raw
+            );
+            assert!(!fixture.root.join("absent-home").exists());
+        }
+    }
+    #[tokio::test]
+    async fn catalog_compatibility_is_independent_of_codex_installation() {
+        struct RestorePath(Option<std::ffi::OsString>);
+        impl Drop for RestorePath {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("PATH", value),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+        }
+        let fixture = Fixture::new("synthetic-install-context");
+        let _restore = RestorePath(std::env::var_os("PATH"));
+        let mut locations = Vec::new();
+        for (location, version) in [
+            (
+                "Old Application.app/Contents/Resources/codex-cli",
+                "0.158.0",
+            ),
+            ("package manager/bin", "0.159.2"),
+            ("standalone tools", "0.159.2"),
+        ] {
+            let directory = fixture.root.join(location);
+            std::fs::create_dir_all(&directory).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let binary = directory.join("codex");
+                std::fs::write(&binary, format!("#!/bin/sh\nprintf invoked > \"$CODEX_HOME/invoked\"\nprintf '{version}\\n'\n")).unwrap();
+                std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            #[cfg(windows)]
+            std::fs::write(
+                directory.join("codex.cmd"),
+                format!(
+                    "@echo off\r\necho invoked>\"%CODEX_HOME%\\invoked\"\r\necho {version}\r\n"
+                ),
+            )
+            .unwrap();
+            locations.push(directory);
+        }
+        let scenarios = [
+            vec![],
+            vec![locations[0].clone()],
+            vec![locations[1].clone()],
+            vec![locations[2].clone()],
+            locations.clone(),
+        ];
+        let before = std::fs::read(fixture.root.join("auth.json")).unwrap();
+        let mut expected = None;
+        for paths in scenarios {
+            std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+            let mut catalog =
+                list_with_fetch(fixture.connection(), &Client::new(), |request| async move {
+                    assert_eq!(request.url().query(), Some("client_version=0.159.2"));
+                    Ok(br#"{"models":[{"slug":"future/exact-id","visibility":"list"}]}"#.to_vec())
+                })
+                .await
+                .unwrap();
+            catalog.as_object_mut().unwrap().remove("fetched_at");
+            if let Some(expected) = &expected {
+                assert_eq!(&catalog, expected);
+            } else {
+                expected = Some(catalog);
+            }
+            assert!(!fixture.root.join("invoked").exists());
+            assert_eq!(
+                std::fs::read(fixture.root.join("auth.json")).unwrap(),
+                before
+            );
         }
     }
     #[tokio::test]

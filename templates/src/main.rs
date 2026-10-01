@@ -35,7 +35,7 @@ use config::loader::{config_path, find_profile, load_config};
 use config::schema::{Profile, ProfileAuthMode, SecretStoreMode};
 use providers::{
     provider_error_messages, validate_provider_content_parts, validate_provider_request,
-    AuthenticationPolicy, ProviderError, ProviderKind,
+    AuthenticationPolicy, ProviderKind,
 };
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
