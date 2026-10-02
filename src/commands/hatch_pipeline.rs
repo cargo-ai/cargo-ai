@@ -4,17 +4,21 @@
 //! source resolution for hatch-style flows.
 use std::fs;
 use std::io::{Error, ErrorKind};
+#[cfg(feature = "developer-tools")]
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "developer-tools")]
 use crate::agent_builder::build_target::{BuildTarget, CargoCompileProfile};
 
 /// Execution mode for hatch pipeline.
+#[cfg(any(feature = "developer-tools", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HatchMode {
     Build,
     Check,
 }
 
+#[cfg(feature = "developer-tools")]
 impl HatchMode {
     fn compile_profile(self) -> CargoCompileProfile {
         match self {
@@ -24,7 +28,7 @@ impl HatchMode {
     }
 }
 
-#[cfg_attr(not(feature = "developer-tools"), allow(dead_code))]
+#[cfg(feature = "developer-tools")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum HatchSource {
     Registry {
@@ -42,11 +46,13 @@ pub(crate) enum HatchSource {
     },
 }
 
+#[cfg(feature = "developer-tools")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HatchPresentation {
     pub source: HatchSource,
 }
 
+#[cfg(feature = "developer-tools")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HatchProgressStep {
     PreparingDefinition,
@@ -59,6 +65,7 @@ pub(crate) enum HatchProgressStep {
 }
 
 /// Request used to run a hatch/check pipeline.
+#[cfg(feature = "developer-tools")]
 #[derive(Clone, Debug)]
 pub(crate) struct HatchRequest {
     pub project_name: String,
@@ -73,6 +80,7 @@ pub(crate) struct HatchRequest {
     pub portable_metadata: crate::agent_builder::project::PortableAgentMetadata,
 }
 
+#[cfg(feature = "developer-tools")]
 impl HatchRequest {
     pub(crate) fn new(
         project_name: String,
@@ -112,12 +120,14 @@ impl HatchRequest {
     }
 }
 
+#[cfg(feature = "developer-tools")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TemplateSummaryStatus {
     Created,
     Reused,
 }
 
+#[cfg(feature = "developer-tools")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum WorkspaceSummaryStatus {
     Removed,
@@ -125,6 +135,7 @@ enum WorkspaceSummaryStatus {
     CleanupFailed(String),
 }
 
+#[cfg(feature = "developer-tools")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct HatchRunSummary {
     project_name: String,
@@ -136,6 +147,7 @@ struct HatchRunSummary {
     workspace_status: WorkspaceSummaryStatus,
 }
 
+#[cfg(feature = "developer-tools")]
 pub(crate) fn print_hatch_start(project_name: &str, mode: HatchMode) {
     println!(
         "{} agent `{}`...",
@@ -148,6 +160,7 @@ pub(crate) fn print_hatch_start(project_name: &str, mode: HatchMode) {
     println!();
 }
 
+#[cfg(feature = "developer-tools")]
 pub(crate) fn print_hatch_progress(step: HatchProgressStep) {
     let message = match step {
         HatchProgressStep::PreparingDefinition => "Preparing definition",
@@ -163,6 +176,7 @@ pub(crate) fn print_hatch_progress(step: HatchProgressStep) {
 }
 
 /// Parses `--output-dir` into an optional directory path.
+#[cfg(feature = "developer-tools")]
 pub(crate) fn resolve_output_dir(raw_output_dir: Option<&str>) -> Result<Option<PathBuf>, String> {
     let Some(raw_output_dir) = raw_output_dir else {
         return Ok(None);
@@ -177,10 +191,12 @@ pub(crate) fn resolve_output_dir(raw_output_dir: Option<&str>) -> Result<Option<
 }
 
 /// Runs the hatch execution pipeline for a single agent definition.
+#[cfg(feature = "developer-tools")]
 pub(crate) fn run_hatch_pipeline(request: HatchRequest) -> bool {
     run_hatch_pipeline_with_lock(request, crate::agent_builder::lock::try_acquire_agent_lock)
 }
 
+#[cfg(feature = "developer-tools")]
 fn run_hatch_pipeline_with_lock<F>(request: HatchRequest, acquire_lock: F) -> bool
 where
     F: FnOnce(&str) -> std::io::Result<crate::agent_builder::lock::AgentLockGuard>,
@@ -377,6 +393,7 @@ where
     true
 }
 
+#[cfg(feature = "developer-tools")]
 fn workspace_progress_step(keep_project: bool) -> HatchProgressStep {
     if keep_project {
         HatchProgressStep::FinalizingWorkspace
@@ -385,6 +402,7 @@ fn workspace_progress_step(keep_project: bool) -> HatchProgressStep {
     }
 }
 
+#[cfg(feature = "developer-tools")]
 fn finalize_workspace(new_project_name: &str, keep_project: bool) -> WorkspaceSummaryStatus {
     if keep_project {
         return WorkspaceSummaryStatus::Preserved;
@@ -396,6 +414,7 @@ fn finalize_workspace(new_project_name: &str, keep_project: bool) -> WorkspaceSu
     }
 }
 
+#[cfg(feature = "developer-tools")]
 fn prepare_workspace_for_hatch<FExists, FDelete>(
     new_project_name: &str,
     force_overwrite: bool,
@@ -428,6 +447,7 @@ where
     Ok(())
 }
 
+#[cfg(feature = "developer-tools")]
 fn render_hatch_success_lines(summary: &HatchRunSummary) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(String::new());
@@ -484,6 +504,7 @@ fn render_hatch_success_lines(summary: &HatchRunSummary) -> Vec<String> {
     lines
 }
 
+#[cfg(feature = "developer-tools")]
 fn summary_line(summary: &HatchRunSummary) -> String {
     match (&summary.mode, &summary.source) {
         (HatchMode::Build, HatchSource::Registry { .. }) => {
@@ -539,6 +560,7 @@ fn summary_line(summary: &HatchRunSummary) -> String {
     }
 }
 
+#[cfg(feature = "developer-tools")]
 fn source_items(summary: &HatchRunSummary) -> Vec<(&'static str, String)> {
     match &summary.source {
         HatchSource::Registry { name } => {
@@ -566,6 +588,7 @@ fn source_items(summary: &HatchRunSummary) -> Vec<(&'static str, String)> {
     }
 }
 
+#[cfg(feature = "developer-tools")]
 fn template_status_label(status: TemplateSummaryStatus) -> &'static str {
     match status {
         TemplateSummaryStatus::Created => "Created warmed template",
@@ -573,6 +596,7 @@ fn template_status_label(status: TemplateSummaryStatus) -> &'static str {
     }
 }
 
+#[cfg(feature = "developer-tools")]
 fn workspace_status_label(status: &WorkspaceSummaryStatus) -> String {
     match status {
         WorkspaceSummaryStatus::Removed => "Removed".to_string(),
@@ -581,6 +605,7 @@ fn workspace_status_label(status: &WorkspaceSummaryStatus) -> String {
     }
 }
 
+#[cfg(feature = "developer-tools")]
 fn push_aligned_section(lines: &mut Vec<String>, title: &str, items: &[(&str, String)]) {
     if items.is_empty() {
         return;
@@ -599,6 +624,7 @@ fn push_aligned_section(lines: &mut Vec<String>, title: &str, items: &[(&str, St
     }
 }
 
+#[cfg(feature = "developer-tools")]
 fn display_path(path: &Path) -> String {
     if path.is_relative() {
         return path.display().to_string();
@@ -667,16 +693,20 @@ async fn fetch_from_registry_at_url(name: &str, url: &str) -> Result<String, Err
 
 #[cfg(test)]
 mod tests {
+    use super::fetch_from_registry_at_url;
+    #[cfg(feature = "developer-tools")]
     use super::{
-        display_path, fetch_from_registry_at_url, prepare_workspace_for_hatch,
-        render_hatch_success_lines, resolve_output_dir, run_hatch_pipeline_with_lock, HatchMode,
-        HatchPresentation, HatchRequest, HatchRunSummary, HatchSource, TemplateSummaryStatus,
-        WorkspaceSummaryStatus,
+        display_path, prepare_workspace_for_hatch, render_hatch_success_lines, resolve_output_dir,
+        run_hatch_pipeline_with_lock, HatchMode, HatchPresentation, HatchRequest, HatchRunSummary,
+        HatchSource, TemplateSummaryStatus, WorkspaceSummaryStatus,
     };
+    #[cfg(feature = "developer-tools")]
     use crate::agent_builder::build_target::BuildTarget;
     use mockito::Matcher;
+    #[cfg(feature = "developer-tools")]
     use std::cell::Cell;
     use std::io;
+    #[cfg(feature = "developer-tools")]
     use std::path::PathBuf;
 
     #[tokio::test]
@@ -727,6 +757,7 @@ mod tests {
         assert!(error.to_string().contains("HTTP 404"));
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn lock_conflict_fails_fast_before_project_mutation() {
         let result = run_hatch_pipeline_with_lock(
@@ -755,6 +786,7 @@ mod tests {
         assert!(!result);
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn existing_workspace_requires_force() {
         let err = prepare_workspace_for_hatch("weather_test", false, |_| true, |_| Ok(()))
@@ -763,6 +795,7 @@ mod tests {
         assert!(err.contains("--force"));
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn force_replaces_existing_workspace_before_build() {
         let deleted = Cell::new(false);
@@ -780,12 +813,14 @@ mod tests {
         assert!(deleted.get());
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn output_dir_rejects_empty_value() {
         let err = resolve_output_dir(Some("   ")).expect_err("empty output dir should fail");
         assert!(err.contains("--output-dir"));
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn output_dir_accepts_non_empty_value() {
         let output_dir =
@@ -793,6 +828,7 @@ mod tests {
         assert_eq!(output_dir, Some(PathBuf::from("./dist")));
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn renders_registry_build_summary_lines() {
         let lines = render_hatch_success_lines(&HatchRunSummary {
@@ -820,6 +856,7 @@ mod tests {
         assert!(rendered.contains("Run agent  `./weather_test --help`"));
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn renders_account_check_summary_without_output_section() {
         let lines = render_hatch_success_lines(&HatchRunSummary {
@@ -852,6 +889,7 @@ mod tests {
         assert!(!rendered.contains("\nNext steps\n"));
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn renders_inline_json_build_summary_lines() {
         let lines = render_hatch_success_lines(&HatchRunSummary {
@@ -870,6 +908,7 @@ mod tests {
         assert!(rendered.contains("Agent  weather_test"));
     }
 
+    #[cfg(feature = "developer-tools")]
     #[test]
     fn displays_absolute_current_dir_children_as_dot_relative_paths() {
         let current_dir = std::env::current_dir().expect("current dir should resolve");

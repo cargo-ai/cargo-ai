@@ -111,6 +111,26 @@ Use `platform` only for genuinely platform-specific work. It accepts `macos`, `l
 
 An omitted platform makes the step eligible everywhere. Prefer portable tools and executables when the workflow is expected to work across operating systems.
 
+## Thinking Overrides
+
+Definition revision `2026-10-01.r1` adds optional tagged `thinking` to `agent`, `generate_image`, `generate_audio` and `transcribe_audio` steps:
+
+```json
+{
+  "kind": "agent",
+  "artifact": "./child",
+  "thinking": { "mode": "choice", "value": { "var": "runtime.thinking" } }
+}
+```
+
+Declare `runtime.thinking` as a string runtime variable and supply it with `--run-var thinking=VALUE`. A choice can also use a literal string or an available string reference, including an earlier capture. References must resolve to a nonblank string with the same exact-choice semantics as profile and invocation settings; numbers/booleans are never coerced. `{"mode":"provider_default"}` explicitly stops inheritance. Missing modes/values, unknown fields/modes and invalid references remain definition/input errors. `exec`, tool and email steps do not accept thinking; direct child `model` remains unsupported.
+
+For media, precedence is explicit step thinking, then selected step-profile thinking, then invocation thinking. Resolve support for the effective provider, model and media endpoint; text support does not imply speech/image support. An unavailable exact choice uses provider default with a notice and no replacement choice. Fixed speech services also preserve execution when a thinking control is inapplicable.
+
+Child JSON definitions retain their existing parent/step profile selection; compiled children retain their existing profile behavior. Parent CLI thinking/model overrides do not implicitly propagate. An explicit child step setting is forwarded only when the actual executable declares the expected runtime capability. Cargo AI reads that declaration passively; it does not execute a probe or replay the child. Older or opaque children receive no unsupported flags and report `not_forwarded`, with effective thinking `child_unverified`. A capable child reports `forwarded`, also with `child_unverified`: forwarding proves supported argument delivery, not observed child provider acceptance.
+
+Earlier strict revisions reject `thinking`; permissive legacy fields never become active thinking controls. Ordinary scaffolds retain `2026-09-09.r1`. Review and validate a complete definition before opting into the new revision, and rebuild standalone artifacts. Older CLIs reject the new revision. Hosted acceptance is not included in local/hatched support; an older service can reject it as unsupported. See the [authoring contract](../templates/guidance/agent-definition-contract.md) and [machine outcomes](machine-payloads.md#runtime-thinking).
+
 ## Resolve Profiles, Models, And Paths
 
 Child `agent`, `generate_image`, `generate_audio`, and `transcribe_audio` steps may select a step-level `profile`. The child receives that resolved profile as its runtime profile.
@@ -274,3 +294,6 @@ Updated child-agent runtimes also forward the root consuming-workspace context. 
 ## Optional application lifecycle stream
 
 Selected `run --output-format ndjson` emits bounded typed operation, provider, action and child lifecycle records instead of the human renderer. Events from parallel actions may interleave within one global sequence. Decode complete lines incrementally, preserve IDs/sequence, and require a terminal outcome before claiming completion. Existing opaque generated children supply exit/diagnostic facts and report instrumentation unavailable; they do not acquire fabricated results or child telemetry. See [machine runtime contracts](machine-payloads.md#runtime-and-model-discovery) for frame schemas, content opt-in, produced-image metadata and cancellation/incomplete-output limits.
+
+
+Use tagged `{"mode":"on"}` or `{"mode":"off"}` for a qualified Boolean control. Tagged Choice stays exact even for literal `on`/`off`; only the generic CLI aliases are case insensitive. Runtime declaration revision2 adds toggles and exact-choice escaping; revision1 children retain named/default forwarding and receive no Boolean override. [Shared selection and discovery rules](providers/README.md#thinking-selection) apply.

@@ -160,11 +160,20 @@ enum ToolParamValue {
 }
 
 #[derive(Debug, Clone)]
+enum ThinkingSpec {
+    ProviderDefault,
+    Choice { value: RunArg },
+    On,
+    Off,
+}
+
+#[derive(Debug, Clone)]
 struct RunStep {
     kind: String,
     program: Option<String>,
     model: Option<RunArg>,
     profile: Option<RunArg>,
+    thinking: Option<ThinkingSpec>,
     voice: Option<RunArg>,
     audio_path: Option<RunArg>,
     output_variable: Option<String>,
@@ -391,6 +400,16 @@ pub fn generate_agent_build_provenance_source_with_values(
         rust_string_literal(build_timestamp_utc)
     ));
 
+    let capability_record = crate::generated_capability_record::encoded_record(false);
+    let bytes = capability_record
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    generated.push_str(&format!(
+        "static AGENT_RUNTIME_CAPABILITY_RECORD: [u8; {}] = [{bytes}];\n",
+        capability_record.len()
+    ));
     Ok(generated)
 }
 
@@ -498,8 +517,7 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
         let prop_obj = expect_object(prop_value, &format!("$.agent_schema.properties.{name}"))?;
         let mut parsed_property =
             parse_agent_property(name, prop_obj, &format!("$.agent_schema.properties.{name}"))?;
-        if schema_version == definition_validation::RUBRIC_SCHEMA_VERSION
-            && prop_obj.contains_key("rubric")
+        if definition_validation::supports_rubric(schema_version) && prop_obj.contains_key("rubric")
         {
             // Exact authored endpoints are returned unchanged by rubric providers.
             parsed_property.rust_type = "serde_json::Number".to_string();
@@ -532,7 +550,8 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
             .map_err(BuildError::Definition)?
             == definition_validation::DefinitionRevision::Strict,
         rubric_enabled: root[definition_validation::VERSION_KEY]
-            == definition_validation::RUBRIC_SCHEMA_VERSION,
+            .as_str()
+            .is_some_and(definition_validation::supports_rubric),
     })
 }
 
@@ -806,6 +825,10 @@ fn parse_actions(
     named_input_kinds: &BTreeMap<String, InputKind>,
 ) -> Result<Vec<Action>, BuildError> {
     let actions = get_required_array(root_obj, "actions", "$")?;
+    let thinking_enabled = root_obj
+        .get(AGENT_DEFINITION_SCHEMA_VERSION_KEY)
+        .and_then(Value::as_str)
+        == Some(definition_validation::THINKING_SCHEMA_VERSION);
     let mut parsed = Vec::with_capacity(actions.len());
 
     for (action_idx, action_value) in actions.iter().enumerate() {
@@ -842,6 +865,11 @@ fn parse_actions(
                 &captured_variable_names,
             )?;
             let kind = get_required_string(run_obj, "kind", &run_path)?.to_string();
+            let thinking = if thinking_enabled {
+                parse_thinking(run_obj, &run_path, &available_field_types)?
+            } else {
+                None
+            };
             for (field, supported_kind) in
                 [("voice", "generate_audio"), ("audio", "transcribe_audio")]
             {
@@ -958,6 +986,7 @@ fn parse_actions(
                     let args = parse_run_args(run_obj, &run_path, &available_field_types)?;
                     RunStep {
                         kind,
+                        thinking: thinking.clone(),
                         program: Some(program),
                         model: None,
                         profile: None,
@@ -1093,6 +1122,7 @@ fn parse_actions(
 
                     RunStep {
                         kind,
+                        thinking: thinking.clone(),
                         program: None,
                         model: None,
                         profile: None,
@@ -1235,6 +1265,7 @@ fn parse_actions(
 
                     RunStep {
                         kind,
+                        thinking: thinking.clone(),
                         program: None,
                         model: None,
                         profile,
@@ -1380,6 +1411,7 @@ fn parse_actions(
 
                     RunStep {
                         kind,
+                        thinking: thinking.clone(),
                         program: None,
                         model: None,
                         profile: None,
@@ -1538,6 +1570,7 @@ fn parse_actions(
 
                     RunStep {
                         kind,
+                        thinking: thinking.clone(),
                         program: None,
                         model,
                         profile,
@@ -1570,7 +1603,11 @@ fn parse_actions(
                     reject_media_step_fields(
                         run_obj,
                         &run_path,
-                        &["text", "path", "voice", "profile", "model"],
+                        if thinking_enabled {
+                            &["text", "path", "voice", "profile", "model", "thinking"]
+                        } else {
+                            &["text", "path", "voice", "profile", "model"]
+                        },
                     )?;
                     let model = parse_optional_string_run_arg_field(
                         run_obj,
@@ -1613,6 +1650,7 @@ fn parse_actions(
                     }
                     RunStep {
                         kind,
+                        thinking: thinking.clone(),
                         program: None,
                         model,
                         profile,
@@ -1645,7 +1683,11 @@ fn parse_actions(
                     reject_media_step_fields(
                         run_obj,
                         &run_path,
-                        &["audio", "output_variable", "profile", "model"],
+                        if thinking_enabled {
+                            &["audio", "output_variable", "profile", "model", "thinking"]
+                        } else {
+                            &["audio", "output_variable", "profile", "model"]
+                        },
                     )?;
                     let model = parse_optional_string_run_arg_field(
                         run_obj,
@@ -1673,6 +1715,7 @@ fn parse_actions(
                     })?;
                     RunStep {
                         kind,
+                        thinking: thinking.clone(),
                         program: None,
                         model,
                         profile,
@@ -2293,6 +2336,35 @@ fn parse_optional_profile_field(
         action_field_types,
         "`profile`",
     )
+}
+
+fn parse_thinking(
+    run_obj: &Map<String, Value>,
+    run_path: &str,
+    available_field_types: &BTreeMap<String, FieldType>,
+) -> Result<Option<ThinkingSpec>, BuildError> {
+    let Some(value) = run_obj.get("thinking") else {
+        return Ok(None);
+    };
+    let path = format!("{run_path}.thinking");
+    let setting = expect_object(value, &path)?;
+    match get_required_string(setting, "mode", &path)? {
+        "provider_default" => Ok(Some(ThinkingSpec::ProviderDefault)),
+        "on" => Ok(Some(ThinkingSpec::On)),
+        "off" => Ok(Some(ThinkingSpec::Off)),
+        "choice" => Ok(Some(ThinkingSpec::Choice {
+            value: parse_required_string_run_arg_field(
+                setting,
+                "value",
+                &path,
+                available_field_types,
+            )?,
+        })),
+        _ => Err(BuildError::config(
+            format!("{path}.mode"),
+            "expected `provider_default`, `choice`, `on`, or `off`",
+        )),
+    }
 }
 
 fn parse_optional_string_run_arg_field(
@@ -4408,6 +4480,13 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     .as_ref()
                     .map(|profile| format!("Some({})", render_run_arg(profile)))
                     .unwrap_or_else(|| "None".to_string());
+                let thinking = match &run_step.thinking {
+                    None => "None".to_string(),
+                    Some(ThinkingSpec::ProviderDefault) => "Some(crate::providers::thinking::ThinkingSetting::ProviderDefault)".to_string(),
+                    Some(ThinkingSpec::On) => "Some(crate::providers::thinking::ThinkingSetting::On)".to_string(),
+                    Some(ThinkingSpec::Off) => "Some(crate::providers::thinking::ThinkingSetting::Off)".to_string(),
+                    Some(ThinkingSpec::Choice { value }) => format!("Some(crate::providers::thinking::ThinkingSetting::Choice {{ value: {} }})", render_run_arg(value)),
+                };
                 let voice = run_step
                     .voice
                     .as_ref()
@@ -4570,6 +4649,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         program: {},
                         model: {},
                         profile: {},
+                        thinking: {},
                         voice: {},
                         audio_path: {},
                         output_variable: {},
@@ -4604,6 +4684,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         .unwrap_or_else(|| "None".to_string()),
                     model,
                     profile,
+                    thinking,
                     voice,
                     audio_path,
                     output_variable,
@@ -4688,6 +4769,11 @@ fn render_agent_model(config: &AgentConfig) -> String {
     };
 
     let raw_validation_complete = config.strict_definition;
+    let raw_validation_parameter = if config.strict_definition {
+        "value"
+    } else {
+        "_value"
+    };
     let raw_validation = if config.strict_definition {
         "        crate::definition_validation::validate_model_output(value, &json_schema_value()).map_err(|error| error.to_string())"
     } else {
@@ -4707,7 +4793,7 @@ pub struct Output {{
 impl crate::providers::ValidatedResponse for Output {{
     const RAW_VALIDATION_COMPLETE: bool = {raw_validation_complete};
 
-    fn validate_raw_response(value: &serde_json::Value) -> Result<(), String> {{
+    fn validate_raw_response({raw_validation_parameter}: &serde_json::Value) -> Result<(), String> {{
 {raw_validation}
     }}
 
@@ -4877,6 +4963,7 @@ pub struct RunStep {{
     program: Option<String>,
     model: Option<RunArg>,
     profile: Option<RunArg>,
+    thinking: Option<crate::providers::thinking::ThinkingSetting<RunArg>>,
     voice: Option<RunArg>,
     audio_path: Option<RunArg>,
     output_variable: Option<String>,
@@ -5217,6 +5304,8 @@ mod tests {
         for (version, rubric) in [
             ("2026-09-19.r1", true),
             ("2026-09-19.r1", false),
+            ("2026-10-01.r1", true),
+            ("2026-10-01.r1", false),
             ("2026-09-08.r42", true),
             ("2026-09-09.r1", false),
         ] {
@@ -5231,7 +5320,7 @@ mod tests {
             let normalized = &config.properties[0].schema_value;
             assert_eq!(
                 config.properties[0].rust_type,
-                if version == "2026-09-19.r1" && rubric {
+                if super::definition_validation::supports_rubric(version) && rubric {
                     "serde_json::Number"
                 } else {
                     "f64"
@@ -5239,7 +5328,7 @@ mod tests {
             );
             for key in ["minimum", "maximum"] {
                 let authored = &property[key];
-                let expected = if version == "2026-09-19.r1" && rubric {
+                let expected = if super::definition_validation::supports_rubric(version) && rubric {
                     authored.clone()
                 } else {
                     serde_json::json!(authored.as_f64().unwrap())

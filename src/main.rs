@@ -21,6 +21,10 @@ mod config;
 mod credentials;
 #[path = "../templates/definition_validation.rs"]
 mod definition_validation;
+mod generated_capabilities;
+#[cfg(test)]
+#[path = "generated_capabilities/record.rs"]
+mod generated_capability_record;
 mod infra_api;
 mod providers;
 mod runtime_definition;
@@ -41,6 +45,7 @@ use std::path::Path;
 use std::process;
 
 include!(concat!(env!("OUT_DIR"), "/agent_model.rs"));
+include!(concat!(env!("OUT_DIR"), "/cli_run_runtime_capabilities.rs"));
 
 fn should_run_automatic_update_check(
     automatic_persistence_allowed: bool,

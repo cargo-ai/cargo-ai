@@ -66,6 +66,7 @@ fn transport(timeout: Duration) -> Result<transport::Transport, String> {
     }
     transport::Transport::new(auth, timeout)
 }
+#[cfg(cargo_ai_cli)]
 pub(crate) fn local_status() -> Result<Value, String> {
     let mut status = queue::status()?;
     let settings = usage_store::settings()?;
@@ -74,6 +75,7 @@ pub(crate) fn local_status() -> Result<Value, String> {
     status["generation"] = json!(settings.backup_generation);
     Ok(status)
 }
+#[cfg(cargo_ai_cli)]
 pub(crate) async fn remote_status() -> Result<Value, String> {
     transport(Duration::from_secs(10))?
         .call(json!({"command":"status"}))
@@ -85,6 +87,7 @@ pub(crate) struct OperationEffects {
     pub(crate) remote: &'static str,
     pub(crate) local: &'static str,
     pub(crate) queue: &'static str,
+    #[cfg(cargo_ai_cli)]
     pub(crate) settings: &'static str,
     pub(crate) uploaded_records: usize,
     pub(crate) accepted_records: usize,
@@ -97,10 +100,12 @@ impl OperationEffects {
             remote: "unapplied",
             local: "unapplied",
             queue: "unapplied",
+            #[cfg(cargo_ai_cli)]
             settings: "unapplied",
             ..Self::default()
         }
     }
+    #[cfg(cargo_ai_cli)]
     pub(crate) fn value(&self) -> Value {
         json!({"remote":self.remote,"local":self.local,"queue":self.queue,"settings":self.settings,
             "uploaded_records":self.uploaded_records.to_string(),"remote_accepted_records":self.accepted_records.to_string(),"batches":self.batches,
@@ -109,22 +114,25 @@ impl OperationEffects {
             "reconciliation":"usage backup status; do not replay an uncertain remote mutation"})
     }
 }
+#[cfg(cargo_ai_cli)]
 #[derive(Debug)]
 pub(crate) struct OperationFailure {
     pub(crate) message: String,
     pub(crate) effects: OperationEffects,
 }
 
+#[cfg(cargo_ai_cli)]
 pub(crate) async fn enable() -> Result<Value, String> {
     enable_outcome().await.map_err(|error| error.message)
 }
+#[cfg(cargo_ai_cli)]
 pub(crate) async fn enable_outcome() -> Result<Value, OperationFailure> {
     let mut effects = OperationEffects::initial();
     enable_impl(&mut effects, crate::usage_backup_host::save_settings)
         .await
         .map_err(|message| OperationFailure { message, effects })
 }
-#[cfg(test)]
+#[cfg(all(cargo_ai_cli, test))]
 pub(crate) async fn enable_outcome_with_writer(
     persist: impl FnOnce(&crate::usage_store::UsageSettings) -> Result<(), String>,
 ) -> Result<Value, OperationFailure> {
@@ -133,6 +141,7 @@ pub(crate) async fn enable_outcome_with_writer(
         .await
         .map_err(|message| OperationFailure { message, effects })
 }
+#[cfg(cargo_ai_cli)]
 async fn enable_impl(
     effects: &mut OperationEffects,
     persist: impl FnOnce(&crate::usage_store::UsageSettings) -> Result<(), String>,
@@ -183,18 +192,22 @@ async fn enable_impl(
         json!({"enabled":true,"account_binding":settings.backup_account_binding,"generation":settings.backup_generation,"future_records_after":boundary.to_string(),"historical_records_selected":0,"note":"Previously queued selections for this same account and generation remain selected. Records collected while upload was disabled require explicit historical selection."}),
     )
 }
+#[cfg(cargo_ai_cli)]
 pub(crate) fn disable() -> Result<Value, String> {
     disable_outcome().map_err(|error| error.message)
 }
+#[cfg(cargo_ai_cli)]
 pub(crate) fn disable_outcome() -> Result<Value, OperationFailure> {
     disable_outcome_with_writer(crate::usage_backup_host::save_settings)
 }
+#[cfg(cargo_ai_cli)]
 pub(crate) fn disable_outcome_with_writer(
     persist: impl FnOnce(&crate::usage_store::UsageSettings) -> Result<(), String>,
 ) -> Result<Value, OperationFailure> {
     let mut effects = OperationEffects::initial();
     disable_impl(&mut effects, persist).map_err(|message| OperationFailure { message, effects })
 }
+#[cfg(cargo_ai_cli)]
 fn disable_impl(
     effects: &mut OperationEffects,
     persist: impl FnOnce(&crate::usage_store::UsageSettings) -> Result<(), String>,
@@ -215,6 +228,7 @@ fn disable_impl(
         json!({"enabled":false,"history_deleted":false,"queued_selections_preserved":true,"note":"Already transmitted requests may finish; future upload passes stop."}),
     )
 }
+#[cfg(cargo_ai_cli)]
 pub(crate) fn include_history(
     through: Option<i64>,
     expected: Option<Binding>,
@@ -326,9 +340,11 @@ async fn drain_impl(
         json!({"enabled":true,"uploaded_records":uploaded,"batches":batches,"account_binding":binding.account,"generation":binding.generation,"local":queue::status()?}),
     )
 }
+#[cfg(cargo_ai_cli)]
 pub(crate) async fn sync() -> Result<Value, String> {
     sync_outcome().await.map_err(|error| error.message)
 }
+#[cfg(cargo_ai_cli)]
 pub(crate) async fn sync_outcome() -> Result<Value, OperationFailure> {
     let mut effects = OperationEffects::initial();
     let result = tokio::time::timeout(
@@ -361,6 +377,7 @@ pub(crate) async fn opportunistic() {
         }
     }
 }
+#[cfg(cargo_ai_cli)]
 pub(crate) async fn restore(
     cursor: Option<String>,
     expected: Option<Binding>,
@@ -409,6 +426,7 @@ pub(crate) async fn restore(
         json!({"account_binding":binding.account,"generation":binding.generation,"page_records":records.len(),"inserted_records":inserted,"next_cursor":page["next_cursor"],"snapshot_complete":page["snapshot_complete"],"note":"Continue --confirm --cursor with next_cursor until snapshot_complete. Local-only labels are preserved for existing facts; newly restored labels may be opaque IDs."}),
     )
 }
+#[cfg(cargo_ai_cli)]
 pub(crate) async fn delete_cloud(
     expected: Option<Binding>,
     confirmed: bool,

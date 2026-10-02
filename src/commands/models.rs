@@ -13,10 +13,23 @@ use clap::ArgMatches;
 use serde_json::Value;
 
 pub async fn run(matches: &ArgMatches) -> Result<Value, DiscoveryError> {
+    let (matches, thinking) = match matches.subcommand() {
+        Some(("thinking", child)) => (child, true),
+        Some(("list", child)) => (child, false),
+        _ => (
+            matches,
+            matches
+                .try_get_one::<String>("model")
+                .ok()
+                .flatten()
+                .is_some(),
+        ),
+    };
     let connection = if let Some(name) = matches.get_one::<String>("profile") {
-        resolve_saved(
+        resolve_saved_for(
             &crate::config::paths::cargo_ai_root().join("config.toml"),
             name,
+            thinking,
         )?
     } else {
         let server = matches.get_one::<String>("server").ok_or_else(|| {
@@ -42,7 +55,12 @@ pub async fn run(matches: &ArgMatches) -> Result<Value, DiscoveryError> {
                 ))
             }
         };
-        let endpoint = discovery::endpoint(
+        let endpoint_for = if thinking {
+            discovery::thinking_endpoint
+        } else {
+            discovery::endpoint
+        };
+        let endpoint = endpoint_for(
             provider,
             matches.get_one::<String>("url").map(String::as_str),
             auth,
@@ -67,6 +85,10 @@ pub async fn run(matches: &ArgMatches) -> Result<Value, DiscoveryError> {
             None
         };
         Connection {
+            request_endpoint: matches
+                .get_one::<String>("url")
+                .cloned()
+                .unwrap_or_else(|| provider.default_url().to_owned()),
             provider,
             auth,
             endpoint,
@@ -75,6 +97,12 @@ pub async fn run(matches: &ArgMatches) -> Result<Value, DiscoveryError> {
             account,
         }
     };
+    if thinking {
+        let model = matches.get_one::<String>("model").ok_or_else(|| {
+            DiscoveryError::new("invalid_request", "Select a model for thinking discovery.")
+        })?;
+        return discovery::thinking(connection, model).await;
+    }
     discovery::list(
         connection,
         *matches.get_one::<u32>("page-limit").unwrap_or(&20),
@@ -82,7 +110,15 @@ pub async fn run(matches: &ArgMatches) -> Result<Value, DiscoveryError> {
     .await
 }
 
+#[cfg(test)]
 fn resolve_saved(path: &std::path::Path, name: &str) -> Result<Connection, DiscoveryError> {
+    resolve_saved_for(path, name, false)
+}
+fn resolve_saved_for(
+    path: &std::path::Path,
+    name: &str,
+    thinking: bool,
+) -> Result<Connection, DiscoveryError> {
     let loaded = match load_config_from_path(path).map_err(|_| {
         DiscoveryError::new(
             "invalid_configuration",
@@ -111,7 +147,12 @@ fn resolve_saved(path: &std::path::Path, name: &str) -> Result<Connection, Disco
             "This provider does not support model discovery.",
         )
     })?;
-    let endpoint = discovery::endpoint(provider, profile.url.as_deref(), profile.auth_mode)?;
+    let endpoint_for = if thinking {
+        discovery::thinking_endpoint
+    } else {
+        discovery::endpoint
+    };
+    let endpoint = endpoint_for(provider, profile.url.as_deref(), profile.auth_mode)?;
     let account = if profile.auth_mode == ProfileAuthMode::OpenaiAccount {
         Some(account_discovery::snapshot_saved(
             path,
@@ -151,6 +192,10 @@ fn resolve_saved(path: &std::path::Path, name: &str) -> Result<Connection, Disco
         ));
     }
     Ok(Connection {
+        request_endpoint: profile
+            .url
+            .clone()
+            .unwrap_or_else(|| provider.default_url().to_owned()),
         provider,
         auth: profile.auth_mode,
         endpoint,

@@ -16,12 +16,15 @@ mod projects;
 mod register;
 mod status;
 
-pub(crate) use agents::{run as run_agents, run_account_agent, run_hatch};
+#[cfg(feature = "developer-tools")]
+pub(crate) use agents::run_hatch;
+pub(crate) use agents::{run as run_agents, run_account_agent};
 pub(crate) use mail::run as run_mail;
 pub(crate) use projects::{
-    create_package_archive_bytes, directory_size_bytes, extract_package_archive_bytes,
-    format_bytes, run as run_packages, sha256_hex,
+    create_package_archive_bytes, extract_package_archive_bytes, run as run_packages, sha256_hex,
 };
+#[cfg(feature = "developer-tools")]
+pub(crate) use projects::{directory_size_bytes, format_bytes};
 
 /// Routes `cargo ai account ...` subcommands to their runtime handlers.
 pub async fn run(sub_m: &ArgMatches) -> bool {

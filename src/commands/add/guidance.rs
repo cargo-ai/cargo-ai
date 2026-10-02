@@ -418,6 +418,7 @@ pub(crate) fn run_lifecycle(sub_m: &ArgMatches) -> bool {
 }
 
 /// Operational guidance state must never become an application asset.
+#[cfg(feature = "developer-tools")]
 pub(crate) fn is_reserved_guidance_path(relative: &Path) -> bool {
     let parts = relative
         .components()
@@ -431,6 +432,7 @@ pub(crate) fn is_reserved_guidance_path(relative: &Path) -> bool {
 }
 
 /// Classifies generated loaders without claiming ownership of user instructions.
+#[cfg(feature = "developer-tools")]
 pub(crate) fn is_managed_entrypoint(path: &Path) -> Result<bool, String> {
     lifecycle::is_managed_entrypoint(path)
 }

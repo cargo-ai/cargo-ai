@@ -89,6 +89,28 @@ cargo ai run ./my_agent.json --profile PROFILE_NAME
 
 Authoring-host access, runtime-provider access, and optional Cargo AI hosting are separate. Access to the assistant that authors an agent does not automatically provide provider credentials for the resulting CLI. A Cargo AI hosted account is not required for local execution and does not supply runtime-provider credentials.
 
+## Thinking Selection
+
+Thinking choices belong to the exact model, connection and request capability. Query the selected text model before choosing a value:
+
+```bash
+cargo ai models thinking --profile PROFILE_NAME --model MODEL_ID --output-format json
+cargo ai profile set PROFILE_NAME --thinking VALUE
+cargo ai run ./my_agent.json --profile PROFILE_NAME --thinking VALUE
+cargo ai profile set PROFILE_NAME --thinking-provider-default
+cargo ai profile set PROFILE_NAME --clear-thinking
+```
+
+`models thinking` uses the same saved-profile or explicit server/auth connection selectors as `models list`, plus required `--model`. Draft API keys use closed stdin. The result distinguishes `configurable`, `unsupported` and `unknown`; configurable choices contain exact `value` strings and optional descriptions/default metadata. It describes text-request support, not media support or invocation access. Inspect the installed [machine capabilities](../machine-interface.md) before using these flags.
+
+`profile add` also accepts `--thinking VALUE` or `--thinking-provider-default`. Adding without either leaves thinking unset. Profile changes are local: they preserve the selected choice when model, server, URL or authentication changes, and do not discover or invoke a model. Show/list expose the stored selection. One `profile set` call updates one field; use separate calls to change the connection and its selection.
+
+An unset selection inherits. Invocation thinking overrides profile thinking independently of `--model`. Explicit provider default stops inheritance and omits the provider parameter; `--clear-thinking` removes the local profile override. Provider default is distinct from a provider's literal `none`, `off` or `default` choice. Choices are opaque and exact, with no universal ordering or nearest-level substitution.
+
+Cargo AI applies a qualified supported choice. If `max` is unavailable, the control is unsupported, or applicability is unknown, it omits the override and explains provider-default fallback while keeping the stored choice. Missing or malformed enumeration is unknown; it does not invalidate support established by the qualified adapter. Default execution does not require thinking discovery. Unrelated authentication, input and provider failures keep their existing behavior. A setting promises no quality, latency, cost or hidden-reasoning disclosure.
+
+Media steps use step thinking, then step-profile thinking, then invocation thinking, after selecting their actual model and endpoint. Child steps forward only an explicit step setting and require a passive runtime declaration; see [action thinking](../actions-and-child-agents.md#thinking-overrides). Action fields require definition revision `2026-10-01.r1`. Existing standalone agents must be rebuilt with a supporting CLI to acquire the flags/resolver; local source support does not establish released or hosted availability.
+
 ## Profile Temperature
 
 Temperature is an optional profile setting for text and image-analysis requests:
@@ -139,3 +161,14 @@ operator-controlled.
 - [Testing and Product Qualification](../testing-and-release-qualification.md)
 - [Documentation home](../README.md)
 - [Public README](../../README.md)
+
+
+### Boolean thinking controls
+
+The shared `--thinking on` / `--thinking off` selection recognizes only these Boolean aliases case-insensitively. Other values remain exact provider names. Use `--thinking-choice on` to request a literal named choice instead; tagged action/profile values `{"mode":"choice","value":"on"}` also remain literal. Actions use `{"mode":"on"}` or `{"mode":"off"}` in revision `2026-10-01.r1`. All forms use the same inheritance, explicit Provider default reset and fallback rules.
+
+Discovery's optional `thinking.toggle` contains qualified Boolean `values` and an optional `default`; named `choices` and `default` remain separate. Missing toggle metadata does not prove either Boolean is available. On does not imply High, and Off does not imply Low. Unsupported or unknown selections use provider default with the requested setting and reason in human/machine outcomes. Named-only adapters do not advertise independent toggles without authoritative model/endpoint evidence.
+
+For Ollama Boolean metadata, the existing compatible Chat request uses `reasoning_effort: "medium"` to request true and `"none"` to request false, only if that value is advertised. These wire values are not named levels on a Boolean model. `[false]` identifies a non-thinking model; missing metadata is Unknown. A named-only model still requires its exact supported name. No native route migration or hidden reasoning access is implied.
+
+Passive runtime declaration revision2 adds On/Off and `--thinking-choice`. Revision1 children still accept exact named/default forwarding using their original flags; they receive no Boolean override. Revision2 children use the exact-choice flag for literal names. Opaque children remain unverified. Rebuild generated applications to obtain the new behavior.

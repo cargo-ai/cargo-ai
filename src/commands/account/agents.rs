@@ -2,14 +2,14 @@
 use clap::ArgMatches;
 use serde_json::{json, Value};
 
+#[cfg(feature = "developer-tools")]
 use crate::agent_builder::build_target::BuildTarget;
 use crate::infra_api;
 use crate::ui;
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+#[cfg(feature = "developer-tools")]
+use std::path::PathBuf;
+use std::{fs, path::Path};
 
 use super::helpers::{
     apply_agents_list_display_limit, load_account_auth, persist_refreshed_access_token,
@@ -20,6 +20,7 @@ fn developer_tools_enabled() -> bool {
     cfg!(feature = "developer-tools")
 }
 
+#[cfg(feature = "developer-tools")]
 #[derive(Clone, Debug)]
 struct AccountHatchCommand {
     source_name: String,
@@ -48,6 +49,7 @@ struct AccountAgentSourceDetails {
     path: String,
 }
 
+#[cfg(any(feature = "developer-tools", test))]
 fn hatch_mode_from_check_flag(check_only: bool) -> crate::commands::hatch_pipeline::HatchMode {
     if check_only {
         crate::commands::hatch_pipeline::HatchMode::Check
@@ -91,6 +93,7 @@ fn validate_account_identifier(
     Ok(trimmed.to_string())
 }
 
+#[cfg(any(feature = "developer-tools", test))]
 fn validate_account_hatch_name(name: &str) -> Result<String, String> {
     validate_account_identifier(
         name,
@@ -129,6 +132,7 @@ fn validate_account_run_name(name: &str) -> Result<String, String> {
     )
 }
 
+#[cfg(any(feature = "developer-tools", test))]
 fn resolve_account_hatch_names(
     local_name_input: &str,
     source_name_override: Option<&str>,
@@ -160,6 +164,7 @@ fn parse_run_command(run_m: &ArgMatches) -> Result<AccountRunCommand, String> {
     })
 }
 
+#[cfg(feature = "developer-tools")]
 fn parse_hatch_command(hatch_m: &ArgMatches) -> Result<AccountHatchCommand, String> {
     let name = hatch_m
         .get_one::<String>("name")
@@ -197,6 +202,7 @@ fn parse_hatch_command(hatch_m: &ArgMatches) -> Result<AccountHatchCommand, Stri
     })
 }
 
+#[cfg(feature = "developer-tools")]
 async fn request_hatch_pull(
     access_token: &str,
     hatch: &AccountHatchCommand,
@@ -484,6 +490,7 @@ fn restyle_agents_list_ui(response: &mut Value, truncation: Option<(usize, usize
     });
 }
 
+#[cfg(feature = "developer-tools")]
 fn account_hatch_presentation(
     hatch: &AccountHatchCommand,
     response: &Value,
@@ -526,6 +533,7 @@ fn pulled_definition_json_string(
         .map_err(|error| format!("Failed to serialize pulled definition JSON: {error}"))
 }
 
+#[cfg(feature = "developer-tools")]
 fn continue_hatch_from_response(hatch: &AccountHatchCommand, response: &Value) -> bool {
     if !is_account_pull_success(response) {
         render_account_agents_response(response);
@@ -1357,6 +1365,7 @@ async fn execute_at(
         .unwrap_or(false)
 }
 
+#[cfg(feature = "developer-tools")]
 pub async fn run_hatch(hatch_m: &ArgMatches) -> bool {
     let hatch = match parse_hatch_command(hatch_m) {
         Ok(hatch) => hatch,

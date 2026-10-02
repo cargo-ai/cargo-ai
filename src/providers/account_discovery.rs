@@ -14,7 +14,7 @@ use std::{
 
 // Wire contract inspected at openai/codex rust-v0.159.2 (ff6aec96948b).
 // Maintain with the provider compatibility policy; do not infer it from PATH.
-const CATALOG_COMPATIBILITY_VERSION: &str = "0.159.2";
+const CATALOG_COMPATIBILITY_VERSION: &str = super::thinking_metadata::ACCOUNT_CATALOG_VERSION;
 const CATALOG_URL: &str = "https://chatgpt.com/backend-api/codex/models";
 const AUTH_NAMESPACE: &str = "https://api.openai.com/auth";
 
@@ -248,6 +248,13 @@ fn text(value: &Value) -> Result<&str, DiscoveryError> {
     Ok(text)
 }
 fn parse(body: &[u8], snapshot: &Snapshot) -> Result<Vec<Value>, DiscoveryError> {
+    parse_selected(body, snapshot, None)
+}
+fn parse_selected(
+    body: &[u8],
+    snapshot: &Snapshot,
+    selected: Option<&str>,
+) -> Result<Vec<Value>, DiscoveryError> {
     if body.len() > MAX_PAGE_BYTES {
         return Err(DiscoveryError::new(
             "response_too_large",
@@ -322,7 +329,13 @@ fn parse(body: &[u8], snapshot: &Snapshot) -> Result<Vec<Value>, DiscoveryError>
             }
         }
         // Validate every record before applying visibility or duplicate selection.
-        if visibility == "list" && seen.insert(slug.to_owned()) {
+        if selected.is_some_and(|selected| selected == slug) && seen.contains(slug) {
+            return Err(DiscoveryError::malformed());
+        }
+        if (selected.is_some_and(|selected| selected == slug)
+            || (selected.is_none() && visibility == "list"))
+            && seen.insert(slug.to_owned())
+        {
             models.push(model);
         }
     }
@@ -446,6 +459,72 @@ pub(crate) async fn list(connection: Connection) -> Result<Value, DiscoveryError
     })
     .await
 }
+
+pub(crate) async fn thinking(connection: Connection, model: &str) -> Result<Value, DiscoveryError> {
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .timeout(Duration::from_secs(TOTAL_SECONDS))
+        .build()
+        .map_err(|_| {
+            DiscoveryError::new("connectivity", "Could not initialize catalog transport.")
+        })?;
+    thinking_with_fetch(connection, model, &client, |request| {
+        fetch(client.clone(), request)
+    })
+    .await
+}
+async fn thinking_with_fetch<F, Fut>(
+    connection: Connection,
+    model: &str,
+    client: &Client,
+    fetch: F,
+) -> Result<Value, DiscoveryError>
+where
+    F: FnOnce(Request) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, DiscoveryError>>,
+{
+    let snapshot = connection.account.as_ref().ok_or_else(unsupported)?;
+    if model.is_empty()
+        || model.len() > 4096
+        || model.chars().any(char::is_control)
+        || snapshot.secrets.iter().any(|secret| {
+            !secret.is_empty()
+                && (model.contains(secret)
+                    || connection
+                        .profile
+                        .as_ref()
+                        .is_some_and(|profile| profile.contains(secret)))
+        })
+    {
+        return Err(DiscoveryError::malformed());
+    }
+    snapshot.revalidate()?;
+    let operation = async {
+        let body = fetch(request(client, &connection, snapshot)?).await?;
+        let support = match parse_selected(&body, snapshot, Some(model)) {
+            Ok(records) if records.len() == 1 => {
+                super::thinking_metadata::account_record_support(&records[0]["metadata"])
+            }
+            Ok(_) => super::thinking_metadata::unknown(
+                "the selected model is absent from current account metadata",
+            ),
+            Err(_) => super::thinking_metadata::unknown(
+                "malformed or mismatched account thinking metadata",
+            ),
+        };
+        snapshot.revalidate()?;
+        Ok(super::discovery::thinking_value(
+            &connection,
+            model,
+            support,
+        ))
+    };
+    tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(TOTAL_SECONDS),operation) => result.unwrap_or_else(|_| Err(DiscoveryError::new("timeout","Thinking discovery timed out."))),
+        result = tokio::signal::ctrl_c() => { let _ = result; Err(DiscoveryError::new("cancelled","Thinking discovery was cancelled.")) },
+    }
+}
 async fn list_with_fetch<F, Fut>(
     connection: Connection,
     client: &Client,
@@ -507,6 +586,60 @@ mod tests {
     use super::*;
     use crate::config::schema::ProfileAuthMode;
     use crate::providers::ProviderKind;
+    #[tokio::test]
+    async fn thinking_inspects_selected_hidden_record_without_widening_picker() {
+        let fixture = Fixture::new("synthetic-thinking-context");
+        let body = json!({"models":[
+            {"slug":"visible","visibility":"list"},
+            {"slug":"hidden","visibility":"hide","supported_reasoning_levels":[{"effort":"deliberate","description":"A provider-specific mode"},{"effort":"quick"}],"default_reasoning_level":"quick"}
+        ]}).to_string().into_bytes();
+        let connection = fixture.connection();
+        assert_eq!(
+            parse(&body, connection.account.as_ref().unwrap())
+                .unwrap()
+                .len(),
+            1
+        );
+        let result =
+            thinking_with_fetch(connection, "hidden", &Client::new(), |request| async move {
+                assert_eq!(request.url().query(), Some("client_version=0.159.2"));
+                Ok(body)
+            })
+            .await
+            .unwrap();
+        assert_eq!(result["thinking"]["status"], "configurable");
+        assert_eq!(result["thinking"]["choices"][0]["value"], "deliberate");
+        assert_eq!(result["thinking"]["default"], "quick");
+        assert!(!result.to_string().contains("synthetic-thinking-context"));
+    }
+    #[tokio::test]
+    async fn thinking_malformed_and_absent_metadata_remain_unknown() {
+        let fixture = Fixture::new("synthetic-thinking-unknown");
+        for body in [
+            json!({"models":[{"slug":"selected","visibility":"hide"}]}),
+            json!({"models":[{"slug":"selected","visibility":"hide","supported_reasoning_levels":"bad"}]}),
+            json!({"models":[]}),
+        ] {
+            let result = thinking_with_fetch(
+                fixture.connection(),
+                "selected",
+                &Client::new(),
+                |_| async { Ok(body.to_string().into_bytes()) },
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["thinking"]["status"], "unknown");
+        }
+    }
+    #[tokio::test]
+    async fn thinking_revalidates_account_before_returning_metadata() {
+        let fixture = Fixture::new("synthetic-thinking-first");
+        let error = thinking_with_fetch(fixture.connection(),"selected",&Client::new(),|_| async {
+            std::fs::write(fixture.root.join("auth.json"),auth("synthetic-thinking-second")).unwrap();
+            Ok(br#"{"models":[{"slug":"selected","visibility":"hide","supported_reasoning_levels":[]}]}"#.to_vec())
+        }).await.unwrap_err();
+        assert_eq!(error.code, "changed_connection");
+    }
     fn jwt(value: Value) -> String {
         format!(
             "e30.{}.synthetic-signature",
@@ -536,6 +669,7 @@ mod tests {
         }
         fn connection(&self) -> Connection {
             Connection {
+                request_endpoint: "https://chatgpt.com/backend-api/codex/responses".into(),
                 provider: ProviderKind::OpenAi,
                 auth: ProfileAuthMode::OpenaiAccount,
                 endpoint: endpoint(None).unwrap(),

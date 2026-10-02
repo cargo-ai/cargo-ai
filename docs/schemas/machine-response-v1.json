@@ -164,6 +164,118 @@
     {
       "if": {
         "properties": {
+          "command": {
+            "enum": [
+              "profile list",
+              "profile show",
+              "profile add",
+              "profile set"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "properties": {
+              "profile": {
+                "properties": {
+                  "thinking": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "model-thinking-v1.json#/$defs/setting"
+                      }
+                    ]
+                  }
+                }
+              },
+              "profiles": {
+                "type": "array",
+                "items": {
+                  "properties": {
+                    "thinking": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "$ref": "model-thinking-v1.json#/$defs/setting"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "models thinking"
+          },
+          "outcome": {
+            "const": "succeeded"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "model-thinking-v1.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "run"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "properties": {
+              "thinking": {
+                "$ref": "model-thinking-v1.json#/$defs/collection"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "capabilities"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "properties": {
+              "runtime_capabilities": {
+                "$ref": "model-thinking-v1.json#/$defs/runtime_capabilities"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
           "outcome": {
             "const": "succeeded"
           }

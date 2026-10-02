@@ -745,6 +745,7 @@ fn mutate(
     })
 }
 
+#[cfg(any(feature = "developer-tools", test))]
 pub(super) fn is_managed_entrypoint(path: &Path) -> Result<bool, String> {
     let Some(name) = path
         .file_name()

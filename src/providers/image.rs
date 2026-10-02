@@ -36,6 +36,8 @@ pub(crate) async fn send_image_request(
         format,
         reference_images,
         None,
+        None,
+        None,
     )
     .await
 }
@@ -50,6 +52,8 @@ pub(crate) async fn send_image_request_with_account_context(
     format: &str,
     reference_images: &[ImageReference],
     account_id: Option<&str>,
+    thinking: Option<&str>,
+    max_output_tokens: Option<u32>,
 ) -> Result<ProviderImageResponse, ProviderError> {
     if !provider.capabilities().supports_generate_image {
         return Err(ProviderError::invalid_request(
@@ -75,6 +79,7 @@ pub(crate) async fn send_image_request_with_account_context(
                 format,
                 reference_images,
                 account_id,
+                thinking,
             )
             .await
         }
@@ -134,7 +139,7 @@ pub(crate) async fn send_image_request_with_account_context(
         ));
     }
     let client = client(provider, timeout_in_sec)?;
-    let (destination, body) = match provider {
+    let (destination, mut body) = match provider {
         ProviderKind::Gemini => {
             let mut input = vec![json!({"type":"text","text":prompt})];
             for reference in reference_images {
@@ -178,6 +183,18 @@ pub(crate) async fn send_image_request_with_account_context(
         ),
         _ => unreachable!(),
     };
+    if provider == ProviderKind::Gemini {
+        if thinking.is_some() || max_output_tokens.is_some() {
+            let mut config = serde_json::Map::new();
+            if let Some(level) = thinking {
+                config.insert("thinking_level".into(), json!(level));
+            }
+            if let Some(cap) = max_output_tokens {
+                config.insert("max_output_tokens".into(), json!(cap));
+            }
+            body["generation_config"] = Value::Object(config);
+        }
+    }
     let builder = client.post(destination).json(&body);
     let builder = if provider == ProviderKind::Gemini {
         builder.header("x-goog-api-key", token)
@@ -597,6 +614,55 @@ fn public_ip(ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn gemini_image_named_thinking_maps_exactly_and_default_omits_it() {
+        for (thinking, cap) in [
+            (None, None),
+            (Some("high"), None),
+            (None, Some(8192)),
+            (Some("high"), Some(8192)),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let mock = server
+                .mock("POST", "/v1beta/interactions")
+                .match_request(move |request| {
+                    let value: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+                    let thinking_matches = match thinking {
+                        Some(choice) => value["generation_config"]["thinking_level"] == choice,
+                        None => value["generation_config"].get("thinking_level").is_none(),
+                    };
+                    let cap_matches = match cap {
+                        Some(cap) => value["generation_config"]["max_output_tokens"] == cap,
+                        None => value["generation_config"]
+                            .get("max_output_tokens")
+                            .is_none(),
+                    };
+                    thinking_matches
+                        && cap_matches
+                        && (thinking.is_some()
+                            || cap.is_some()
+                            || value.get("generation_config").is_none())
+                })
+                .with_body(r#"{"steps":[]}"#)
+                .create_async()
+                .await;
+            let _ = send_image_request_with_account_context(
+                ProviderKind::Gemini,
+                &server.url(),
+                "gemini-3.1-flash-image",
+                "draw",
+                5,
+                "fixture-token",
+                "jpeg",
+                &[],
+                None,
+                thinking,
+                cap,
+            )
+            .await;
+            mock.assert_async().await;
+        }
+    }
     use mockito::{Matcher, Server};
 
     #[test]

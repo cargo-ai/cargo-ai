@@ -766,6 +766,7 @@ pub(super) fn project(db: &Connection, event: &Value) -> Result<Value, String> {
     Ok(result)
 }
 
+#[cfg(any(cargo_ai_cli, test))]
 pub(super) fn restore(record: &Value) -> Result<Value, String> {
     validate_cloud_record(record)?;
     let ms = record["occurred_at_ms"]

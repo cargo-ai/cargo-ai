@@ -3,7 +3,7 @@
 Use this file as the complete offline contract when you need to author or review a Cargo AI agent definition without looking at repository code.
 That JSON definition is the source for a generated CLI executable: it defines the inputs, structured output, and follow-up actions the hatched tool will use.
 
-The supported strict contracts are `2026-09-09.r1` and the opt-in rubric revision `2026-09-19.r1`. Unless a section says otherwise, the supported field lists below are exhaustive for both revisions. Stable objects reject additional fields; user-named maps allow names whose values satisfy the stated contract.
+The supported strict contracts are `2026-09-09.r1`, opt-in rubric revision `2026-09-19.r1`, and opt-in thinking revision `2026-10-01.r1`. The thinking revision retains rubric behavior and adds only the action fields described below. Unless a section says otherwise, the supported field lists below are exhaustive for all three revisions. Stable objects reject additional fields; user-named maps allow names whose values satisfy the stated contract.
 
 ## Required Top-Level Shape
 
@@ -22,11 +22,12 @@ Every agent definition must be a JSON object with these keys. Prefer this order 
 - Non-empty string.
 - Format: `YYYY-MM-DD.rN`
 - Ordinary scaffolds retain strict revision `2026-09-09.r1`; use `2026-09-19.r1` when authoring a rubric.
+- Use `2026-10-01.r1` for action thinking overrides, with or without rubric outputs.
 - This identifies the Cargo AI contract used to interpret this definition. It is not the agent or package version; package version is `[project].version`.
 - Copy the schema version from the current Cargo AI template or guidance. Do not invent one from the current date, an agent/package/project version, or the Cargo AI product version.
 - The legacy top-level `version` key is invalid. Rename that key without changing its schema-version value.
 - Syntactically valid revisions chronologically before `2026-09-09.r1` keep their legacy parsing behavior, including permissive unknown fields. This includes `2026-03-03.r1`, `2026-03-11.r1`, and `2026-03-28.r1`; it is not a closed registry of old revisions.
-- Exactly `2026-09-09.r1` and `2026-09-19.r1` select strict validation. Every other revision at or after the `2026-09-09.r1` cutoff is unsupported. The earlier strict revision still rejects `rubric` and unknown keywords; it does not become legacy. Date and revision components are compared numerically.
+- Exactly `2026-09-09.r1`, `2026-09-19.r1` and `2026-10-01.r1` select strict validation. Every other revision at or after the `2026-09-09.r1` cutoff is unsupported. The earlier strict revision still rejects `rubric`; the two earlier strict revisions reject `thinking`. Ignored legacy thinking fields never activate. Date and revision components are compared numerically.
 - Existing definitions are not rewritten automatically. To migrate, review the complete definition against this contract and validate it with the strict revision. Do not replace an unsupported version header blindly; check the intended contract or upgrade Cargo AI.
 
 ## `inputs`
@@ -181,7 +182,7 @@ Exact descriptor keys are:
 |---|---|
 | Root `agent_schema` | `type`, `properties` |
 | String | `type`, optional `description`, optional `enum` |
-| Number or integer | `type`, optional `description`, optional `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`; top-level `number` may also use `rubric` in `2026-09-19.r1` |
+| Number or integer | `type`, optional `description`, optional `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`; top-level `number` may also use `rubric` in `2026-09-19.r1` or `2026-10-01.r1` |
 | Boolean | `type`, optional `description` |
 | Array | `type`, optional `description`, required `items` |
 | Object | `type`, optional `description`, required `properties` |
@@ -222,7 +223,7 @@ Structural action-only rule:
 
 ## Explicit rubric scores and TypeSafe Jev
 
-In `2026-09-19.r1`, a top-level `number` output may add `rubric`: an array of 2–10 nonblank strings describing levels from low to high. It requires a nonblank `description`, finite inclusive `minimum < maximum`, and a finite representable span. Exclusive bounds, integer, nullable, nested and structured rubric locations are invalid. Invalid rubric syntax fails definition validation on every provider. Review the wording and ordering: syntax cannot establish meaningful criteria or judgment quality.
+In `2026-09-19.r1` and `2026-10-01.r1`, a top-level `number` output may add `rubric`: an array of 2–10 nonblank strings describing levels from low to high. It requires a nonblank `description`, finite inclusive `minimum < maximum`, and a finite representable span. Exclusive bounds, integer, nullable, nested and structured rubric locations are invalid. Invalid rubric syntax fails definition validation on every provider. Review the wording and ordering: syntax cannot establish meaningful criteria or judgment quality.
 
 For example, `"rubric": ["Routine request that can wait until next week", "Time-sensitive request needing attention today", "Service-blocking issue requiring immediate attention"]` with bounds 0 and 100 describes an urgency score. Bounds alone still describe ordinary numeric output; they do not imply scoring semantics.
 
@@ -234,7 +235,7 @@ Use `cargo ai hatch triage --config ./triage.json --check --profile jev` (`-P je
 
 Text and client-fetched URL text are supported; image and file inputs fail before Jev inference. Keep temperature and max-output-tokens unset. A successful static assessment covers declared schema, input kinds and known settings only: credentials, live availability, token fit, fetched content, runtime overrides, dynamic children and answer quality remain runtime-dependent. Runtime checks the effective invocation and each child's effective profile. An empty action-only root skips inference and its children retain their own profile checks. Failed children cannot undo prior successful actions.
 
-**Local and hatched execution only for new rubric definitions:** hosted account storage of `2026-09-19.r1` is deferred. Do not attempt hosted saving/sharing of that revision as part of this workflow. Keep ordinary definitions/scaffolds on `2026-09-09.r1` when no rubric is needed. Existing definitions are not rewritten, and old binaries need an updated CLI/re-hatch to interpret the new revision. See `examples/jev-choice-score.json` for a complete definition.
+**Local and hatched execution for newer contracts:** hosted account storage of `2026-09-19.r1` remains deferred; local support for `2026-10-01.r1` does not establish deployed acceptance. Keep ordinary scaffolds on `2026-09-09.r1` when neither rubric nor action thinking is needed. Existing definitions are not rewritten, and old binaries need an updated CLI/re-hatch to interpret newer revisions. See `examples/jev-choice-score.json` for a complete rubric definition.
 
 ## `actions`
 
@@ -281,6 +282,20 @@ If `logic` evaluates true, the action's `run` steps execute in order.
 - In append-only output, provider-backed or child-agent steps emit another action-prefixed `using:` line only when the effective `profile`, `auth`, `server`, or `model` changes from the most recently printed context.
 - Interactive live mode keeps the parent dashboard at the orchestration level and does not surface child or step-level `using:` lines there.
 
+## Thinking Selection
+
+Saved profiles and invocations accept mutually exclusive `--thinking VALUE`, `--thinking-choice VALUE` or `--thinking-provider-default`. Profile set additionally accepts `--clear-thinking`, conflicting with all three. Profile mutations are local, preserve the stored choice across model/connection changes, and require no discovery or inference. Unset thinking inherits; invocation overrides profile independently of `--model`. Explicit provider default stops inheritance and omits the request parameter. A provider's exact `none`, `off` or `default` choice is different from provider default.
+
+Query exact text-model support with `cargo ai models thinking --profile NAME --model MODEL_ID --output-format json`, or use the same draft server/auth selectors as `models list`. Support is `configurable`, `unsupported` or `unknown`, with optional descriptions/default/evidence. A model name or missing list is insufficient to infer support. A qualified supported choice is applied; unavailable choices, unsupported control and unknown applicability use provider default with an explicit explanation. Choices are opaque, case-sensitive values with no ordering or nearest-choice substitution.
+
+Only `2026-10-01.r1` adds optional `thinking` to `agent`, `generate_image`, `generate_audio` and `transcribe_audio`. Its exact shape is `{"mode":"provider_default"}`, `{"mode":"on"}`, `{"mode":"off"}` or `{"mode":"choice","value":"high"}`. Choice `value` may instead be one existing `{"var":"runtime.thinking"}` reference. Declare referenced runtime/output strings or use an earlier available string capture. Runtime values must be nonblank strings with the same exact-choice semantics as profile and invocation settings; scalar coercion is prohibited. Missing/unknown fields and modes or invalid references remain errors. `exec`, `email_me` and `tool` reject the field.
+
+Media precedence is step thinking, step-profile thinking, then invocation thinking, after resolving the actual provider/model/endpoint. Text controls do not imply media support. Child JSON definitions retain parent/step profile selection; compiled children retain their existing profile behavior. Parent CLI model/thinking overrides do not implicitly propagate; use an explicit child step selection to forward one. Direct child `model` remains unsupported.
+
+Forward explicit child thinking only when the actual executable passively declares the corresponding runtime capability. Older/opaque children receive no unsupported flags, preserve their existing settings and disclose `not_forwarded`. A supported declaration reports `forwarded`; either disposition has effective thinking `child_unverified`, because forwarding does not establish observed child inference. Do not execute a capability probe or replay a failed child.
+
+Inspect installed CLI `capabilities` and generated `inspect --json` for the additive `runtime_capabilities` declaration. Rebuild existing generated artifacts to acquire these controls. Older CLIs reject the new definition revision. Hosted new-revision acceptance is not established by local/hatched support; preserve an older service's explicit unsupported-revision error. Ordinary scaffolds and existing definitions remain unchanged. No setting guarantees answer quality, latency, cost or hidden-reasoning access.
+
 ## Supported Run-Step Kinds
 
 These documented step kinds are exhaustive for the current MVP.
@@ -300,6 +315,7 @@ Required fields:
 
 Optional fields:
 - `profile`
+- `thinking` in `2026-10-01.r1` only (see Thinking Selection)
 - `usage_log`
 - `inputs`
 - `input_mode`
@@ -349,6 +365,7 @@ Required fields:
   - `model`
   - `profile`
   - `reference_images`
+  - `thinking` in `2026-10-01.r1` only (see Thinking Selection)
 - First slice writes one local image file.
 - If `model` is omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override.
 - If `profile` is present, Cargo AI resolves that profile at step runtime and uses it for the image step's provider/url/token context.
@@ -418,7 +435,7 @@ Mixed reference image example:
 
 ### `generate_audio`
 
-Required fields: `kind`, `text`, `voice`, and `path`. Optional fields: `profile` and `model`. This first audio contract generates speech from supplied text. `text` and `path` accept literal strings or ordered string/variable parts; `voice` accepts a nonempty literal or one string variable reference. A voice is provider-specific. A selected step profile supplies provider credentials and context, and model precedence is explicit step model, step-profile model, then invocation model. xAI's fixed speech service has no model selection and rejects an explicit step `model`.
+Required fields: `kind`, `text`, `voice`, and `path`. Optional fields: `profile` and `model`, plus `thinking` in `2026-10-01.r1` (see Thinking Selection). This first audio contract generates speech from supplied text. `text` and `path` accept literal strings or ordered string/variable parts; `voice` accepts a nonempty literal or one string variable reference. A voice is provider-specific. A selected step profile supplies provider credentials and context, and model precedence is explicit step model, step-profile model, then invocation model. xAI's fixed speech service has no model selection and rejects an explicit step `model`.
 
 OpenAI API-key, Gemini, Mistral, and xAI API-key profiles support this step. Use `.wav` for all four; `.mp3` is additionally supported for OpenAI, Mistral, and xAI. Gemini accepts `.wav` only. Mistral needs an existing saved voice ID available to the selected account. Cargo AI does not create or clone voices. Generated audio is limited to 20 MiB. The adapter checks returned container bytes and writes one complete file through a staged replacement, preserving an existing target on failure. See [action rules](action-rules.md) for path roots and provider limits.
 
@@ -435,7 +452,7 @@ OpenAI API-key, Gemini, Mistral, and xAI API-key profiles support this step. Use
 
 ### `transcribe_audio`
 
-Required fields: `kind`, `audio` with exactly one `path`, and `output_variable`. Optional fields: `profile` and `model`. The path is a literal portable relative path or a single string variable reference such as `{ "var": "runtime.audio_path" }`; WAV and MP3 source files are limited to 10 MiB. The source is read by the step and sent to the selected native transcription provider. It is not a top-level `file` input.
+Required fields: `kind`, `audio` with exactly one `path`, and `output_variable`. Optional fields: `profile` and `model`, plus `thinking` in `2026-10-01.r1` (see Thinking Selection). The path is a literal portable relative path or a single string variable reference such as `{ "var": "runtime.audio_path" }`; WAV and MP3 source files are limited to 10 MiB. The source is read by the step and sent to the selected native transcription provider. It is not a top-level `file` input.
 
 OpenAI API-key, Gemini, Mistral, and xAI API-key profiles support transcription. Empty or whitespace-only text fails. A successful transcript is captured as a string for later steps of the same action and is never inserted into the earlier root inference result. An action-only coordinator can transcribe and then pass that string to a text-compatible child agent. See [action rules](action-rules.md) for source confinement and package asset/data roots.
 
@@ -697,3 +714,14 @@ For onboarding and pattern selection, read:
 - `start-here.md`
 - `pattern-selection.md`
 - `examples/README.md`
+
+
+### Boolean thinking controls
+
+The shared `--thinking on` / `--thinking off` selection recognizes only these Boolean aliases case-insensitively. Other values remain exact provider names. Use `--thinking-choice on` to request a literal named choice instead; tagged action/profile values `{"mode":"choice","value":"on"}` also remain literal. Actions use `{"mode":"on"}` or `{"mode":"off"}` in revision `2026-10-01.r1`. All forms use the same inheritance, explicit Provider default reset and fallback rules.
+
+Discovery's optional `thinking.toggle` contains qualified Boolean `values` and an optional `default`; named `choices` and `default` remain separate. Missing toggle metadata does not prove either Boolean is available. On does not imply High, and Off does not imply Low. Unsupported or unknown selections use provider default with the requested setting and reason in human/machine outcomes. Named-only adapters do not advertise independent toggles without authoritative model/endpoint evidence.
+
+For Ollama Boolean metadata, the existing compatible Chat request uses `reasoning_effort: "medium"` to request true and `"none"` to request false, only if that value is advertised. These wire values are not named levels on a Boolean model. `[false]` identifies a non-thinking model; missing metadata is Unknown. A named-only model still requires its exact supported name. No native route migration or hidden reasoning access is implied.
+
+Passive runtime declaration revision2 adds On/Off and `--thinking-choice`. Revision1 children still accept exact named/default forwarding using their original flags; they receive no Boolean override. Revision2 children use the exact-choice flag for literal names. Opaque children remain unverified. Rebuild generated applications to obtain the new behavior.

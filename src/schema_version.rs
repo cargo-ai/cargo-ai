@@ -84,5 +84,9 @@ mod tests {
             crate::definition_validation::RUBRIC_SCHEMA_VERSION,
             "2026-09-19.r1"
         );
+        assert_eq!(
+            crate::definition_validation::THINKING_SCHEMA_VERSION,
+            "2026-10-01.r1"
+        );
     }
 }

@@ -36,6 +36,7 @@ pub(crate) struct Connection {
     pub provider: ProviderKind,
     pub auth: ProfileAuthMode,
     pub endpoint: Url,
+    pub request_endpoint: String,
     pub token: String,
     pub profile: Option<String>,
     pub account: Option<super::account_discovery::Snapshot>,
@@ -64,6 +65,110 @@ pub(crate) fn provider_name(provider: ProviderKind) -> &'static str {
         ProviderKind::Ollama => "ollama",
         ProviderKind::TypeSafe => "typesafe",
     }
+}
+
+pub(crate) fn thinking_value(
+    connection: &Connection,
+    model: &str,
+    support: super::thinking::ThinkingSupport,
+) -> Value {
+    json!({"schema_version":1,"provider":provider_name(connection.provider),"auth":connection.auth,"model":model,
+        "connection":{"endpoint":super::provider_url_origin(connection.endpoint.as_str()),"profile":connection.profile},
+        "fetched_at":time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+        "thinking":support,"invocation_access":"unverified"})
+}
+
+pub(crate) async fn thinking(connection: Connection, model: &str) -> Result<Value, DiscoveryError> {
+    if model.is_empty() || model.len() > 4096 || model.chars().any(char::is_control) {
+        return Err(DiscoveryError::new(
+            "invalid_request",
+            "Select a bounded nonempty model identifier.",
+        ));
+    }
+    if connection.auth == ProfileAuthMode::OpenaiAccount {
+        return super::account_discovery::thinking(connection, model).await;
+    }
+    let kind = if connection.provider == ProviderKind::Gemini
+        && matches!(
+            super::thinking_image::gemini_support(&connection.request_endpoint, model),
+            super::thinking::ThinkingSupport::Configurable { .. }
+        ) {
+        super::thinking_metadata::ThinkingRequestKind::Image
+    } else {
+        super::thinking_metadata::ThinkingRequestKind::Text
+    };
+    let support = tokio::select! {
+        support = super::thinking_metadata::query_support(connection.provider,&connection.request_endpoint,model,&connection.token,None,kind) => support.map_err(thinking_metadata_error)?,
+        result = tokio::signal::ctrl_c() => { let _ = result; return Err(DiscoveryError::new("cancelled","Thinking discovery was cancelled.")); },
+    };
+    Ok(thinking_value(&connection, model, support))
+}
+
+fn thinking_metadata_error(
+    error: super::thinking_metadata::ThinkingMetadataError,
+) -> DiscoveryError {
+    use super::thinking_metadata::ThinkingMetadataError;
+    match error {
+        ThinkingMetadataError::Unauthorized => DiscoveryError::new(
+            "unauthorized",
+            "The provider rejected the catalog credential.",
+        ),
+        ThinkingMetadataError::Forbidden => {
+            DiscoveryError::new("forbidden", "The provider denied catalog access.")
+        }
+        ThinkingMetadataError::RateLimited => {
+            DiscoveryError::new("rate_limited", "The provider rate limited catalog access.")
+        }
+        ThinkingMetadataError::RedirectRefused => DiscoveryError::new(
+            "redirect_refused",
+            "Model catalog redirects are not followed.",
+        ),
+        ThinkingMetadataError::ProviderError => DiscoveryError::new(
+            "provider_error",
+            "The provider could not return a model catalog.",
+        ),
+        ThinkingMetadataError::Timeout => {
+            DiscoveryError::new("timeout", "Model discovery timed out.")
+        }
+        ThinkingMetadataError::Connectivity => {
+            DiscoveryError::new("connectivity", "Could not reach the model catalog.")
+        }
+        ThinkingMetadataError::InvalidProviderResponse => DiscoveryError::malformed(),
+        ThinkingMetadataError::ResponseTooLarge => DiscoveryError::new(
+            "response_too_large",
+            "The model catalog exceeds the page byte limit.",
+        ),
+    }
+}
+
+pub(crate) fn thinking_endpoint(
+    provider: ProviderKind,
+    raw: Option<&str>,
+    auth: ProfileAuthMode,
+) -> Result<Url, DiscoveryError> {
+    if provider != ProviderKind::TypeSafe {
+        return endpoint(provider, raw, auth);
+    }
+    if auth != ProfileAuthMode::ApiKey {
+        return Err(DiscoveryError::new(
+            "unsupported_connection",
+            "This connection requires API-key authentication.",
+        ));
+    }
+    let url = Url::parse(raw.unwrap_or(provider.default_url()))
+        .map_err(|_| DiscoveryError::new("invalid_connection", "The connection URL is invalid."))?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(DiscoveryError::new(
+            "invalid_connection",
+            "Authenticated remote catalogs require a clean HTTPS URL.",
+        ));
+    }
+    Ok(url)
 }
 
 pub(crate) fn endpoint(
@@ -430,6 +535,7 @@ mod tests {
     use super::*;
     fn connection(provider: ProviderKind, url: String) -> Connection {
         Connection {
+            request_endpoint: url.clone(),
             provider,
             auth: ProfileAuthMode::ApiKey,
             endpoint: Url::parse(&url).unwrap(),

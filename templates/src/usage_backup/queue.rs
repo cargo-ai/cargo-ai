@@ -81,6 +81,7 @@ pub(super) fn status() -> Result<Value, String> {
     Ok(result)
 }
 
+#[cfg(cargo_ai_cli)]
 pub(super) fn enable(binding: &Binding, preserve_active: bool) -> Result<i64, String> {
     let mut db = open()?;
     let tx = db
@@ -90,6 +91,7 @@ pub(super) fn enable(binding: &Binding, preserve_active: bool) -> Result<i64, St
     tx.commit().map_err(db_error)?;
     Ok(boundary)
 }
+#[cfg(any(cargo_ai_cli, test))]
 fn enable_at(db: &Connection, binding: &Binding, preserve_active: bool) -> Result<i64, String> {
     if preserve_active {
         let boundary:Option<i64>=db.query_row("SELECT start_sequence FROM usage_backup_windows WHERE binding=?1 AND generation=?2 AND end_sequence IS NULL",params![binding.account,generation(binding)?],|r|r.get(0)).optional().map_err(db_error)?;
@@ -109,6 +111,7 @@ fn enable_at(db: &Connection, binding: &Binding, preserve_active: bool) -> Resul
     db.execute("INSERT INTO usage_backup_windows(binding,generation,start_sequence,last_scan) VALUES(?1,?2,?3,?3)",params![binding.account,generation(binding)?,boundary]).map_err(db_error)?;
     Ok(boundary)
 }
+#[cfg(cargo_ai_cli)]
 pub(super) fn pause(binding: &Binding) -> Result<(), String> {
     let mut db = open()?;
     let tx = db
@@ -117,6 +120,7 @@ pub(super) fn pause(binding: &Binding) -> Result<(), String> {
     pause_at(&tx, binding)?;
     tx.commit().map_err(db_error)
 }
+#[cfg(any(cargo_ai_cli, test))]
 fn pause_at(db: &Connection, binding: &Binding) -> Result<(), String> {
     db.execute("UPDATE usage_backup_windows SET end_sequence=?3 WHERE binding=?1 AND generation=?2 AND end_sequence IS NULL",params![binding.account,generation(binding)?,high(db)?]).map_err(db_error)?;
     Ok(())
@@ -206,6 +210,7 @@ fn select(
     }
     Ok(added)
 }
+#[cfg(any(cargo_ai_cli, test))]
 fn records(
     db: &Connection,
     after: i64,
@@ -260,6 +265,7 @@ fn capture_at(db: &Connection, binding: &Binding) -> Result<(), String> {
     db.execute("UPDATE usage_backup_windows SET last_scan=MIN(COALESCE(end_sequence,?3),?3) WHERE binding=?1 AND generation=?2 AND last_scan<?3",params![binding.account,generation(binding)?,scanned]).map_err(db_error)?;
     Ok(())
 }
+#[cfg(cargo_ai_cli)]
 pub(super) fn include_history(
     binding: &Binding,
     through: i64,
@@ -347,6 +353,7 @@ pub(super) fn acknowledge(binding: &Binding, ids: &[String]) -> Result<(), Strin
     }
     tx.commit().map_err(db_error)
 }
+#[cfg(cargo_ai_cli)]
 pub(super) fn restore(records: &[Value], account_binding: &str) -> Result<usize, String> {
     if records.len() > 100 {
         return Err("Backup page exceeds its record limit".into());

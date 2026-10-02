@@ -14,7 +14,7 @@ struct Request<'a> {
     response_format: ResponseFormat<'a>,
     store: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    generation_config: Option<GenerationConfig>,
+    generation_config: Option<GenerationConfig<'a>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -32,8 +32,11 @@ struct ResponseFormat<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct GenerationConfig {
-    max_output_tokens: u32,
+struct GenerationConfig<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_level: Option<&'a str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -250,6 +253,7 @@ fn error_message(body: &[u8]) -> String {
         .unwrap_or_else(|_| "Gemini returned an HTTP error response.".to_string())
 }
 
+#[cfg(test)]
 pub(crate) async fn send_request(
     url: &str,
     model: &str,
@@ -258,6 +262,19 @@ pub(crate) async fn send_request(
     token: &str,
     response_schema: &serde_json::Value,
     max_output_tokens: Option<u32>,
+ ) -> Result<ProviderTextResponse, ProviderError> {
+    send_request_with_thinking(url, model, content_parts, timeout_in_sec, token, response_schema, max_output_tokens, None).await
+}
+
+pub(crate) async fn send_request_with_thinking(
+    url: &str,
+    model: &str,
+    content_parts: &[ContentPart],
+    timeout_in_sec: u64,
+    token: &str,
+    response_schema: &serde_json::Value,
+    max_output_tokens: Option<u32>,
+    thinking: Option<&str>,
 ) -> Result<ProviderTextResponse, ProviderError> {
     validate_response_schema(response_schema)?;
     let request = Request {
@@ -269,8 +286,7 @@ pub(crate) async fn send_request(
             schema: response_schema,
         },
         store: false,
-        generation_config: max_output_tokens
-            .map(|max_output_tokens| GenerationConfig { max_output_tokens }),
+        generation_config: (max_output_tokens.is_some() || thinking.is_some()).then_some(GenerationConfig { max_output_tokens, thinking_level: thinking }),
     };
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(timeout_in_sec))

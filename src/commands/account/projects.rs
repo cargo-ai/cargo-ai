@@ -125,6 +125,7 @@ const PACKAGE_MANIFEST_FILE_NAME: &str = "cargo-ai-package.toml";
 const PULLED_PACKAGE_RECEIPT_RELATIVE_PATH: &str = ".cargo-ai/origin/cargo-ai-package.toml";
 const PULLED_PACKAGE_HOSTED_RECEIPT_RELATIVE_PATH: &str =
     ".cargo-ai/origin/cargo-ai-package-receipt.toml";
+#[cfg(feature = "developer-tools")]
 const ESTIMATED_PUBLISH_ACCESS_TOKEN: &str = "__publish-size-estimate__";
 #[cfg(feature = "developer-tools")]
 const SAFE_PROJECT_PUBLISH_REQUEST_LIMIT_BYTES: u64 = 5_500_000;
@@ -997,6 +998,7 @@ fn render_account_projects_response(response: &Value) {
     }
 }
 
+#[cfg(feature = "developer-tools")]
 fn current_project_root() -> Result<Option<PathBuf>, String> {
     let current_dir = std::env::current_dir()
         .map_err(|error| format!("Failed to inspect the current project directory: {error}"))?;
@@ -1999,11 +2001,13 @@ fn extract_legacy_package_archive_bytes(
     Ok(())
 }
 
+#[cfg(feature = "developer-tools")]
 pub(crate) fn directory_size_bytes(root: &Path) -> Result<u64, String> {
     let canonical_root = validate_archive_source_root(root)?;
     directory_size_bytes_under_root(root, &canonical_root, root)
 }
 
+#[cfg(feature = "developer-tools")]
 fn directory_size_bytes_under_root(
     root: &Path,
     canonical_root: &Path,
@@ -2129,6 +2133,7 @@ fn validate_archive_source_path(
     Ok(metadata)
 }
 
+#[cfg(feature = "developer-tools")]
 pub(crate) fn format_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = KIB * 1024.0;

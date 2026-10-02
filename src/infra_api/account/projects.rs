@@ -72,6 +72,7 @@ pub async fn list_projects(
 }
 
 /// Publish a packaged project archive.
+#[cfg(feature = "developer-tools")]
 pub async fn publish_project(
     base_url: &str,
     access_token: &str,
@@ -190,6 +191,7 @@ fn build_list_projects_body(
     }))
 }
 
+#[cfg(feature = "developer-tools")]
 fn build_publish_project_body(
     access_token: &str,
     project_name: &str,
@@ -217,6 +219,7 @@ fn build_publish_project_body(
     }))
 }
 
+#[cfg(feature = "developer-tools")]
 pub(crate) fn estimate_publish_project_request_size(
     access_token: &str,
     project_name: &str,

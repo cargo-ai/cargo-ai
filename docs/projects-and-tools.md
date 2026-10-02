@@ -157,6 +157,8 @@ Ordinary `cargo ai hatch` exports the agent binary only; it does not copy projec
 
 Treat `.cargo-ai/tools/` and `.cargo-ai/agents/` as Cargo AI-owned generated state. Do not manually copy, move, rename, symlink, or delete files there while diagnosing a build or runtime problem.
 
+Updating Cargo AI does not rewrite previously generated agent source or exported binaries. Regenerate and rebuild standalone agents from their definitions with the updated CLI to receive generator and template fixes, including compiler-warning cleanup.
+
 If managed state was changed manually, stop using that workspace as evidence of a Cargo AI artifact defect. Reproduce from a fresh workspace or freshly regenerated state so the result is trustworthy.
 
 Project bootstrap may add `.gitignore` entries for managed build state when version control is enabled. The separate `cargo ai add guidance` command creates `AGENTS.md` and/or `CLAUDE.md` discovery entrypoints plus `.cargo-ai/guidance/`, a self-contained, version-matched authoring bundle, and manages the related ignore entries.

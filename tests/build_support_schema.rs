@@ -1,5 +1,8 @@
 //! Focused schema/codegen hardening tests for `templates/build_support.rs`.
 
+#[path = "../src/generated_capabilities/record.rs"]
+mod generated_capability_record;
+
 #[allow(dead_code)]
 #[path = "../templates/build_support.rs"]
 mod build_support;
@@ -32,6 +35,114 @@ fn absolute_test_path(file_name: &str) -> String {
     let path = std::env::temp_dir().join(file_name);
     assert!(path.is_absolute());
     path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn thinking_definition_revision_codegen_and_validation_are_exact() {
+    use serde_json::json;
+    let base = json!({
+        "agent_definition_schema_version":"2026-10-01.r1",
+        "agent_schema":{"type":"object","properties":{"level":{"type":"string"}, "count":{"type":"integer"}}},
+        "actions":[{"name":"run","logic":{"==":[1,1]}, "run":[]}],
+    });
+    let settings = [
+        (json!({"mode":"on"}), "On"),
+        (json!({"mode":"off"}), "Off"),
+        (json!({"mode":"provider_default"}), "ProviderDefault"),
+        (
+            json!({"mode":"choice","value":"on"}),
+            "Choice { value: RunArg::Literal(\"on\".to_string()) }",
+        ),
+        (
+            json!({"mode":"choice","value":"off"}),
+            "Choice { value: RunArg::Literal(\"off\".to_string()) }",
+        ),
+        (
+            json!({"mode":"choice","value":"MAX"}),
+            "Choice { value: RunArg::Literal(\"MAX\".to_string()) }",
+        ),
+        (
+            json!({"mode":"choice","value":{"var":"level"}}),
+            "Choice { value: RunArg::Variable(\"level\".to_string()) }",
+        ),
+    ];
+    for step in [
+        json!({"kind":"agent","artifact":"./child"}),
+        json!({"kind":"generate_image","prompt":"paint", "path":"out.png"}),
+        json!({"kind":"generate_audio","text":"speak", "voice":"voice", "path":"out.mp3"}),
+        json!({"kind":"transcribe_audio","audio":{"path":"input.mp3"}, "output_variable":"transcript"}),
+    ] {
+        let mut value = base.clone();
+        value["actions"][0]["run"] = json!([step]);
+        let generated = build_support::generate_agent_model_from_str(&value.to_string()).unwrap();
+        assert!(generated.contains("thinking: None"));
+        assert!(!generated.contains("thinking: Some("));
+        for (setting, expected) in &settings {
+            value["agent_definition_schema_version"] = json!("2026-10-01.r1");
+            value["actions"][0]["run"][0]["thinking"] = setting.clone();
+            let generated =
+                build_support::generate_agent_model_from_str(&value.to_string()).unwrap();
+            assert!(generated.contains(&format!(
+                "thinking: Some(crate::providers::thinking::ThinkingSetting::{expected})"
+            )));
+            for old in ["2026-09-09.r1", "2026-09-19.r1"] {
+                value["agent_definition_schema_version"] = json!(old);
+                let error = build_support::generate_agent_model_from_str(&value.to_string())
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains(".thinking"), "{error}");
+            }
+        }
+    }
+    for setting in [
+        json!({"mode":"choice","value":""}),
+        json!({"mode":"choice","value":4}),
+        json!({"mode":"choice","value":{"var":"count"}}),
+        json!({"mode":"choice","value":{"var":"missing"}}),
+        json!({"mode":"choice","value":{"var":"level","extra":true}}),
+        json!({"mode":"choice"}),
+        json!({"mode":"unknown"}),
+        json!({"mode":"On"}),
+        json!({"mode":true}),
+        json!({}),
+        json!({"mode":"on","value":true}),
+        json!({"mode":"off","value":false}),
+        json!({"mode":"on","extra":true}),
+        json!({"mode":"off","extra":true}),
+        json!({"mode":"provider_default","value":"high"}),
+        json!({"mode":"choice","value":"high","extra":true}),
+        json!(true),
+        json!("on"),
+        json!(null),
+    ] {
+        let mut value = base.clone();
+        value["actions"][0]["run"] =
+            json!([{"kind":"agent","artifact":"./child","thinking":setting}]);
+        let error = build_support::generate_agent_model_from_str(&value.to_string())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(".thinking"), "{error}");
+    }
+    for step in [
+        json!({"kind":"exec","program":"echo","args":[], "thinking":{"mode":"provider_default"}}),
+        json!({"kind":"exec","program":"echo","args":[], "thinking":{"mode":"on"}}),
+        json!({"kind":"email_me","subject":"subject","text":"message", "thinking":{"mode":"off"}}),
+        json!({"kind":"tool","name":"tool","params":{}, "thinking":{"mode":"on"}}),
+        json!({"kind":"agent","artifact":"./child","model":"model", "thinking":{"mode":"provider_default"}}),
+    ] {
+        let mut value = base.clone();
+        value["actions"][0]["run"] = json!([step]);
+        assert!(build_support::generate_agent_model_from_str(&value.to_string()).is_err());
+    }
+    for (setting, _) in settings {
+        let mut legacy = base.clone();
+        legacy["agent_definition_schema_version"] = json!("2026-09-08.r42");
+        legacy["actions"][0]["run"] =
+            json!([{"kind":"agent","artifact":"./child","thinking":setting}]);
+        let generated = build_support::generate_agent_model_from_str(&legacy.to_string()).unwrap();
+        assert!(generated.contains("thinking: None"));
+        assert!(!generated.contains("thinking: Some("));
+    }
 }
 
 /// Constructs a minimal `.agentcfg` JSON document with caller-provided schema

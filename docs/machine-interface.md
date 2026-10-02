@@ -6,6 +6,7 @@ Application callers opt into the application envelope with `--output-format json
 cargo ai capabilities --output-format json
 cargo ai profile list --output-format json --output-schema-version 1
 cargo ai profile show example --output-format json
+cargo ai models thinking --profile example --model MODEL_ID --output-format json
 cargo ai usage runs --json --schema-version 2 --output-format json
 cargo ai run agent.json --output-format ndjson --max-runtime-in-sec 60
 ```
@@ -29,6 +30,16 @@ Only `run` currently advertises NDJSON. Decode incrementally across arbitrary re
 Known validated root results have availability metadata. `--include-result-content` explicitly includes private result content on stdout; content is bounded to 4 MiB; it adds no result persistence, usage metadata or backup content. Produced artifacts are reported only after the production write succeeds. Existing artifact files retain their established lifecycle. Older generated children are opaque: exit status does not create a result or establish child instrumentation.
 
 Selected execution owns child process groups on Unix and native jobs on Windows, bounds captured child output to 1 MiB per channel, and cleans up descendants on cooperative cancellation/deadline. Builds have a 600-second bound. Forced termination, crashes and failures before machine negotiation may leave incomplete output; consumers must reconcile effects. Essential output delivery failure is an invocation failure, even if the underlying operation already applied.
+
+## Thinking
+
+Use the advertised `models thinking` JSON contract to query one explicit model and connection. `--model MODEL_ID` is required; saved-profile and draft server/auth selectors match `models list`. Configurable results expose exact choices, descriptions and any authoritative default; unsupported and unknown results retain their separate meanings. The query performs no inference or profile mutation. Default runs need no thinking catalog read. Connection/authentication errors remain errors; a valid query with unknown support can succeed without a choice list. See the [typed payload](machine-payloads.md#thinking-discovery).
+
+Profiles and invocations accept mutually exclusive `--thinking VALUE`, `--thinking-choice VALUE` and `--thinking-provider-default`; profile set also accepts conflicting `--clear-thinking`. The installed `run` capability descriptor declares tagged selection, terminal outcomes and action revision `2026-10-01.r1`. [Profile and action precedence](providers/README.md#thinking-selection) applies independently of model overrides.
+
+Runtime `thinking_resolved` progress frames report request outcomes or passive child forwarding. Terminal JSON/NDJSON retains bounded observed records under `data.thinking` and structured fallback warnings, including when progress delivery is omitted or execution later fails. An opaque child's effective setting stays `child_unverified`. Read terminal records and coverage fields; a progress frame, saved choice or forwarded flag alone does not establish provider acceptance. [Runtime payloads](machine-payloads.md#runtime-thinking) describe the bounds and fallback codes.
+
+CLI `capabilities` and newly generated `inspect --json` include passive `runtime_capabilities`. A declaration identifies invocation support; it does not authenticate an artifact, grant execution permission or attest to inference. Rebuild existing standalone applications to add these controls. Earlier binaries and hosted services can reject the opt-in revision; local support does not certify deployed acceptance.
 
 ## Models
 
@@ -59,3 +70,6 @@ Discovery follows pagination within one connection/query for at most 20 requests
 Use capabilities instead of help-text parsing. Profile reads and installed-package inspection supply typed fields instead of table/headline parsing. Installed lists retain the legacy default limit of 20, disclose available count/completeness, and offer the existing limit/all selectors where supported. Hosted lists preserve existing ordering/filter semantics and disclose their display limit. Usage v1/v2 payloads remain unchanged inside the explicitly selected envelope. Backup contracts describe remote acceptance and local queue/settings persistence separately.
 
 This development interface becomes available only in a build containing it. Integration does not publish a release or upgrade users. Application wrappers consume these contracts; Cargo AI owns runtime, configuration, authentication and provider requests.
+
+
+The same selection supports case-insensitive `--thinking on` / `off` and literal `--thinking-choice VALUE`. Discovery advertises qualified Boolean availability separately from named choices; [typed outcomes and runtime compatibility](machine-payloads.md#runtime-thinking) retain truthful default fallback. On/Off do not imply High/Low.

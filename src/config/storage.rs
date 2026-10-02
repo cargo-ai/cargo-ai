@@ -651,6 +651,7 @@ fn backup_is_provably_secret_free(document: &toml::Value) -> bool {
         "timeout_in_sec",
         "max_output_tokens",
         "temperature",
+        "thinking",
         "description",
         "auth_mode",
     ];
@@ -682,7 +683,9 @@ fn backup_is_provably_secret_free(document: &toml::Value) -> bool {
         .is_some_and(|profiles| {
             profiles.iter().all(|profile| {
                 profile.as_table().is_some_and(|profile| {
-                    table_has_only_keys(profile, PROFILE_KEYS) && !profile.contains_key("url")
+                    table_has_only_keys(profile, PROFILE_KEYS)
+                        && !profile.contains_key("url")
+                        && optional_table_has_only_keys(profile, "thinking", &["mode", "value"])
                 })
             })
         });
@@ -760,6 +763,15 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+    #[test]
+    fn thinking_backup_allowlist_retains_only_known_setting_fields() {
+        let contents = r#"profile = [{ name = "dev", server = "ollama", model = "manual", thinking = { mode = "choice", value = "max" } }]"#;
+        assert!(super::managed_backup_contents_are_provably_safe(contents));
+        let hidden = contents.replace(r#"value = "max""#, r#"value = "max", token = "private""#);
+        assert!(!super::managed_backup_contents_are_provably_safe(&hidden));
+        let parsed: toml::Value = toml::from_str(&hidden).unwrap();
+        assert!(!super::backup_is_provably_secret_free(&parsed));
+    }
 
     fn temp_config_path(stem: &str) -> PathBuf {
         let unique = SystemTime::now()

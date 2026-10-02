@@ -1,6 +1,8 @@
 //! Action execution helpers for interpreted runtime flows.
 #[path = "../../templates/src/runtime_media.rs"]
 mod runtime_media;
+#[path = "../../templates/src/runtime_thinking.rs"]
+pub(crate) mod runtime_thinking;
 use crate::config::adder::set_account_tokens;
 use crate::config::loader::{config_path, find_profile, load_config};
 use crate::config::schema::ProfileAuthMode;
@@ -785,6 +787,9 @@ pub(crate) struct ActionProviderContext {
     pub(crate) profile_name: Option<String>,
     pub(crate) auth_mode: String,
     pub(crate) model: String,
+    pub(crate) thinking: Option<crate::providers::thinking::ThinkingSetting>,
+    pub(crate) thinking_source: String,
+    pub(crate) max_output_tokens: Option<u32>,
     pub(crate) url: String,
     pub(crate) token: String,
     pub(crate) openai_account_id: Option<String>,
@@ -2323,6 +2328,26 @@ async fn run_generate_image_step(
         action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
     })?;
 
+    let (thinking_setting, thinking_source) = runtime_thinking::step_setting(
+        step,
+        data,
+        step_profile_context.as_ref(),
+        provider_context,
+    )?;
+    let thinking_outcome = runtime_thinking::resolve_for_request(
+        thinking_setting.as_ref(),
+        &thinking_source,
+        effective_provider_context,
+        &model,
+        crate::providers::thinking_metadata::ThinkingRequestKind::Image,
+        runtime_budget,
+    )
+    .await?;
+    note_runtime_thinking(
+        runtime_thinking::step_scope(action_index, action_name, step_index),
+        &thinking_outcome,
+    );
+
     let usage_attempt = provider_context.usage_log.as_ref().map(|usage_log| {
         usage_log.start_provider_request(
             effective_provider_context.provider,
@@ -2361,6 +2386,10 @@ async fn run_generate_image_step(
             output_format,
             &reference_images,
             effective_provider_context.openai_account_id.as_deref(),
+            thinking_outcome.provider_value(
+                effective_provider_context.provider == crate::providers::ProviderKind::Ollama,
+            ),
+            effective_provider_context.max_output_tokens,
         )
         .await
     })
@@ -2493,6 +2522,16 @@ async fn run_generate_image_step(
         format!("wrote generated image to '{}'.", output_path_ref.display()).as_str(),
     );
     Ok(StepExecutionOutcome::Completed)
+}
+
+pub(crate) fn note_runtime_thinking(
+    scope: serde_json::Value,
+    outcome: &crate::providers::thinking::ThinkingOutcome,
+) {
+    super::machine::record_thinking(serde_json::json!({"scope":scope,"outcome":outcome}));
+    if let Some(notice) = outcome.notice() {
+        eprintln!("{notice}");
+    }
 }
 
 fn note_runtime_artifact(kind: &str, path: &Path) {
@@ -2738,6 +2777,9 @@ async fn resolve_media_step_profile_context(
     }
 
     Ok(Some(ActionProviderContext {
+        thinking: profile.thinking.clone(),
+        thinking_source: "profile".into(),
+        max_output_tokens: profile.max_output_tokens,
         project_data: None,
         provider,
         profile_name: Some(profile.name.clone()),
@@ -2859,6 +2901,20 @@ async fn run_agent_step_with_provider_context(
         provider_context.package_context.as_ref(),
     )?;
     let mut command = child_artifact_command(&invocation);
+    if let Some(setting) = runtime_thinking::explicit_step_setting(step.thinking.as_ref(), data)? {
+        let record = runtime_thinking::child_thinking(
+            &invocation,
+            &setting,
+            &mut command,
+            runtime_thinking::step_scope(action_index, action_name, step_index),
+        );
+        if record["disposition"] == "not_forwarded" {
+            print_action_line(action_index, action_name,
+                "Thinking override was not forwarded: the child does not declare support. Its existing configuration is preserved; effective thinking is unverified.");
+        }
+        super::machine::record_thinking(record);
+    }
+
     if crate::commands::package_dependencies::is_package_reference(artifact) {
         let declaring_project_root = package_child_project_root(
             provider_context.package_context.as_ref(),
@@ -3148,6 +3204,9 @@ async fn run_agent_step(
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
     let provider_context = ActionProviderContext {
+        thinking: None,
+        thinking_source: "provider_default".into(),
+        max_output_tokens: None,
         project_data: None,
         provider: crate::providers::ProviderKind::OpenAi,
         profile_name: None,
@@ -5297,6 +5356,7 @@ mod tests {
         args: Vec<crate::RunArg>,
     ) -> crate::RunStep {
         crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -5334,6 +5394,9 @@ mod tests {
 
     fn provider_context() -> ActionProviderContext {
         ActionProviderContext {
+            thinking: None,
+            thinking_source: "provider_default".into(),
+            max_output_tokens: None,
             project_data: None,
             provider: ProviderKind::OpenAi,
             profile_name: Some("test_profile".to_string()),
@@ -5455,6 +5518,9 @@ auth_mode = "{auth_mode}"
 
     fn ollama_provider_context(server_url: &str, model: &str) -> ActionProviderContext {
         ActionProviderContext {
+            thinking: None,
+            thinking_source: "provider_default".into(),
+            max_output_tokens: None,
             project_data: None,
             provider: ProviderKind::Ollama,
             profile_name: Some("ollama_profile".to_string()),
@@ -6436,6 +6502,9 @@ auth_mode = "{auth_mode}"
     #[test]
     fn using_line_hides_standard_openai_account_url() {
         let provider_context = ActionProviderContext {
+            thinking: None,
+            thinking_source: "provider_default".into(),
+            max_output_tokens: None,
             project_data: None,
             provider: ProviderKind::OpenAi,
             profile_name: Some("codex_account".to_string()),
@@ -6459,6 +6528,9 @@ auth_mode = "{auth_mode}"
     #[test]
     fn using_line_includes_custom_url_when_material() {
         let provider_context = ActionProviderContext {
+            thinking: None,
+            thinking_source: "provider_default".into(),
+            max_output_tokens: None,
             project_data: None,
             provider: ProviderKind::OpenAi,
             profile_name: None,
@@ -6555,6 +6627,7 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn exec_step_captures_output_variable_on_success() {
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -6603,6 +6676,7 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn exec_step_buckets_raw_output_into_live_lane() {
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -6684,6 +6758,7 @@ auth_mode = "{auth_mode}"
 
         let output_name = format!(".tmp-cai2054-generated-image-{}.png", std::process::id());
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -6716,6 +6791,9 @@ auth_mode = "{auth_mode}"
             platforms: None,
         };
         let provider_context = ActionProviderContext {
+            thinking: None,
+            thinking_source: "provider_default".into(),
+            max_output_tokens: None,
             project_data: None,
             provider: ProviderKind::OpenAi,
             profile_name: Some("test_profile".to_string()),
@@ -6814,6 +6892,7 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -6855,6 +6934,9 @@ auth_mode = "{auth_mode}"
             },
         )]);
         let provider_context = ActionProviderContext {
+            thinking: None,
+            thinking_source: "provider_default".into(),
+            max_output_tokens: None,
             project_data: None,
             provider: ProviderKind::OpenAi,
             profile_name: Some("test_profile".to_string()),
@@ -6899,6 +6981,7 @@ auth_mode = "{auth_mode}"
         let missing_reference =
             format!(".tmp-cai2097-missing-reference-{}.png", std::process::id());
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -6978,6 +7061,7 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -7009,6 +7093,9 @@ auth_mode = "{auth_mode}"
             platforms: None,
         };
         let provider_context = ActionProviderContext {
+            thinking: None,
+            thinking_source: "provider_default".into(),
+            max_output_tokens: None,
             project_data: None,
             provider: ProviderKind::OpenAi,
             profile_name: Some("test_profile".to_string()),
@@ -7077,6 +7164,7 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -7108,6 +7196,9 @@ auth_mode = "{auth_mode}"
             platforms: None,
         };
         let provider_context = ActionProviderContext {
+            thinking: None,
+            thinking_source: "provider_default".into(),
+            max_output_tokens: None,
             project_data: None,
             provider: ProviderKind::OpenAi,
             profile_name: Some("test_profile".to_string()),
@@ -7149,6 +7240,7 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn generate_image_step_requires_model_when_step_and_invocation_omit_it() {
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -7182,6 +7274,9 @@ auth_mode = "{auth_mode}"
             platforms: None,
         };
         let provider_context = ActionProviderContext {
+            thinking: None,
+            thinking_source: "provider_default".into(),
+            max_output_tokens: None,
             project_data: None,
             provider: ProviderKind::OpenAi,
             profile_name: Some("test_profile".to_string()),
@@ -7247,6 +7342,7 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -7449,6 +7545,7 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -7513,6 +7610,7 @@ auth_mode = "{auth_mode}"
         let _test_env = TestCargoHome::new(&config);
 
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -7565,6 +7663,7 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn generate_image_step_rejects_reference_images_for_ollama() {
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -7645,6 +7744,7 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -7734,6 +7834,7 @@ auth_mode = "{auth_mode}"
             std::process::id()
         );
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -7792,6 +7893,7 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn generate_image_step_rejects_non_png_output_for_ollama() {
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -8129,6 +8231,7 @@ auth_mode = "{auth_mode}"
         provider.profile_name = None;
         provider.package_context = Some(context.clone());
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -8401,6 +8504,7 @@ auth_mode = "{auth_mode}"
         let mut provider = provider_context();
         provider.package_context = Some(context.clone());
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -8485,6 +8589,7 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -8604,6 +8709,7 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -8719,6 +8825,7 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -8811,6 +8918,7 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -8905,6 +9013,7 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let exec_step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -8937,6 +9046,7 @@ auth_mode = "{auth_mode}"
             platforms: None,
         };
         let agent_step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -9040,6 +9150,7 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -9155,6 +9266,7 @@ auth_mode = "{auth_mode}"
         .expect("tool manifest should be written");
 
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: Some("bridge_tool".to_string()),
@@ -9254,6 +9366,7 @@ auth_mode = "{auth_mode}"
         fs::write(&artifact_path, "{}").expect("json child artifact should be written");
 
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -9342,6 +9455,7 @@ auth_mode = "{auth_mode}"
         fs::write(&artifact_path, "{}").expect("json child artifact should be written");
 
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -9417,6 +9531,7 @@ auth_mode = "{auth_mode}"
         fs::write(&artifact_path, "{}").expect("json child artifact should be written");
 
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -9469,6 +9584,7 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn agent_step_rejects_bare_child_name() {
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -9518,6 +9634,7 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn agent_step_rejects_parent_traversal_path() {
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -9567,6 +9684,7 @@ auth_mode = "{auth_mode}"
     #[tokio::test]
     async fn agent_step_rejects_nested_child_path() {
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -9633,6 +9751,7 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -9703,6 +9822,7 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let failing_step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -9735,6 +9855,7 @@ auth_mode = "{auth_mode}"
             platforms: None,
         };
         let second_step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -9814,6 +9935,7 @@ auth_mode = "{auth_mode}"
             name: "first_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                thinking: None,
                 voice: None,
                 audio_path: None,
                 tool_name: None,
@@ -9850,6 +9972,7 @@ auth_mode = "{auth_mode}"
             name: "second_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                thinking: None,
                 voice: None,
                 audio_path: None,
                 tool_name: None,
@@ -9923,6 +10046,7 @@ auth_mode = "{auth_mode}"
             name: "first_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                thinking: None,
                 voice: None,
                 audio_path: None,
                 tool_name: None,
@@ -9962,6 +10086,7 @@ auth_mode = "{auth_mode}"
             name: "second_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                thinking: None,
                 voice: None,
                 audio_path: None,
                 tool_name: None,
@@ -10054,6 +10179,7 @@ auth_mode = "{auth_mode}"
             name: "first_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                thinking: None,
                 voice: None,
                 audio_path: None,
                 tool_name: None,
@@ -10090,6 +10216,7 @@ auth_mode = "{auth_mode}"
             name: "second_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                thinking: None,
                 voice: None,
                 audio_path: None,
                 tool_name: None,
@@ -10178,6 +10305,7 @@ auth_mode = "{auth_mode}"
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![
                 crate::RunStep {
+                    thinking: None,
                     voice: None,
                     audio_path: None,
                     tool_name: None,
@@ -10210,6 +10338,7 @@ auth_mode = "{auth_mode}"
                     platforms: None,
                 },
                 crate::RunStep {
+                    thinking: None,
                     voice: None,
                     audio_path: None,
                     tool_name: None,
@@ -10244,6 +10373,7 @@ auth_mode = "{auth_mode}"
             name: "second_action".to_string(),
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![crate::RunStep {
+                thinking: None,
                 voice: None,
                 audio_path: None,
                 tool_name: None,
@@ -10317,6 +10447,7 @@ auth_mode = "{auth_mode}"
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![
                 crate::RunStep {
+                    thinking: None,
                     voice: None,
                     audio_path: None,
                     tool_name: None,
@@ -10349,6 +10480,7 @@ auth_mode = "{auth_mode}"
                     platforms: None,
                 },
                 crate::RunStep {
+                    thinking: None,
                     voice: None,
                     audio_path: None,
                     tool_name: None,
@@ -10387,6 +10519,7 @@ auth_mode = "{auth_mode}"
             logic: json!({ "==": [{ "var": "answer" }, 4] }),
             run: vec![
                 crate::RunStep {
+                    thinking: None,
                     voice: None,
                     audio_path: None,
                     tool_name: None,
@@ -10419,6 +10552,7 @@ auth_mode = "{auth_mode}"
                     platforms: None,
                 },
                 crate::RunStep {
+                    thinking: None,
                     voice: None,
                     audio_path: None,
                     tool_name: None,
@@ -10506,6 +10640,7 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let failing_step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -10538,6 +10673,7 @@ auth_mode = "{auth_mode}"
             platforms: None,
         };
         let second_step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -10617,6 +10753,7 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,
@@ -10699,6 +10836,7 @@ auth_mode = "{auth_mode}"
         fs::set_permissions(&script_path, permissions).expect("script should be executable");
 
         let step = crate::RunStep {
+            thinking: None,
             voice: None,
             audio_path: None,
             tool_name: None,

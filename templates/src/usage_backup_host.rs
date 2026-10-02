@@ -9,6 +9,3 @@ pub(crate) fn load_auth() -> Result<Auth, String> {
         refresh_token: tokens.refresh_token,
     })
 }
-pub(crate) fn save_settings(_: &crate::usage_store::UsageSettings) -> Result<(), String> {
-    Err("Manage usage backup consent through `cargo ai usage backup`".into())
-}

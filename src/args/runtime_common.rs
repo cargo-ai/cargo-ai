@@ -34,6 +34,40 @@ pub(crate) fn runtime_command(name: &'static str, about: &'static str) -> Comman
                 .value_name("URL"),
         )
         .arg(
+            Arg::new("thinking")
+                .long("thinking")
+                .value_name("VALUE")
+                .help("Request On/Off (case insensitive) or an exact provider/model thinking choice")
+                .conflicts_with_all(["thinking_provider_default", "thinking_choice"])
+                .value_parser(|value: &str| {
+                    if value.trim().is_empty() {
+                        Err("thinking choice must be nonempty".to_string())
+                    } else {
+                        Ok(value.to_string())
+                    }
+                }),
+        )
+        .arg(
+            Arg::new("thinking_choice")
+                .long("thinking-choice")
+                .value_name("VALUE")
+                .help("Request an exact named choice, including literal on/off")
+                .conflicts_with_all(["thinking", "thinking_provider_default"])
+                .value_parser(|value: &str| {
+                    if value.trim().is_empty() {
+                        Err("thinking choice must be nonempty".to_string())
+                    } else {
+                        Ok(value.to_string())
+                    }
+                }),
+        )
+        .arg(
+            Arg::new("thinking_provider_default")
+                .long("thinking-provider-default")
+                .help("Use provider-default thinking instead of an inherited choice")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("token")
                 .long("token")
                 .value_name("TOKEN")
@@ -160,6 +194,31 @@ pub(crate) fn runtime_command(name: &'static str, about: &'static str) -> Comman
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn thinking_override_does_not_require_model_and_conflicts_with_default() {
+        for words in [
+            vec!["runtime-test", "--thinking", "high"],
+            vec!["runtime-test", "--thinking-provider-default"],
+        ] {
+            assert!(super::runtime_command("runtime-test", "test")
+                .try_get_matches_from(words)
+                .is_ok());
+        }
+        for words in [
+            vec!["runtime-test", "--thinking", " "],
+            vec![
+                "runtime-test",
+                "--thinking",
+                "high",
+                "--thinking-provider-default",
+            ],
+        ] {
+            assert!(super::runtime_command("runtime-test", "test")
+                .try_get_matches_from(words)
+                .is_err());
+        }
+    }
+
     #[test]
     fn help_describes_input_file_as_supported_file_path() {
         let mut command = super::runtime_command("runtime-test", "Runtime test command");

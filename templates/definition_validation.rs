@@ -11,6 +11,11 @@ use std::fmt;
 
 pub const STRICT_SCHEMA_VERSION: &str = "2026-09-09.r1";
 pub const RUBRIC_SCHEMA_VERSION: &str = "2026-09-19.r1";
+pub const THINKING_SCHEMA_VERSION: &str = "2026-10-01.r1";
+
+pub fn supports_rubric(version: &str) -> bool {
+    matches!(version, RUBRIC_SCHEMA_VERSION | THINKING_SCHEMA_VERSION)
+}
 pub const VERSION_KEY: &str = "agent_definition_schema_version";
 pub const MAX_STRING_BYTES: usize = 256 * 1024;
 pub const MAX_KEY_BYTES: usize = 256;
@@ -273,7 +278,10 @@ pub fn definition_revision(root: &Value) -> Result<DefinitionRevision> {
     let strict = (2026, 9, 9, 1);
     if parsed < strict {
         Ok(DefinitionRevision::Legacy)
-    } else if value == STRICT_SCHEMA_VERSION || value == RUBRIC_SCHEMA_VERSION {
+    } else if matches!(
+        value,
+        STRICT_SCHEMA_VERSION | RUBRIC_SCHEMA_VERSION | THINKING_SCHEMA_VERSION
+    ) {
         Ok(DefinitionRevision::Strict)
     } else {
         Err(error(
@@ -844,7 +852,7 @@ pub fn validate_definition(value: &Value) -> Result<DefinitionRevision> {
                 prop,
                 &p,
                 SchemaContext::TopLevel,
-                value[VERSION_KEY] == RUBRIC_SCHEMA_VERSION,
+                value[VERSION_KEY].as_str().is_some_and(supports_rubric),
                 &mut budget,
             )?,
         );
@@ -940,6 +948,7 @@ pub fn validate_definition(value: &Value) -> Result<DefinitionRevision> {
                 &mut available,
                 &mut captures,
                 &inputs,
+                root[VERSION_KEY] == THINKING_SCHEMA_VERSION,
                 &mut budget,
             )?;
         }
@@ -1246,6 +1255,27 @@ fn logic_kind(
     }
 }
 
+fn thinking_setting(value: &Value, path: &str, available: &BTreeMap<String, Kind>) -> Result<()> {
+    let map = object(value, path)?;
+    let mode = string(required(map, "mode", path)?, &field_path(path, "mode"))?;
+    match mode {
+        "provider_default" | "on" | "off" => keys(map, &["mode"], path, false),
+        "choice" => {
+            keys(map, &["mode", "value"], path, false)?;
+            scalar_or_reference(
+                required(map, "value", path)?,
+                &field_path(path, "value"),
+                available,
+                true,
+            )
+        }
+        _ => Err(invalid(
+            &field_path(path, "mode"),
+            "Expected provider_default, choice, on or off.",
+        )),
+    }
+}
+
 fn run_step(
     value: &Value,
     path: &str,
@@ -1253,6 +1283,7 @@ fn run_step(
     available: &mut BTreeMap<String, Kind>,
     captures: &mut BTreeSet<String>,
     inputs: &BTreeMap<String, String>,
+    thinking_allowed: bool,
     budget: &mut Budget,
 ) -> Result<()> {
     budget.charge(path, 1)?;
@@ -1292,7 +1323,18 @@ fn run_step(
             ))
         }
     });
+    if thinking_allowed
+        && matches!(
+            k,
+            "agent" | "generate_image" | "generate_audio" | "transcribe_audio"
+        )
+    {
+        allowed.push("thinking");
+    }
     keys(map, &allowed, path, false)?;
+    if let Some(value) = map.get("thinking") {
+        thinking_setting(value, &field_path(path, "thinking"), available)?;
+    }
     if let Some(v) = map.get("when") {
         logic(v, &field_path(path, "when"), available, budget)?;
     }

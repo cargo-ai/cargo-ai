@@ -31,6 +31,21 @@ const MISTRAL_TEST_TOKEN: &str = "mistral-provider-smoke-token";
 const XAI_TEST_TOKEN: &str = "xai-provider-smoke-token";
 const OPENAI_TEST_TOKEN: &str = "openai-provider-smoke-token";
 
+fn assert_warning_free_build(output: &Output, context: &str) {
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.trim_start().starts_with("warning:")
+                || line.trim_start().starts_with("warning[")),
+        "{context} must compile without warnings\n{text}"
+    );
+}
+
 fn fixture_base_dir(runner_temp: Option<std::ffi::OsString>) -> PathBuf {
     runner_temp
         .filter(|path| !path.is_empty())
@@ -232,15 +247,15 @@ fn media_responses(transcript: &str, include_child: bool) -> Vec<MediaResponse> 
 
 fn write_media_definitions(fixture: &Fixture) {
     let definition = serde_json::json!({
-        "agent_definition_schema_version": "2026-09-09.r1",
+        "agent_definition_schema_version": "2026-10-01.r1",
         "agent_schema": {"type":"object","properties":{}},
         "runtime_vars": {"audio_path":{"type":"string","default":"./speech.wav"}},
         "actions": [{
             "name":"speak_then_listen",
             "logic":{"==":[1,1]},
             "run":[
-                {"kind":"generate_audio","model":"tts-model","text":"The quarterly report is ready.","voice":"coral","path":"./speech.wav"},
-                {"kind":"transcribe_audio","model":"transcriber-model","audio":{"path":{"var":"runtime.audio_path"}},"output_variable":"transcript"},
+                {"kind":"generate_audio","model":"tts-model","thinking":{"mode":"choice","value":"max"},"text":"The quarterly report is ready.","voice":"coral","path":"./speech.wav"},
+                {"kind":"transcribe_audio","model":"transcriber-model","thinking":{"mode":"provider_default"},"audio":{"path":{"var":"runtime.audio_path"}},"output_variable":"transcript"},
                 {"kind":"agent","artifact":"./child.json","inputs":[{"type":"text","text":["Transcript: ",{"var":"transcript"}]}]}
             ]
         }]
@@ -374,8 +389,11 @@ fn assert_media_chain(fixture: &Fixture, output: &Output, requests: &[String]) {
     assert_eq!(speech["input"], MEDIA_TRANSCRIPT);
     assert_eq!(speech["voice"], "coral");
     assert_eq!(speech["response_format"], "wav");
+    assert!(speech.get("reasoning_effort").is_none());
+    assert!(speech.get("thinking").is_none());
     assert!(requests[1].contains("name=\"model\"\r\n\r\ntranscriber-model"));
     assert!(requests[1].contains("filename=\"speech.wav\""));
+    assert!(!requests[1].contains("reasoning_effort"));
     assert!(requests[1]
         .as_bytes()
         .windows(MEDIA_WAV.len())
@@ -854,6 +872,7 @@ fn run_generated_hosted_smoke(
         .arg("--force")
         .output()
         .expect("hosted provider hatch should start");
+    assert_warning_free_build(&hatch, "hosted provider hatch");
     if fixture.home.join("batch-seed-marker").exists() {
         assert!(
             String::from_utf8_lossy(&hatch.stdout).contains("Reused warmed template"),
@@ -941,6 +960,12 @@ fn assert_openai_compatible_success(
         .expect("request should contain a body");
     let body: Value = serde_json::from_str(body).expect("request body should be JSON");
     assert_eq!(body["model"], model);
+    if provider == "openai" {
+        assert_eq!(body["max_completion_tokens"], 128);
+        assert!(body.get("max_tokens").is_none());
+    } else {
+        assert_eq!(body["max_tokens"], 128);
+    }
     assert!(
         body.get("temperature").is_none(),
         "unset profiles must use the provider default temperature"
@@ -1011,6 +1036,7 @@ fn run_generated_openai_compatible_smoke(
         .arg("--force")
         .output()
         .expect("OpenAI-compatible hatch should start");
+    assert_warning_free_build(&hatch, "OpenAI-compatible hatch");
     if fixture.home.join("batch-seed-marker").exists() {
         assert!(
             String::from_utf8_lossy(&hatch.stdout).contains("Reused warmed template"),
@@ -1458,6 +1484,18 @@ fn selected_audio_chain_reports_written_artifact_without_child_result_or_private
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["outcome"], "succeeded", "{value}");
     assert_eq!(value["data"]["result"]["availability"], "not_produced");
+    let thinking = &value["data"]["thinking"]["records"];
+    assert_eq!(thinking[0]["outcome"]["requested"]["value"], "max");
+    assert_eq!(thinking[0]["outcome"]["fallback"], "unsupported_control");
+    assert_eq!(
+        thinking[1]["outcome"]["requested"]["mode"],
+        "provider_default"
+    );
+    assert_eq!(
+        thinking[1]["outcome"]["effective"]["mode"],
+        "provider_default"
+    );
+    assert_eq!(thinking[1]["outcome"]["source"], "step");
     assert!(value["data"]["artifacts"]
         .as_array()
         .unwrap()
@@ -1528,6 +1566,7 @@ fn generated_audio_chain_case(fixture: &Fixture) {
         .arg("--force")
         .output()
         .expect("media chain hatch should start");
+    assert_warning_free_build(&hatch, "media chain hatch");
     assert!(
         hatch.status.success(),
         "media hatch failed:\n{}\n{}",
@@ -1579,6 +1618,7 @@ fn generated_anthropic_case(fixture: &Fixture) {
         .arg("--force")
         .output()
         .expect("hatch should start");
+    assert_warning_free_build(&hatch, "provider hatch");
     if fixture.home.join("batch-seed-marker").exists() {
         assert!(
             String::from_utf8_lossy(&hatch.stdout).contains("Reused warmed template"),
@@ -1651,6 +1691,7 @@ fn generated_gemini_case(fixture: &Fixture) {
         .arg("--force")
         .output()
         .expect("hatch should start");
+    assert_warning_free_build(&hatch, "provider hatch");
     if fixture.home.join("batch-seed-marker").exists() {
         assert!(
             String::from_utf8_lossy(&hatch.stdout).contains("Reused warmed template"),
@@ -1799,6 +1840,65 @@ fn generated_ollama_case(fixture: &Fixture) {
         None,
         MockServer::ollama_success(),
     );
+    let executable = fixture.root.join("dist").join(if cfg!(windows) {
+        "ollama_provider_smoke.exe"
+    } else {
+        "ollama_provider_smoke"
+    });
+    for (flags, applied, metadata_reads, fallback_notice) in [
+        (vec!["--thinking", "high"], true, 1, false),
+        (vec!["--thinking", "max"], false, 1, true),
+        (vec!["--thinking-provider-default"], false, 0, false),
+        (vec![], true, 1, false),
+    ] {
+        let mut server = mockito::Server::new();
+        let metadata = server
+            .mock("POST", "/api/show")
+            .expect(metadata_reads)
+            .with_body(
+                r#"{"model":"ollama-smoke","thinking":{"values":["low","high"],"default":"low"}}"#,
+            )
+            .create();
+        let inference = server
+            .mock("POST", "/v1/chat/completions")
+            .match_request(move |request| {
+                let body: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+                if applied {
+                    body["reasoning_effort"] == "high"
+                } else {
+                    body.get("reasoning_effort").is_none()
+                }
+            })
+            .with_body(ollama_success_response(r#"{"status":"ok"}"#))
+            .create();
+        fs::write(fixture.home.join("config.toml"), format!(
+            "secret_store='file'\n[[profile]]\nname='thinking-fixture'\nserver='ollama'\nmodel='ollama-smoke'\nurl='{}/v1/chat/completions'\nauth_mode='none'\nthinking={{mode='choice',value='high'}}\n", server.url())).unwrap();
+        let output = fixture
+            .isolated_command(&executable)
+            .args([
+                "--profile",
+                "thinking-fixture",
+                "--max-output-tokens",
+                "128",
+                "--render-mode",
+                "append-only",
+            ])
+            .args(&flags)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "generated thinking failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr).contains("using provider default"),
+            fallback_notice
+        );
+        metadata.assert();
+        inference.assert();
+    }
 }
 
 #[test]
@@ -1818,6 +1918,7 @@ fn generated_native_account_case(fixture: &Fixture) {
         .args(["--force", "--keep-project"])
         .output()
         .expect("native account hatch should start");
+    assert_warning_free_build(&hatch, "native account hatch");
     assert!(
         hatch.status.success(),
         "native account hatch failed\n{}\n{}",
@@ -1959,6 +2060,7 @@ fn generated_native_account_case(fixture: &Fixture) {
         ])
         .output()
         .expect("actual emitted native account tests should start");
+    assert_warning_free_build(&output, "emitted native account tests");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
@@ -2009,6 +2111,7 @@ fn generated_provider_batch_isolated_and_deterministic() {
         String::from_utf8_lossy(&hatch.stderr)
     );
     let cache = provider_cache::SeedCache::capture(&seed.home, identity.clone()).unwrap();
+    assert_warning_free_build(&hatch, "neutral generated seed");
     eprintln!(
         "generated-provider neutral-seed: {:.2}s",
         started.elapsed().as_secs_f64()

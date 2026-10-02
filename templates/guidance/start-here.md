@@ -2,6 +2,10 @@
 
 Use this file when a user opens a blank folder and wants help creating their first Cargo AI agent that hatches into a CLI tool.
 
+## Thinking Controls
+
+Model selection works without a thinking setting. When a user requests one, inspect installed capabilities, then query exact choices with `cargo ai models thinking --profile NAME --model MODEL_ID --output-format json`. A profile or invocation may use `--thinking VALUE` or `--thinking-provider-default`; profile set also supports `--clear-thinking`. Choices depend on the model/connection and have no universal ordering. Unavailable choices use provider default with an explanation. See [Thinking Selection](agent-definition-contract.md#thinking-selection) for action revision `2026-10-01.r1`, inheritance, child forwarding and rebuild limits.
+
 ## First-Run Goal
 
 Do not start by asking the user to choose between a single agent, an action agent, or a parent/child setup.
@@ -139,3 +143,6 @@ Inspect `.cargo-ai/project.toml` before choosing output paths. `cargo ai new` se
 For a native wrapper or script integration, check installed `cargo ai capabilities --output-format json` before selecting `--output-format json --output-schema-version 1` or the advertised `run` NDJSON stream. Keep existing definition-input flags, consent and credential handling unchanged. `cargo ai models list --profile NAME --output-format json` can discover supported catalog IDs without inference; listing does not establish invocation access, and saved API-key discovery requires explicit file storage. Use draft bounded stdin or manual entry for unsupported stores/connections.
 
 The public [machine interface](https://github.com/cargo-ai/cargo-ai/blob/develop/docs/machine-interface.md) and [payload reference](https://github.com/cargo-ai/cargo-ai/blob/develop/docs/machine-payloads.md) describe these optional interfaces. Do not assume source documentation means an older installation or generated child has the capability.
+
+
+Use case-insensitive `--thinking on` / `off` for qualified Boolean controls, or `--thinking-choice VALUE` for an exact name such as literal `on`. Discovery supplies Boolean availability/default separately from named levels. Unsupported selections use provider default with a notice. See [Thinking Selection](agent-definition-contract.md#thinking-selection).

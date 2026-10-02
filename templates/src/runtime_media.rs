@@ -267,6 +267,25 @@ pub(super) async fn run_audio_step(
                 .ok_or_else(|| "transcribe_audio requires `output_variable`.".to_string())?,
         )
     };
+    let (thinking_setting, thinking_source) =
+        runtime_thinking::step_setting(step, data, selected.as_ref(), provider_context)?;
+    let thinking_outcome = runtime_thinking::resolve_for_request(
+        thinking_setting.as_ref(),
+        &thinking_source,
+        context,
+        model.as_deref().unwrap_or_default(),
+        if speech {
+            crate::providers::thinking_metadata::ThinkingRequestKind::Speech
+        } else {
+            crate::providers::thinking_metadata::ThinkingRequestKind::Transcription
+        },
+        runtime_budget,
+    )
+    .await?;
+    note_runtime_thinking(
+        runtime_thinking::step_scope(action_index, action_name, step_index),
+        &thinking_outcome,
+    );
     let remaining = remaining_runtime_duration(runtime_budget, "before starting audio request")
         .map_err(|context| action_runtime_timeout_message(action_name, runtime_budget, &context))?;
     let usage_step = crate::usage_log::UsageStep {

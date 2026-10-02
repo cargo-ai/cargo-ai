@@ -73,6 +73,7 @@ pub(crate) struct ProviderTextRequest<'a> {
     pub(crate) response_schema: &'a serde_json::Value,
     pub(crate) max_output_tokens: Option<u32>,
     pub(crate) temperature: Option<f64>,
+    pub(crate) thinking: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

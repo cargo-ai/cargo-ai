@@ -68,6 +68,40 @@ pub(crate) fn build_cli_from(mut args: Vec<String>) -> ArgMatches {
                 .global(true)
         )
         .arg(
+            Arg::new("thinking")
+                .long("thinking")
+                .value_name("VALUE")
+                .help("Request On/Off (case insensitive) or an exact provider/model thinking choice")
+                .conflicts_with_all(["thinking_provider_default", "thinking_choice"])
+                .value_parser(|value: &str| {
+                    if value.trim().is_empty() {
+                        Err("thinking choice must be nonempty".to_string())
+                    } else {
+                        Ok(value.to_string())
+                    }
+                })
+        )
+        .arg(
+            Arg::new("thinking_choice")
+                .long("thinking-choice")
+                .value_name("VALUE")
+                .help("Request an exact named choice, including literal on/off")
+                .conflicts_with_all(["thinking", "thinking_provider_default"])
+                .value_parser(|value: &str| {
+                    if value.trim().is_empty() {
+                        Err("thinking choice must be nonempty".to_string())
+                    } else {
+                        Ok(value.to_string())
+                    }
+                })
+        )
+        .arg(
+            Arg::new("thinking_provider_default")
+                .long("thinking-provider-default")
+                .help("Use provider-default thinking instead of an inherited choice")
+                .action(ArgAction::SetTrue)
+        )
+        .arg(
             Arg::new("max_output_tokens")
                 .long("max-output-tokens")
                 .help("Maximum provider output tokens for this invocation")
@@ -191,4 +225,25 @@ pub(crate) fn build_cli_from(mut args: Vec<String>) -> ArgMatches {
                 .action(ArgAction::SetTrue),
         )
         .get_matches_from(args)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn thinking_flags_preserve_exact_choice_default_and_inheritance() {
+        let absent = super::build_cli_from(vec!["agent".into()]);
+        assert!(absent.get_one::<String>("thinking").is_none());
+        assert!(!absent.get_flag("thinking_provider_default"));
+        let choice =
+            super::build_cli_from(vec!["agent".into(), "--thinking".into(), "default".into()]);
+        assert_eq!(
+            choice.get_one::<String>("thinking").map(String::as_str),
+            Some("default")
+        );
+        assert!(!choice.get_flag("thinking_provider_default"));
+        let default =
+            super::build_cli_from(vec!["agent".into(), "--thinking-provider-default".into()]);
+        assert!(default.get_one::<String>("thinking").is_none());
+        assert!(default.get_flag("thinking_provider_default"));
+    }
 }

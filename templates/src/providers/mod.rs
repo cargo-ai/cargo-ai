@@ -9,11 +9,15 @@ mod gemini;
 mod image;
 mod media;
 mod ollama;
-mod openai;
 #[cfg(test)]
-pub(crate) use openai::native_account_test_endpoint;
+pub(crate) mod openai;
+#[cfg(not(test))]
+mod openai;
 mod openai_compatible;
 pub(crate) mod runtime;
+pub(crate) mod thinking;
+pub(crate) mod thinking_image;
+pub(crate) mod thinking_metadata;
 mod typesafe;
 mod xai;
 
@@ -83,7 +87,7 @@ pub(crate) async fn send_text_request_with_account_context(
             unreachable!("TypeSafe is dispatched before JSON Schema preparation")
         }
         error::ProviderTransport::AnthropicMessages => {
-            anthropic::send_request(
+            anthropic::send_request_with_thinking(
                 url,
                 request.model,
                 request.content_parts,
@@ -91,11 +95,12 @@ pub(crate) async fn send_text_request_with_account_context(
                 request.token,
                 request.response_schema,
                 request.max_output_tokens,
+                request.thinking,
             )
             .await
         }
         error::ProviderTransport::GeminiInteractions => {
-            gemini::send_request(
+            gemini::send_request_with_thinking(
                 url,
                 request.model,
                 request.content_parts,
@@ -103,11 +108,12 @@ pub(crate) async fn send_text_request_with_account_context(
                 request.token,
                 request.response_schema,
                 request.max_output_tokens,
+                request.thinking,
             )
             .await
         }
         error::ProviderTransport::OpenAiCompatibleChat => {
-            openai_compatible::send_request(
+            openai_compatible::send_request_with_thinking(
                 provider,
                 url,
                 request.model,
@@ -117,6 +123,7 @@ pub(crate) async fn send_text_request_with_account_context(
                 request.response_schema,
                 request.max_output_tokens,
                 request.temperature,
+                request.thinking,
             )
             .await
         }
@@ -145,11 +152,13 @@ pub(crate) async fn send_text_request_with_account_context(
                 response_format,
                 request.temperature,
                 account_id,
+                request.thinking,
+                request.max_output_tokens,
             )
             .await
         }
         error::ProviderTransport::XaiResponses => {
-            xai::send_request(
+            xai::send_request_with_thinking(
                 url,
                 request.model,
                 request.content_parts,
@@ -157,9 +166,105 @@ pub(crate) async fn send_text_request_with_account_context(
                 request.token,
                 request.response_schema,
                 request.max_output_tokens,
+                request.thinking,
             )
             .await
         }
+    }
+}
+
+#[cfg(test)]
+mod thinking_request_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    #[tokio::test]
+    async fn named_choices_map_exactly_and_default_omits_controls() {
+        for provider in [
+            ProviderKind::OpenAi,
+            ProviderKind::Anthropic,
+            ProviderKind::Gemini,
+            ProviderKind::Mistral,
+            ProviderKind::Ollama,
+            ProviderKind::Xai,
+        ] {
+            for thinking in [None, Some("high")] {
+                let mut server = mockito::Server::new_async().await;
+                let mock = server
+                    .mock("POST", "/")
+                    .match_request(move |request| {
+                        let Ok(value) = serde_json::from_slice::<Value>(request.body().unwrap())
+                        else {
+                            return false;
+                        };
+                        let observed = match provider {
+                            ProviderKind::OpenAi | ProviderKind::Mistral | ProviderKind::Ollama => {
+                                value.get("reasoning_effort")
+                            }
+                            ProviderKind::Anthropic => value
+                                .get("output_config")
+                                .and_then(|value| value.get("effort")),
+                            ProviderKind::Gemini => value
+                                .get("generation_config")
+                                .and_then(|value| value.get("thinking_level")),
+                            ProviderKind::Xai => {
+                                value.get("reasoning").and_then(|value| value.get("effort"))
+                            }
+                            _ => unreachable!(),
+                        };
+                        let companion = if provider == ProviderKind::Anthropic {
+                            value.get("thinking").cloned()
+                        } else {
+                            None
+                        };
+                        observed.and_then(Value::as_str) == thinking
+                            && (provider != ProviderKind::Anthropic
+                                || companion == thinking.map(|_| json!({"type":"adaptive"})))
+                    })
+                    .with_status(200)
+                    .with_body(r#"{"content":[],"steps":[],"output":[],"choices":[],"usage":{}}"#)
+                    .create_async()
+                    .await;
+                // The invalid output is deliberate: request assertions must hold even on failure.
+                let _ = send_text_request(provider,&server.url(),ProviderTextRequest {
+                    rubric_enabled:false,model:"claude-opus-4-6",content_parts:&[runtime::ContentPart::Text("fixture".into())],timeout_in_sec:5,token:"fixture-token",response_schema:&json!({"type":"object","properties":{},"additionalProperties":false}),max_output_tokens:None,temperature:None,thinking,
+                }).await;
+                mock.assert_async().await;
+            }
+        }
+    }
+    #[tokio::test]
+    async fn boolean_thinking_uses_qualified_compatible_payloads_and_omits_unavailable_choice() {
+        for (setting, expected) in [(thinking::ThinkingSetting::On,Some("medium")),(thinking::ThinkingSetting::Off,Some("none")),(thinking::ThinkingSetting::Choice { value:"high".into() },None),(thinking::ThinkingSetting::ProviderDefault,None)] {
+            let support = thinking_metadata::ollama_support(&json!({"thinking":{"values":[false,true],"default":true}}), "fixture");
+            let outcome = thinking::resolve(Some(&setting), "run", support);
+            assert_eq!(outcome.provider_value(true),expected);
+            let mut server=mockito::Server::new_async().await;
+            let request=server.mock("POST","/v1/chat/completions").match_request(move |request| {
+                let value: Value=serde_json::from_slice(request.body().unwrap()).unwrap();
+                value.get("reasoning_effort").and_then(Value::as_str)==expected && value.get("think").is_none()
+            }).with_status(200).with_body(r#"{"choices":[{"message":{"content":"{}"}}],"usage":{}}"#).create_async().await;
+            let _=send_text_request(ProviderKind::Ollama,&format!("{}/v1/chat/completions",server.url()),ProviderTextRequest {
+                rubric_enabled:false,model:"fixture",content_parts:&[runtime::ContentPart::Text("fixture".into())],timeout_in_sec:5,token:"",response_schema:&json!({"type":"object","properties":{},"additionalProperties":false}),max_output_tokens:Some(8192),temperature:None,thinking:outcome.provider_value(true),
+            }).await;
+            request.assert_async().await;
+        }
+    }
+
+    #[test]
+    fn unavailable_mistral_choice_uses_provider_default_without_substitution() {
+        let setting = thinking::ThinkingSetting::Choice {
+            value: "max".into(),
+        };
+        let support = thinking_metadata::adapter_support(
+            ProviderKind::Mistral,
+            "https://api.mistral.ai/v1/chat/completions",
+            "mistral-small-latest",
+            thinking_metadata::ThinkingRequestKind::Text,
+        );
+        assert!(thinking::resolve(Some(&setting), "run", support)
+            .applied_choice()
+            .is_none());
     }
 }
 
@@ -188,6 +293,7 @@ mod temperature_tests {
                     response_schema: &serde_json::json!({}),
                     max_output_tokens: None,
                     temperature: Some(0.0),
+                    thinking: None,
                     rubric_enabled: false,
                 },
             )
@@ -226,6 +332,7 @@ mod temperature_tests {
                     rubric_enabled: enabled,
                     max_output_tokens: None,
                     temperature: None,
+                    thinking: None,
                 },
             )
             .await
@@ -272,6 +379,7 @@ mod usage_retention_tests {
                     response_schema: &schema,
                     max_output_tokens: None,
                     temperature: None,
+                    thinking: None,
                 },
             )
             .await

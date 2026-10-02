@@ -110,6 +110,7 @@ pub(crate) struct AttributionSnapshot {
     pub(crate) runtime: Runtime,
 }
 
+#[cfg(cargo_ai_cli)]
 #[derive(Serialize)]
 pub(crate) struct UsageContextInspection {
     pub(crate) effective_home: String,
@@ -323,6 +324,7 @@ impl AttributionSnapshot {
     }
 }
 
+#[cfg(cargo_ai_cli)]
 pub(crate) fn inspect_context() -> UsageContextInspection {
     let home = crate::config::loader::config_path()
         .parent()
