@@ -1456,11 +1456,24 @@ fn inspect_existing_output_components(
         }
         None => (PathBuf::new(), path),
     };
-    for component in remaining_path.components() {
+    let mut components = remaining_path.components().peekable();
+    while let Some(component) = components.next() {
         current_path.push(component.as_os_str());
-        // A Windows prefix is not a filesystem ancestor until its root is appended.
-        if matches!(component, Component::Prefix(_)) && remaining_path.is_absolute() {
-            continue;
+        if let Component::Prefix(prefix) = component {
+            // Verbatim prefixes can be absolute without yielding a root component.
+            // Defer inspection only when the next component completes the root.
+            if matches!(components.peek(), Some(Component::RootDir)) {
+                continue;
+            }
+            if matches!(
+                prefix.kind(),
+                std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)
+            ) {
+                return Err(format!(
+                    "Package output ancestor '{}' must include a root directory after its drive prefix.",
+                    current_path.display()
+                ));
+            }
         }
         match fs::symlink_metadata(&current_path) {
             Ok(metadata) if metadata_is_link_like(&metadata) => {
@@ -2205,6 +2218,42 @@ assets = ["assets/linked.txt"]
         let _ = fs::remove_file(project_root.join("linked-output"));
         let _ = fs::remove_dir_all(project_root);
         let _ = fs::remove_dir_all(external_root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_windows_prefix_roots_require_actual_components() {
+        use std::path::{Component, Path};
+
+        for (raw, absolute, root_component) in [
+            (r"C:", false, false),
+            (r"C:relative", false, false),
+            (r"C:\", true, true),
+            (r"\\?\C:", true, false),
+            (r"\\?\C:\", true, true),
+            (r"\\server\share", true, true),
+            (r"\\?\UNC\server\share", true, false),
+            (r"\\?\UNC\server\share\", true, true),
+            (r"\\.\device", true, true),
+            (r"\\?\device", true, false),
+            (r"\\?\device\", true, true),
+        ] {
+            let path = Path::new(raw);
+            let mut components = path.components();
+            assert!(matches!(components.next(), Some(Component::Prefix(_))));
+            assert_eq!(path.is_absolute(), absolute, "{raw}");
+            assert_eq!(
+                matches!(components.next(), Some(Component::RootDir)),
+                root_component,
+                "{raw}"
+            );
+        }
+
+        for raw in [r"C:", r"C:relative", r"\\?\C:"] {
+            let error = super::inspect_existing_output_components(Path::new(raw), &[])
+                .expect_err("a drive prefix without a root must fail before filesystem access");
+            assert!(error.contains("must include a root directory"), "{error}");
+        }
     }
 
     #[cfg(windows)]
