@@ -2425,6 +2425,7 @@ fn canonical_authoring_corpus_matches_codegen_contract() {
 
 #[test]
 fn installed_authoring_examples_use_valid_strict_contracts() {
+    let mut action_documents = 0;
     for directory in ["templates/guidance/examples", "templates/shared/examples"] {
         for entry in
             std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(directory))
@@ -2436,10 +2437,20 @@ fn installed_authoring_examples_use_valid_strict_contracts() {
             }
             let raw = std::fs::read_to_string(&path).unwrap();
             let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            if matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("client-actions.json" | "client-action-request.json")
+            ) {
+                // These documents use the action contract, exercised through
+                // the real CLI in client_action_contracts, rather than codegen.
+                assert_eq!(value["schema_version"], 1, "{}", path.display());
+                action_documents += 1;
+                continue;
+            }
             assert!(
                 matches!(
                     value["agent_definition_schema_version"].as_str(),
-                    Some("2026-09-09.r1" | "2026-09-19.r1")
+                    Some("2026-09-09.r1" | "2026-09-19.r1" | "2026-10-01.r1")
                 ),
                 "{}",
                 path.display()
@@ -2448,6 +2459,7 @@ fn installed_authoring_examples_use_valid_strict_contracts() {
                 .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         }
     }
+    assert_eq!(action_documents, 2);
 }
 
 #[test]
