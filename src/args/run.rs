@@ -6,9 +6,22 @@ pub fn command() -> Command {
     super::runtime_common::runtime_command("run", "Run an agent JSON definition without hatching")
         .group(
             ArgGroup::new("run_definition_source")
-                .args(["name", "config", "json", "stdin"])
+                .args(["name", "config", "json", "stdin", "action"])
                 .required(true),
         )
+        .arg(
+            Arg::new("action")
+                .long("action")
+                .value_name("ID")
+                .help("Run an explicitly declared client action with a validated request")
+                .requires_all(["interface", "action_target", "action_request_stdin"])
+                .conflicts_with_all(["run_var", "input_override", "input_mode", "input_text", "input_url", "input_image", "input_file", "server", "url", "token"]),
+        )
+        .arg(Arg::new("interface").long("interface").value_name("ID").requires("action"))
+        .arg(Arg::new("project").long("project").value_name("DIRECTORY").requires("action"))
+        .arg(Arg::new("package").long("package").value_name("ALIAS").requires("action"))
+        .group(ArgGroup::new("action_target").args(["project", "package"]))
+        .arg(Arg::new("action_request_stdin").long("action-request-stdin").action(ArgAction::SetTrue).requires("action").help("Read the declared action request from stdin; distinct from --stdin definition input"))
         .arg(
             Arg::new("name")
                 .help("Agent name or local .json config path (shorthand)")
@@ -73,6 +86,42 @@ pub fn command() -> Command {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn action_selection_is_distinct_from_definition_and_business_override_flags() {
+        let base = [
+            "run",
+            "--action",
+            "draw",
+            "--interface",
+            "board",
+            "--project",
+            ".",
+            "--action-request-stdin",
+        ];
+        assert!(super::command().try_get_matches_from(base).is_ok());
+        for extra in [
+            vec!["--json", "{}"],
+            vec!["--stdin"],
+            vec!["--run-var", "panel=x"],
+            vec!["--input-override", "panel=x"],
+            vec!["--server", "openai"],
+            vec!["--url", "https://example.invalid"],
+        ] {
+            assert!(super::command()
+                .try_get_matches_from(base.into_iter().chain(extra))
+                .is_err());
+        }
+        assert!(super::command()
+            .try_get_matches_from(["run", "--action", "draw", "--action-request-stdin"])
+            .is_err());
+        assert!(super::command()
+            .try_get_matches_from(["run", "--config", "agent.json", "--project", "."])
+            .is_err());
+        assert!(super::command()
+            .try_get_matches_from(base.into_iter().chain(["--package", "demo"]))
+            .is_err());
+    }
+
     #[test]
     fn help_describes_definition_source_flags() {
         let mut command = super::command();

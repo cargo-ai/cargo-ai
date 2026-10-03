@@ -461,6 +461,8 @@ fn interpreted_and_emitted_outputs_preserve_authority_and_reject_before_consumpt
             "test",
             "--offline",
             "--release",
+            "--color",
+            "never",
             "--target",
             target,
             "--",

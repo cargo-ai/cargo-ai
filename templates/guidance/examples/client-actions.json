@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "actions": [
+    {
+      "id": "generate-one",
+      "label": "Generate this panel",
+      "target": "client-action-coordinator.json",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "panel_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "minItems": 1,
+            "maxItems": 1
+          }
+        },
+        "required": [
+          "panel_ids"
+        ],
+        "additionalProperties": false
+      },
+      "mappings": {
+        "panel_ids": {
+          "runtime_var": "panel_ids_json",
+          "encoding": "json"
+        }
+      },
+      "required_capabilities": [
+        "execution_policy.v1"
+      ]
+    },
+    {
+      "id": "generate-selected",
+      "label": "Generate selected panels",
+      "target": "client-action-coordinator.json",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "panel_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "minItems": 1,
+            "maxItems": 64
+          }
+        },
+        "required": [
+          "panel_ids"
+        ],
+        "additionalProperties": false
+      },
+      "mappings": {
+        "panel_ids": {
+          "runtime_var": "panel_ids_json",
+          "encoding": "json"
+        }
+      },
+      "required_capabilities": [
+        "execution_policy.v1"
+      ]
+    },
+    {
+      "id": "review",
+      "label": "Review selected panels",
+      "target": "client-action-review.json",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "panel_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "minItems": 1,
+            "maxItems": 64
+          }
+        },
+        "required": [
+          "panel_ids"
+        ],
+        "additionalProperties": false
+      },
+      "mappings": {
+        "panel_ids": {
+          "runtime_var": "panel_ids_json",
+          "encoding": "json"
+        }
+      },
+      "required_capabilities": [
+        "execution_policy.v1"
+      ]
+    }
+  ],
+  "interfaces": [
+    {
+      "id": "panels",
+      "label": "Panel controls",
+      "actions": [
+        "generate-one",
+        "generate-selected",
+        "review"
+      ],
+      "resources": [
+        "controls"
+      ]
+    }
+  ],
+  "resources": [
+    {
+      "id": "controls",
+      "path": "client-action-controls.js",
+      "mime_type": "text/javascript"
+    }
+  ]
+}

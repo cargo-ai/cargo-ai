@@ -134,11 +134,14 @@ mod native_account_runtime_tests {
             if let Some(account) = account {
                 assert!(!format!("{resolved:?}").contains(account));
             }
-            let override_context = resolve_generate_image_step_profile_context(
+            let override_context = resolve_media_step_profile_context(
                 Some(&RunArg::Literal("native-image".into())),
                 &serde_json::json!({}),
                 "image",
                 9,
+                "generate_image",
+                None,
+                None,
             )
             .await
             .unwrap()

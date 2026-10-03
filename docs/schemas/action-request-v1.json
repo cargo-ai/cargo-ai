@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/action-request-v1.json",
+  "title": "Cargo AI declared-action request v1",
+  "$comment": "Strict bounded stdin request, maximum 64 KiB UTF-8. Business values also obey the selected action input_schema, depth 8, arrays 1024 items and runtime input limits. Interface/action must match CLI selectors. Host constructs policy/grants; page values cannot authorize them. Referenced schemas are repository-local specifications; the runtime never loads network schemas.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "interface": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+      "not": {
+        "enum": [
+          "execution_policy",
+          "expected_binding",
+          "attachment_grants",
+          "constructor",
+          "prototype",
+          "__proto__"
+        ]
+      }
+    },
+    "action": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+      "not": {
+        "enum": [
+          "execution_policy",
+          "expected_binding",
+          "attachment_grants",
+          "constructor",
+          "prototype",
+          "__proto__"
+        ]
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+        "not": {
+          "enum": [
+            "execution_policy",
+            "expected_binding",
+            "attachment_grants",
+            "constructor",
+            "prototype",
+            "__proto__",
+            "profile",
+            "model",
+            "thinking",
+            "server",
+            "token",
+            "settings",
+            "config",
+            "execution_limits"
+          ]
+        }
+      }
+    },
+    "expected_binding": {
+      "$ref": "action-binding-v1.json"
+    },
+    "execution_policy": {
+      "$ref": "action-execution-policy-v1.json"
+    },
+    "attachment_grants": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+        "not": {
+          "enum": [
+            "execution_policy",
+            "expected_binding",
+            "attachment_grants",
+            "constructor",
+            "prototype",
+            "__proto__"
+          ]
+        }
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Host-authorized absolute path, never a page-supplied grant."
+          },
+          "content_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "path",
+          "content_sha256"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "interface",
+    "action",
+    "inputs",
+    "expected_binding",
+    "execution_policy"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "resource_request": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "interface": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+          "not": {
+            "enum": [
+              "execution_policy",
+              "expected_binding",
+              "attachment_grants",
+              "constructor",
+              "prototype",
+              "__proto__"
+            ]
+          }
+        },
+        "resource": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+          "not": {
+            "enum": [
+              "execution_policy",
+              "expected_binding",
+              "attachment_grants",
+              "constructor",
+              "prototype",
+              "__proto__"
+            ]
+          }
+        },
+        "expected_binding": {
+          "$ref": "action-binding-v1.json"
+        }
+      },
+      "required": [
+        "schema_version",
+        "interface",
+        "resource",
+        "expected_binding"
+      ],
+      "additionalProperties": false
+    },
+    "attachment_reference": {
+      "type": "object",
+      "properties": {
+        "grant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+          "not": {
+            "enum": [
+              "execution_policy",
+              "expected_binding",
+              "attachment_grants",
+              "constructor",
+              "prototype",
+              "__proto__"
+            ]
+          }
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "grant_id",
+        "content_sha256"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -89,6 +89,40 @@ fn installed_guidance_preserves_home_user_instructions_and_repeated_updates() {
     assert_state(&fixture, &root, "missing");
     assert!(!fixture.cargo_ai_home.exists());
     add(&fixture, &root);
+    for (path, expected) in [
+        (
+            "client-actions.md",
+            include_str!("../templates/guidance/client-actions.md"),
+        ),
+        (
+            "examples/client-actions.json",
+            include_str!("../templates/guidance/examples/client-actions.json"),
+        ),
+        (
+            "examples/client-action-request.json",
+            include_str!("../templates/guidance/examples/client-action-request.json"),
+        ),
+        (
+            "examples/client-action-controls.js",
+            include_str!("../templates/guidance/examples/client-action-controls.js"),
+        ),
+        (
+            "examples/client-action-coordinator.json",
+            include_str!("../templates/guidance/examples/client-action-coordinator.json"),
+        ),
+        (
+            "examples/client-action-review.json",
+            include_str!("../templates/guidance/examples/client-action-review.json"),
+        ),
+    ] {
+        assert_eq!(
+            fs::read_to_string(root.join(".cargo-ai/guidance").join(path)).unwrap(),
+            expected
+        );
+        if path.ends_with(".json") {
+            serde_json::from_str::<serde_json::Value>(expected).unwrap();
+        }
+    }
     assert!(
         !fixture.cargo_ai_home.exists(),
         "add must not initialize a home"
@@ -130,6 +164,7 @@ fn installed_guidance_preserves_home_user_instructions_and_repeated_updates() {
 fn guidance_blocked_states_leave_all_existing_bytes_unchanged() {
     for (case, state) in [
         ("modified", "locally modified"),
+        ("client-actions", "locally modified"),
         ("missing", "incomplete"),
         ("manifest", "malformed"),
         ("legacy", "legacy/unmanaged"),
@@ -141,6 +176,9 @@ fn guidance_blocked_states_leave_all_existing_bytes_unchanged() {
         let bundle = root.join(".cargo-ai/guidance");
         match case {
             "modified" => fs::write(bundle.join("start-here.md"), "user changes\n").unwrap(),
+            "client-actions" => {
+                fs::write(bundle.join("client-actions.md"), "user action guidance\n").unwrap()
+            }
             "missing" => fs::remove_file(bundle.join("start-here.md")).unwrap(),
             "manifest" => fs::write(bundle.join("manifest.json"), "{ broken").unwrap(),
             "legacy" => fs::remove_file(bundle.join("manifest.json")).unwrap(),

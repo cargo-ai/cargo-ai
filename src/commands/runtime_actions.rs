@@ -1198,6 +1198,7 @@ async fn apply_actions_parallel(
         let provider_context_clone = provider_context.clone();
         let abort_signal_clone = abort_signal.clone();
         let action_output_clone = action_output.clone();
+        let execution_policy = crate::execution_policy::current();
         let declaring_project_root_clone = declaring_project_root.clone();
 
         let completion = super::machine::lane_completion();
@@ -1220,6 +1221,9 @@ async fn apply_actions_parallel(
             };
             let lane_future =
                 DECLARING_PROJECT_ROOT.scope(declaring_project_root_clone, lane_future);
+
+            let lane_future =
+                crate::execution_policy::scope_optional(execution_policy, Box::pin(lane_future));
 
             if let Some(output) = action_output_clone {
                 ACTION_OUTPUT.scope(output, lane_future).await
@@ -2232,13 +2236,9 @@ async fn run_generate_image_step(
     provider_context: &ActionProviderContext,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
-    let step_profile_context = resolve_generate_image_step_profile_context(
-        step.profile.as_ref(),
-        data,
-        action_name,
-        provider_context.inference_timeout_in_sec,
-    )
-    .await?;
+    let step_profile_context =
+        resolve_media_step_context(step, data, action_name, provider_context, "generate_image")
+            .await?;
     let effective_provider_context = step_profile_context.as_ref().unwrap_or(provider_context);
 
     let model = resolve_generate_image_model(
@@ -2630,6 +2630,7 @@ fn resolve_profile_api_token_for_action_step(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn resolve_generate_image_step_profile_context(
     profile: Option<&crate::RunArg>,
     data: &serde_json::Value,
@@ -2642,8 +2643,31 @@ pub(crate) async fn resolve_generate_image_step_profile_context(
         action_name,
         invocation_timeout_in_sec,
         "generate_image",
+        None,
+        None,
     )
     .await
+}
+
+async fn resolve_media_step_context(
+    step: &crate::RunStep,
+    data: &serde_json::Value,
+    action_name: &str,
+    invocation: &ActionProviderContext,
+    kind: &str,
+) -> Result<Option<ActionProviderContext>, String> {
+    let selected = resolve_media_step_profile_context(
+        step.profile.as_ref(),
+        data,
+        action_name,
+        invocation.inference_timeout_in_sec,
+        kind,
+        Some(step),
+        Some(invocation),
+    )
+    .await?;
+    runtime_thinking::check_media_selection(step, data, selected.as_ref(), invocation, kind)?;
+    Ok(selected)
 }
 
 async fn resolve_media_step_profile_context(
@@ -2652,6 +2676,8 @@ async fn resolve_media_step_profile_context(
     action_name: &str,
     invocation_timeout_in_sec: u64,
     step_kind: &str,
+    selection_step: Option<&crate::RunStep>,
+    invocation: Option<&ActionProviderContext>,
 ) -> Result<Option<ActionProviderContext>, String> {
     let Some(profile_name) = resolve_step_profile_name(profile, data, action_name, step_kind)?
     else {
@@ -2683,6 +2709,35 @@ async fn resolve_media_step_profile_context(
             )
         })?;
 
+    if let (Some(step), Some(invocation)) = (selection_step, invocation) {
+        let metadata = ActionProviderContext {
+            project_data: None,
+            provider,
+            profile_name: Some(profile.name.clone()),
+            auth_mode: profile_auth_mode_display(profile.auth_mode).into(),
+            model: profile.model.clone(),
+            thinking: profile.thinking.clone(),
+            thinking_source: "profile".into(),
+            max_output_tokens: crate::execution_policy::output_limit(profile.max_output_tokens),
+            url: profile.url.clone().unwrap_or_default(),
+            token: String::new(),
+            openai_account_id: None,
+            inference_timeout_in_sec: invocation_timeout_in_sec,
+            tool_resolver: None,
+            usage_log: None,
+            package_context: None,
+        };
+        runtime_thinking::check_media_selection(
+            step,
+            data,
+            Some(&metadata),
+            invocation,
+            step_kind,
+        )?;
+    }
+
+    #[cfg(test)]
+    crate::execution_policy::note_boundary("credentials");
     if step_kind != "generate_image" && profile.auth_mode != ProfileAuthMode::ApiKey {
         return Err(format!(
             "Action '{action_name}' {step_kind} requires an API-key profile."
@@ -2779,7 +2834,7 @@ async fn resolve_media_step_profile_context(
     Ok(Some(ActionProviderContext {
         thinking: profile.thinking.clone(),
         thinking_source: "profile".into(),
-        max_output_tokens: profile.max_output_tokens,
+        max_output_tokens: crate::execution_policy::output_limit(profile.max_output_tokens),
         project_data: None,
         provider,
         profile_name: Some(profile.name.clone()),
@@ -2901,6 +2956,55 @@ async fn run_agent_step_with_provider_context(
         provider_context.package_context.as_ref(),
     )?;
     let mut command = child_artifact_command(&invocation);
+    crate::execution_policy::propagate_child(
+        &mut command,
+        !matches!(invocation, ChildArtifactInvocation::DirectExecutable(_)),
+    )?;
+    let child_profile =
+        resolve_step_profile_name(step.profile.as_ref(), data, action_name, "agent")?.or_else(
+            || {
+                artifact_is_json_definition(artifact)
+                    .then(|| provider_context.profile_name.clone())
+                    .flatten()
+            },
+        );
+    let child_thinking = runtime_thinking::explicit_step_setting(step.thinking.as_ref(), data)?;
+    crate::execution_policy::check_child_selectors(
+        child_profile.as_deref(),
+        child_thinking.as_ref(),
+    )?;
+    if crate::execution_policy::current().is_some() {
+        let config = load_config();
+        let effective_profile = child_profile.as_deref().or_else(|| {
+            config
+                .as_ref()
+                .and_then(|config| config.default_profile.as_deref())
+        });
+        let selected = effective_profile.and_then(|name| {
+            config
+                .as_ref()
+                .and_then(|config| find_profile(config, name))
+        });
+        if effective_profile.is_some() && selected.is_none() {
+            return Err("Child profile configuration was not found.".into());
+        }
+        let effective_thinking = child_thinking
+            .as_ref()
+            .or_else(|| selected.and_then(|profile| profile.thinking.as_ref()));
+        crate::execution_policy::check(
+            effective_profile,
+            crate::execution_policy::RequestKind::Text,
+            crate::execution_policy::ModelSelection::named_or_default(
+                selected
+                    .map(|profile| profile.model.as_str())
+                    .unwrap_or_default(),
+            ),
+            effective_thinking,
+            crate::execution_policy::output_limit(
+                selected.and_then(|profile| profile.max_output_tokens),
+            ),
+        )?;
+    }
     if let Some(setting) = runtime_thinking::explicit_step_setting(step.thinking.as_ref(), data)? {
         let record = runtime_thinking::child_thinking(
             &invocation,
@@ -3033,6 +3137,8 @@ async fn run_agent_step_with_provider_context(
         super::machine_process::prepare(&mut command)
             .map_err(|_| "Could not prepare owned child execution".to_string())?;
     }
+    #[cfg(test)]
+    crate::execution_policy::note_boundary("child_spawn");
     let child = command.spawn().map_err(|error| {
         format!(
             "Action '{}' failed to start child agent '{}': {}",
@@ -3421,8 +3527,15 @@ fn child_artifact_command(invocation: &ChildArtifactInvocation) -> tokio::proces
     match invocation {
         ChildArtifactInvocation::DirectExecutable(path) => tokio::process::Command::new(path),
         ChildArtifactInvocation::CargoSubcommand(reference) => {
-            let mut command = tokio::process::Command::new("cargo");
-            command.arg("ai");
+            let mut command =
+                tokio::process::Command::new(if crate::execution_policy::current().is_some() {
+                    "cargo-ai"
+                } else {
+                    "cargo"
+                });
+            if crate::execution_policy::current().is_none() {
+                command.arg("ai");
+            }
             command.arg("run");
             command.arg(reference);
             command
@@ -4023,11 +4136,18 @@ pub(crate) fn configured_agent_action_runtime_budget_with_project_default(
     cli_override: Option<u64>,
     project_default: Option<u64>,
 ) -> InvocationRuntimeBudget {
-    cli_override
+    let mut budget = cli_override
         .map(new_runtime_budget)
         .or_else(inherited_agent_action_runtime_budget)
         .or_else(|| project_default.map(new_runtime_budget))
-        .unwrap_or_else(|| new_runtime_budget(DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS))
+        .unwrap_or_else(|| new_runtime_budget(DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS));
+    budget.max_runtime_secs = crate::execution_policy::runtime_limit(budget.max_runtime_secs);
+    budget.deadline_ms = budget.deadline_ms.min(
+        budget
+            .started_at_ms
+            .saturating_add(budget.max_runtime_secs.saturating_mul(1000)),
+    );
+    budget
 }
 
 fn remaining_runtime_duration(
@@ -7412,6 +7532,184 @@ auth_mode = "{auth_mode}"
         assert!(!snapshot
             .iter()
             .any(|line| line.contains("url=http://127.0.0.1")));
+    }
+
+    #[tokio::test]
+    async fn policy_media_literals_and_dynamic_selectors_fail_before_credentials() {
+        let config = r#"[[profile]]
+name = "sensitive"
+server = "openai"
+model = "image-model"
+auth_mode = "openai_account"
+timeout_in_sec = 60
+"#;
+        let _test_env = TestCargoHome::new(config);
+        let policy = crate::execution_policy::ExecutionPolicy::parse(&json!({
+            "version":1,"allowed":[{"profile":null,"request_kind":"text","model":{"kind":"named","value":"fixture"},"thinking":{"mode":"provider_default"}}],
+            "limits":{"max_runtime_secs":60,"max_output_tokens":100,"max_agent_depth":2}
+        })).unwrap();
+        let before = crate::execution_policy::boundary_counts();
+        let invocation = provider_context();
+        for selector in [
+            json!({"Literal":"sensitive"}),
+            json!({"Variable":"innocuous"}),
+        ] {
+            for step_kind in ["generate_image", "generate_audio", "transcribe_audio"] {
+                let step: crate::RunStep = serde_json::from_value(json!({"kind":step_kind,"profile":selector,"model":{"Variable":"choice"},"args":[],"tool_params":{},"ignore_tools":false})).unwrap();
+                policy
+                    .scope(async {
+                        let result = super::resolve_media_step_context(
+                            &step,
+                            &json!({"innocuous":"sensitive","choice":"image-model"}),
+                            "image",
+                            &invocation,
+                            step_kind,
+                        )
+                        .await;
+                        assert_eq!(
+                            result.unwrap_err(),
+                            "Effective runtime selection is outside the execution policy."
+                        );
+                        assert_eq!(crate::execution_policy::boundary_counts(), before);
+                    })
+                    .await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_granted_profile_still_denies_authored_model_and_thinking_values() {
+        let _test_env = TestCargoHome::new(&ollama_profile_config(
+            "granted",
+            "http://127.0.0.1:1",
+            "allowed-model",
+        ));
+        let policy = crate::execution_policy::ExecutionPolicy::parse(&json!({
+            "version":1,"allowed":[{"profile":"granted","request_kind":"image","model":{"kind":"named","value":"allowed-model"},"thinking":{"mode":"provider_default"}}],
+            "limits":{"max_runtime_secs":60,"max_output_tokens":100,"max_agent_depth":2}
+        })).unwrap();
+        let invocation = provider_context();
+        let before = crate::execution_policy::boundary_counts();
+        for (model, thinking) in [
+            (
+                json!({"Literal":"denied-model"}),
+                json!({"mode":"provider_default"}),
+            ),
+            (
+                json!({"Variable":"innocuous"}),
+                json!({"mode":"provider_default"}),
+            ),
+            (
+                json!({"Literal":"allowed-model"}),
+                json!({"mode":"choice","value":{"Literal":"denied-choice"}}),
+            ),
+            (
+                json!({"Literal":"allowed-model"}),
+                json!({"mode":"choice","value":{"Variable":"choice"}}),
+            ),
+        ] {
+            let step: crate::RunStep = serde_json::from_value(json!({"kind":"generate_image","profile":{"Literal":"granted"},"model":model,"thinking":thinking,"args":[],"tool_params":{},"ignore_tools":false})).unwrap();
+            policy
+                .scope(async {
+                    let result = super::resolve_media_step_context(
+                        &step,
+                        &json!({"innocuous":"denied-model","choice":"denied-choice"}),
+                        "media",
+                        &invocation,
+                        "generate_image",
+                    )
+                    .await;
+                    assert_eq!(
+                        result.unwrap_err(),
+                        "Effective runtime selection is outside the execution policy."
+                    );
+                    assert_eq!(crate::execution_policy::boundary_counts(), before);
+                })
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_media_allows_authored_model_and_thinking_precedence_within_grant() {
+        let _test_env = TestCargoHome::new(&ollama_profile_config(
+            "image_profile",
+            "http://127.0.0.1:1",
+            "profile-model",
+        ));
+        let policy = crate::execution_policy::ExecutionPolicy::parse(&json!({
+            "version":1,"allowed":[{"profile":"image_profile","request_kind":"image","model":{"kind":"named","value":"authored-model"},"thinking":{"mode":"choice","value":"authored-choice"}}],
+            "limits":{"max_runtime_secs":60,"max_output_tokens":100,"max_agent_depth":2}
+        })).unwrap();
+        let invocation = provider_context();
+        let step: crate::RunStep = serde_json::from_value(json!({"kind":"generate_image","profile":{"Literal":"image_profile"},"model":{"Variable":"choice"},"thinking":{"mode":"choice","value":{"Variable":"innocuous"}},"args":[],"tool_params":{},"ignore_tools":false})).unwrap();
+        policy
+            .scope(async {
+                let context = super::resolve_media_step_context(
+                    &step,
+                    &json!({"choice":"authored-model","innocuous":"authored-choice"}),
+                    "image",
+                    &invocation,
+                    "generate_image",
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(context.model, "profile-model");
+                assert_eq!(context.max_output_tokens, Some(100));
+                assert_eq!(
+                    super::resolve_generate_image_model(
+                        step.model.as_ref(),
+                        &json!({"choice":"authored-model"}),
+                        "image",
+                        Some(&context),
+                        &invocation
+                    )
+                    .unwrap(),
+                    "authored-model"
+                );
+            })
+            .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn policy_dynamic_child_selector_denied_before_spawn() {
+        use std::os::unix::fs::PermissionsExt;
+        let _test_env = TestCargoHome::new("");
+        let package = hosted_package_context(&_test_env.root, "allowed");
+        let child = package.package_payload_root.join("agents/child");
+        std::fs::write(&child, crate::generated_capabilities::test_record(3)).unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let policy = crate::execution_policy::ExecutionPolicy::parse(&json!({
+            "version":1,"allowed":[{"profile":"granted","request_kind":"text","model":{"kind":"named","value":"fixture"},"thinking":{"mode":"provider_default"}}],
+            "limits":{"max_runtime_secs":60,"max_output_tokens":100,"max_agent_depth":2}
+        })).unwrap();
+        let mut invocation = provider_context();
+        invocation.package_context = Some(package);
+        let step: crate::RunStep = serde_json::from_value(json!({"kind":"agent","agent":"./child","profile":{"Variable":"innocuous"},"args":[],"tool_params":{},"ignore_tools":false})).unwrap();
+        let before = crate::execution_policy::boundary_counts();
+        policy
+            .scope(async {
+                let result = super::run_agent_step_with_provider_context(
+                    &step,
+                    &json!({"innocuous":"denied"}),
+                    &no_named_inputs(),
+                    0,
+                    "child",
+                    1,
+                    &invocation,
+                    None,
+                    2,
+                    configured_agent_action_runtime_budget(Some(60)),
+                )
+                .await;
+                assert_eq!(
+                    result.unwrap_err(),
+                    "Effective child selection is outside the execution policy."
+                );
+                assert_eq!(crate::execution_policy::boundary_counts(), before);
+            })
+            .await;
     }
 
     #[tokio::test]

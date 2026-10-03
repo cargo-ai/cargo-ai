@@ -31,6 +31,25 @@ Known validated root results have availability metadata. `--include-result-conte
 
 Selected execution owns child process groups on Unix and native jobs on Windows, bounds captured child output to 1 MiB per channel, and cleans up descendants on cooperative cancellation/deadline. Builds have a 600-second bound. Forced termination, crashes and failures before machine negotiation may leave incomplete output; consumers must reconcile effects. Essential output delivery failure is an invocation failure, even if the underlying operation already applied.
 
+## Declared actions
+
+Action-capable builds advertise `actions list`, `actions validate`, `actions resource` and the `run` action selector. Use the explicit `--project PATH` or `--package ALIAS` target; action discovery does not infer a catalog from the working directory. See [client action authoring](client-actions.md) and [action payloads](machine-payloads.md#declared-client-actions).
+
+```sh
+cargo ai actions list --project ./project --output-format json
+cargo ai actions validate --project ./project --interface panels --action generate-selected --request-stdin --output-format json < request.json
+cargo ai actions resource --project ./project --interface panels --resource controls --request-stdin --output-format json < resource-request.json
+cargo ai run --project ./project --interface panels --action generate-selected --action-request-stdin --output-format ndjson < request.json
+```
+
+The finite operations are passive reads/validation. They do not compile or execute code, resolve provider credentials, contact providers or initialize incidental home state. `validate` reports `execution_authorized:false`: it does not grant permission or certify later execution. Business input values are not echoed in its mapping descriptors. A file/image grant may read the authorized attachment to verify its supplied digest.
+
+The host constructs the bounded stdin request, expected catalog-wide binding, scoped attachment grants and typed execution policy. Interface/action IDs must match the flags. `run` action selection is mutually exclusive with existing definition sources; it retains root profile/settings resolution, shared package/runtime permissions and current JSON/NDJSON/private-result controls. Settings queries remain the existing profile/model commands with their own effects. Host policy constrains effective supported declarative root, media and child choices, including fallback, before their corresponding credential/provider/launch boundaries; it is not an OS sandbox or authority for arbitrary trusted tool code.
+
+After resolution, terminal `data.client_action`, `client_action_resolved` progress and subsequent NDJSON event `client_action` metadata contain `{interface,action,binding}`. `operation_started` occurs before validation and has no action metadata. The operation/root/invocation IDs and terminal semantics remain the existing run lifecycle. No input values, client session handles, schedule records or idempotency promise are added to that correlation.
+
+Catalog-wide identity includes declared target definitions and resources; changing a sibling action/resource invalidates it too. Hosts serve verified presentation bytes for one authorized document generation, and revalidate/re-enable after changes. A source binding does not freeze transitive dependencies or arbitrary same-user edits. Installed runs retain supported package leases. Missing generated-child policy/input capabilities require rebuilding or an unsupported result before launch; opaque child exit status does not establish inner telemetry or structured results.
+
 ## Thinking
 
 Use the advertised `models thinking` JSON contract to query one explicit model and connection. `--model MODEL_ID` is required; saved-profile and draft server/auth selectors match `models list`. Configurable results expose exact choices, descriptions and any authoritative default; unsupported and unknown results retain their separate meanings. The query performs no inference or profile mutation. Default runs need no thinking catalog read. Connection/authentication errors remain errors; a valid query with unknown support can succeed without a choice list. See the [typed payload](machine-payloads.md#thinking-discovery).

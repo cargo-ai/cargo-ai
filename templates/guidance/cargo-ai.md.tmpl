@@ -37,6 +37,7 @@ Use `cargo ai guidance status` before relying on an existing bundle. It is read-
 Read these files before inventing structure:
 - `.cargo-ai/guidance/start-here.md`
 - `.cargo-ai/guidance/package-workflow.md`
+- `.cargo-ai/guidance/client-actions.md`
 - `.cargo-ai/guidance/tool-authoring.md`
 - `.cargo-ai/guidance/tool-contract.md`
 - `.cargo-ai/guidance/tool-child-agents.md`
@@ -220,3 +221,5 @@ For published packages, keep the contract narrow:
 When helping an application embed Cargo AI, inspect `cargo ai capabilities --output-format json` on its selected installed binary before choosing a machine format. Supported finite commands can use `--output-format json --output-schema-version 1`; `run` can use NDJSON. Existing `run --json` still supplies definition input, and usage `--schema-version` still selects the usage payload. Use saved profiles or bounded stdin for secrets, retain explicit consent and reconcile uncertain effects before retries. Private result content requires `--include-result-content` and is not usage/backup metadata.
 
 See the public [machine interface](https://github.com/cargo-ai/cargo-ai/blob/develop/docs/machine-interface.md) and [typed payloads](https://github.com/cargo-ai/cargo-ai/blob/develop/docs/machine-payloads.md) as supplemental integration guidance; the installed capabilities and this versioned local bundle control availability. Older binaries retain their documented human/legacy JSON interfaces.
+
+For project-authored web/native controls or page-free invocations, use `.cargo-ai/guidance/client-actions.md`. Declare whole-agent actions in `cargo-ai-actions.json`, retain explicit target/resource/settings grants, and capability-probe the real binary. Scheduling, persistence and presentation remain client choices.

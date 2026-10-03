@@ -1,0 +1,867 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/action-catalog-v1.json",
+  "title": "Cargo AI portable action catalog v1",
+  "$comment": "Project-root cargo-ai-actions.json; maximum 256 KiB UTF-8, action input schema depth 8, 64 object properties, 1024 array items, and 16 MiB total declared target/resource inventory. The runtime verifies references, path confinement, schema keyword/type consistency, bounds ordering, enum types, required membership, unique IDs/destinations, explicit JSON encoding and destination compatibility; this document does not replace those checks. Authored schemas never accept $ref, patterns, network loading or unknown keywords. JSON encoding is required for arrays/objects except scoped file/image references. Strict known fields; no legacy companion.json adapter.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/action"
+      }
+    },
+    "interfaces": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/interface"
+      }
+    },
+    "resources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "not": {
+              "enum": [
+                "execution_policy",
+                "expected_binding",
+                "attachment_grants",
+                "constructor",
+                "prototype",
+                "__proto__"
+              ]
+            }
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "mime_type": {
+            "enum": [
+              "text/html",
+              "text/css",
+              "text/javascript",
+              "text/plain",
+              "application/json",
+              "image/png",
+              "image/jpeg",
+              "image/gif",
+              "image/webp",
+              "image/svg+xml"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "mime_type"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 64
+    }
+  },
+  "required": [
+    "schema_version",
+    "actions",
+    "interfaces"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "action": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+          "not": {
+            "enum": [
+              "execution_policy",
+              "expected_binding",
+              "attachment_grants",
+              "constructor",
+              "prototype",
+              "__proto__"
+            ]
+          }
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "Canonical project-relative JSON entrypoint explicitly selected in build/package."
+        },
+        "input_schema": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/input_schema"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "object"
+                }
+              }
+            }
+          ]
+        },
+        "mappings": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "not": {
+              "enum": [
+                "execution_policy",
+                "expected_binding",
+                "attachment_grants",
+                "constructor",
+                "prototype",
+                "__proto__"
+              ]
+            }
+          },
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "runtime_var": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                    "not": {
+                      "enum": [
+                        "execution_policy",
+                        "expected_binding",
+                        "attachment_grants",
+                        "constructor",
+                        "prototype",
+                        "__proto__"
+                      ]
+                    }
+                  },
+                  "encoding": {
+                    "type": "string",
+                    "const": "json"
+                  }
+                },
+                "required": [
+                  "runtime_var"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "input": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                    "not": {
+                      "enum": [
+                        "execution_policy",
+                        "expected_binding",
+                        "attachment_grants",
+                        "constructor",
+                        "prototype",
+                        "__proto__"
+                      ]
+                    }
+                  },
+                  "encoding": {
+                    "type": "string",
+                    "const": "json"
+                  }
+                },
+                "required": [
+                  "input"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "constants": {
+          "type": "object",
+          "properties": {
+            "runtime_vars": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                "not": {
+                  "enum": [
+                    "execution_policy",
+                    "expected_binding",
+                    "attachment_grants",
+                    "constructor",
+                    "prototype",
+                    "__proto__"
+                  ]
+                }
+              },
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              }
+            },
+            "inputs": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                "not": {
+                  "enum": [
+                    "execution_policy",
+                    "expected_binding",
+                    "attachment_grants",
+                    "constructor",
+                    "prototype",
+                    "__proto__"
+                  ]
+                }
+              },
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "required_capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "const": "execution_policy.v1"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "target",
+        "input_schema",
+        "mappings"
+      ],
+      "additionalProperties": false
+    },
+    "interface": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+          "not": {
+            "enum": [
+              "execution_policy",
+              "expected_binding",
+              "attachment_grants",
+              "constructor",
+              "prototype",
+              "__proto__"
+            ]
+          }
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "not": {
+              "enum": [
+                "execution_policy",
+                "expected_binding",
+                "attachment_grants",
+                "constructor",
+                "prototype",
+                "__proto__"
+              ]
+            }
+          }
+        },
+        "resources": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "not": {
+              "enum": [
+                "execution_policy",
+                "expected_binding",
+                "attachment_grants",
+                "constructor",
+                "prototype",
+                "__proto__"
+              ]
+            }
+          },
+          "maxItems": 64
+        },
+        "presentation": {
+          "type": "object",
+          "properties": {
+            "entrypoint": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "not": {
+                "enum": [
+                  "execution_policy",
+                  "expected_binding",
+                  "attachment_grants",
+                  "constructor",
+                  "prototype",
+                  "__proto__"
+                ]
+              }
+            }
+          },
+          "required": [
+            "entrypoint"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "actions"
+      ],
+      "additionalProperties": false
+    },
+    "input_schema": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "object"
+            },
+            "description": {
+              "type": "string"
+            },
+            "properties": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                "not": {
+                  "enum": [
+                    "execution_policy",
+                    "expected_binding",
+                    "attachment_grants",
+                    "constructor",
+                    "prototype",
+                    "__proto__",
+                    "profile",
+                    "model",
+                    "thinking",
+                    "server",
+                    "token",
+                    "settings",
+                    "config",
+                    "execution_limits"
+                  ]
+                }
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/input_schema"
+              }
+            },
+            "required": {
+              "type": "array",
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                "not": {
+                  "enum": [
+                    "execution_policy",
+                    "expected_binding",
+                    "attachment_grants",
+                    "constructor",
+                    "prototype",
+                    "__proto__"
+                  ]
+                }
+              }
+            },
+            "additionalProperties": {
+              "const": false
+            }
+          },
+          "required": [
+            "type",
+            "properties",
+            "additionalProperties"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "array"
+            },
+            "description": {
+              "type": "string"
+            },
+            "items": {
+              "$ref": "#/$defs/input_schema"
+            },
+            "minItems": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1024
+            },
+            "maxItems": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1024
+            }
+          },
+          "required": [
+            "type",
+            "items"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "minLength": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65536
+            },
+            "maxLength": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65536
+            },
+            "enum": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              }
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "integer"
+            },
+            "description": {
+              "type": "string"
+            },
+            "minimum": {
+              "type": "number"
+            },
+            "maximum": {
+              "type": "number"
+            },
+            "enum": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              }
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "number"
+            },
+            "description": {
+              "type": "string"
+            },
+            "minimum": {
+              "type": "number"
+            },
+            "maximum": {
+              "type": "number"
+            },
+            "enum": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              }
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "boolean"
+            },
+            "description": {
+              "type": "string"
+            },
+            "enum": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              }
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "mapping": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "runtime_var": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "not": {
+                "enum": [
+                  "execution_policy",
+                  "expected_binding",
+                  "attachment_grants",
+                  "constructor",
+                  "prototype",
+                  "__proto__"
+                ]
+              }
+            },
+            "encoding": {
+              "type": "string",
+              "const": "json"
+            }
+          },
+          "required": [
+            "runtime_var"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "not": {
+                "enum": [
+                  "execution_policy",
+                  "expected_binding",
+                  "attachment_grants",
+                  "constructor",
+                  "prototype",
+                  "__proto__"
+                ]
+              }
+            },
+            "encoding": {
+              "type": "string",
+              "const": "json"
+            }
+          },
+          "required": [
+            "input"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "discovery": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/action"
+          }
+        },
+        "interfaces": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/interface"
+          }
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                "not": {
+                  "enum": [
+                    "execution_policy",
+                    "expected_binding",
+                    "attachment_grants",
+                    "constructor",
+                    "prototype",
+                    "__proto__"
+                  ]
+                }
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "mime_type": {
+                "enum": [
+                  "text/html",
+                  "text/css",
+                  "text/javascript",
+                  "text/plain",
+                  "application/json",
+                  "image/png",
+                  "image/jpeg",
+                  "image/gif",
+                  "image/webp",
+                  "image/svg+xml"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "mime_type"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 64
+        },
+        "binding": {
+          "$ref": "action-binding-v1.json"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "contains": {
+            "const": "execution_policy.v1"
+          }
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "catalog_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current v1 value is 262144."
+            },
+            "actions": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current v1 value is 256."
+            },
+            "interfaces": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current v1 value is 64."
+            },
+            "resources": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current v1 value is 64."
+            },
+            "request_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current v1 value is 65536."
+            },
+            "business_depth": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current v1 value is 8."
+            },
+            "array_items": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current v1 value is 1024."
+            },
+            "object_members": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current v1 value is 64."
+            },
+            "resource_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current v1 value is 4194304."
+            },
+            "inventory_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current v1 value is 16777216."
+            },
+            "definition_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current v1 value is 1048576."
+            },
+            "attachment_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current v1 value is 10485760."
+            },
+            "string_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current v1 value is 65536."
+            }
+          },
+          "required": [
+            "catalog_bytes",
+            "actions",
+            "interfaces",
+            "resources",
+            "request_bytes",
+            "business_depth",
+            "array_items",
+            "object_members",
+            "resource_bytes",
+            "inventory_bytes",
+            "definition_bytes",
+            "attachment_bytes",
+            "string_bytes"
+          ],
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "schema_version",
+        "binding",
+        "actions",
+        "interfaces",
+        "resources",
+        "capabilities",
+        "limits"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

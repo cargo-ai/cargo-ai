@@ -1,0 +1,57 @@
+{
+  "agent_definition_schema_version": "2026-09-09.r1",
+  "runtime_vars": {
+    "panel_ids_json": {
+      "type": "string"
+    }
+  },
+  "agent_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "actions": [
+    {
+      "name": "show_request",
+      "logic": {
+        "==": [
+          1,
+          1
+        ]
+      },
+      "run": [
+        {
+          "kind": "exec",
+          "program": "/bin/echo",
+          "args": [
+            "generate panels",
+            {
+              "var": "runtime.panel_ids_json"
+            }
+          ],
+          "platform": "macos"
+        },
+        {
+          "kind": "exec",
+          "program": "/bin/echo",
+          "args": [
+            "generate panels",
+            {
+              "var": "runtime.panel_ids_json"
+            }
+          ],
+          "platform": "linux"
+        },
+        {
+          "kind": "exec",
+          "program": "cmd",
+          "args": [
+            "/C",
+            "echo",
+            "generate panels"
+          ],
+          "platform": "windows"
+        }
+      ]
+    }
+  ]
+}

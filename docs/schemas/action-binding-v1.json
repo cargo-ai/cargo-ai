@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/action-binding-v1.json",
+  "title": "Cargo AI action binding v1",
+  "$comment": "Catalog-wide identity; sibling action/resource changes invalidate it too. Interface/action IDs are validated separately. Copy the whole binding from discovery; do not derive identities from names. This is not an executable trust attestation, immutable transitive dependency graph or OS sandbox.",
+  "type": "object",
+  "properties": {
+    "root_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Opaque selected-root identity; copy from discovery."
+    },
+    "catalog_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Digest of original catalog bytes."
+    },
+    "content_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Digest of the complete declared target/resource inventory."
+    },
+    "package": {
+      "type": "object",
+      "properties": {
+        "alias": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "alias",
+        "version",
+        "content_sha256"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "root_sha256",
+    "catalog_sha256",
+    "content_sha256"
+  ],
+  "additionalProperties": false
+}

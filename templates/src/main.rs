@@ -3,11 +3,12 @@ mod config;
 mod credentials;
 #[path = "../definition_validation.rs"]
 mod definition_validation;
+mod execution_policy;
+mod generated_capabilities;
 mod providers;
 mod runtime_data;
 mod runtime_media;
 mod runtime_thinking;
-mod generated_capabilities;
 mod usage_attribution;
 mod usage_backup;
 mod usage_backup_host;
@@ -20,8 +21,13 @@ use serde::{Deserialize, Serialize};
 // Generated agents retain their established output protocol. The interpreted
 // CLI supplies the optional observer for this shared production write hook.
 fn note_runtime_artifact(_kind: &str, _path: &std::path::Path) {}
-fn note_runtime_thinking(_scope: serde_json::Value, outcome: &crate::providers::thinking::ThinkingOutcome) {
-    if let Some(notice) = outcome.notice() { eprintln!("{notice}"); }
+fn note_runtime_thinking(
+    _scope: serde_json::Value,
+    outcome: &crate::providers::thinking::ThinkingOutcome,
+) {
+    if let Some(notice) = outcome.notice() {
+        eprintln!("{notice}");
+    }
 }
 
 use std::collections::{BTreeMap, VecDeque};
@@ -3190,7 +3196,13 @@ fn parse_runtime_var_value(
 async fn main() {
     // Generation inserts provenance command dispatch after argument parsing.
     let cmd_args = args::build_cli();
-    run_with_matches(cmd_args).await;
+    match execution_policy::scope_inherited(Box::pin(run_with_matches(cmd_args))).await {
+        Ok(()) => {}
+        Err(error) => {
+            eprintln!("❌ {error}");
+            std::process::exit(1);
+        }
+    }
 }
 
 async fn run_with_matches(cmd_args: clap::ArgMatches) {
@@ -3244,7 +3256,9 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
     match resolve_loaded_profile(config.as_ref(), explicit_profile_name) {
         Ok(Some((profile, kind))) => {
             thinking = profile.thinking.clone();
-            if thinking.is_some() { thinking_source = "profile".into(); }
+            if thinking.is_some() {
+                thinking_source = "profile".into();
+            }
             selected_profile = Some(apply_profile(
                 profile,
                 &mut server,
@@ -3295,6 +3309,15 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
         max_output_tokens = Some(max_output_tokens_arg);
     }
 
+    if let Err(error) = crate::execution_policy::check_explicit_limits(
+        cmd_args.get_one::<u32>("max_output_tokens").copied(),
+        cmd_args.get_one::<u64>("max_runtime_in_sec").copied(),
+        cmd_args.get_one::<u32>("max_agent_depth").copied(),
+    ) {
+        eprintln!("x {error}");
+        exit_failure!();
+    }
+
     let max_agent_depth = configured_agent_action_max_depth_with_project_default(
         cmd_args.get_one::<u32>("max_agent_depth").copied(),
         project_runtime_defaults
@@ -3318,9 +3341,25 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
         }
     };
 
+    max_output_tokens = crate::execution_policy::output_limit(max_output_tokens);
+    if let Err(error) = crate::execution_policy::check(
+        selected_profile
+            .as_ref()
+            .map(|profile| profile.name.as_str()),
+        crate::execution_policy::RequestKind::Text,
+        crate::execution_policy::ModelSelection::named_or_default(&model),
+        thinking.as_ref(),
+        max_output_tokens,
+    ) {
+        eprintln!("❌ {error}");
+        exit_failure!();
+    }
+
     let explicit_token_override = cmd_args
         .get_one::<String>("token")
         .map(|token| token.to_string());
+    #[cfg(test)]
+    crate::execution_policy::note_boundary("credentials");
     let has_explicit_token_override = explicit_token_override.is_some();
     if let Some((kind, profile_name)) = loaded_profile_message.as_ref() {
         for line in profile_selection_messages(
@@ -3605,10 +3644,21 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
         }
     };
     let thinking_outcome = match runtime_thinking::resolve_for_request(
-        action_provider_context.thinking.as_ref(), &action_provider_context.thinking_source,
-        &action_provider_context, &model, crate::providers::thinking_metadata::ThinkingRequestKind::Text,
+        action_provider_context.thinking.as_ref(),
+        &action_provider_context.thinking_source,
+        &action_provider_context,
+        &model,
+        crate::providers::thinking_metadata::ThinkingRequestKind::Text,
         runtime_budget,
-    ).await { Ok(outcome) => outcome, Err(error) => { eprintln!("{error}"); exit_failure!(); } };
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            eprintln!("{error}");
+            exit_failure!();
+        }
+    };
     note_runtime_thinking(serde_json::json!({"kind":"invocation"}), &thinking_outcome);
     let usage_attempt = usage_log_context.as_ref().map(|usage_log| {
         usage_log.start_provider_request(
@@ -3655,7 +3705,9 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
                 rubric_enabled: rubric_enabled(),
                 max_output_tokens,
                 temperature,
-                thinking: thinking_outcome.provider_value(action_provider_context.provider == crate::providers::ProviderKind::Ollama),
+                thinking: thinking_outcome.provider_value(
+                    action_provider_context.provider == crate::providers::ProviderKind::Ollama,
+                ),
             },
             openai_account_id.as_deref(),
         ),
@@ -4255,6 +4307,7 @@ async fn apply_actions_parallel(
         let provider_context_clone = provider_context.clone();
         let abort_signal_clone = abort_signal.clone();
         let action_output_clone = action_output.clone();
+        let execution_policy = crate::execution_policy::current();
 
         lane_tasks.push(tokio::spawn(async move {
             let lane_future = async move {
@@ -4273,6 +4326,9 @@ async fn apply_actions_parallel(
                 )
                 .await
             };
+
+            let lane_future =
+                crate::execution_policy::scope_optional(execution_policy, Box::pin(lane_future));
 
             if let Some(output) = action_output_clone {
                 ACTION_OUTPUT.scope(output, lane_future).await
@@ -5053,13 +5109,9 @@ async fn run_generate_image_step(
     provider_context: &ActionProviderContext,
     runtime_budget: InvocationRuntimeBudget,
 ) -> Result<StepExecutionOutcome, String> {
-    let step_profile_context = resolve_generate_image_step_profile_context(
-        step.profile.as_ref(),
-        data,
-        action_name,
-        provider_context.inference_timeout_in_sec,
-    )
-    .await?;
+    let step_profile_context =
+        resolve_media_step_context(step, data, action_name, provider_context, "generate_image")
+            .await?;
     let effective_provider_context = step_profile_context.as_ref().unwrap_or(provider_context);
 
     let model = resolve_generate_image_model(
@@ -5149,13 +5201,24 @@ async fn run_generate_image_step(
     })?;
 
     let (thinking_setting, thinking_source) = runtime_thinking::step_setting(
-        step, data, step_profile_context.as_ref(), provider_context,
+        step,
+        data,
+        step_profile_context.as_ref(),
+        provider_context,
     )?;
     let thinking_outcome = runtime_thinking::resolve_for_request(
-        thinking_setting.as_ref(), &thinking_source, effective_provider_context, &model,
-        crate::providers::thinking_metadata::ThinkingRequestKind::Image, runtime_budget,
-    ).await?;
-    note_runtime_thinking(runtime_thinking::step_scope(action_index, action_name, step_index), &thinking_outcome);
+        thinking_setting.as_ref(),
+        &thinking_source,
+        effective_provider_context,
+        &model,
+        crate::providers::thinking_metadata::ThinkingRequestKind::Image,
+        runtime_budget,
+    )
+    .await?;
+    note_runtime_thinking(
+        runtime_thinking::step_scope(action_index, action_name, step_index),
+        &thinking_outcome,
+    );
 
     let usage_attempt = provider_context.usage_log.as_ref().map(|usage_log| {
         usage_log.start_provider_request(
@@ -5195,7 +5258,9 @@ async fn run_generate_image_step(
             output_format,
             &reference_images,
             effective_provider_context.openai_account_id.as_deref(),
-            thinking_outcome.provider_value(effective_provider_context.provider == crate::providers::ProviderKind::Ollama),
+            thinking_outcome.provider_value(
+                effective_provider_context.provider == crate::providers::ProviderKind::Ollama,
+            ),
             effective_provider_context.max_output_tokens,
         )
         .await
@@ -5394,20 +5459,25 @@ fn resolve_step_profile_name(
     Ok(Some(profile_name))
 }
 
-async fn resolve_generate_image_step_profile_context(
-    profile: Option<&RunArg>,
+async fn resolve_media_step_context(
+    step: &crate::RunStep,
     data: &serde_json::Value,
     action_name: &str,
-    invocation_timeout_in_sec: u64,
+    invocation: &ActionProviderContext,
+    kind: &str,
 ) -> Result<Option<ActionProviderContext>, String> {
-    resolve_media_step_profile_context(
-        profile,
+    let selected = resolve_media_step_profile_context(
+        step.profile.as_ref(),
         data,
         action_name,
-        invocation_timeout_in_sec,
-        "generate_image",
+        invocation.inference_timeout_in_sec,
+        kind,
+        Some(step),
+        Some(invocation),
     )
-    .await
+    .await?;
+    runtime_thinking::check_media_selection(step, data, selected.as_ref(), invocation, kind)?;
+    Ok(selected)
 }
 
 async fn resolve_media_step_profile_context(
@@ -5416,6 +5486,8 @@ async fn resolve_media_step_profile_context(
     action_name: &str,
     invocation_timeout_in_sec: u64,
     step_kind: &str,
+    selection_step: Option<&crate::RunStep>,
+    invocation: Option<&ActionProviderContext>,
 ) -> Result<Option<ActionProviderContext>, String> {
     let Some(profile_name) = resolve_step_profile_name(profile, data, action_name, step_kind)?
     else {
@@ -5446,6 +5518,34 @@ async fn resolve_media_step_profile_context(
         )
     })?;
 
+    if let (Some(step), Some(invocation)) = (selection_step, invocation) {
+        let metadata = ActionProviderContext {
+            project_data: None,
+            provider,
+            profile_name: Some(profile.name.clone()),
+            auth_mode: profile_auth_mode_display(profile.auth_mode).into(),
+            model: profile.model.clone(),
+            thinking: profile.thinking.clone(),
+            thinking_source: "profile".into(),
+            max_output_tokens: crate::execution_policy::output_limit(profile.max_output_tokens),
+            url: profile.url.clone().unwrap_or_default(),
+            token: String::new(),
+            openai_account_id: None,
+            inference_timeout_in_sec: invocation_timeout_in_sec,
+            tool_resolver: None,
+            usage_log: None,
+        };
+        runtime_thinking::check_media_selection(
+            step,
+            data,
+            Some(&metadata),
+            invocation,
+            step_kind,
+        )?;
+    }
+
+    #[cfg(test)]
+    crate::execution_policy::note_boundary("credentials");
     if step_kind != "generate_image" && profile.auth_mode != ProfileAuthMode::ApiKey {
         return Err(format!(
             "Action '{action_name}' {step_kind} requires an API-key profile."
@@ -5521,7 +5621,7 @@ async fn resolve_media_step_profile_context(
     Ok(Some(ActionProviderContext {
         thinking: profile.thinking.clone(),
         thinking_source: "profile".into(),
-        max_output_tokens: profile.max_output_tokens,
+        max_output_tokens: crate::execution_policy::output_limit(profile.max_output_tokens),
         project_data: None,
         provider,
         profile_name: Some(profile.name.clone()),
@@ -5639,9 +5739,60 @@ async fn run_agent_step(
 
     let invocation = resolve_child_artifact_invocation(artifact, action_name)?;
     let mut command = child_artifact_command(&invocation, artifact);
+    crate::execution_policy::propagate_child(
+        &mut command,
+        !matches!(invocation, ChildArtifactInvocation::DirectExecutable(_)),
+    )?;
+    let child_profile =
+        resolve_step_profile_name(step.profile.as_ref(), data, action_name, "agent")?.or_else(
+            || {
+                artifact_is_json_definition(artifact)
+                    .then(|| provider_context.profile_name.clone())
+                    .flatten()
+            },
+        );
+    let child_thinking = runtime_thinking::explicit_step_setting(step.thinking.as_ref(), data)?;
+    crate::execution_policy::check_child_selectors(
+        child_profile.as_deref(),
+        child_thinking.as_ref(),
+    )?;
+    if crate::execution_policy::current().is_some() {
+        let config = load_config();
+        let effective_profile = child_profile.as_deref().or_else(|| {
+            config
+                .as_ref()
+                .and_then(|config| config.default_profile.as_deref())
+        });
+        let selected = effective_profile.and_then(|name| {
+            config
+                .as_ref()
+                .and_then(|config| find_profile(config, name))
+        });
+        if effective_profile.is_some() && selected.is_none() {
+            return Err("Child profile configuration was not found.".into());
+        }
+        let effective_thinking = child_thinking
+            .as_ref()
+            .or_else(|| selected.and_then(|profile| profile.thinking.as_ref()));
+        crate::execution_policy::check(
+            effective_profile,
+            crate::execution_policy::RequestKind::Text,
+            crate::execution_policy::ModelSelection::named_or_default(
+                selected
+                    .map(|profile| profile.model.as_str())
+                    .unwrap_or_default(),
+            ),
+            effective_thinking,
+            crate::execution_policy::output_limit(
+                selected.and_then(|profile| profile.max_output_tokens),
+            ),
+        )?;
+    }
     if let Some(setting) = runtime_thinking::explicit_step_setting(step.thinking.as_ref(), data)? {
         let record = runtime_thinking::child_thinking(
-            &invocation, &setting, &mut command,
+            &invocation,
+            &setting,
+            &mut command,
             runtime_thinking::step_scope(action_index, action_name, step_index),
         );
         if record["disposition"] == "not_forwarded" {
@@ -5751,6 +5902,8 @@ async fn run_agent_step(
         action_runtime_timeout_message(action_name, runtime_budget, context.as_str())
     })?;
 
+    #[cfg(test)]
+    crate::execution_policy::note_boundary("child_spawn");
     let child = command.spawn().map_err(|error| {
         format!(
             "Action '{}' failed to start child agent '{}': {}",
@@ -5945,8 +6098,15 @@ fn child_artifact_command(
     match invocation {
         ChildArtifactInvocation::DirectExecutable(path) => tokio::process::Command::new(path),
         ChildArtifactInvocation::CargoSubcommand => {
-            let mut command = tokio::process::Command::new("cargo");
-            command.arg("ai");
+            let mut command =
+                tokio::process::Command::new(if crate::execution_policy::current().is_some() {
+                    "cargo-ai"
+                } else {
+                    "cargo"
+                });
+            if crate::execution_policy::current().is_none() {
+                command.arg("ai");
+            }
             command.arg("run");
             command.arg(artifact);
             command
@@ -7082,11 +7242,18 @@ fn configured_agent_action_runtime_budget_with_project_default(
     cli_override: Option<u64>,
     project_default: Option<u64>,
 ) -> InvocationRuntimeBudget {
-    cli_override
+    let mut budget = cli_override
         .map(new_runtime_budget)
         .or_else(inherited_agent_action_runtime_budget)
         .or_else(|| project_default.map(new_runtime_budget))
-        .unwrap_or_else(|| new_runtime_budget(DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS))
+        .unwrap_or_else(|| new_runtime_budget(DEFAULT_AGENT_ACTION_MAX_RUNTIME_SECS));
+    budget.max_runtime_secs = crate::execution_policy::runtime_limit(budget.max_runtime_secs);
+    budget.deadline_ms = budget.deadline_ms.min(
+        budget
+            .started_at_ms
+            .saturating_add(budget.max_runtime_secs.saturating_mul(1000)),
+    );
+    budget
 }
 
 fn remaining_runtime_duration(
@@ -7145,10 +7312,12 @@ fn configured_agent_action_max_depth_with_project_default(
     cli_override: Option<u32>,
     project_default: Option<u32>,
 ) -> u32 {
-    cli_override
-        .or_else(inherited_agent_action_max_depth)
-        .or(project_default)
-        .unwrap_or(DEFAULT_AGENT_ACTION_MAX_DEPTH)
+    crate::execution_policy::depth_limit(
+        cli_override
+            .or_else(inherited_agent_action_max_depth)
+            .or(project_default)
+            .unwrap_or(DEFAULT_AGENT_ACTION_MAX_DEPTH),
+    )
 }
 
 fn validate_agent_action_depth(

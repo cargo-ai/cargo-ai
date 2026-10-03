@@ -829,6 +829,16 @@ mod tests {
         let mut manifest = inspect(&project.0).unwrap().manifest.unwrap();
         let mut payload = installed_tree();
         payload.remove("action-rules.md");
+        for path in [
+            "client-actions.md",
+            "examples/client-actions.json",
+            "examples/client-action-request.json",
+            "examples/client-action-controls.js",
+            "examples/client-action-coordinator.json",
+            "examples/client-action-review.json",
+        ] {
+            payload.remove(path);
+        }
         payload.insert("retired.md".into(), b"previous release artifact".to_vec());
         payload.insert("cargo-ai.md".into(), b"previous release guidance".to_vec());
         manifest.producer_version = "0.0.1".into();
@@ -895,6 +905,16 @@ mod tests {
         assert_eq!(inspect(&project.0).unwrap().state, State::Current);
         assert!(!project.0.join(BUNDLE).join("retired.md").exists());
         assert!(project.0.join(BUNDLE).join("action-rules.md").exists());
+        for path in [
+            "client-actions.md",
+            "examples/client-actions.json",
+            "examples/client-action-request.json",
+            "examples/client-action-controls.js",
+            "examples/client-action-coordinator.json",
+            "examples/client-action-review.json",
+        ] {
+            assert!(project.0.join(BUNDLE).join(path).is_file());
+        }
         assert_eq!(
             fs::read(project.0.join("unrelated.txt")).unwrap(),
             b"must remain"

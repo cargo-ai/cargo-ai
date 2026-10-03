@@ -165,6 +165,44 @@
       "if": {
         "properties": {
           "command": {
+            "const": "actions resource"
+          },
+          "outcome": {
+            "const": "succeeded"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "action-resource-v1.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "actions list"
+          },
+          "outcome": {
+            "const": "succeeded"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "action-catalog-v1.json#/$defs/discovery"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
             "enum": [
               "profile list",
               "profile show",
@@ -247,6 +285,28 @@
             "properties": {
               "thinking": {
                 "$ref": "model-thinking-v1.json#/$defs/collection"
+              },
+              "client_action": {
+                "type": "object",
+                "properties": {
+                  "interface": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "action": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "binding": {
+                    "$ref": "action-binding-v1.json"
+                  }
+                },
+                "required": [
+                  "interface",
+                  "action",
+                  "binding"
+                ],
+                "additionalProperties": true
               }
             }
           }

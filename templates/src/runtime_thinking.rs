@@ -62,6 +62,44 @@ pub(crate) fn step_setting(
     ))
 }
 
+pub(super) fn check_media_selection(
+    step: &crate::RunStep,
+    data: &serde_json::Value,
+    selected: Option<&ActionProviderContext>,
+    invocation: &ActionProviderContext,
+    kind: &str,
+) -> Result<(), String> {
+    if crate::execution_policy::current().is_none() {
+        return Ok(());
+    }
+    let context = selected.unwrap_or(invocation);
+    let fixed_service =
+        kind == "generate_audio" && context.provider == crate::providers::ProviderKind::Xai;
+    let model = if fixed_service {
+        crate::execution_policy::ModelSelection::FixedService {}
+    } else {
+        crate::execution_policy::ModelSelection::named_or_default(&resolve_generate_image_model(
+            step.model.as_ref(),
+            data,
+            "media",
+            selected,
+            invocation,
+        )?)
+    };
+    let (thinking, _) = step_setting(step, data, selected, invocation)?;
+    crate::execution_policy::check(
+        context.profile_name.as_deref(),
+        match kind {
+            "generate_image" => crate::execution_policy::RequestKind::Image,
+            "generate_audio" => crate::execution_policy::RequestKind::Audio,
+            _ => crate::execution_policy::RequestKind::Transcription,
+        },
+        model,
+        thinking.as_ref(),
+        crate::execution_policy::output_limit(context.max_output_tokens),
+    )
+}
+
 pub(crate) async fn resolve_for_request(
     selection: Option<&ThinkingSetting>,
     source: &str,
@@ -70,9 +108,31 @@ pub(crate) async fn resolve_for_request(
     kind: ThinkingRequestKind,
     budget: InvocationRuntimeBudget,
 ) -> Result<ThinkingOutcome, String> {
+    let policy_kind = match kind {
+        ThinkingRequestKind::Text => crate::execution_policy::RequestKind::Text,
+        ThinkingRequestKind::Image => crate::execution_policy::RequestKind::Image,
+        ThinkingRequestKind::Speech => crate::execution_policy::RequestKind::Audio,
+        ThinkingRequestKind::Transcription => crate::execution_policy::RequestKind::Transcription,
+    };
+    let policy_model = if kind == ThinkingRequestKind::Speech
+        && context.provider == crate::providers::ProviderKind::Xai
+    {
+        crate::execution_policy::ModelSelection::FixedService {}
+    } else {
+        crate::execution_policy::ModelSelection::named_or_default(model)
+    };
+    crate::execution_policy::check(
+        context.profile_name.as_deref(),
+        policy_kind,
+        policy_model.clone(),
+        selection,
+        crate::execution_policy::output_limit(context.max_output_tokens),
+    )?;
     let support = if selection
         .is_some_and(|setting| !matches!(setting, ThinkingSetting::ProviderDefault))
     {
+        #[cfg(test)]
+        crate::execution_policy::note_boundary("discovery");
         let remaining = remaining_runtime_duration(budget, "before resolving thinking support")?;
         tokio::time::timeout(
             remaining,
@@ -94,7 +154,15 @@ pub(crate) async fn resolve_for_request(
             evidence: None,
         }
     };
-    Ok(thinking::resolve(selection, source, support))
+    let outcome = thinking::resolve(selection, source, support);
+    crate::execution_policy::check(
+        context.profile_name.as_deref(),
+        policy_kind,
+        policy_model,
+        Some(&outcome.effective),
+        crate::execution_policy::output_limit(context.max_output_tokens),
+    )?;
+    Ok(outcome)
 }
 
 pub(crate) fn step_scope(
@@ -138,6 +206,11 @@ pub(super) fn child_thinking(
         ChildArtifactInvocation::CargoSubcommand | ChildArtifactInvocation::StandaloneCargoAi => {
             (cargo_ai_artifact_on_path(), true)
         }
+    };
+    let artifact = if crate::execution_policy::current().is_some() {
+        Some(std::path::PathBuf::from(command.as_std().get_program()))
+    } else {
+        artifact
     };
     let declaration = artifact
         .as_deref()
@@ -387,5 +460,89 @@ mod tests {
         )
         .await
         .is_err());
+    }
+    #[cfg(cargo_ai_cli)]
+    #[tokio::test]
+    async fn policy_denies_before_discovery_and_checks_default_fallback() {
+        let mut policy = crate::execution_policy::ExecutionPolicy::parse(&serde_json::json!({
+            "version":1,"allowed":[{"profile":null,"request_kind":"text","model":{"kind":"named","value":"fixture"},"thinking":{"mode":"choice","value":"high"}}],
+            "limits":{"max_runtime_secs":60,"max_output_tokens":100,"max_agent_depth":2}
+        })).unwrap();
+        let context = context(None, "provider_default");
+        let budget = InvocationRuntimeBudget {
+            max_runtime_secs: 60,
+            started_at_ms: 0,
+            deadline_ms: u64::MAX,
+        };
+        let before = crate::execution_policy::boundary_counts();
+        policy
+            .scope(async {
+                assert!(resolve_for_request(
+                    Some(&ThinkingSetting::Choice {
+                        value: "innocuous-input-choice".into()
+                    }),
+                    "step",
+                    &context,
+                    "fixture",
+                    ThinkingRequestKind::Text,
+                    budget
+                )
+                .await
+                .is_err());
+                assert_eq!(crate::execution_policy::boundary_counts(), before);
+                assert!(resolve_for_request(
+                    None,
+                    "invocation",
+                    &context,
+                    "fixture",
+                    ThinkingRequestKind::Text,
+                    budget
+                )
+                .await
+                .is_err());
+            })
+            .await;
+        policy.allowed[0].thinking = ThinkingSetting::ProviderDefault;
+        policy
+            .scope(async {
+                assert!(resolve_for_request(
+                    None,
+                    "invocation",
+                    &context,
+                    "fixture",
+                    ThinkingRequestKind::Text,
+                    budget
+                )
+                .await
+                .is_ok());
+                assert_eq!(crate::execution_policy::boundary_counts(), before);
+            })
+            .await;
+        let fallback = thinking::resolve(
+            Some(&ThinkingSetting::Choice {
+                value: "high".into(),
+            }),
+            "step",
+            ThinkingSupport::Unknown {
+                reason: "fixture".into(),
+                evidence: None,
+            },
+        );
+        assert_eq!(fallback.effective, ThinkingSetting::ProviderDefault);
+        policy.allowed[0].thinking = ThinkingSetting::Choice {
+            value: "high".into(),
+        };
+        policy
+            .scope(async {
+                assert!(crate::execution_policy::check(
+                    None,
+                    crate::execution_policy::RequestKind::Text,
+                    crate::execution_policy::ModelSelection::named_or_default("fixture"),
+                    Some(&fallback.effective),
+                    None
+                )
+                .is_err());
+            })
+            .await;
     }
 }

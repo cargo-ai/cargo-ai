@@ -2116,7 +2116,7 @@ fn generated_provider_batch_isolated_and_deterministic() {
         "generated-provider neutral-seed: {:.2}s",
         started.elapsed().as_secs_f64()
     );
-    let cases: [(&str, fn(&Fixture)); 9] = [
+    let cases: [(&str, fn(&Fixture)); 10] = [
         ("anthropic", generated_anthropic_case),
         ("gemini", generated_gemini_case),
         ("mistral", generated_mistral_case),
@@ -2126,6 +2126,7 @@ fn generated_provider_batch_isolated_and_deterministic() {
         ("ollama", generated_ollama_case),
         ("typesafe", typesafe_smoke::generated_typesafe_case),
         ("media-chain", generated_audio_chain_case),
+        ("execution-policy", generated_execution_policy_case),
     ];
     let mut completed = Vec::new();
     for (provider, case) in cases {
@@ -2171,11 +2172,12 @@ fn generated_provider_batch_isolated_and_deterministic() {
             "native-account",
             "ollama",
             "typesafe",
-            "media-chain"
+            "media-chain",
+            "execution-policy"
         ]
     );
     eprintln!(
-        "generated-provider batch: 9/9 passed in {:.2}s",
+        "generated-provider batch: 10/10 passed in {:.2}s",
         started.elapsed().as_secs_f64()
     );
 }
@@ -4124,4 +4126,300 @@ fn qualification_probe_case(provider: &str, mock: MockServer, expected: &str, di
         changed[2]["provider"]["server"] = Value::String("xai".into());
         assert!(classify(&serialize(&changed), Some(0)).is_err());
     }
+}
+
+#[test]
+#[ignore = "run explicitly for generated execution-policy qualification"]
+fn generated_execution_policy_enforces_and_propagates_to_json_grandchild() {
+    let fixture = Fixture::new();
+    generated_execution_policy_case(&fixture);
+}
+
+fn generated_execution_policy_case(fixture: &Fixture) {
+    let mut generated_definition: Value = serde_json::from_str(definition_json()).unwrap();
+    generated_definition["agent_definition_schema_version"] = serde_json::json!("2026-10-01.r1");
+    generated_definition["agent_schema"] = serde_json::json!({
+        "type":"object","properties":{"status":{"type":"string"}}
+    });
+    fs::write(
+        fixture.root.join("grandchild.json"),
+        serde_json::to_vec(&generated_definition).unwrap(),
+    )
+    .unwrap();
+    generated_definition["actions"] = serde_json::json!([{
+        "name":"descendant", "logic":{"==":[1,1]},
+        "run":[{"kind":"agent","artifact":"./grandchild.json","inputs":[{"type":"text","text":"Return a short status."}]}]
+    }]);
+    fs::write(
+        &fixture.definition,
+        serde_json::to_vec(&generated_definition).unwrap(),
+    )
+    .unwrap();
+    let output_dir = fixture.root.clone();
+    let hatch = fixture
+        .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
+        .args([
+            "--no-update-check",
+            "hatch",
+            "policy_descendant",
+            "--config",
+        ])
+        .arg(&fixture.definition)
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--force")
+        .output()
+        .unwrap();
+    assert_warning_free_build(&hatch, "execution-policy hatch");
+    assert!(
+        hatch.status.success(),
+        "hatch failed:\n{}\n{}",
+        String::from_utf8_lossy(&hatch.stdout),
+        String::from_utf8_lossy(&hatch.stderr)
+    );
+    let executable = output_dir.join(if cfg!(windows) {
+        "policy_descendant.exe"
+    } else {
+        "policy_descendant"
+    });
+    let inspect = fixture
+        .isolated_command(&executable)
+        .args(["inspect", "--json"])
+        .output()
+        .unwrap();
+    assert!(inspect.status.success());
+    let inspected: Value = serde_json::from_slice(&inspect.stdout).unwrap();
+    assert_eq!(
+        inspected["runtime_capabilities"]["execution_policy"]["version"],
+        1
+    );
+
+    let denied_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    denied_listener.set_nonblocking(true).unwrap();
+    let denied_url = format!(
+        "http://{}/v1/chat/completions",
+        denied_listener.local_addr().unwrap()
+    );
+    let denied_policy = serde_json::json!({"version":1,"allowed":[],"limits":{"max_runtime_secs":30,"max_output_tokens":100,"max_agent_depth":2}});
+    let mut channels = vec![denied_policy.to_string(), "null".into()];
+    // Windows rejects a single environment value this large before process
+    // creation; the shared parser's byte-bound unit test covers that platform.
+    if !cfg!(windows) {
+        channels.push("x".repeat(32 * 1024 + 1));
+    }
+    for channel in channels {
+        let denied = media_command(&fixture, &executable)
+            .args([
+                "--server",
+                "openai",
+                "--model",
+                "ungranted",
+                "--url",
+                &denied_url,
+            ])
+            .env("CARGO_AI_EXECUTION_POLICY_V1", channel)
+            .output()
+            .unwrap();
+        assert!(
+            !denied.status.success(),
+            "generated runtime discarded a denied/malformed inherited policy"
+        );
+        let diagnostic = String::from_utf8_lossy(&denied.stderr);
+        assert!(
+            diagnostic.contains("execution policy") || diagnostic.contains("Execution policy"),
+            "expected policy denial before credential resolution: {diagnostic}"
+        );
+        assert_eq!(
+            denied_listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    let policy = serde_json::json!({"version":1,"allowed":[{
+        "profile":"policy_fixture","request_kind":"text","model":{"kind":"named","value":"policy-model"},"thinking":{"mode":"provider_default"}
+    }],"limits":{"max_runtime_secs":60,"max_output_tokens":100,"max_agent_depth":2}});
+    let mock = MediaServer::new(
+        (0..2)
+            .map(|_| MediaResponse {
+                path: "/v1/chat/completions",
+                content_type: "application/json",
+                body: ollama_success_response(r#"{"status":"ok"}"#).into_bytes(),
+            })
+            .collect(),
+    );
+    fs::write(fixture.home.join("config.toml"),format!("default_profile = \"policy_fixture\"\n[[profile]]\nname = \"policy_fixture\"\nserver = \"ollama\"\nmodel = \"policy-model\"\nurl = \"{}\"\nauth_mode = \"none\"\n",mock.url)).unwrap();
+    let parent_definition = fixture.root.join("policy_parent.json");
+    let parent = serde_json::json!({
+        "agent_definition_schema_version":"2026-10-01.r1","agent_schema":{"type":"object","properties":{}},
+        "actions":[{"name":"generated_child","logic":{"==":[1,1]},"run":[{"kind":"agent","artifact":format!("./{}", executable.file_name().unwrap().to_str().unwrap())}]}]
+    });
+    fs::write(&parent_definition, serde_json::to_vec(&parent).unwrap()).unwrap();
+    let allowed = media_command(&fixture, env!("CARGO_BIN_EXE_cargo-ai"))
+        .args(["run", "--config"])
+        .arg(&parent_definition)
+        .args(["--output-format", "json"])
+        .env("CARGO_AI_EXECUTION_POLICY_V1", policy.to_string())
+        .output()
+        .unwrap();
+    assert!(
+        allowed.status.success(),
+        "JSON/generated/grandchild execution failed:\n{}\n{}",
+        String::from_utf8_lossy(&allowed.stdout),
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+    let requests = mock.finish();
+    assert_eq!(
+        requests.len(),
+        2,
+        "generated child and JSON grandchild must each execute once"
+    );
+    for request in requests {
+        let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["model"], "policy-model");
+        assert_eq!(
+            body["max_tokens"], 100,
+            "each descendant must retain the policy ceiling"
+        );
+    }
+    let terminal: Value = serde_json::from_slice(&allowed.stdout).unwrap();
+    assert_eq!(terminal["data"]["result"]["availability"], "not_produced");
+    assert_eq!(terminal["data"]["child_instrumentation"], "unavailable");
+
+    // Hold the generated child's actual provider request while the supervisor
+    // cancels it. EOF proves the owned compiled process released its connection.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let held = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(10))
+                }
+                error => panic!("generated child did not reach held provider: {error:?}"),
+            }
+        };
+        // Accepted sockets may inherit the listener's nonblocking mode. The
+        // cleanup read must actually wait for EOF inside its bounded deadline.
+        stream.set_nonblocking(false).unwrap();
+        let request = read_http_request(&mut stream);
+        stream
+            .set_read_timeout(Some(Duration::from_secs(8)))
+            .unwrap();
+        assert!(request.starts_with("POST /v1/chat/completions"));
+        ready_tx.send(()).unwrap();
+        let mut byte = [0u8; 1];
+        let read_result = stream.read(&mut byte);
+        let closed = match &read_result {
+            Ok(0) => true,
+            Err(error) => matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+            ),
+            _ => false,
+        };
+        assert!(
+            closed,
+            "owned compiled child must release its socket after cancellation: {read_result:?}"
+        );
+    });
+    fs::write(fixture.home.join("config.toml"),format!("default_profile='policy_fixture'\n[[profile]]\nname='policy_fixture'\nserver='ollama'\nmodel='policy-model'\nurl='http://{address}/v1/chat/completions'\nauth_mode='none'\n")).unwrap();
+    let mut canceled = media_command(&fixture, env!("CARGO_BIN_EXE_cargo-ai"))
+        .args(["run", "--config"])
+        .arg(&parent_definition)
+        .args([
+            "--output-format",
+            "json",
+            "--max-runtime-in-sec",
+            if cfg!(windows) { "3" } else { "30" },
+        ])
+        .env("CARGO_AI_EXECUTION_POLICY_V1", policy.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    ready_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    #[cfg(unix)]
+    assert!(Command::new("/bin/kill")
+        .args(["-INT", &canceled.id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while canceled.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = canceled.kill();
+            panic!("owned compiled-child cancellation did not settle");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let canceled = canceled.wait_with_output().unwrap();
+    assert!(!canceled.status.success());
+    let canceled: Value = serde_json::from_slice(&canceled.stdout).unwrap();
+    #[cfg(unix)]
+    assert_eq!(canceled["error"]["code"], "cli.canceled", "{canceled}");
+    #[cfg(windows)]
+    assert!(
+        matches!(
+            canceled["error"]["code"].as_str(),
+            Some("runtime.timeout" | "runtime.action_failed")
+        ),
+        "{canceled}"
+    );
+    held.join().unwrap();
+
+    // Downgrade only the passive declaration in a copy of the real generated
+    // executable. The parent must reject it before attempting execution.
+    let mut bytes = fs::read(&executable).unwrap();
+    let identity = b"cargo-ai.generated-runtime";
+    let records = bytes
+        .windows(identity.len())
+        .enumerate()
+        .filter_map(|(offset, value)| {
+            (value == identity
+                && bytes.get(offset + identity.len()..offset + identity.len() + 8)
+                    == Some(&[3, 0, 0, 0, 255, 0, 0, 0][..]))
+            .then_some(offset + identity.len())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        records.len(),
+        1,
+        "expected one exact generated enforcement declaration"
+    );
+    let offset = records[0];
+    bytes[offset..offset + 4].copy_from_slice(&2u32.to_le_bytes());
+    bytes[offset + 4..offset + 8].copy_from_slice(&127u32.to_le_bytes());
+    let older = output_dir.join(if cfg!(windows) {
+        "older_policy_descendant.exe"
+    } else {
+        "older_policy_descendant"
+    });
+    fs::copy(&executable, &older).unwrap();
+    fs::write(&older, bytes).unwrap();
+    let mut parent = parent;
+    parent["actions"][0]["run"][0]["artifact"] = serde_json::json!(format!(
+        "./{}",
+        older.file_name().unwrap().to_str().unwrap()
+    ));
+    fs::write(&parent_definition, serde_json::to_vec(&parent).unwrap()).unwrap();
+    let unsupported = media_command(&fixture, env!("CARGO_BIN_EXE_cargo-ai"))
+        .args(["run", "--config"])
+        .arg(&parent_definition)
+        .args(["--output-format", "json"])
+        .env("CARGO_AI_EXECUTION_POLICY_V1", policy.to_string())
+        .output()
+        .unwrap();
+    assert!(!unsupported.status.success());
+    let unsupported: Value = serde_json::from_slice(&unsupported.stdout).unwrap();
+    assert_eq!(
+        unsupported["error"]["code"], "action.execution_policy_unsupported",
+        "unsupported child needs a typed prelaunch failure: {unsupported}"
+    );
 }

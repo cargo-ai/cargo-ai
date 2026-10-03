@@ -325,6 +325,16 @@ fn assemble_build_root(
     let tools = dedupe_preserve_order(&build_profile.tools);
     let assets = dedupe_preserve_order(&build_profile.assets);
 
+    crate::commands::client_actions::validate_distribution(
+        project_root,
+        &build_profile
+            .agent_definitions
+            .iter()
+            .chain(&build_profile.hatched_agents)
+            .cloned()
+            .collect::<Vec<_>>(),
+        &build_profile.assets,
+    )?;
     validate_build_input_boundaries(project_root, build_profile, output_root)?;
     prepare_output_root(output_root, force)?;
     write_generated_project_metadata(
@@ -1123,6 +1133,7 @@ mod tests {
         dedupe_preserve_order, derive_agent_output_name, normalize_path, platform_label_for_target,
         BuildProfileDocument, ProjectMetadataDocument,
     };
+    use std::fs;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -1181,6 +1192,57 @@ assets = ["assets/prompts/"]
                 assets: vec!["assets/prompts/".to_string()],
             }
         );
+    }
+
+    #[test]
+    fn action_build_rejects_excluded_target_before_replacing_output() {
+        let root =
+            std::env::temp_dir().join(format!("cargo-ai-build-action-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("agent.json"),
+            include_str!("../../templates/guidance/examples/client-action-coordinator.json"),
+        )
+        .unwrap();
+        let mut catalog: serde_json::Value = serde_json::from_str(include_str!(
+            "../../templates/guidance/examples/client-actions.json"
+        ))
+        .unwrap();
+        catalog["actions"].as_array_mut().unwrap().truncate(1);
+        catalog["actions"][0]["target"] = serde_json::json!("agent.json");
+        catalog["interfaces"] = serde_json::json!([{"id":"native","actions":["generate-one"]}]);
+        catalog["resources"] = serde_json::json!([]);
+        fs::write(
+            root.join(crate::commands::client_actions::CATALOG_FILE),
+            serde_json::to_vec(&catalog).unwrap(),
+        )
+        .unwrap();
+        let output = root.join("assembled");
+        fs::create_dir_all(&output).unwrap();
+        fs::write(output.join("preserved"), "previous").unwrap();
+        let output_root = super::BuildOutputRoot {
+            path: output.clone(),
+            explicit: true,
+        };
+        let metadata = super::LoadedProjectMetadata {
+            build_profile: super::BuildProfileDocument {
+                assets: vec![crate::commands::client_actions::CATALOG_FILE.into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let target =
+            crate::agent_builder::build_target::BuildTarget::from_cli(Some("aarch64-apple-darwin"))
+                .unwrap();
+        let error =
+            super::assemble_build_root(&root, "default", &metadata, &target, &output_root, true)
+                .unwrap_err();
+        assert!(error.contains("not explicitly selected"));
+        assert_eq!(
+            fs::read_to_string(output.join("preserved")).unwrap(),
+            "previous"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

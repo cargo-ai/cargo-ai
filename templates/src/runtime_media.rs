@@ -173,14 +173,8 @@ pub(super) async fn run_audio_step(
     } else {
         "transcribe_audio"
     };
-    let selected = resolve_media_step_profile_context(
-        step.profile.as_ref(),
-        data,
-        action_name,
-        provider_context.inference_timeout_in_sec,
-        kind,
-    )
-    .await?;
+    let selected =
+        resolve_media_step_context(step, data, action_name, provider_context, kind).await?;
     let context = selected.as_ref().unwrap_or(provider_context);
     let capability = context.provider.capabilities();
     if !(if speech {

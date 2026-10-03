@@ -50,6 +50,7 @@ struct Observer {
     thinking_omitted: usize,
     child_instrumentation: bool,
     truncated: bool,
+    client_action: Option<Value>,
 }
 
 pub(crate) fn selected() -> bool {
@@ -305,7 +306,10 @@ pub(crate) fn event(kind: &'static str, data: Value) {
         if !progress_capacity(o) {
             return;
         }
-        let value = json!({"schema_version":1,"event_type":kind,"operation_id":o.id,"root_invocation_id":o.id,"invocation_id":o.id,"sequence":o.sequence,"timestamp":timestamp(),"data":data});
+        let mut value = json!({"schema_version":1,"event_type":kind,"operation_id":o.id,"root_invocation_id":o.id,"invocation_id":o.id,"sequence":o.sequence,"timestamp":timestamp(),"data":data});
+        if let Some(action) = &o.client_action {
+            value["client_action"] = action.clone();
+        }
         match serde_json::to_vec(&value) {
             Ok(bytes) if bytes.len() <= EVENT_LIMIT => {
                 if o.sender.try_send((bytes, false)).is_ok() {
@@ -343,6 +347,16 @@ pub(crate) fn record_error(error: Failure) {
                 o.error = Some(error);
             }
         }
+    }
+}
+
+/// Associates a validated declaration with this execution, without retaining inputs.
+pub(crate) fn record_client_action(action: Value) {
+    if selected() {
+        if let Some(observer) = OBSERVER.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            observer.client_action = Some(action.clone());
+        }
+        event("client_action_resolved", action);
     }
 }
 pub(crate) fn record_process_error(error: &io::Error) {
@@ -432,6 +446,12 @@ fn thinking_data(observer: &Observer) -> Value {
 }
 
 fn merge_thinking(mut data: Value, observer: &Observer) -> Value {
+    if let Some(action) = &observer.client_action {
+        if !data.is_object() {
+            data = json!({"operation_data":data});
+        }
+        data["client_action"] = action.clone();
+    }
     if observer.thinking.is_empty() && observer.thinking_omitted == 0 {
         return data;
     }
@@ -477,6 +497,9 @@ fn contracts() -> Vec<Value> {
     let finite = [
         "capabilities",
         "version",
+        "actions list",
+        "actions validate",
+        "actions resource",
         "profile list",
         "profile show",
         "profile add",
@@ -514,6 +537,7 @@ fn contracts() -> Vec<Value> {
     let mut values: Vec<Value> = finite.iter().map(|name| {
         let effects=match *name {
             "capabilities"|"version"=>vec!["none"],
+            "actions list"|"actions validate"|"actions resource"=>vec!["explicit_project_or_installed_package_read"],
             "profile list"=>vec!["configuration_read"],
             "profile show"=>vec!["configuration_read","credential_presence_lookup"],
             "models list"|"models thinking"=>vec!["connection_read","provider_catalog_read"],
@@ -528,6 +552,7 @@ fn contracts() -> Vec<Value> {
         };
         let variants=match *name {
             "packages list"=>json!([{"selector":"installed","pagination":"limit_and_all","legacy_default_limit":20},{"selector":"account","pagination":"all_and_existing_limit"}]),
+            "actions list"|"actions validate"|"actions resource"=>json!([{"selector":"explicit_project"},{"selector":"installed_package_alias"}]),
             "packages inspect"=>json!([{"selector":"installed_alias"},{"selector":"account_name_and_optional_version"}]),
             "models list"|"models thinking"=>json!([{"selector":"saved_profile","api_key_store":"explicit_file_only","auth_modes":["none","api_key","openai_account"]},{"selector":"draft_server_auth","api_key_input":"stdin","auth_modes":["none","api_key","openai_account"],"account_provider":"openai"}]),
             "usage summary"|"usage runs"|"usage show"=>json!([{"domain_schema_version":1},{"domain_schema_version":2}]),
@@ -537,6 +562,8 @@ fn contracts() -> Vec<Value> {
         json!({"command":name,"payload_schema":format!("cargo-ai.{}.v1",name.replace(' ',".")),"formats":["json"],"schema_versions":[1],"effects":effects,"variants":variants,"interaction":if *name=="auth login openai"{"existing_terminal_protocol_exception"}else{"noninteractive_explicit_consent_required_when_applicable"}})
     }).collect();
     values.push(json!({"command":"run","formats":["json","ndjson"],"schema_versions":[1],"private_content":"explicit_opt_in","opaque_children":"exit_status_only","thinking":{"selection":"tagged_provider_default_or_exact_choice","settings":["choice","provider_default","on","off"],"flags":["--thinking","--thinking-provider-default","--thinking-choice"],"terminal_outcomes":true,"action_definition_revision":"2026-10-01.r1"}}));
+    let run = values.last_mut().expect("run contract was appended");
+    run["client_actions"] = json!({"schema_version":1,"selector":"--action","request_input":"--action-request-stdin","execution_policy":"required","definition_binding":"required","client_action_correlation":true,"idempotency":false,"limits":super::client_actions::limits()});
     if cfg!(feature = "developer-tools") {
         values.push(json!({"command":"package","formats":["json"],"schema_versions":[1]}));
     }
@@ -548,6 +575,14 @@ pub(crate) fn capabilities() -> Value {
     ))
     .ok();
     json!({"build":build(),"contracts":contracts(),"runtime_capabilities":runtime_capabilities,"installed_capability_is_not_live_access":true,"legacy_formats":{"version_and_help":"text","usage_json":"unchanged_v1_v2","agent_pull_stdout":"raw_definition_json","run_json":"input_definition"},"limits":{"response_bytes":RESPONSE_LIMIT,"event_bytes":EVENT_LIMIT,"progress_records":63,"private_result_bytes":4*1024*1024,"terminal_delivery_seconds":2},"storage":{"keychain":"shared_profile_name","discovery_saved_api_key":"explicit_file_only"},"interaction":"noninteractive_by_default","generated_children":"instrumentation_unavailable_unless_explicitly_supported"})
+}
+
+fn terminal_event(id: &str, observer: &Observer, data: Value) -> Value {
+    let mut value = json!({"schema_version":1,"event_type":"operation_completed","operation_id":id,"root_invocation_id":id,"invocation_id":id,"sequence":observer.sequence,"timestamp":timestamp(),"data":data});
+    if let Some(action) = &observer.client_action {
+        value["client_action"] = action.clone();
+    }
+    value
 }
 
 pub(crate) async fn dispatch(matches: &ArgMatches) -> Option<i32> {
@@ -598,6 +633,7 @@ pub(crate) async fn dispatch(matches: &ArgMatches) -> Option<i32> {
         thinking_omitted: 0,
         child_instrumentation: true,
         truncated: false,
+        client_action: None,
     });
     event("operation_started", json!({"command":path}));
     let owned_matches = matches.clone();
@@ -648,7 +684,7 @@ pub(crate) async fn dispatch(matches: &ArgMatches) -> Option<i32> {
         warnings,
     );
     let output = if format == "ndjson" {
-        json!({"schema_version":1,"event_type":"operation_completed","operation_id":id,"root_invocation_id":id,"invocation_id":id,"sequence":observer.sequence,"timestamp":timestamp(),"data":value})
+        terminal_event(&id, &observer, value)
     } else {
         value
     };
@@ -669,7 +705,7 @@ pub(crate) async fn dispatch(matches: &ArgMatches) -> Option<i32> {
                 thinking_warnings(&observer),
             );
             let fallback = if format == "ndjson" {
-                json!({"schema_version":1,"event_type":"operation_completed","operation_id":id,"root_invocation_id":id,"invocation_id":id,"sequence":observer.sequence,"timestamp":timestamp(),"data":value})
+                terminal_event(&id, &observer, value)
             } else {
                 value
             };
@@ -707,6 +743,7 @@ async fn execute(matches: &ArgMatches) -> Result<Value, Failure> {
             Ok(build())
         }
         Some(("profile", m)) => super::profile::machine_run(m),
+        Some(("actions", m)) => super::client_actions::machine_run(m),
         Some(("new", m)) => super::new::machine_run(m),
         Some(("usage", m)) => {
             if let Some(b) = m.subcommand_matches("backup") {
@@ -819,6 +856,7 @@ mod thinking_tests {
             thinking_omitted: 0,
             child_instrumentation: true,
             truncated: false,
+            client_action: None,
         }
     }
 

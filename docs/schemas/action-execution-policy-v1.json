@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/action-execution-policy-v1.json",
+  "title": "Cargo AI declared-action execution policy v1",
+  "$comment": "Strict host-supplied invocation policy, separate from business inputs. Encoded policy is bounded to 32 KiB. Allowed records grant explicit combinations, not independent lists or Cartesian products. An empty list denies provider selections. This constrains supported declarative execution, not arbitrary trusted tool code or an OS sandbox. Profile/model/thinking lengths and nonblank values are checked as UTF-8 bytes by the runtime.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "allowed": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/$defs/selection"
+      }
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "max_runtime_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "max_agent_depth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        }
+      },
+      "required": [
+        "max_runtime_secs",
+        "max_output_tokens",
+        "max_agent_depth"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "version",
+    "allowed",
+    "limits"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "selection": {
+      "type": "object",
+      "properties": {
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "request_kind": {
+          "enum": [
+            "text",
+            "image",
+            "audio",
+            "transcription"
+          ]
+        },
+        "model": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "named"
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                }
+              },
+              "required": [
+                "kind",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "provider_default",
+                    "fixed_service"
+                  ]
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "thinking": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "provider_default",
+                    "on",
+                    "off"
+                  ]
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "const": "choice"
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                }
+              },
+              "required": [
+                "mode",
+                "value"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "profile",
+        "request_kind",
+        "model",
+        "thinking"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

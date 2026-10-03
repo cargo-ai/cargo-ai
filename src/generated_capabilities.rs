@@ -19,6 +19,8 @@ pub struct RuntimeCapabilities {
     runtime: &'static str,
     revision: u32,
     thinking: ThinkingCapabilities,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_policy: Option<ExecutionPolicyCapabilities>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -27,21 +29,30 @@ struct ThinkingCapabilities {
     settings: &'static [&'static str],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+struct ExecutionPolicyCapabilities {
+    version: u32,
+    boundaries: &'static [&'static str],
+}
+
 impl RuntimeCapabilities {
+    pub fn supports_execution_policy(self) -> bool {
+        self.execution_policy.is_some()
+    }
     pub fn is_cli_run(self) -> bool {
         self.runtime == "cargo-ai.cli-run-runtime"
     }
 
     pub fn supports_thinking(self) -> bool {
-        matches!(self.revision, 1 | REVISION)
+        matches!(self.revision, 1 | 2 | REVISION)
     }
 
     pub fn supports_toggle(self) -> bool {
-        self.revision == REVISION
+        matches!(self.revision, 2 | REVISION)
     }
 
     pub fn supports_exact_choice_flag(self) -> bool {
-        self.revision == REVISION
+        matches!(self.revision, 2 | REVISION)
     }
 }
 
@@ -73,7 +84,10 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
     let mut legacy = encoded_record(cli_run);
     legacy[payload..payload + 4].copy_from_slice(&1u32.to_le_bytes());
     legacy[payload + 4..payload + 8].copy_from_slice(&0b1111u32.to_le_bytes());
-    if record != encoded_record(cli_run) && record != legacy {
+    let mut prior = encoded_record(cli_run);
+    prior[payload..payload + 4].copy_from_slice(&2u32.to_le_bytes());
+    prior[payload + 4..payload + 8].copy_from_slice(&0b111_1111u32.to_le_bytes());
+    if record != encoded_record(cli_run) && record != legacy && record != prior {
         return Err(CapabilityReadError::Unsupported);
     }
     Ok(RuntimeCapabilities {
@@ -83,6 +97,10 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
             "cargo-ai.generated-runtime"
         },
         revision,
+        execution_policy: (revision == REVISION).then_some(ExecutionPolicyCapabilities {
+            version: 1,
+            boundaries: &["root", "media", "descendants"],
+        }),
         thinking: ThinkingCapabilities {
             flags: if revision == 1 {
                 &["--thinking", "--thinking-provider-default"]
@@ -164,6 +182,17 @@ fn capabilities_from_reader(
 }
 
 #[cfg(test)]
+pub(crate) fn test_record(revision: u32) -> Vec<u8> {
+    let mut record = encoded_record(false);
+    let payload = OPEN.len() + IDENTITY.len();
+    record[payload..payload + 4].copy_from_slice(&revision.to_le_bytes());
+    if revision == 2 {
+        record[payload + 4..payload + 8].copy_from_slice(&0b111_1111u32.to_le_bytes());
+    }
+    record
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -176,7 +205,8 @@ mod tests {
             serde_json::to_value(caps).unwrap(),
             serde_json::json!({
                 "runtime": "cargo-ai.generated-runtime",
-                "revision": 2,
+                "revision": 3,
+                "execution_policy": {"version":1,"boundaries":["root","media","descendants"]},
                 "thinking": {
                     "flags": ["--thinking", "--thinking-provider-default", "--thinking-choice"],
                     "settings": ["choice", "provider_default", "on", "off"]
@@ -198,6 +228,16 @@ mod tests {
         assert!(decode_record(&encoded_record(false))
             .unwrap()
             .supports_toggle());
+    }
+
+    #[test]
+    fn thinking_support_does_not_imply_execution_policy_enforcement() {
+        let older = decode_record(&test_record(2)).unwrap();
+        assert!(older.supports_thinking());
+        assert!(older.supports_toggle());
+        assert!(!older.supports_execution_policy());
+        let current = decode_record(&test_record(REVISION)).unwrap();
+        assert!(current.supports_execution_policy());
     }
 
     #[test]

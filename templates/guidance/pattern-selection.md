@@ -71,3 +71,7 @@ Choose the smallest shape that meets that answer:
 ## Selection Rule
 
 Infer the pattern yourself and explain it in plain language. Do not push the architecture decision back onto the user unless they explicitly want that level of control.
+
+## Application controls
+
+When one interface needs several buttons for declared agents, use `client-actions.md` and the `examples/client-action-*` group. The neutral catalog handles same-agent/different-input and different-agent bindings; the client chooses HTML/native/headless presentation. Keep orchestration in existing agents rather than introducing a second workflow engine.
