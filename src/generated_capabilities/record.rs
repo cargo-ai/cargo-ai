@@ -8,10 +8,10 @@ pub const CLOSE: [u8; 16] = [
 ];
 pub const IDENTITY: &[u8; 26] = b"cargo-ai.generated-runtime";
 pub const CLI_IDENTITY: &[u8; 26] = b"cargo-ai.cli-run-runtime\0\0";
-pub const REVISION: u32 = 3;
+pub const REVISION: u32 = 4;
 // Thinking controls and versioned root/media/descendant policy enforcement
 // are required together for this declaration revision.
-pub const THINKING_CAPABILITIES: u32 = 0b1111_1111;
+pub const THINKING_CAPABILITIES: u32 = 0b1_1111_1111;
 pub const RECORD_LEN: usize = OPEN.len() + IDENTITY.len() + 8 + CLOSE.len();
 
 /// Emits numeric source data; template/source text is not a binary declaration.

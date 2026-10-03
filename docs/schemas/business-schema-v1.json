@@ -1,0 +1,441 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/business-schema-v1.json",
+  "title": "Cargo AI bounded business schema and values",
+  "$comment": "Runtime enforces depth 8, UTF-8 byte limits, serialized business data at most 65536 bytes, duplicate-key rejection, required-member membership, enum typing and bound consistency. Authored schemas cannot use $ref or unknown keywords. References in this meta-schema describe the contract; they do not enable authored references.",
+  "$defs": {
+    "key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+      "not": {
+        "enum": [
+          "__proto__",
+          "prototype",
+          "constructor"
+        ]
+      },
+      "$comment": "Runtime additionally enforces at most 128 UTF-8 bytes."
+    },
+    "schema": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "oneOf": [
+                {
+                  "const": "object"
+                },
+                {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "const": "object"
+                    },
+                    {
+                      "const": "null"
+                    }
+                  ],
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              ]
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 65536
+            },
+            "enum": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/value"
+              }
+            },
+            "properties": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+                "not": {
+                  "enum": [
+                    "__proto__",
+                    "prototype",
+                    "constructor"
+                  ]
+                },
+                "$comment": "Runtime additionally enforces at most 128 UTF-8 bytes."
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/schema"
+              }
+            },
+            "required": {
+              "type": "array",
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+                "not": {
+                  "enum": [
+                    "__proto__",
+                    "prototype",
+                    "constructor"
+                  ]
+                },
+                "$comment": "Runtime additionally enforces at most 128 UTF-8 bytes."
+              }
+            },
+            "additionalProperties": {
+              "const": false
+            }
+          },
+          "required": [
+            "type",
+            "properties",
+            "required",
+            "additionalProperties"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "oneOf": [
+                {
+                  "const": "array"
+                },
+                {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "const": "array"
+                    },
+                    {
+                      "const": "null"
+                    }
+                  ],
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              ]
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 65536
+            },
+            "enum": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/value"
+              }
+            },
+            "items": {
+              "$ref": "#/$defs/schema"
+            },
+            "minItems": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1024
+            },
+            "maxItems": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1024
+            }
+          },
+          "required": [
+            "type",
+            "items"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "oneOf": [
+                {
+                  "const": "string"
+                },
+                {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "const": "string"
+                    },
+                    {
+                      "const": "null"
+                    }
+                  ],
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              ]
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 65536
+            },
+            "enum": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/value"
+              }
+            },
+            "minLength": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65536
+            },
+            "maxLength": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65536
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "oneOf": [
+                {
+                  "const": "integer"
+                },
+                {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "const": "integer"
+                    },
+                    {
+                      "const": "null"
+                    }
+                  ],
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              ]
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 65536
+            },
+            "enum": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/value"
+              }
+            },
+            "minimum": {
+              "type": "integer"
+            },
+            "maximum": {
+              "type": "integer"
+            },
+            "exclusiveMinimum": {
+              "type": "integer"
+            },
+            "exclusiveMaximum": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "oneOf": [
+                {
+                  "const": "number"
+                },
+                {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "const": "number"
+                    },
+                    {
+                      "const": "null"
+                    }
+                  ],
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              ]
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 65536
+            },
+            "enum": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/value"
+              }
+            },
+            "minimum": {
+              "type": "number"
+            },
+            "maximum": {
+              "type": "number"
+            },
+            "exclusiveMinimum": {
+              "type": "number"
+            },
+            "exclusiveMaximum": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "oneOf": [
+                {
+                  "const": "boolean"
+                },
+                {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "const": "boolean"
+                    },
+                    {
+                      "const": "null"
+                    }
+                  ],
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              ]
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 65536
+            },
+            "enum": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/value"
+              }
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "null"
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 65536
+            },
+            "enum": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/value"
+              }
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "value": {
+      "oneOf": [
+        {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+            "not": {
+              "enum": [
+                "__proto__",
+                "prototype",
+                "constructor"
+              ]
+            },
+            "$comment": "Runtime additionally enforces at most 128 UTF-8 bytes."
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/value"
+          }
+        },
+        {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/value"
+          }
+        },
+        {
+          "type": "string",
+          "maxLength": 65536
+        },
+        {
+          "type": [
+            "number",
+            "boolean",
+            "null"
+          ]
+        }
+      ]
+    }
+  },
+  "$ref": "#/$defs/schema"
+}

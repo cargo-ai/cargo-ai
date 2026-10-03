@@ -18,7 +18,7 @@ For broader shape and validation rules, also read:
 
 `agent_definition_schema_version` identifies the Cargo AI contract used to interpret the definition. It is not an agent or package version; copy it from the current Cargo AI template or guidance rather than inventing a value from the current date or another version surface.
 
-Ordinary scaffolds use strict revision `2026-09-09.r1`; opt-in `2026-09-19.r1` adds rubric outputs, and `2026-10-01.r1` retains rubric and adds action thinking. Valid earlier revisions keep legacy parsing behavior; every other revision at or after the cutoff is unsupported. Strict stable objects reject additional keys. `inputs` is optional, and `actions: []` is valid for a model-only definition. Each declared action has exactly `name`, `logic`, and a nonempty `run` array.
+Ordinary scaffolds use strict revision `2026-09-09.r1`; opt-in `2026-09-19.r1` adds rubric outputs, `2026-10-01.r1` retains rubric and adds action thinking, and `2026-10-03.r1` adds a selected tool root result. Valid earlier revisions keep legacy parsing behavior; every other revision at or after the cutoff is unsupported. Strict stable objects reject additional keys. `inputs` is optional, and `actions: []` is valid for a model-only definition. Each declared action has exactly `name`, `logic`, and a nonempty `run` array.
 
 Each `logic` or `when` object contains one supported operator. Use the exhaustive operator list in `agent-definition-contract.md`; unknown operators and `literal` are rejected. For an unconditional true gate, use `{ "==": [1, 1] }`. Existing scalar-reference, flat-variable and comparison-type rules still apply.
 
@@ -55,7 +55,7 @@ Media actions require a compatible model and API project with access to the sele
   - Required: `kind`, `program`, `args`
 - `agent`
   - Required: `kind`, exactly one of `artifact` or legacy alias `agent`
-  - Optional: `profile`, `usage_log`, `inputs`, `input_mode`, `input_overrides`, `run_vars`, `ignore_tools`; `thinking` is also optional in `2026-10-01.r1`
+  - Optional: `profile`, `usage_log`, `inputs`, `input_mode`, `input_overrides`, `run_vars`, `ignore_tools`; `thinking` is also optional in `2026-10-01.r1` or `2026-10-03.r1`
 - `tool`
   - Required: `kind`, `name`
   - Optional: `params`, `output_variable`
@@ -68,7 +68,7 @@ Media actions require a compatible model and API project with access to the sele
   - Required: `kind`, `subject`, `text`
 - `generate_image`
   - Required: `kind`, `prompt`, `path`
-  - Optional: `model`, `profile`, `reference_images`; `thinking` is also optional in `2026-10-01.r1`
+  - Optional: `model`, `profile`, `reference_images`; `thinking` is also optional in `2026-10-01.r1` or `2026-10-03.r1`
   - OpenAI image transport (API key or account), Gemini, Mistral, xAI, and Ollama's experimental image transport have provider-specific formats and reference limits.
   - If `model` is omitted, Cargo AI falls back to the effective invocation model resolved from the current profile and any `--model` CLI override.
   - If `profile` is present, Cargo AI resolves that profile at step runtime and uses it for the image step's provider/url/token context.
@@ -112,7 +112,7 @@ Media actions require a compatible model and API project with access to the sele
   ```
 
 - `generate_audio` (speech from supplied text)
-  - Required: `kind`, `text`, `voice`, `path`; optional: `profile`, `model` except for xAI's fixed speech service. Also accepts `thinking` in `2026-10-01.r1`.
+  - Required: `kind`, `text`, `voice`, `path`; optional: `profile`, `model` except for xAI's fixed speech service. Also accepts `thinking` in `2026-10-01.r1` or `2026-10-03.r1`.
   - `text` and `path` accept a literal string or ordered string/variable parts. `voice` accepts a nonempty literal or one string variable reference. Voice IDs belong to the selected provider; there is no cross-provider voice mapping.
   - A model-selecting route uses explicit step `model`, then the selected step-profile model, then the invocation model. An incompatible inherited model fails; Cargo AI does not choose another speech model.
   - OpenAI API-key, Gemini, Mistral, and xAI API-key profiles are supported. Anthropic, Ollama, TypeSafe, and OpenAI account transport are unsupported for this step.
@@ -120,7 +120,7 @@ Media actions require a compatible model and API project with access to the sele
   - Mistral requires an existing saved voice ID accessible to the selected account. Cargo AI does not create, clone, or upload a voice. xAI accepts no step `model`; its fixed speech service uses the adapter's `language: auto` value.
   - Generated audio is limited to 20 MiB. A successful step writes one complete local file. The destination is staged and replaced only after generation and validation succeed; an existing file survives a provider or write failure.
 - `transcribe_audio` (local speech file to text)
-  - Required: `kind`, `audio: { "path": ... }`, `output_variable`; optional: `profile`, `model`. Also accepts `thinking` in `2026-10-01.r1`.
+  - Required: `kind`, `audio: { "path": ... }`, `output_variable`; optional: `profile`, `model`. Also accepts `thinking` in `2026-10-01.r1` or `2026-10-03.r1`.
   - `audio.path` is a literal relative path or a single `{ "var": "runtime.audio_path" }` reference to a string. It accepts `.wav` and `.mp3` files up to 10 MiB. It is a step-owned source, not a generic parent `file` input.
   - Its model precedence is explicit step `model`, selected step-profile model, then invocation model. The effective model must support the provider's native transcription route.
   - OpenAI API-key, Gemini, Mistral, and xAI API-key profiles use native transcription routes. Anthropic, Ollama, TypeSafe, and OpenAI account transport are unsupported.
@@ -129,7 +129,7 @@ Media actions require a compatible model and API project with access to the sele
 
 ## Thinking Overrides
 
-Only definition revision `2026-10-01.r1` permits tagged `thinking` on `agent`, `generate_image`, `generate_audio` and `transcribe_audio`. Use `{"mode":"provider_default"}`, `{"mode":"on"}`, `{"mode":"off"}` or `{"mode":"choice","value":"VALUE"}`; choice value may be an available string `{"var":"runtime.thinking"}` reference. Values resolve to nonblank strings with the same exact-choice semantics as profile and invocation settings. No scalar coercion, rank conversion or nearest-choice mapping is allowed.
+Definition revisions `2026-10-01.r1` and `2026-10-03.r1` permit tagged `thinking` on `agent`, `generate_image`, `generate_audio` and `transcribe_audio`. Use `{"mode":"provider_default"}`, `{"mode":"on"}`, `{"mode":"off"}` or `{"mode":"choice","value":"VALUE"}`; choice value may be an available string `{"var":"runtime.thinking"}` reference. Values resolve to nonblank strings with the same exact-choice semantics as profile and invocation settings. No scalar coercion, rank conversion or nearest-choice mapping is allowed.
 
 Media precedence is explicit step thinking, step-profile thinking, then invocation thinking. Explicit provider default stops inheritance. Resolve support only after selecting the actual provider, model and request endpoint. An unavailable or inapplicable choice preserves execution with provider-default fallback and an explanation.
 
@@ -278,3 +278,7 @@ For installed package entrypoints, that relative `usage_log` path resolves under
 
 
 Tagged `{"mode":"on"}` and `{"mode":"off"}` request qualified Boolean controls. Choice values stay exact, including literal `on`/`off`; only generic CLI aliases are case insensitive. Revision2 runtime declarations add toggles and `--thinking-choice`; revision1 children retain named/default forwarding but receive no Boolean override. See [Thinking Selection](agent-definition-contract.md#thinking-selection).
+
+## Selected tool result
+
+Revision `2026-10-03.r1` allows exactly one concrete root tool step to declare `produces_result:true` when the definition supplies root `result:{source:"tool",schema:BUSINESS_SCHEMA}`. Optional `artifact_scopes` require declared action/native permission. The successful tool protocol result string contains the bounded `{data,artifacts}` wrapper; a skipped step has no result and cannot fall back to model/child/prose output. See [selected result authoring](client-actions.md#business-data-and-selected-tool-results). Do not log the private producer payload. Generated runtimes validate/check this contract without advertising CLI result delivery or artifact reads.

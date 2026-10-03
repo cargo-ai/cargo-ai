@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://cargo-ai.org/schemas/action-request-v1.json",
-  "title": "Cargo AI declared-action request v1",
-  "$comment": "Strict bounded stdin request, maximum 64 KiB UTF-8. Business values also obey the selected action input_schema, depth 8, arrays 1024 items and runtime input limits. Interface/action must match CLI selectors. Host constructs policy/grants; page values cannot authorize them. Referenced schemas are repository-local specifications; the runtime never loads network schemas.",
+  "$id": "https://cargo-ai.org/schemas/action-request-v2.json",
+  "title": "Cargo AI action request v2",
+  "$comment": "Complete UTF-8 request is at most 65536 bytes including binding, policy and grants. inputs is the only business namespace; schema validation and explicit mappings do not confer authority. Duplicate keys fail. Static resource requests retain their separate revision 1.",
   "type": "object",
   "properties": {
     "schema_version": {
-      "const": 1
+      "const": 2
     },
     "interface": {
       "type": "string",
@@ -41,32 +41,14 @@
       }
     },
     "inputs": {
-      "type": "object",
-      "maxProperties": 64,
-      "propertyNames": {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 128,
-        "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-        "not": {
-          "enum": [
-            "execution_policy",
-            "expected_binding",
-            "attachment_grants",
-            "constructor",
-            "prototype",
-            "__proto__",
-            "profile",
-            "model",
-            "thinking",
-            "server",
-            "token",
-            "settings",
-            "config",
-            "execution_limits"
-          ]
+      "allOf": [
+        {
+          "$ref": "business-schema-v1.json#/$defs/value"
+        },
+        {
+          "type": "object"
         }
-      }
+      ]
     },
     "expected_binding": {
       "$ref": "action-binding-v1.json"
@@ -112,6 +94,37 @@
         ],
         "additionalProperties": false
       }
+    },
+    "artifact_access": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "scopes": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "not": {
+              "enum": [
+                "constructor",
+                "prototype",
+                "__proto__"
+              ]
+            }
+          }
+        }
+      },
+      "required": [
+        "version",
+        "scopes"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [

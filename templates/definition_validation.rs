@@ -1,9 +1,12 @@
 //! Portable, versioned authoring and structured-output validation.
 //!
-//! This module deliberately uses only serde_json and the standard library so the
+//! This module deliberately uses only serde/serde_json and the standard library so the
 //! CLI, generated build scripts and hosted input boundary share one contract.
 
 #![allow(dead_code)]
+
+#[path = "src/business_schema.rs"]
+pub mod business_schema;
 
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,9 +15,13 @@ use std::fmt;
 pub const STRICT_SCHEMA_VERSION: &str = "2026-09-09.r1";
 pub const RUBRIC_SCHEMA_VERSION: &str = "2026-09-19.r1";
 pub const THINKING_SCHEMA_VERSION: &str = "2026-10-01.r1";
+pub const RESULT_SCHEMA_VERSION: &str = "2026-10-03.r1";
 
 pub fn supports_rubric(version: &str) -> bool {
-    matches!(version, RUBRIC_SCHEMA_VERSION | THINKING_SCHEMA_VERSION)
+    matches!(
+        version,
+        RUBRIC_SCHEMA_VERSION | THINKING_SCHEMA_VERSION | RESULT_SCHEMA_VERSION
+    )
 }
 pub const VERSION_KEY: &str = "agent_definition_schema_version";
 pub const MAX_STRING_BYTES: usize = 256 * 1024;
@@ -280,7 +287,10 @@ pub fn definition_revision(root: &Value) -> Result<DefinitionRevision> {
         Ok(DefinitionRevision::Legacy)
     } else if matches!(
         value,
-        STRICT_SCHEMA_VERSION | RUBRIC_SCHEMA_VERSION | THINKING_SCHEMA_VERSION
+        STRICT_SCHEMA_VERSION
+            | RUBRIC_SCHEMA_VERSION
+            | THINKING_SCHEMA_VERSION
+            | RESULT_SCHEMA_VERSION
     ) {
         Ok(DefinitionRevision::Strict)
     } else {
@@ -293,7 +303,7 @@ pub fn definition_revision(root: &Value) -> Result<DefinitionRevision> {
     }
 }
 pub fn parse_definition(raw: &str) -> Result<(Value, DefinitionRevision)> {
-    let value = serde_json::from_str(raw).map_err(|cause| {
+    let value = business_schema::strict_definition_json(raw.as_bytes()).map_err(|cause| {
         error(
             "invalid_json",
             "$",
@@ -800,23 +810,26 @@ fn child_path(raw: &str, path: &str) -> Result<()> {
 pub fn validate_definition(value: &Value) -> Result<DefinitionRevision> {
     let revision = definition_revision(value)?;
     if revision == DefinitionRevision::Legacy {
+        validate_selected_result(object(value, "$")?, false)?;
         return Ok(revision);
     }
     let mut budget = data_budget(value, "$")?;
     let root = object(value, "$")?;
-    keys(
-        root,
-        &[
-            VERSION_KEY,
-            "agent_schema",
-            "actions",
-            "inputs",
-            "runtime_vars",
-            "action_execution",
-        ],
-        "$",
-        false,
-    )?;
+    let selected_results = root[VERSION_KEY] == RESULT_SCHEMA_VERSION;
+    let mut root_keys = vec![
+        VERSION_KEY,
+        "agent_schema",
+        "actions",
+        "inputs",
+        "runtime_vars",
+        "action_execution",
+    ];
+    if selected_results {
+        root_keys.push("result");
+    }
+    keys(root, &root_keys, "$", false)?;
+    validate_selected_result(root, selected_results)?;
+
     if let Some(execution) = root.get("action_execution") {
         choice(execution, "$.action_execution", &["sequential", "parallel"])?;
     }
@@ -948,13 +961,106 @@ pub fn validate_definition(value: &Value) -> Result<DefinitionRevision> {
                 &mut available,
                 &mut captures,
                 &inputs,
-                root[VERSION_KEY] == THINKING_SCHEMA_VERSION,
+                matches!(
+                    root[VERSION_KEY].as_str(),
+                    Some(THINKING_SCHEMA_VERSION | RESULT_SCHEMA_VERSION)
+                ),
                 &mut budget,
             )?;
         }
     }
     Ok(revision)
 }
+
+fn validate_selected_result(root: &Map<String, Value>, supported: bool) -> Result<()> {
+    let mut producers = 0;
+    for action in root
+        .get("actions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for step in action
+            .get("run")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(annotation) = step.get("produces_result") {
+                if !supported
+                    || step
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .is_none_or(|k| !k.eq_ignore_ascii_case("tool"))
+                    || !annotation.is_boolean()
+                {
+                    return Err(invalid(
+                        "$.actions",
+                        "Only supported concrete tool steps can declare produces_result.",
+                    ));
+                }
+                if annotation == true {
+                    producers += 1;
+                }
+            }
+        }
+    }
+    let Some(result) = root.get("result") else {
+        if producers != 0 {
+            return Err(invalid(
+                "$.result",
+                "A producer requires a root result declaration.",
+            ));
+        }
+        return Ok(());
+    };
+    if !supported {
+        return Err(invalid(
+            "$.result",
+            "Selected results require the supported result definition revision.",
+        ));
+    }
+    let result = object(result, "$.result")?;
+    keys(
+        result,
+        &["source", "schema", "artifact_scopes"],
+        "$.result",
+        false,
+    )?;
+    if result.get("source") != Some(&Value::String("tool".into())) {
+        return Err(invalid("$.result.source", "Result source must be tool."));
+    }
+    business_schema::validate_schema(required(result, "schema", "$.result")?, 0)
+        .map_err(|message| invalid("$.result.schema", message))?;
+    if let Some(scopes) = result.get("artifact_scopes") {
+        let scopes = array(scopes, "$.result.artifact_scopes")?;
+        limit(
+            "$.result.artifact_scopes",
+            "artifact_scopes",
+            scopes.len(),
+            64,
+        )?;
+        let mut seen = BTreeSet::new();
+        for scope in scopes {
+            let scope = nonempty(scope, "$.result.artifact_scopes")?;
+            if scope.len() > 128 || scope.chars().any(char::is_control) || !seen.insert(scope) {
+                return Err(invalid(
+                    "$.result.artifact_scopes",
+                    "Artifact scope IDs must be bounded and unique.",
+                ));
+            }
+        }
+    }
+    if producers != 1 {
+        return Err(invalid(
+            "$.result",
+            "A tool result declaration requires exactly one producer.",
+        ));
+    }
+    Ok(())
+}
+
 fn choice<'a>(value: &'a Value, path: &str, allowed: &[&str]) -> Result<&'a str> {
     let raw = string(value, path)?;
     if allowed.contains(&raw.trim().to_ascii_lowercase().as_str()) {
@@ -1330,6 +1436,9 @@ fn run_step(
         )
     {
         allowed.push("thinking");
+    }
+    if k == "tool" && map.contains_key("produces_result") {
+        allowed.push("produces_result");
     }
     keys(map, &allowed, path, false)?;
     if let Some(value) = map.get("thinking") {
@@ -1797,27 +1906,58 @@ fn output_value(value: &Value, schema: &Value, path: &str, budget: &mut Budget) 
 }
 
 fn exact_number_order(value: &Value, bound: &Value) -> Option<std::cmp::Ordering> {
-    fn integer(value: &Value) -> Option<i128> {
-        value
-            .as_i64()
-            .map(i128::from)
-            .or_else(|| value.as_u64().map(i128::from))
+    business_schema::exact_number_order(value, bound)
+}
+
+#[cfg(test)]
+mod selected_result_tests {
+    use super::*;
+    fn definition() -> Value {
+        json!({VERSION_KEY:RESULT_SCHEMA_VERSION,"agent_schema":{"type":"object","properties":{}},"result":{"source":"tool","schema":{"type":"integer"}},"actions":[{"name":"save","logic":{"==":[1,1]},"run":[{"kind":"tool","name":"store","produces_result":true}]}]})
     }
-    fn finite(value: &Value) -> Option<f64> {
-        value.as_f64().filter(|number| number.is_finite())
+    #[test]
+    fn selected_result_requires_one_concrete_tool_and_matching_revision() {
+        validate_definition(&definition()).unwrap();
+        let mut missing = definition();
+        missing["actions"][0]["run"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("produces_result");
+        assert!(validate_definition(&missing).is_err());
+        let mut duplicate = definition();
+        let step = duplicate["actions"][0]["run"][0].clone();
+        duplicate["actions"][0]["run"]
+            .as_array_mut()
+            .unwrap()
+            .push(step);
+        assert!(validate_definition(&duplicate).is_err());
+        let mut wrong = definition();
+        wrong["actions"][0]["run"][0]["kind"] = json!("exec");
+        assert!(validate_definition(&wrong).is_err());
+        let mut undeclared = definition();
+        undeclared.as_object_mut().unwrap().remove("result");
+        assert!(validate_definition(&undeclared).is_err());
+        let mut prior = definition();
+        prior[VERSION_KEY] = json!(THINKING_SCHEMA_VERSION);
+        assert!(validate_definition(&prior).is_err());
     }
-    fn integer_float(integer: i128, float: f64) -> std::cmp::Ordering {
-        // Every JSON integer fits i128. Truncation preserves the float's whole
-        // part without rounding the integer to f64; saturation can only occur
-        // beyond the JSON integer range. The fractional sign breaks a tie.
-        integer
-            .cmp(&(float as i128))
-            .then_with(|| 0.0_f64.partial_cmp(&float.fract()).unwrap())
+    #[test]
+    fn selected_result_schema_and_scope_declarations_are_closed() {
+        let mut value = definition();
+        value["result"]["artifact_scopes"] = json!(["exports", "exports"]);
+        assert!(validate_definition(&value).is_err());
+        let mut value = definition();
+        value["result"]["source"] = json!("provider");
+        assert!(validate_definition(&value).is_err());
+        let mut value = definition();
+        value["result"]["schema"]["pattern"] = json!(".*");
+        assert!(validate_definition(&value).is_err());
     }
-    match (integer(value), integer(bound)) {
-        (Some(value), Some(bound)) => Some(value.cmp(&bound)),
-        (Some(value), None) => Some(integer_float(value, finite(bound)?)),
-        (None, Some(bound)) => Some(integer_float(bound, finite(value)?).reverse()),
-        (None, None) => finite(value)?.partial_cmp(&finite(bound)?),
+    #[test]
+    fn duplicate_schema_and_root_members_are_rejected_before_conversion() {
+        let raw = definition()
+            .to_string()
+            .replace(r#""source":"tool""#, r#""source":"tool","source":"tool""#);
+        assert_eq!(parse_definition(&raw).unwrap_err().code, "invalid_json");
     }
 }

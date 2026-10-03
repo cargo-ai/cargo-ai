@@ -194,7 +194,7 @@
       "then": {
         "properties": {
           "data": {
-            "$ref": "action-catalog-v1.json#/$defs/discovery"
+            "$ref": "action-catalog-v2.json#/$defs/discovery"
           }
         }
       }
@@ -307,6 +307,9 @@
                   "binding"
                 ],
                 "additionalProperties": true
+              },
+              "result": {
+                "$ref": "structured-result-v1.json#/$defs/terminal_result"
               }
             }
           }
@@ -373,6 +376,25 @@
               "retryable"
             ],
             "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "actions artifact"
+          },
+          "outcome": {
+            "const": "succeeded"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "action-artifact-v1.json"
           }
         }
       }

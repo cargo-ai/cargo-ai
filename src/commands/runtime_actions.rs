@@ -1201,6 +1201,8 @@ async fn apply_actions_parallel(
         let execution_policy = crate::execution_policy::current();
         let declaring_project_root_clone = declaring_project_root.clone();
 
+        let result_context = super::structured_results::current();
+        let artifact_context = super::client_actions::current_result_artifact_context();
         let completion = super::machine::lane_completion();
         lane_tasks.push(OwnedLane(tokio::spawn(async move {
             let _completion = completion;
@@ -1219,6 +1221,9 @@ async fn apply_actions_parallel(
                 )
                 .await
             };
+            let lane_future = super::structured_results::scope(result_context, lane_future);
+            let lane_future =
+                super::client_actions::scope_result_artifacts(artifact_context, lane_future);
             let lane_future =
                 DECLARING_PROJECT_ROOT.scope(declaring_project_root_clone, lane_future);
 
@@ -1829,7 +1834,7 @@ async fn run_tool_step(
     } else if let Some(root) = provider_context.project_data.as_ref() {
         command.current_dir(root.ensure_directory()?);
     }
-    if super::machine::selected() {
+    if super::machine::selected() || step.produces_result {
         super::machine_process::prepare(&mut command)
             .map_err(|_| "Could not prepare owned tool execution".to_string())?;
     }
@@ -1844,10 +1849,13 @@ async fn run_tool_step(
                 action_name, tool_name, error
             )
         })?;
-    let output = if super::machine::selected() {
+    let output = if super::machine::selected() || step.produces_result {
         super::machine_process::wait_with_input(child, remaining, &request_bytes)
             .await
             .map_err(|error| {
+                if step.produces_result && error.kind() == std::io::ErrorKind::InvalidData {
+                    return super::structured_results::limit_failure();
+                }
                 super::machine::record_process_error(&error);
                 "Owned tool execution did not complete".to_string()
             })?
@@ -1899,7 +1907,17 @@ async fn run_tool_step(
     }
 
     let result =
-        crate::commands::tools::validate_tool_invoke_response(&contract.resolved, &output.stdout)?;
+        crate::commands::tools::validate_tool_invoke_response(&contract.resolved, &output.stdout)
+            .map_err(|error| {
+            if step.produces_result {
+                super::structured_results::protocol_failure()
+            } else {
+                error
+            }
+        })?;
+    if step.produces_result {
+        super::structured_results::capture(result.as_deref())?;
+    }
     if let Some(output_variable) = step.output_variable.as_deref() {
         let value = result.ok_or_else(|| {
             format!(
@@ -1917,7 +1935,7 @@ async fn run_tool_step(
         }
         Ok(Some((output_variable.to_string(), value)))
     } else {
-        if let Some(result) = result {
+        if let Some(result) = result.filter(|_| !step.produces_result) {
             print_action_line(
                 action_index,
                 action_name,
@@ -5482,6 +5500,7 @@ mod tests {
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "exec".to_string(),
             program: Some(program.to_string()),
             model: None,
@@ -6753,6 +6772,7 @@ auth_mode = "{auth_mode}"
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
@@ -6802,6 +6822,7 @@ auth_mode = "{auth_mode}"
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
@@ -6884,6 +6905,7 @@ auth_mode = "{auth_mode}"
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "generate_image".to_string(),
             program: None,
             model: Some(crate::RunArg::Literal("gpt-image-1".to_string())),
@@ -7018,6 +7040,7 @@ auth_mode = "{auth_mode}"
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "generate_image".to_string(),
             program: None,
             model: Some(crate::RunArg::Literal("gpt-image-2".to_string())),
@@ -7107,6 +7130,7 @@ auth_mode = "{auth_mode}"
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "generate_image".to_string(),
             program: None,
             model: Some(crate::RunArg::Literal("gpt-image-2".to_string())),
@@ -7187,6 +7211,7 @@ auth_mode = "{auth_mode}"
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "generate_image".to_string(),
             program: None,
             model: Some(crate::RunArg::Variable("runtime.image_model".to_string())),
@@ -7290,6 +7315,7 @@ auth_mode = "{auth_mode}"
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "generate_image".to_string(),
             program: None,
             model: None,
@@ -7366,6 +7392,7 @@ auth_mode = "{auth_mode}"
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "generate_image".to_string(),
             program: None,
             model: None,
@@ -7468,6 +7495,7 @@ auth_mode = "{auth_mode}"
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "generate_image".to_string(),
             program: None,
             model: None,
@@ -7849,6 +7877,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "generate_image".to_string(),
             program: None,
             model: Some(crate::RunArg::Literal("gpt-image-explicit".to_string())),
@@ -7914,6 +7943,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "generate_image".to_string(),
             program: None,
             model: Some(crate::RunArg::Literal("gpt-image-explicit".to_string())),
@@ -7967,6 +7997,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "generate_image".to_string(),
             program: None,
             model: None,
@@ -8048,6 +8079,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "generate_image".to_string(),
             program: None,
             model: None,
@@ -8138,6 +8170,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "generate_image".to_string(),
             program: None,
             model: None,
@@ -8197,6 +8230,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "generate_image".to_string(),
             program: None,
             model: None,
@@ -8535,6 +8569,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -8808,6 +8843,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -8893,6 +8929,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -9013,6 +9050,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -9129,6 +9167,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -9222,6 +9261,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -9317,6 +9357,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
@@ -9350,6 +9391,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -9454,6 +9496,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -9570,6 +9613,7 @@ timeout_in_sec = 60
             tool_name: Some("bridge_tool".to_string()),
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "tool".to_string(),
             program: None,
             model: None,
@@ -9670,6 +9714,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -9759,6 +9804,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -9835,6 +9881,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -9888,6 +9935,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -9938,6 +9986,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -9988,6 +10037,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -10055,6 +10105,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -10126,6 +10177,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
@@ -10159,6 +10211,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -10239,6 +10292,7 @@ timeout_in_sec = 60
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
                 ignore_tools: false,
+                produces_result: false,
                 kind: "exec".to_string(),
                 program: Some("/bin/sh".to_string()),
                 model: None,
@@ -10276,6 +10330,7 @@ timeout_in_sec = 60
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
                 ignore_tools: false,
+                produces_result: false,
                 kind: "agent".to_string(),
                 program: None,
                 model: None,
@@ -10350,6 +10405,7 @@ timeout_in_sec = 60
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
                 ignore_tools: false,
+                produces_result: false,
                 kind: "exec".to_string(),
                 program: Some("/bin/sh".to_string()),
                 model: None,
@@ -10390,6 +10446,7 @@ timeout_in_sec = 60
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
                 ignore_tools: false,
+                produces_result: false,
                 kind: "exec".to_string(),
                 program: Some("/bin/sh".to_string()),
                 model: None,
@@ -10483,6 +10540,7 @@ timeout_in_sec = 60
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
                 ignore_tools: false,
+                produces_result: false,
                 kind: "exec".to_string(),
                 program: Some("/bin/sh".to_string()),
                 model: None,
@@ -10520,6 +10578,7 @@ timeout_in_sec = 60
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
                 ignore_tools: false,
+                produces_result: false,
                 kind: "exec".to_string(),
                 program: Some("/bin/sh".to_string()),
                 model: None,
@@ -10609,6 +10668,7 @@ timeout_in_sec = 60
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
                     ignore_tools: false,
+                    produces_result: false,
                     kind: "exec".to_string(),
                     program: Some("/bin/sh".to_string()),
                     model: None,
@@ -10642,6 +10702,7 @@ timeout_in_sec = 60
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
                     ignore_tools: false,
+                    produces_result: false,
                     kind: "agent".to_string(),
                     program: None,
                     model: None,
@@ -10677,6 +10738,7 @@ timeout_in_sec = 60
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
                 ignore_tools: false,
+                produces_result: false,
                 kind: "agent".to_string(),
                 program: None,
                 model: None,
@@ -10751,6 +10813,7 @@ timeout_in_sec = 60
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
                     ignore_tools: false,
+                    produces_result: false,
                     kind: "exec".to_string(),
                     program: Some("/bin/sh".to_string()),
                     model: None,
@@ -10784,6 +10847,7 @@ timeout_in_sec = 60
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
                     ignore_tools: false,
+                    produces_result: false,
                     kind: "exec".to_string(),
                     program: Some("/bin/sh".to_string()),
                     model: None,
@@ -10823,6 +10887,7 @@ timeout_in_sec = 60
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
                     ignore_tools: false,
+                    produces_result: false,
                     kind: "exec".to_string(),
                     program: Some("/bin/sh".to_string()),
                     model: None,
@@ -10856,6 +10921,7 @@ timeout_in_sec = 60
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
                     ignore_tools: false,
+                    produces_result: false,
                     kind: "exec".to_string(),
                     program: Some("/bin/sh".to_string()),
                     model: None,
@@ -10944,6 +11010,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "exec".to_string(),
             program: Some("/bin/sh".to_string()),
             model: None,
@@ -10977,6 +11044,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -11057,6 +11125,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,
@@ -11140,6 +11209,7 @@ timeout_in_sec = 60
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
             ignore_tools: false,
+            produces_result: false,
             kind: "agent".to_string(),
             program: None,
             model: None,

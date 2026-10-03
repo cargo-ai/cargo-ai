@@ -3469,7 +3469,17 @@ fn set_test_staged_install_failures(points: &[StagedInstallFailurePoint]) {
 }
 
 fn write_install_manifest(path: &Path, document: &InstalledPackageDocument) -> Result<(), String> {
-    let rendered = toml::to_string_pretty(document)
+    // Each committed materialization has a fresh identity even if version/content repeat.
+    let mut receipt = toml::Value::try_from(document)
+        .map_err(|error| format!("Failed to render install metadata TOML: {error}"))?;
+    receipt
+        .as_table_mut()
+        .ok_or("Install metadata must be a table")?
+        .insert(
+            "artifact_incarnation".into(),
+            toml::Value::String(uuid::Uuid::new_v4().to_string()),
+        );
+    let rendered = toml::to_string_pretty(&receipt)
         .map_err(|error| format!("Failed to render install metadata TOML: {error}"))?;
     fs::write(path, rendered).map_err(|error| {
         format!(
@@ -3566,6 +3576,48 @@ fn load_installed_package(alias: &str) -> Result<InstalledPackageDocument, Strin
             error
         )
     })
+}
+
+/// Reads the exact current installation identity while the caller retains its alias lease.
+pub(crate) fn artifact_installation_identity(
+    checked: &CheckedInstalledPackageRuntime,
+) -> Result<String, String> {
+    let context = &checked.context;
+    validate_package_alias(&context.alias)?;
+    let bytes = super::action_artifacts::read_owned_bytes(
+        &packages_root(),
+        &format!("{}/{}", context.alias, INSTALL_MANIFEST_FILE_NAME),
+        1024 * 1024,
+    )
+    .map_err(|_| "Installed artifact identity unavailable".to_string())?;
+    let current: InstalledPackageDocument = toml::from_str(
+        std::str::from_utf8(&bytes).map_err(|_| "Installed artifact identity is invalid")?,
+    )
+    .map_err(|_| "Installed artifact identity is invalid")?;
+    if current.format_version != 1
+        || current.alias != context.alias
+        || current.package_version != context.package_version
+        || current.project_id != context.project_id
+        || current.permissions != context.permissions
+        || current.entrypoints.len() != context.entrypoints.len()
+        || current
+            .entrypoints
+            .iter()
+            .zip(&context.entrypoints)
+            .any(|(a, b)| {
+                a.name != b.name
+                    || a.path != b.path
+                    || a.runnable != b.runnable
+                    || a.hatchable != b.hatchable
+            })
+        || current.content_sha256 != context.content_sha256
+        || current.source.kind != context.source_kind
+        || current.source.hosted_source_id != context.hosted_source_id
+        || current.source.hosted_version_id != context.hosted_version_id
+    {
+        return Err("Installed artifact ownership changed".into());
+    }
+    Ok(super::account::sha256_hex(&bytes))
 }
 
 fn load_installed_package_if_present(
@@ -4114,7 +4166,7 @@ assets = ["schemas/customer.sql"]
         )
         .unwrap();
         std::fs::write(root.join("page.js"), "fixture script").unwrap();
-        std::fs::write(root.join("cargo-ai-actions.json"),serde_json::to_vec(&serde_json::json!({"schema_version":1,"actions":[{"id":"generate","target":"agents/lookup_account.json","input_schema":{"type":"object","properties":{"panels":{"type":"array","items":{"type":"string"}}},"required":["panels"],"additionalProperties":false},"mappings":{"panels":{"runtime_var":"panel_ids_json","encoding":"json"}}}],"interfaces":[{"id":"native","actions":["generate"],"resources":["script"]}],"resources":[{"id":"script","path":"page.js","mime_type":"text/javascript"}]})).unwrap()).unwrap();
+        std::fs::write(root.join("cargo-ai-actions.json"),serde_json::to_vec(&serde_json::json!({"schema_version":2,"actions":[{"id":"generate","target":"agents/lookup_account.json","input_schema":{"type":"object","properties":{"panels":{"type":"array","items":{"type":"string"}}},"required":["panels"],"additionalProperties":false},"mappings":{"panels":{"runtime_var":"panel_ids_json","encoding":"json"}}}],"interfaces":[{"id":"native","actions":["generate"],"resources":["script"]}],"resources":[{"id":"script","path":"page.js","mime_type":"text/javascript"}]})).unwrap()).unwrap();
         let manifest = std::fs::read_to_string(root.join("cargo-ai-package.toml"))
             .unwrap()
             .replace(
@@ -4122,6 +4174,249 @@ assets = ["schemas/customer.sql"]
                 "assets = [\"cargo-ai-actions.json\", \"page.js\"]",
             );
         std::fs::write(root.join("cargo-ai-package.toml"), manifest).unwrap();
+    }
+
+    fn artifact_test_context(
+        checked: &super::CheckedInstalledPackageRuntime,
+    ) -> crate::commands::action_artifacts::Context {
+        let catalog =
+            crate::commands::client_actions::discover(&checked.context.package_payload_root)
+                .unwrap();
+        crate::commands::action_artifacts::Context {
+            data_root: checked.context.package_data_root.clone(),
+            data_context_sha256: super::artifact_installation_identity(checked).unwrap(),
+            interface: "native".into(),
+            binding: serde_json::to_value(catalog.binding).unwrap(),
+            scopes: vec![crate::commands::action_artifacts::ArtifactScope {
+                id: "exports".into(),
+                path: "exports".into(),
+                mime_types: vec!["text/plain".into()],
+            }],
+            allowed_scopes: vec!["exports".into()],
+        }
+    }
+
+    #[test]
+    fn artifact_installed_reads_and_lifecycle_bind_the_exact_incarnation() {
+        use crate::commands::action_artifacts::{issue, read, Nomination};
+        let store = PackagesRootGuard::new("artifact-incarnation");
+        std::fs::create_dir_all(&store.path).unwrap();
+        // Normalize the fixture's OS temporary-directory spelling before ownership
+        // selection, so the tested boundary itself contains no symlink ancestors.
+        super::TEST_PACKAGES_ROOT.with(|value| {
+            value.replace(Some(
+                std::fs::canonicalize(&store.path).unwrap().join("packages"),
+            ))
+        });
+        let root = temp_package_root("artifact-incarnation");
+        write_action_package_fixture(&root);
+        let mut request = local_install_request(&root);
+        assert!(matches!(
+            install_local_package(&request).unwrap(),
+            InstallAction::New
+        ));
+        let data = super::installed_package_data_root("data_integration");
+        std::fs::create_dir(data.join("exports")).unwrap();
+        std::fs::write(data.join("exports/report.txt"), "saved report").unwrap();
+        let nomination = Nomination {
+            id: "report".into(),
+            scope: "exports".into(),
+            path: "report.txt".into(),
+            mime_type: "text/plain".into(),
+        };
+        let checked = super::checked_action_target_for_alias("data_integration", None).unwrap();
+        let initial = artifact_test_context(&checked);
+        let receipt = super::installed_package_root("data_integration")
+            .join(super::INSTALL_MANIFEST_FILE_NAME);
+        let original_receipt = std::fs::read(&receipt).unwrap();
+        let (_, grants) = issue(&initial, std::slice::from_ref(&nomination)).unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                super::artifact_installation_identity(&checked).unwrap(),
+                initial.data_context_sha256
+            );
+            let bytes = read(&initial, &grants[0], &grants[0].reference).unwrap();
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(bytes["data"].as_str().unwrap())
+                    .unwrap(),
+                b"saved report"
+            );
+        }
+        assert_eq!(std::fs::read(&receipt).unwrap(), original_receipt);
+        std::fs::write(
+            data.join("other-business-state.json"),
+            "changed independently",
+        )
+        .unwrap();
+        assert_eq!(artifact_test_context(&checked).binding, initial.binding);
+        assert_eq!(
+            super::artifact_installation_identity(&checked).unwrap(),
+            initial.data_context_sha256
+        );
+        set_package_version(&root, "1.0.0", "2.0.0");
+        assert!(install_local_package(&request)
+            .unwrap_err()
+            .contains("another Cargo AI process"));
+        assert!(uninstall_package("data_integration", true)
+            .unwrap_err()
+            .contains("another Cargo AI process"));
+        assert_eq!(std::fs::read(&receipt).unwrap(), original_receipt);
+        drop(checked);
+        assert!(matches!(
+            install_local_package(&request).unwrap(),
+            InstallAction::Upgrade
+        ));
+        let checked = super::checked_action_target_for_alias("data_integration", None).unwrap();
+        let upgraded = artifact_test_context(&checked);
+        assert_ne!(upgraded.data_context_sha256, initial.data_context_sha256);
+        assert!(read(&upgraded, &grants[0], &grants[0].reference).is_err());
+        assert_eq!(
+            std::fs::read(data.join("exports/report.txt")).unwrap(),
+            b"saved report"
+        );
+        drop(checked);
+        set_package_version(&root, "2.0.0", "1.0.0");
+        request.downgrade = true;
+        assert!(matches!(
+            install_local_package(&request).unwrap(),
+            InstallAction::Downgrade
+        ));
+        let checked = super::checked_action_target_for_alias("data_integration", None).unwrap();
+        let rolled_back = artifact_test_context(&checked);
+        assert_eq!(
+            rolled_back.binding, initial.binding,
+            "rollback returned to the exact original package identity"
+        );
+        assert_ne!(rolled_back.data_context_sha256, initial.data_context_sha256);
+        assert_eq!(
+            read(&rolled_back, &grants[0], &grants[0].reference)
+                .unwrap_err()
+                .code,
+            "artifact.stale_context"
+        );
+        drop(checked);
+        assert!(matches!(
+            install_local_package(&request).unwrap(),
+            InstallAction::Noop
+        ));
+        let checked = super::checked_action_target_for_alias("data_integration", None).unwrap();
+        assert_eq!(
+            super::artifact_installation_identity(&checked).unwrap(),
+            rolled_back.data_context_sha256,
+            "a no-op is not a new materialization"
+        );
+        drop(checked);
+        std::fs::remove_dir_all(
+            super::installed_package_root("data_integration")
+                .join(super::INSTALLED_PACKAGE_RUNTIME_DIR_NAME),
+        )
+        .unwrap();
+        assert!(matches!(
+            install_local_package(&request).unwrap(),
+            InstallAction::Replace
+        ));
+        let checked = super::checked_action_target_for_alias("data_integration", None).unwrap();
+        let repaired = artifact_test_context(&checked);
+        assert_eq!(repaired.binding, initial.binding);
+        assert_ne!(
+            repaired.data_context_sha256,
+            rolled_back.data_context_sha256
+        );
+        drop(checked);
+        assert!(
+            uninstall_package("data_integration", false).is_err(),
+            "nonempty project data still requires explicit deletion"
+        );
+        uninstall_package("data_integration", true).unwrap();
+        assert!(matches!(
+            install_local_package(&request).unwrap(),
+            InstallAction::New
+        ));
+        let checked = super::checked_action_target_for_alias("data_integration", None).unwrap();
+        let reinstalled = artifact_test_context(&checked);
+        assert_eq!(reinstalled.binding, initial.binding);
+        assert_ne!(
+            reinstalled.data_context_sha256,
+            repaired.data_context_sha256
+        );
+        assert_ne!(reinstalled.data_context_sha256, initial.data_context_sha256);
+        assert_eq!(
+            read(&reinstalled, &grants[0], &grants[0].reference)
+                .unwrap_err()
+                .code,
+            "artifact.stale_context"
+        );
+        drop(checked);
+        remove_temp_dir_if_present(&root);
+    }
+
+    #[test]
+    fn artifact_installation_receipt_is_passive_bounded_and_consistent() {
+        let store = PackagesRootGuard::new("artifact-receipt");
+        std::fs::create_dir_all(&store.path).unwrap();
+        super::TEST_PACKAGES_ROOT.with(|value| {
+            value.replace(Some(
+                std::fs::canonicalize(&store.path).unwrap().join("packages"),
+            ))
+        });
+        let root = temp_package_root("artifact-receipt");
+        install_local_package(&local_install_request(&root)).unwrap();
+        let checked = super::checked_action_target_for_alias("data_integration", None).unwrap();
+        let receipt = super::installed_package_root("data_integration")
+            .join(super::INSTALL_MANIFEST_FILE_NAME);
+        let original = std::fs::read_to_string(&receipt).unwrap();
+        let mut document: toml::Value = toml::from_str(&original).unwrap();
+        assert!(uuid::Uuid::parse_str(document["artifact_incarnation"].as_str().unwrap()).is_ok());
+        document
+            .as_table_mut()
+            .unwrap()
+            .remove("artifact_incarnation");
+        let legacy = toml::to_string(&document).unwrap();
+        std::fs::write(&receipt, &legacy).unwrap();
+        let identity = super::artifact_installation_identity(&checked).unwrap();
+        assert_eq!(
+            identity,
+            crate::commands::account::sha256_hex(legacy.as_bytes())
+        );
+        assert_eq!(
+            super::artifact_installation_identity(&checked).unwrap(),
+            identity
+        );
+        assert_eq!(
+            std::fs::read_to_string(&receipt).unwrap(),
+            legacy,
+            "read must not migrate a legacy receipt"
+        );
+        document["permissions"]["subprocess"] = toml::Value::String("changed".into());
+        std::fs::write(&receipt, toml::to_string(&document).unwrap()).unwrap();
+        assert!(super::artifact_installation_identity(&checked)
+            .unwrap_err()
+            .contains("ownership changed"));
+        document = toml::from_str(&legacy).unwrap();
+        document["package_version"] = toml::Value::String("99.0.0".into());
+        std::fs::write(&receipt, toml::to_string(&document).unwrap()).unwrap();
+        assert!(super::artifact_installation_identity(&checked)
+            .unwrap_err()
+            .contains("ownership changed"));
+        std::fs::write(&receipt, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        assert!(super::artifact_installation_identity(&checked).is_err());
+        std::fs::write(&receipt, &original).unwrap();
+        let linked = receipt.with_extension("link");
+        std::fs::hard_link(&receipt, &linked).unwrap();
+        assert!(super::artifact_installation_identity(&checked).is_err());
+        std::fs::remove_file(linked).unwrap();
+        #[cfg(unix)]
+        {
+            let retained = receipt.with_extension("retained");
+            std::fs::rename(&receipt, &retained).unwrap();
+            std::os::unix::fs::symlink(&retained, &receipt).unwrap();
+            assert!(super::artifact_installation_identity(&checked).is_err());
+            std::fs::remove_file(&receipt).unwrap();
+            std::fs::rename(retained, &receipt).unwrap();
+        }
+        drop(checked);
+        remove_temp_dir_if_present(&root);
     }
 
     #[test]
@@ -4168,7 +4463,7 @@ assets = ["schemas/customer.sql"]
             resource["content_sha256"],
             crate::commands::account::sha256_hex(b"fixture script")
         );
-        let action_request=crate::commands::client_actions::parse_request(&serde_json::json!({"schema_version":1,"interface":"native","action":"generate","inputs":{"panels":["p1"]},"expected_binding":catalog.binding,"execution_policy":{"version":1,"allowed":[],"limits":{"max_runtime_secs":60,"max_output_tokens":512,"max_agent_depth":4}}}).to_string()).unwrap();
+        let action_request=crate::commands::client_actions::parse_request(&serde_json::json!({"schema_version":2,"interface":"native","action":"generate","inputs":{"panels":["p1"]},"expected_binding":catalog.binding,"execution_policy":{"version":1,"allowed":[],"limits":{"max_runtime_secs":60,"max_output_tokens":512,"max_agent_depth":4}}}).to_string()).unwrap();
         let prepared = crate::commands::client_actions::prepare(payload, &action_request).unwrap();
         assert_eq!(
             prepared

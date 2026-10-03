@@ -1456,8 +1456,25 @@ fn inspect_existing_output_components(
         }
         None => (PathBuf::new(), path),
     };
-    for component in remaining_path.components() {
+    let mut components = remaining_path.components().peekable();
+    while let Some(component) = components.next() {
         current_path.push(component.as_os_str());
+        if let Component::Prefix(prefix) = component {
+            // Verbatim prefixes can be absolute without yielding a root component.
+            // Defer inspection only when the next component completes the root.
+            if matches!(components.peek(), Some(Component::RootDir)) {
+                continue;
+            }
+            if matches!(
+                prefix.kind(),
+                std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)
+            ) {
+                return Err(format!(
+                    "Package output ancestor '{}' must include a root directory after its drive prefix.",
+                    current_path.display()
+                ));
+            }
+        }
         match fs::symlink_metadata(&current_path) {
             Ok(metadata) if metadata_is_link_like(&metadata) => {
                 return Err(format!(
@@ -2201,6 +2218,76 @@ assets = ["assets/linked.txt"]
         let _ = fs::remove_file(project_root.join("linked-output"));
         let _ = fs::remove_dir_all(project_root);
         let _ = fs::remove_dir_all(external_root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_windows_prefix_roots_require_actual_components() {
+        use std::path::{Component, Path};
+
+        for (raw, absolute, root_component) in [
+            (r"C:", false, false),
+            (r"C:relative", false, false),
+            (r"C:\", true, true),
+            (r"\\?\C:", true, false),
+            (r"\\?\C:\", true, true),
+            (r"\\server\share", true, true),
+            (r"\\?\UNC\server\share", true, false),
+            (r"\\?\UNC\server\share\", true, true),
+            (r"\\.\device", true, true),
+            (r"\\?\device", true, false),
+            (r"\\?\device\", true, true),
+        ] {
+            let path = Path::new(raw);
+            let mut components = path.components();
+            assert!(matches!(components.next(), Some(Component::Prefix(_))));
+            assert_eq!(path.is_absolute(), absolute, "{raw}");
+            assert_eq!(
+                matches!(components.next(), Some(Component::RootDir)),
+                root_component,
+                "{raw}"
+            );
+        }
+
+        for raw in [r"C:", r"C:relative", r"\\?\C:"] {
+            let error = super::inspect_existing_output_components(Path::new(raw), &[])
+                .expect_err("a drive prefix without a root must fail before filesystem access");
+            assert!(error.contains("must include a root directory"), "{error}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_inspects_rooted_windows_output_ancestors_without_trusted_boundary() {
+        let fixture_root = temp_dir("rooted-output-ancestors");
+        fs::create_dir_all(&fixture_root).expect("output ancestor fixture should exist");
+        fs::write(fixture_root.join("file"), "preserved")
+            .expect("non-directory ancestor fixture should exist");
+        let canonical_root =
+            fs::canonicalize(&fixture_root).expect("output ancestor fixture should resolve");
+        if let Some(std::path::Component::Prefix(prefix)) = canonical_root.components().next() {
+            if matches!(prefix.kind(), std::path::Prefix::VerbatimDisk(_)) {
+                super::inspect_existing_output_components(
+                    std::path::Path::new(prefix.as_os_str()),
+                    &[],
+                )
+                .expect_err("an incomplete verbatim drive prefix must not bypass inspection");
+            }
+        }
+
+        for path in [&fixture_root, &canonical_root] {
+            super::inspect_existing_output_components(path, &[])
+                .expect("a complete drive or share root and real ancestors should be accepted");
+            let error =
+                super::inspect_existing_output_components(&path.join("file").join("child"), &[])
+                    .expect_err("a non-directory ancestor must still be rejected");
+            assert!(error.contains("must be a real directory"), "{error}");
+        }
+        assert_eq!(
+            fs::read_to_string(fixture_root.join("file")).expect("fixture must remain readable"),
+            "preserved"
+        );
+        fs::remove_dir_all(fixture_root).expect("fixture should be removable");
     }
 
     #[cfg(windows)]

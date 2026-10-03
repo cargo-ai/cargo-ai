@@ -75,6 +75,8 @@ Both commands accept `--output-dir`; replacing an existing explicit destination 
 
 Build and package assembly retain `[runtime] data_root = ".cargo-ai/data"` when the source project adopts it. They exclude runtime data independently of Git tracking, including nested `.cargo-ai/data/` directories in copied assets and tool sources. An explicit input declaration that includes the reserved root, or an output destination that overlaps it, fails before replacing existing output. Declare immutable assets individually or under an unrelated asset directory; never use the data root to distribute credentials or live state.
 
+Declared catalog-2 artifact scopes may expose finite verified files from this runtime-data root through native authorization. Installed aliases retain their separate data ownership; read grants are tied to the installation incarnation and held lease, so update/rollback/uninstall invalidates affected grants even if version/content later returns. This is not an export of immutable package files or an implicit consuming-project binding. See [authorized artifact reads](machine-payloads.md#authorized-artifact-reads).
+
 A runnable build gets its own project data on first writing execution. An installed alias continues to use its separate `data/` directory, regardless of the source project's setting. Different projects and aliases do not share those files. See [project-owned runtime data](./projects-and-tools.md#project-owned-runtime-data) for adoption, path checks, and older-tool compatibility.
 
 ## Permission requests and publisher trust

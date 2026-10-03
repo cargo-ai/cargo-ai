@@ -20,7 +20,18 @@ pub struct RuntimeCapabilities {
     revision: u32,
     thinking: ThinkingCapabilities,
     #[serde(skip_serializing_if = "Option::is_none")]
+    structured_results: Option<StructuredResultCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     execution_policy: Option<ExecutionPolicyCapabilities>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+struct StructuredResultCapabilities {
+    definition_revision: &'static str,
+    validation: bool,
+    execution_checking: bool,
+    terminal_delivery: bool,
+    artifact_read: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -44,15 +55,15 @@ impl RuntimeCapabilities {
     }
 
     pub fn supports_thinking(self) -> bool {
-        matches!(self.revision, 1 | 2 | REVISION)
+        matches!(self.revision, 1 | 2 | 3 | REVISION)
     }
 
     pub fn supports_toggle(self) -> bool {
-        matches!(self.revision, 2 | REVISION)
+        matches!(self.revision, 2 | 3 | REVISION)
     }
 
     pub fn supports_exact_choice_flag(self) -> bool {
-        matches!(self.revision, 2 | REVISION)
+        matches!(self.revision, 2 | 3 | REVISION)
     }
 }
 
@@ -87,7 +98,11 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
     let mut prior = encoded_record(cli_run);
     prior[payload..payload + 4].copy_from_slice(&2u32.to_le_bytes());
     prior[payload + 4..payload + 8].copy_from_slice(&0b111_1111u32.to_le_bytes());
-    if record != encoded_record(cli_run) && record != legacy && record != prior {
+    let mut policy = encoded_record(cli_run);
+    policy[payload..payload + 4].copy_from_slice(&3u32.to_le_bytes());
+    policy[payload + 4..payload + 8].copy_from_slice(&0b1111_1111u32.to_le_bytes());
+    if record != encoded_record(cli_run) && record != legacy && record != prior && record != policy
+    {
         return Err(CapabilityReadError::Unsupported);
     }
     Ok(RuntimeCapabilities {
@@ -97,7 +112,14 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
             "cargo-ai.generated-runtime"
         },
         revision,
-        execution_policy: (revision == REVISION).then_some(ExecutionPolicyCapabilities {
+        structured_results: (revision == REVISION).then_some(StructuredResultCapabilities {
+            definition_revision: "2026-10-03.r1",
+            validation: true,
+            execution_checking: true,
+            terminal_delivery: cli_run,
+            artifact_read: cli_run,
+        }),
+        execution_policy: matches!(revision, 3 | REVISION).then_some(ExecutionPolicyCapabilities {
             version: 1,
             boundaries: &["root", "media", "descendants"],
         }),
@@ -186,9 +208,13 @@ pub(crate) fn test_record(revision: u32) -> Vec<u8> {
     let mut record = encoded_record(false);
     let payload = OPEN.len() + IDENTITY.len();
     record[payload..payload + 4].copy_from_slice(&revision.to_le_bytes());
-    if revision == 2 {
-        record[payload + 4..payload + 8].copy_from_slice(&0b111_1111u32.to_le_bytes());
-    }
+    let bits = match revision {
+        1 => 0b1111u32,
+        2 => 0b111_1111,
+        3 => 0b1111_1111,
+        _ => record::THINKING_CAPABILITIES,
+    };
+    record[payload + 4..payload + 8].copy_from_slice(&bits.to_le_bytes());
     record
 }
 
@@ -205,7 +231,8 @@ mod tests {
             serde_json::to_value(caps).unwrap(),
             serde_json::json!({
                 "runtime": "cargo-ai.generated-runtime",
-                "revision": 3,
+                "revision": 4,
+                "structured_results":{"definition_revision":"2026-10-03.r1","validation":true,"execution_checking":true,"terminal_delivery":false,"artifact_read":false},
                 "execution_policy": {"version":1,"boundaries":["root","media","descendants"]},
                 "thinking": {
                     "flags": ["--thinking", "--thinking-provider-default", "--thinking-choice"],
@@ -213,6 +240,18 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn selected_result_support_distinguishes_execution_checks_and_delivery() {
+        let generated = decode_record(&encoded_record(false)).unwrap();
+        assert!(generated.structured_results.unwrap().execution_checking);
+        assert!(!generated.structured_results.unwrap().terminal_delivery);
+        let cli = decode_record(&encoded_record(true)).unwrap();
+        assert!(cli.structured_results.unwrap().terminal_delivery);
+        let previous = decode_record(&test_record(3)).unwrap();
+        assert!(previous.structured_results.is_none());
+        assert!(previous.supports_execution_policy());
     }
 
     #[test]

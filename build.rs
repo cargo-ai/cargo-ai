@@ -87,6 +87,14 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
         source: "build_support.rs",
     },
     TemplateSource {
+        destination: "src/result_capture.rs",
+        source: "src/result_capture.rs",
+    },
+    TemplateSource {
+        destination: "src/business_schema.rs",
+        source: "src/business_schema.rs",
+    },
+    TemplateSource {
         destination: "definition_validation.rs",
         source: "definition_validation.rs",
     },
