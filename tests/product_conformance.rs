@@ -64,12 +64,17 @@ fn version_scaffold_guidance_and_invalid_definition_are_process_safe() {
 
 #[test]
 fn real_cli_package_lifecycle_is_isolated_and_fail_closed() {
-    let mut fixture = Fixture::new("lifecycle");
-    // Select canonical test ownership roots before configuring the CLI. Artifact
-    // reads must not weaken no-follow traversal for OS temporary-path aliases.
-    fixture.root = fs::canonicalize(&fixture.root).unwrap();
-    fixture.cargo_ai_home = fs::canonicalize(&fixture.cargo_ai_home).unwrap();
-    fixture.fallback_home = fs::canonicalize(&fixture.fallback_home).unwrap();
+    let fixture = Fixture::new("lifecycle");
+    // Resolve Unix temporary-path aliases before configuring no-follow ownership
+    // roots. Keep ordinary Windows paths compatible with downstream Cargo/MSVC.
+    #[cfg(unix)]
+    let fixture = {
+        let mut fixture = fixture;
+        fixture.root = fs::canonicalize(&fixture.root).unwrap();
+        fixture.cargo_ai_home = fs::canonicalize(&fixture.cargo_ai_home).unwrap();
+        fixture.fallback_home = fs::canonicalize(&fixture.fallback_home).unwrap();
+        fixture
+    };
     let fallback_sentinel = fixture.fallback_home.join("sentinel.txt");
     fs::write(&fallback_sentinel, "unchanged").expect("fallback sentinel should be written");
     let project = fixture.root.join("source");
