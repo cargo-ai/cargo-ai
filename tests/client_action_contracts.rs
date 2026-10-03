@@ -148,9 +148,9 @@ fn invoke_result(
         "--project",
         f.root.to_str().unwrap(),
         "--interface",
-        "report",
+        request["interface"].as_str().unwrap(),
         "--action",
-        "save",
+        request["action"].as_str().unwrap(),
         "--action-request-stdin",
         "--profile",
         "fixture",
@@ -631,6 +631,10 @@ fn selected_tools_round_trip_business_data_and_export_only_authorized_private_ar
             assert_eq!(result["data"]["result"]["content"], value);
         }
     }
+    for (kind, workspace) in [("report", &f), ("media", &media)] {
+        stable_business_journey(workspace, kind);
+    }
+
     fn no_private_state(path: &std::path::Path) {
         for entry in fs::read_dir(path).unwrap() {
             let entry = entry.unwrap();
@@ -645,6 +649,7 @@ fn selected_tools_round_trip_business_data_and_export_only_authorized_private_ar
                     "private-saved-state",
                     "private-report-bytes",
                     "private-inference-only",
+                    "private-journey-business",
                 ] {
                     assert!(!bytes.windows(private.len()).any(|value|value==private.as_bytes()),"Private business content persisted in configuration, usage or backup state: {}",entry.path().display());
                 }
@@ -1013,4 +1018,592 @@ fn action_cancellation_retains_binding_and_existing_owned_child_cleanup() {
     assert_eq!(terminal["data"]["outcome"], "canceled");
     assert_eq!(terminal["data"]["data"]["owned_child_cleanup"], "completed");
     assert!(!f.root.join("action.late").exists());
+}
+
+fn closed(properties: Value, required: &[&str]) -> Value {
+    json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
+}
+fn journey_request(
+    binding: &Value,
+    kind: &str,
+    action: &str,
+    inputs: Value,
+    consent: bool,
+) -> Value {
+    let mut value = request(binding, action, &[]);
+    value["interface"] = json!(kind);
+    value["inputs"] = inputs;
+    if consent {
+        value["artifact_access"] = json!({"version":1,"scopes":["exports"]});
+    }
+    value
+}
+fn journey_read(f: &Fixture, kind: &str, binding: &Value, result: &Value, index: usize) -> Value {
+    let request = json!({"schema_version":1,"interface":kind,"expected_binding":binding,"reference":result["artifact_references"][index]["reference"],"read_grant":result["artifact_read_grants"][index]});
+    envelope(execute(
+        f,
+        &[
+            "actions",
+            "artifact",
+            "--project",
+            f.root.to_str().unwrap(),
+            "--interface",
+            kind,
+            "--request-stdin",
+        ],
+        Some(&request),
+    ))
+}
+fn stable_business_journey(f: &Fixture, kind: &str) {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let item_key = if kind == "report" {
+        "sections"
+    } else {
+        "panels"
+    };
+    let text_key = if kind == "report" {
+        "text"
+    } else {
+        "narration"
+    };
+    let settings = closed(
+        json!({"model":{"type":"string"},"profile":{"type":["string","null"]},"config":closed(json!({"language":{"type":"string"},"note":{"type":["string","null"]}}),&["language","note"]),"token":{"type":["string","null"]}}),
+        &["model", "profile", "config", "token"],
+    );
+    let item = closed(
+        json!({"id":{"type":"string"},text_key:{"type":"string"},"state":{"type":"string","enum":["pending","complete","failed"]}}),
+        &["id", text_key, "state"],
+    );
+    let editable = closed(
+        json!({"id":{"type":"string"},"title":{"type":"string"},"settings":settings,item_key:{"type":"array","items":item,"maxItems":8}}),
+        &["id", "title", "settings", item_key],
+    );
+    let representation = closed(
+        json!({"id":{"type":"string"},"status":{"type":"string"},"mime_type":{"type":"string"}}),
+        &["id", "status", "mime_type"],
+    );
+    let mut record = editable.clone();
+    record["properties"]["version"] = json!({"type":"string"});
+    record["properties"]["representations"] =
+        json!({"type":"array","items":representation,"maxItems":8});
+    record["required"]
+        .as_array_mut()
+        .unwrap()
+        .extend([json!("version"), json!("representations")]);
+    let mut selected = record.clone();
+    selected["type"] = json!(["object", "null"]);
+    let run_item = closed(
+        json!({"id":{"type":"string"},"state":{"type":"string"}}),
+        &["id", "state"],
+    );
+    let mut run = closed(
+        json!({"id":{"type":"string"},"snapshot_version":{"type":"string"},"items":{"type":"array","items":run_item,"maxItems":8}}),
+        &["id", "snapshot_version", "items"],
+    );
+    run["type"] = json!(["object", "null"]);
+    let result_schema = closed(
+        json!({"status":{"type":"string","enum":["loaded","searched","selected","saved","conflict","partial","preview","missing","unsupported"]},"records":{"type":"array","items":record,"maxItems":8},"selected":selected,"current_version":{"type":"string"},"total":{"type":"integer"},"run":run}),
+        &[
+            "status",
+            "records",
+            "selected",
+            "current_version",
+            "total",
+            "run",
+        ],
+    );
+    let declarations = [
+        ("load", closed(json!({}), &[])),
+        (
+            "search",
+            closed(
+                json!({"document":closed(json!({"query":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":8}}),&["query","offset","limit"])}),
+                &["document"],
+            ),
+        ),
+        (
+            "select",
+            closed(
+                json!({"document":closed(json!({"id":{"type":"string"}}),&["id"])}),
+                &["document"],
+            ),
+        ),
+        (
+            "save",
+            closed(
+                json!({"data":editable,"expected_version":{"type":"string"}}),
+                &["data", "expected_version"],
+            ),
+        ),
+        (
+            "work",
+            closed(
+                json!({"document":closed(json!({"id":{"type":"string"},"ids":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":8}}),&["id","ids"]),"expected_version":{"type":"string"}}),
+                &["document", "expected_version"],
+            ),
+        ),
+        (
+            "preview",
+            closed(
+                json!({"document":closed(json!({"id":{"type":"string"},"representation":{"type":"string","enum":["valid","secondary","missing","pdf","race","stale","generated","generated_secondary"]}}),&["id","representation"]),"expected_version":{"type":"string"}}),
+                &["document", "expected_version"],
+            ),
+        ),
+        (
+            "required",
+            closed(
+                json!({"document":closed(json!({"id":{"type":"string"}}),&["id"]),"expected_version":{"type":"string"}}),
+                &["document", "expected_version"],
+            ),
+        ),
+    ];
+    let mut actions = Vec::new();
+    for (operation, input_schema) in declarations {
+        let mut definition = result_definition(
+            result_schema.clone(),
+            if matches!(operation, "preview" | "required") {
+                json!(["exports"])
+            } else {
+                json!([])
+            },
+        );
+        definition["runtime_vars"]["business_json"]["default"] = json!("{}");
+        definition["runtime_vars"]["expected_version"] = json!({"type":"string","default":""});
+        definition["actions"][0]["run"][0]["params"]["mode"] =
+            json!(format!("journey_{kind}_{operation}"));
+        definition["actions"][0]["run"][0]["params"]["expected_version"] =
+            json!({"var":"runtime.expected_version"});
+        let target = format!("journey-{operation}.json");
+        fs::write(f.root.join(&target), definition.to_string()).unwrap();
+        let mut mappings = json!({});
+        if operation != "load" {
+            mappings[if operation == "save" {
+                "data"
+            } else {
+                "document"
+            }] = json!({"runtime_var":"business_json","encoding":"json"});
+        }
+        if matches!(operation, "save" | "work" | "preview" | "required") {
+            mappings["expected_version"] = json!({"runtime_var":"expected_version"});
+        }
+        actions.push(json!({"id":operation,"target":target,"input_schema":input_schema,"mappings":mappings,"required_capabilities":["business_inputs.v1","structured_results.v1"]}));
+    }
+    let catalog_document = json!({"schema_version":2,"actions":actions,"artifact_scopes":[{"id":"exports","path":"exports","mime_types":["text/plain","application/json","image/png","audio/wav"]}],"interfaces":[{"id":kind,"actions":["load","search","select","save","work","preview","required"],"artifact_scopes":["exports"],"resources":["page","script"],"presentation":{"entrypoint":"page"}}],"resources":[{"id":"page","path":"journey.html","mime_type":"text/html"},{"id":"script","path":"journey.js","mime_type":"text/javascript"}]});
+    fs::write(
+        f.root.join("journey.html"),
+        "<!doctype html><title>Fixture</title><script src='journey.js'></script>",
+    )
+    .unwrap();
+    fs::write(f.root.join("journey.js"), "'use strict';").unwrap();
+    fs::write(
+        f.root.join("cargo-ai-actions.json"),
+        catalog_document.to_string(),
+    )
+    .unwrap();
+    let data_root = f.root.join(".cargo-ai/data");
+    let exports = data_root.join("exports");
+    fs::create_dir_all(&exports).unwrap();
+    let png=base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC").unwrap();
+    let mut wav = b"RIFF".to_vec();
+    wav.extend(40u32.to_le_bytes());
+    wav.extend(b"WAVEfmt ");
+    wav.extend(16u32.to_le_bytes());
+    wav.extend([1, 0, 1, 0]);
+    wav.extend(8000u32.to_le_bytes());
+    wav.extend(16000u32.to_le_bytes());
+    wav.extend([2, 0, 16, 0]);
+    wav.extend(b"data");
+    wav.extend(4u32.to_le_bytes());
+    wav.extend([0, 0, 0, 0]);
+    for (path, bytes) in [
+        (
+            "existing.txt",
+            b"private-journey-business existing text".as_slice(),
+        ),
+        (
+            "existing.json",
+            br#"{"version":"7","note":null}"#.as_slice(),
+        ),
+        ("existing.png", png.as_slice()),
+        ("existing.wav", wav.as_slice()),
+        ("stale.txt", b"earlier report revision".as_slice()),
+        ("stale.wav", wav.as_slice()),
+    ] {
+        fs::write(exports.join(path), bytes).unwrap();
+    }
+    let mime = if kind == "report" {
+        "text/plain"
+    } else {
+        "image/png"
+    };
+    let records=(0..3).map(|index|json!({"id":format!("{kind}-record-{index}"),"version":"7","title":format!("{kind} draft {index}"),"settings":{"model":"private-journey-business","profile":null,"config":{"language":"en","note":null},"token":null},item_key:(0..3).map(|item|json!({"id":format!("{kind}-item-{item}"),text_key:format!("private-journey-business {item}"),"state":"pending"})).collect::<Vec<_>>(),"representations":[{"id":"valid","status":"available","mime_type":mime},{"id":"missing","status":"missing","mime_type":mime},{"id":"pdf","status":"unsupported","mime_type":"application/pdf"},{"id":"stale","status":"available","mime_type":if kind=="report" {"text/plain"} else {"audio/wav"}}]})).collect::<Vec<_>>();
+    fs::write(
+        data_root.join("journey-state.json"),
+        json!({"records":records}).to_string(),
+    )
+    .unwrap();
+    let binding = catalog(f)["binding"].clone();
+    let policy_before = fs::read(f.cargo_ai_home.join("config.toml")).unwrap();
+    let invoke = |action: &str, inputs: Value, consent: bool, format: &str, include: bool| {
+        let req = journey_request(&binding, kind, action, inputs, consent);
+        let result = invoke_result(f, &req, format, include, &[]);
+        assert_eq!(
+            catalog(f)["binding"],
+            binding,
+            "Business activity cannot invalidate the fixed presentation"
+        );
+        result
+    };
+    let (loaded, _) = invoke("load", json!({}), false, "json", true);
+    assert_eq!(loaded["outcome"], "succeeded");
+    assert_eq!(
+        loaded["data"]["result"]["content"]["records"],
+        json!(records)
+    );
+    assert_eq!(
+        loaded["data"]["result"]["content"]["selected"]["id"],
+        records[0]["id"]
+    );
+    assert!(loaded["data"]["result"]
+        .get("artifact_references")
+        .is_none());
+    let (hidden, raw) = invoke("load", json!({}), false, "ndjson", false);
+    assert_eq!(hidden["data"]["result"]["availability"], "available");
+    assert!(!raw.contains("private-journey-business"));
+    for (query, offset, expected) in [
+        (kind.to_string(), 1, records[1].clone()),
+        (format!("{kind}-record-2"), 0, records[2].clone()),
+    ] {
+        let (searched, _) = invoke(
+            "search",
+            json!({"document":{"query":query,"offset":offset,"limit":1}}),
+            false,
+            "ndjson",
+            true,
+        );
+        assert_eq!(
+            searched["data"]["result"]["content"]["records"],
+            json!([expected])
+        );
+    }
+    let id = records[1]["id"].clone();
+    let (selected, _) = invoke("select", json!({"document":{"id":id}}), false, "json", true);
+    assert_eq!(
+        selected["data"]["result"]["content"]["selected"],
+        records[1]
+    );
+    let preview_inputs = |representation: &str, version: &str| json!({"document":{"id":id,"representation":representation},"expected_version":version});
+    let (good, _) = invoke("preview", preview_inputs("valid", "7"), true, "json", true);
+    assert_eq!(good["outcome"], "succeeded", "{good}");
+    let good_result = good["data"]["result"].clone();
+    assert_eq!(
+        good_result["artifact_references"].as_array().unwrap().len(),
+        1
+    );
+    let good_bytes = fs::read(exports.join(if kind == "report" {
+        "existing.txt"
+    } else {
+        "existing.png"
+    }))
+    .unwrap();
+    let assert_good = || {
+        let read = journey_read(f, kind, &binding, &good_result, 0);
+        assert_eq!(read["outcome"], "succeeded", "{read}");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(read["data"]["data"].as_str().unwrap())
+                .unwrap(),
+            good_bytes
+        );
+        assert_eq!(
+            read["data"]["content_sha256"],
+            format!("{:x}", Sha256::digest(&good_bytes))
+        );
+    };
+    for (representation, status) in [("missing", "missing"), ("pdf", "unsupported")] {
+        let (unavailable, _) = invoke(
+            "preview",
+            preview_inputs(representation, "7"),
+            true,
+            "json",
+            true,
+        );
+        assert_eq!(unavailable["outcome"], "succeeded");
+        assert_eq!(unavailable["data"]["result"]["content"]["status"], status);
+        assert!(unavailable["data"]["result"]
+            .get("artifact_read_grants")
+            .is_none());
+        assert_good();
+    }
+    let (race, _) = invoke("preview", preview_inputs("race", "7"), true, "json", true);
+    assert_eq!(race["error"]["code"], "artifact.export_failed");
+    assert_eq!(race["outcome"], "partial");
+    assert!(race["data"]["result"].get("artifact_read_grants").is_none());
+    assert_good();
+    let calls_before = fs::read(data_root.join("journey-call-count.txt")).unwrap();
+    let (denied, _) = invoke("preview", preview_inputs("valid", "7"), false, "json", true);
+    assert_eq!(denied["error"]["code"], "artifact.access_denied");
+    assert_eq!(
+        fs::read(data_root.join("journey-call-count.txt")).unwrap(),
+        calls_before
+    );
+    assert_good();
+    let mut edit = records[1].clone();
+    edit.as_object_mut().unwrap().remove("version");
+    edit.as_object_mut().unwrap().remove("representations");
+    edit["title"] = json!("edited draft");
+    edit["settings"]["profile"] = json!("private-journey-business profile");
+    edit["settings"]["config"]["language"] = json!("fr");
+    let (saved, _) = invoke(
+        "save",
+        json!({"data":edit,"expected_version":"7"}),
+        false,
+        "ndjson",
+        true,
+    );
+    assert_eq!(saved["outcome"], "succeeded", "{saved}");
+    let saved_record = saved["data"]["result"]["content"]["selected"].clone();
+    assert_eq!(saved_record["version"], "8");
+    assert_eq!(saved_record["settings"], edit["settings"]);
+    assert_eq!(saved_record[item_key], edit[item_key]);
+    assert!(saved["data"]["result"]
+        .get("artifact_read_grants")
+        .is_none());
+    assert_good();
+    let saved_bytes = fs::read(data_root.join("journey-state.json")).unwrap();
+    let (conflict, _) = invoke(
+        "save",
+        json!({"data":edit,"expected_version":"7"}),
+        false,
+        "json",
+        true,
+    );
+    assert_eq!(
+        conflict["outcome"], "succeeded",
+        "Successful transport cannot turn a business conflict into a committed save"
+    );
+    assert_eq!(conflict["data"]["result"]["content"]["status"], "conflict");
+    assert_eq!(
+        conflict["data"]["result"]["content"]["current_version"],
+        "8"
+    );
+    assert_eq!(
+        conflict["data"]["result"]["content"]["selected"],
+        saved_record
+    );
+    assert_eq!(
+        fs::read(data_root.join("journey-state.json")).unwrap(),
+        saved_bytes
+    );
+    let (reload, _) = invoke("select", json!({"document":{"id":id}}), false, "json", true);
+    assert_eq!(
+        reload["data"]["result"]["content"]["selected"],
+        saved_record
+    );
+    edit["title"] = json!("deliberately reapplied draft");
+    let (reapplied, _) = invoke(
+        "save",
+        json!({"data":edit,"expected_version":"8"}),
+        false,
+        "json",
+        true,
+    );
+    assert_eq!(
+        reapplied["data"]["result"]["content"]["selected"]["version"],
+        "9"
+    );
+    let (partial, _) = invoke(
+        "work",
+        json!({"document":{"id":id,"ids":[format!("{kind}-item-0"),format!("{kind}-item-1")]},"expected_version":"9"}),
+        false,
+        "ndjson",
+        true,
+    );
+    let partial_data = &partial["data"]["result"]["content"];
+    assert_eq!(partial["outcome"], "succeeded");
+    assert_eq!(partial_data["status"], "partial");
+    assert_eq!(partial_data["run"]["snapshot_version"], "9");
+    assert_eq!(
+        partial_data["run"]["items"],
+        json!([{"id":format!("{kind}-item-0"),"state":"complete"},{"id":format!("{kind}-item-1"),"state":"failed"}])
+    );
+    assert_eq!(partial_data["selected"]["version"], "10");
+    assert_eq!(partial_data["selected"][item_key][2]["state"], "pending");
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(data_root.join("journey-state.json")).unwrap()).unwrap();
+    assert_eq!(persisted["records"][1], partial_data["selected"]);
+    for (representation, path) in [
+        (
+            "secondary",
+            if kind == "report" {
+                "existing.json"
+            } else {
+                "existing.wav"
+            },
+        ),
+        (
+            "generated",
+            if kind == "report" {
+                "generated.txt"
+            } else {
+                "generated.png"
+            },
+        ),
+        (
+            "generated_secondary",
+            if kind == "report" {
+                "generated.json"
+            } else {
+                "generated.wav"
+            },
+        ),
+    ] {
+        let (exported, _) = invoke(
+            "preview",
+            preview_inputs(representation, "10"),
+            true,
+            "json",
+            true,
+        );
+        assert_eq!(exported["outcome"], "succeeded", "{exported}");
+        let read = journey_read(f, kind, &binding, &exported["data"]["result"], 0);
+        assert_eq!(read["outcome"], "succeeded", "{read}");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(read["data"]["data"].as_str().unwrap())
+                .unwrap(),
+            fs::read(exports.join(path)).unwrap()
+        );
+    }
+    let (stale, _) = invoke("preview", preview_inputs("stale", "10"), true, "json", true);
+    assert_eq!(stale["outcome"], "succeeded");
+    let stale_result = stale["data"]["result"].clone();
+    let stale_path = exports.join(if kind == "report" {
+        "stale.txt"
+    } else {
+        "stale.wav"
+    });
+    let mut changed = if kind == "report" {
+        b"changed report revision".to_vec()
+    } else {
+        wav.clone()
+    };
+    if kind == "media" {
+        *changed.last_mut().unwrap() = 1;
+    }
+    fs::write(&stale_path, &changed).unwrap();
+    let calls_before = fs::read(data_root.join("journey-call-count.txt")).unwrap();
+    let state_before = fs::read(data_root.join("journey-state.json")).unwrap();
+    assert_eq!(
+        journey_read(f, kind, &binding, &stale_result, 0)["error"]["code"],
+        "artifact.content_changed"
+    );
+    fs::remove_file(&stale_path).unwrap();
+    assert_eq!(
+        journey_read(f, kind, &binding, &stale_result, 0)["error"]["code"],
+        "artifact.not_found"
+    );
+    assert_good();
+    assert_eq!(
+        fs::read(data_root.join("journey-call-count.txt")).unwrap(),
+        calls_before
+    );
+    assert_eq!(
+        fs::read(data_root.join("journey-state.json")).unwrap(),
+        state_before
+    );
+    let (required, _) = invoke(
+        "required",
+        json!({"document":{"id":id},"expected_version":"10"}),
+        true,
+        "json",
+        true,
+    );
+    assert_eq!(required["outcome"], "partial");
+    assert_eq!(required["error"]["code"], "artifact.export_failed");
+    assert_eq!(
+        required["data"]["result"]["content"]["selected"]["version"],
+        "10"
+    );
+    assert!(required["data"]["result"]
+        .get("artifact_references")
+        .is_none());
+    assert!(required["data"]["result"]
+        .get("artifact_read_grants")
+        .is_none());
+    assert_good();
+    assert_eq!(
+        fs::read(data_root.join("journey-state.json")).unwrap(),
+        state_before
+    );
+    fs::write(&stale_path, &changed).unwrap();
+    let (current, _) = invoke("preview", preview_inputs("stale", "10"), true, "json", true);
+    assert_ne!(
+        current["data"]["result"]["artifact_references"][0]["reference"],
+        stale_result["artifact_references"][0]["reference"]
+    );
+    let read = journey_read(f, kind, &binding, &current["data"]["result"], 0);
+    assert_eq!(read["outcome"], "succeeded");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(read["data"]["data"].as_str().unwrap())
+            .unwrap(),
+        changed
+    );
+    assert_eq!(
+        fs::read(f.cargo_ai_home.join("config.toml")).unwrap(),
+        policy_before
+    );
+    for name in [
+        "journey.html",
+        "journey.js",
+        "journey-load.json",
+        "cargo-ai-actions.json",
+    ] {
+        let path = f.root.join(name);
+        let calls_before = fs::read(data_root.join("journey-call-count.txt")).unwrap();
+        let original = fs::read(&path).unwrap();
+        let changed = match name {
+            "journey-load.json" => {
+                let mut value: Value = serde_json::from_slice(&original).unwrap();
+                value["actions"][0]["name"] = json!("changed executable definition");
+                serde_json::to_vec(&value).unwrap()
+            }
+            "cargo-ai-actions.json" => {
+                let mut value: Value = serde_json::from_slice(&original).unwrap();
+                value["artifact_scopes"][0]["path"] = json!("other-exports");
+                serde_json::to_vec(&value).unwrap()
+            }
+            _ => {
+                let mut changed = original.clone();
+                changed.extend(b"\n/* changed fixture presentation */");
+                changed
+            }
+        };
+        fs::write(&path, changed).unwrap();
+        assert_ne!(catalog(f)["binding"], binding);
+        let old = journey_request(&binding, kind, "load", json!({}), false);
+        let rejected = invoke_result(f, &old, "json", true, &[]).0;
+        assert_eq!(
+            rejected["error"]["code"], "action.stale_binding",
+            "{name}: {rejected}"
+        );
+        let rejected = journey_read(f, kind, &binding, &good_result, 0);
+        assert_eq!(
+            rejected["error"]["code"], "artifact.stale_binding",
+            "{name}: {rejected}"
+        );
+        assert_eq!(
+            fs::read(data_root.join("journey-call-count.txt")).unwrap(),
+            calls_before
+        );
+        assert_eq!(
+            fs::read(data_root.join("journey-state.json")).unwrap(),
+            state_before
+        );
+        fs::write(path, original).unwrap();
+        assert_eq!(catalog(f)["binding"], binding);
+        assert_good();
+    }
 }
