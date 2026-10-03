@@ -4384,7 +4384,7 @@ fn generated_execution_policy_case(fixture: &Fixture) {
         .filter_map(|(offset, value)| {
             (value == identity
                 && bytes.get(offset + identity.len()..offset + identity.len() + 8)
-                    == Some(&[3, 0, 0, 0, 255, 0, 0, 0][..]))
+                    == Some(&[4, 0, 0, 0, 255, 1, 0, 0][..]))
             .then_some(offset + identity.len())
         })
         .collect::<Vec<_>>();
