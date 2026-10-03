@@ -46,6 +46,30 @@ const PACKAGE_WORKFLOW_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/package-workflow.md"
 ));
+const CLIENT_ACTIONS_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/client-actions.md"
+));
+const EXAMPLE_CLIENT_ACTIONS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/client-actions.json"
+));
+const EXAMPLE_CLIENT_ACTION_REQUEST: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/client-action-request.json"
+));
+const EXAMPLE_CLIENT_ACTION_CONTROLS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/client-action-controls.js"
+));
+const EXAMPLE_CLIENT_ACTION_COORDINATOR: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/client-action-coordinator.json"
+));
+const EXAMPLE_CLIENT_ACTION_REVIEW: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/client-action-review.json"
+));
 const USAGE_LEDGER_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/usage-ledger.md"
@@ -121,7 +145,7 @@ struct GuidanceArtifact {
     contents: &'static str,
 }
 
-const GUIDANCE_ARTIFACTS: [GuidanceArtifact; 23] = [
+const GUIDANCE_ARTIFACTS: [GuidanceArtifact; 29] = [
     GuidanceArtifact {
         relative_path: BUNDLE_ENTRY_PATH,
         contents: CANONICAL_GUIDANCE_TEMPLATE,
@@ -149,6 +173,30 @@ const GUIDANCE_ARTIFACTS: [GuidanceArtifact; 23] = [
     GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/package-workflow.md",
         contents: PACKAGE_WORKFLOW_TEMPLATE,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/client-actions.md",
+        contents: CLIENT_ACTIONS_TEMPLATE,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/client-actions.json",
+        contents: EXAMPLE_CLIENT_ACTIONS,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/client-action-request.json",
+        contents: EXAMPLE_CLIENT_ACTION_REQUEST,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/client-action-controls.js",
+        contents: EXAMPLE_CLIENT_ACTION_CONTROLS,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/client-action-coordinator.json",
+        contents: EXAMPLE_CLIENT_ACTION_COORDINATOR,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/client-action-review.json",
+        contents: EXAMPLE_CLIENT_ACTION_REVIEW,
     },
     GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/usage-ledger.md",
@@ -470,7 +518,8 @@ fn run_impl(sub_m: &ArgMatches) -> Result<(), String> {
 mod tests {
     use super::{
         guidance_success_ui_response, write_guidance_bundle, EntrypointStatus,
-        GuidanceBundleReport, GuidanceEntrypointReport, GuidanceStyle, PACKAGE_WORKFLOW_TEMPLATE,
+        GuidanceBundleReport, GuidanceEntrypointReport, GuidanceStyle, GUIDANCE_ARTIFACTS,
+        PACKAGE_WORKFLOW_TEMPLATE,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -499,7 +548,7 @@ mod tests {
             Some("AGENTS.md")
         );
         assert_eq!(report.entrypoints[0].status, EntrypointStatus::Written);
-        assert_eq!(report.written_paths.len(), 25);
+        assert_eq!(report.written_paths.len(), GUIDANCE_ARTIFACTS.len() + 2);
         assert!(dir.join("AGENTS.md").exists());
         assert!(dir.join(".cargo-ai/guidance/cargo-ai.md").exists());
         assert!(dir
@@ -515,6 +564,16 @@ mod tests {
         assert!(dir.join(".cargo-ai/guidance/examples/README.md").exists());
         assert!(dir.join(".cargo-ai/guidance/start-here.md").exists());
         assert!(dir.join(".cargo-ai/guidance/package-workflow.md").exists());
+        for name in [
+            "client-actions.md",
+            "examples/client-actions.json",
+            "examples/client-action-request.json",
+            "examples/client-action-controls.js",
+            "examples/client-action-coordinator.json",
+            "examples/client-action-review.json",
+        ] {
+            assert!(dir.join(".cargo-ai/guidance").join(name).is_file());
+        }
         assert!(dir.join(".cargo-ai/guidance/usage-ledger.md").exists());
         assert!(dir.join(".cargo-ai/guidance/tool-authoring.md").exists());
         assert!(dir.join(".cargo-ai/guidance/tool-contract.md").exists());
@@ -648,7 +707,7 @@ mod tests {
         let report = write_guidance_bundle(&dir, &[GuidanceStyle::Codex])
             .expect("guidance write should work");
         assert_eq!(report.entrypoints[0].status, EntrypointStatus::Preserved);
-        assert_eq!(report.written_paths.len(), 24);
+        assert_eq!(report.written_paths.len(), GUIDANCE_ARTIFACTS.len() + 1);
         assert_eq!(
             fs::read_to_string(dir.join("AGENTS.md")).expect("existing AGENTS should be readable"),
             "existing guidance\n"
@@ -774,7 +833,7 @@ mod tests {
             .expect("combined guidance write should work");
 
         assert_eq!(report.entrypoints.len(), 2);
-        assert_eq!(report.written_paths.len(), 26);
+        assert_eq!(report.written_paths.len(), GUIDANCE_ARTIFACTS.len() + 3);
         assert!(dir.join("AGENTS.md").exists());
         assert!(dir.join("CLAUDE.md").exists());
         assert!(dir.join(".cargo-ai/guidance/cargo-ai.md").exists());
@@ -804,7 +863,7 @@ mod tests {
                 dir.join("CLAUDE.md")
             ]
         );
-        assert_eq!(report.reused_paths.len(), 23);
+        assert_eq!(report.reused_paths.len(), GUIDANCE_ARTIFACTS.len());
         assert_eq!(report.entrypoints[0].status, EntrypointStatus::Written);
 
         let _ = fs::remove_dir_all(dir);
@@ -821,7 +880,7 @@ mod tests {
             .expect("repeated style should be idempotent");
 
         assert!(report.written_paths.is_empty());
-        assert_eq!(report.reused_paths.len(), 25);
+        assert_eq!(report.reused_paths.len(), GUIDANCE_ARTIFACTS.len() + 2);
         assert_eq!(report.entrypoints[0].status, EntrypointStatus::Reused);
 
         let _ = fs::remove_dir_all(dir);

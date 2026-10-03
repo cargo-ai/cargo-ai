@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/action-resource-v1.json",
+  "title": "Cargo AI declared resource payload v1",
+  "$comment": "Finite data for cargo-ai.actions.resource.v1. Maximum 4 MiB decoded bytes; content_sha256 identifies those bytes, binding identifies the current declared inventory. Verified resource data does not authorize execution or provide a private-store path API.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "binding": {
+      "$ref": "action-binding-v1.json"
+    },
+    "interface": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+      "not": {
+        "enum": [
+          "execution_policy",
+          "expected_binding",
+          "attachment_grants",
+          "constructor",
+          "prototype",
+          "__proto__"
+        ]
+      }
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+      "not": {
+        "enum": [
+          "execution_policy",
+          "expected_binding",
+          "attachment_grants",
+          "constructor",
+          "prototype",
+          "__proto__"
+        ]
+      }
+    },
+    "mime_type": {
+      "type": "string"
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4194304
+    },
+    "content_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "encoding": {
+      "const": "base64"
+    },
+    "data": {
+      "type": "string",
+      "contentEncoding": "base64"
+    }
+  },
+  "required": [
+    "schema_version",
+    "binding",
+    "interface",
+    "id",
+    "mime_type",
+    "size_bytes",
+    "content_sha256",
+    "encoding",
+    "data"
+  ],
+  "additionalProperties": true
+}

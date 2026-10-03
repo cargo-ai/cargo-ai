@@ -297,3 +297,7 @@ Selected `run --output-format ndjson` emits bounded typed operation, provider, a
 
 
 Use tagged `{"mode":"on"}` or `{"mode":"off"}` for a qualified Boolean control. Tagged Choice stays exact even for literal `on`/`off`; only the generic CLI aliases are case insensitive. Runtime declaration revision2 adds toggles and exact-choice escaping; revision1 children retain named/default forwarding and receive no Boolean override. [Shared selection and discovery rules](providers/README.md#thinking-selection) apply.
+
+## Controls in application clients
+
+A [portable client action](client-actions.md) declares a whole agent/coordinator entrypoint with validated business inputs. It is distinct from an internal `actions[]` step. Interfaces can bind several controls to the same agent with different values, or to different agents; Cargo AI retains authored orchestration and clients choose web/native/headless presentation.

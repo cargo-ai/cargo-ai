@@ -21,6 +21,8 @@ mod config;
 mod credentials;
 #[path = "../templates/definition_validation.rs"]
 mod definition_validation;
+#[path = "../templates/src/execution_policy.rs"]
+mod execution_policy;
 mod generated_capabilities;
 #[cfg(test)]
 #[path = "generated_capabilities/record.rs"]
@@ -64,6 +66,26 @@ async fn main() {
             process::exit(exit);
         }
         return;
+    }
+    // Explicit action inspection must stay passive, including in human mode.
+    if let Some(actions) = cmd_args.subcommand_matches("actions") {
+        match commands::client_actions::machine_run(actions) {
+            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+            Err(error) => {
+                eprintln!("{}: {}", error.code, error.message);
+                process::exit(1);
+            }
+        }
+        return;
+    }
+    // Action-bound and inherited requests must precede legacy startup writers.
+    if let Some(run) = cmd_args.subcommand_matches("run") {
+        if run.get_one::<String>("action").is_some() || execution_policy::inheritance_requested() {
+            if !commands::run::run(run).await {
+                process::exit(1);
+            }
+            return;
+        }
     }
     if let Some(usage) = cmd_args.subcommand_matches("usage") {
         if let Some(backup) = usage.subcommand_matches("backup") {

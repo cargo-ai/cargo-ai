@@ -506,6 +506,16 @@ fn assemble_package_root(
         assets: dedupe_preserve_order(&build_profile.assets),
     };
 
+    crate::commands::client_actions::validate_distribution(
+        project_root,
+        &build_profile
+            .agent_definitions
+            .iter()
+            .chain(&build_profile.hatched_agents)
+            .cloned()
+            .collect::<Vec<_>>(),
+        &build_profile.assets,
+    )?;
     validate_output_source_boundaries(project_root, &build_profile, output_root)?;
     prepare_output_root(project_root, output_root, force)?;
 
@@ -1535,6 +1545,8 @@ mod tests {
         assemble_package_root, load_project_metadata, load_project_source_tool_context,
         resolve_package_output_root, PackageManifestDocument, PackagePermissionProfileDocument,
     };
+    use super::{BuildProfileDocument, PackageOutputRoot};
+    use crate::commands::package_dependencies::PackageDependencies;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1725,6 +1737,79 @@ agent_definitions = ["agents/demo.json"]
             );
             let _ = fs::remove_dir_all(project_root);
         }
+    }
+
+    #[test]
+    fn action_package_build_rejects_excluded_target_before_replacing_output() {
+        let project_root = temp_dir("action-selection");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::write(
+            project_root.join("agent.json"),
+            include_str!("../../templates/guidance/examples/client-action-coordinator.json"),
+        )
+        .unwrap();
+        let mut catalog: serde_json::Value = serde_json::from_str(include_str!(
+            "../../templates/guidance/examples/client-actions.json"
+        ))
+        .unwrap();
+        catalog["actions"].as_array_mut().unwrap().truncate(1);
+        catalog["actions"][0]["target"] = serde_json::json!("agent.json");
+        catalog["interfaces"] = serde_json::json!([{"id":"native","actions":["generate-one"]}]);
+        catalog["resources"] = serde_json::json!([]);
+        let bytes = serde_json::to_vec(&catalog).unwrap();
+        fs::write(
+            project_root.join(crate::commands::client_actions::CATALOG_FILE),
+            &bytes,
+        )
+        .unwrap();
+        let output = project_root.join("assembled");
+        fs::create_dir_all(&output).unwrap();
+        fs::write(output.join("preserved"), "previous").unwrap();
+        let output_root = PackageOutputRoot {
+            path: output.clone(),
+            explicit: true,
+        };
+        let mut profile = BuildProfileDocument {
+            agent_definitions: vec![],
+            hatched_agents: vec![],
+            tools: vec![],
+            assets: vec![crate::commands::client_actions::CATALOG_FILE.into()],
+        };
+        let error = assemble_package_root(
+            &project_root,
+            "default",
+            None,
+            None,
+            &profile,
+            &PackagePermissionProfileDocument::default(),
+            &PackageDependencies::new(),
+            &output_root,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("not explicitly selected"));
+        assert_eq!(
+            fs::read_to_string(output.join("preserved")).unwrap(),
+            "previous"
+        );
+        profile.agent_definitions.push("agent.json".into());
+        assemble_package_root(
+            &project_root,
+            "default",
+            None,
+            None,
+            &profile,
+            &PackagePermissionProfileDocument::default(),
+            &PackageDependencies::new(),
+            &output_root,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(output.join(crate::commands::client_actions::CATALOG_FILE)).unwrap(),
+            bytes
+        );
+        let _ = fs::remove_dir_all(project_root);
     }
 
     #[test]

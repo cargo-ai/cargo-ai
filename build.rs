@@ -35,6 +35,10 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
         source: "../src/providers/thinking_image.rs",
     },
     TemplateSource {
+        destination: "src/execution_policy.rs",
+        source: "src/execution_policy.rs",
+    },
+    TemplateSource {
         destination: "src/runtime_thinking.rs",
         source: "src/runtime_thinking.rs",
     },

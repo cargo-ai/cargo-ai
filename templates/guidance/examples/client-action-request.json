@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "interface": "panels",
+  "action": "generate-selected",
+  "inputs": {
+    "panel_ids": [
+      "panel-1",
+      "panel-2"
+    ]
+  },
+  "expected_binding": {
+    "root_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "catalog_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "execution_policy": {
+    "version": 1,
+    "allowed": [
+      {
+        "profile": "fixture",
+        "request_kind": "text",
+        "model": {
+          "kind": "named",
+          "value": "fixture-model"
+        },
+        "thinking": {
+          "mode": "provider_default"
+        }
+      }
+    ],
+    "limits": {
+      "max_runtime_secs": 60,
+      "max_output_tokens": 512,
+      "max_agent_depth": 4
+    }
+  }
+}

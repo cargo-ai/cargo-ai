@@ -530,6 +530,72 @@
             "thinking"
           ],
           "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "runtime": {
+              "enum": [
+                "cargo-ai.generated-runtime",
+                "cargo-ai.cli-run-runtime"
+              ]
+            },
+            "revision": {
+              "const": 3
+            },
+            "thinking": {
+              "type": "object",
+              "properties": {
+                "flags": {
+                  "const": [
+                    "--thinking",
+                    "--thinking-provider-default",
+                    "--thinking-choice"
+                  ]
+                },
+                "settings": {
+                  "const": [
+                    "choice",
+                    "provider_default",
+                    "on",
+                    "off"
+                  ]
+                }
+              },
+              "required": [
+                "flags",
+                "settings"
+              ],
+              "additionalProperties": true
+            },
+            "execution_policy": {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "const": 1
+                },
+                "boundaries": {
+                  "const": [
+                    "root",
+                    "media",
+                    "descendants"
+                  ]
+                }
+              },
+              "required": [
+                "version",
+                "boundaries"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "runtime",
+            "revision",
+            "thinking",
+            "execution_policy"
+          ],
+          "additionalProperties": true
         }
       ]
     }

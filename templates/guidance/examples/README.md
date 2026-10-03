@@ -1,7 +1,7 @@
 # Cargo AI Guidance Examples
 
 Use these examples as starting points. Copy the closest file, rename it, and then edit only what the user needs.
-Each example is meant to be validated and hatched into a CLI executable.
+Agent-definition examples are meant to be validated and hatched into a CLI executable. The client-action group also includes a catalog, serialized request and illustrative browser adapter.
 
 ## Example Index
 
@@ -29,6 +29,12 @@ Each example is meant to be validated and hatched into a CLI executable.
   - Shows top-level `runtime_vars`, `--run-var`-driven action gating, typed runtime vars in JSON Logic, and runtime-backed `generate_image.model`.
   - Shows `generate_image.reference_images` with both `{ "input": "source_photo" }` for a named top-level image input and `{ "path": "./assets/style-reference.png" }` for a definition-owned local asset.
   - Keep the source/edit-target image first in `reference_images`, then add supporting detail, style, color, or material references.
+
+## Client Action Example Group
+
+Read `../client-actions.md` for the installed offline contract and integration responsibilities. Copy `client-actions.json` to project-root `cargo-ai-actions.json` with `client-action-coordinator.json` and `client-action-review.json` beside it. The catalog demonstrates same-agent/different-input and different-agent routing. Both agents print markers without model inference. `client-action-request.json` is a non-web/headless request template: replace the illustrative binding with discovery and construct an authorized policy for discovered configuration. The `fixture` profile/model is a test value, not a bundled provider configuration. Submit it through the real action-run stdin selector. `client-action-controls.js` binds imperative browser controls to an illustrative injected host callback; the receiving client supplies its bridge, scoped grants and real CLI process supervision. It is not a host implementation or a browser SDK.
+
+Validate the two agent definitions using ordinary `hatch --check`; validate catalog/request semantics through `actions list` and `actions validate`. Do not hatch the catalog or request as an agent.
 
 ## How To Use The Examples
 

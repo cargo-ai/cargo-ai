@@ -1479,6 +1479,41 @@ pub(crate) fn resolve_entrypoint_reference_for_project(
     }))
 }
 
+/// Retain the same alias lease used by ordinary installed entrypoints while
+/// resolving a declared-action catalog and its immutable resources.
+pub(crate) fn installed_action_assets(
+    context: &InstalledPackageRuntimeContext,
+) -> Result<Vec<String>, String> {
+    let path = resolve_existing_path_under_root(
+        &context.package_payload_root,
+        Path::new(PACKAGE_MANIFEST_FILE_NAME),
+        "Installed action manifest",
+    )?;
+    let contents = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let manifest: PackageManifestDocument =
+        toml::from_str(&contents).map_err(|error| error.to_string())?;
+    if manifest.format_version != 1 {
+        return Err("Unsupported installed action package format.".into());
+    }
+    Ok(manifest.assets)
+}
+
+pub(crate) fn checked_action_target_for_alias(
+    alias: &str,
+    dependency_project_root: Option<&Path>,
+) -> Result<CheckedInstalledPackageRuntime, String> {
+    validate_package_alias(alias)?;
+    let checked = checked_runtime_lease_for_path(
+        &installed_package_root(alias).join(INSTALLED_PACKAGE_DIR_NAME),
+        None,
+    )?
+    .ok_or("Installed action target has no verified package context")?;
+    if let Some(project) = dependency_project_root {
+        validate_installed_alias_dependency_for_project(alias, project)?;
+    }
+    Ok(checked)
+}
+
 pub(crate) fn validate_installed_alias_dependency_for_project(
     alias: &str,
     project_root: &Path,
@@ -1685,6 +1720,19 @@ fn load_package_manifest(path: &Path) -> Result<PackageManifestDocument, String>
             path.display(),
             manifest.format_version
         ));
+    }
+    let root = path.parent().ok_or("Package manifest has no parent")?;
+    if fs::symlink_metadata(root.join(crate::commands::client_actions::CATALOG_FILE)).is_ok() {
+        crate::commands::client_actions::validate_installed_distribution(
+            root,
+            &manifest
+                .agent_definitions
+                .iter()
+                .chain(&manifest.hatched_agents)
+                .cloned()
+                .collect::<Vec<_>>(),
+            &manifest.assets,
+        )?;
     }
     Ok(manifest)
 }
@@ -4057,6 +4105,142 @@ assets = ["schemas/customer.sql"]
         std::fs::write(root.join("agents/daily_digest.json"), "{}")
             .expect("hatch definition should be writable");
         root
+    }
+
+    fn write_action_package_fixture(root: &Path) {
+        std::fs::write(
+            root.join("agents/lookup_account.json"),
+            include_str!("../../templates/guidance/examples/client-action-coordinator.json"),
+        )
+        .unwrap();
+        std::fs::write(root.join("page.js"), "fixture script").unwrap();
+        std::fs::write(root.join("cargo-ai-actions.json"),serde_json::to_vec(&serde_json::json!({"schema_version":1,"actions":[{"id":"generate","target":"agents/lookup_account.json","input_schema":{"type":"object","properties":{"panels":{"type":"array","items":{"type":"string"}}},"required":["panels"],"additionalProperties":false},"mappings":{"panels":{"runtime_var":"panel_ids_json","encoding":"json"}}}],"interfaces":[{"id":"native","actions":["generate"],"resources":["script"]}],"resources":[{"id":"script","path":"page.js","mime_type":"text/javascript"}]})).unwrap()).unwrap();
+        let manifest = std::fs::read_to_string(root.join("cargo-ai-package.toml"))
+            .unwrap()
+            .replace(
+                "assets = [\"schemas/customer.sql\"]",
+                "assets = [\"cargo-ai-actions.json\", \"page.js\"]",
+            );
+        std::fs::write(root.join("cargo-ai-package.toml"), manifest).unwrap();
+    }
+
+    #[test]
+    fn action_package_install_discovers_resources_and_retains_invocation_lease() {
+        let _store = PackagesRootGuard::new("action-discovery");
+        let root = temp_package_root("action-discovery");
+        write_action_package_fixture(&root);
+        let request = local_install_request(&root);
+        let transported = temp_package_root("action-transported");
+        std::fs::remove_dir_all(&transported).unwrap();
+        std::fs::create_dir_all(&transported).unwrap();
+        let archive = crate::commands::account::create_package_archive_bytes(&root).unwrap();
+        crate::commands::account::extract_package_archive_bytes(&archive, &transported).unwrap();
+        for path in [
+            "cargo-ai-actions.json",
+            "page.js",
+            "agents/lookup_account.json",
+        ] {
+            assert_eq!(
+                std::fs::read(root.join(path)).unwrap(),
+                std::fs::read(transported.join(path)).unwrap()
+            );
+        }
+        let transported_request = local_install_request(&transported);
+        assert!(matches!(
+            install_local_package(&transported_request).unwrap(),
+            InstallAction::New
+        ));
+        let checked = super::checked_action_target_for_alias("data_integration", None).unwrap();
+        let payload = &checked.context.package_payload_root;
+        let catalog = crate::commands::client_actions::discover(payload).unwrap();
+        assert_eq!(
+            catalog.binding.package.as_ref().unwrap().alias,
+            "data_integration"
+        );
+        let resource = crate::commands::client_actions::resource(
+            payload,
+            "native",
+            "script",
+            &catalog.binding,
+        )
+        .unwrap();
+        assert_eq!(
+            resource["content_sha256"],
+            crate::commands::account::sha256_hex(b"fixture script")
+        );
+        let action_request=crate::commands::client_actions::parse_request(&serde_json::json!({"schema_version":1,"interface":"native","action":"generate","inputs":{"panels":["p1"]},"expected_binding":catalog.binding,"execution_policy":{"version":1,"allowed":[],"limits":{"max_runtime_secs":60,"max_output_tokens":512,"max_agent_depth":4}}}).to_string()).unwrap();
+        let prepared = crate::commands::client_actions::prepare(payload, &action_request).unwrap();
+        assert_eq!(
+            prepared
+                .installed
+                .as_ref()
+                .unwrap()
+                .context
+                .current_entrypoint_path
+                .as_deref(),
+            Some("agents/lookup_account.json")
+        );
+        drop(checked);
+        let mut replacement = request.clone();
+        replacement.replace = true;
+        std::fs::write(root.join("page.js"), "replacement").unwrap();
+        assert!(install_local_package(&replacement)
+            .unwrap_err()
+            .contains("another Cargo AI process"));
+        drop(prepared);
+        assert!(install_local_package(&replacement).is_ok());
+        let changed = super::checked_action_target_for_alias("data_integration", None).unwrap();
+        assert_eq!(
+            crate::commands::client_actions::prepare(
+                &changed.context.package_payload_root,
+                &action_request
+            )
+            .unwrap_err()
+            .code,
+            "action.stale_binding"
+        );
+        remove_temp_dir_if_present(&root);
+        remove_temp_dir_if_present(&transported);
+    }
+
+    #[test]
+    fn action_package_invalid_replacement_preserves_payload_data_and_receipt() {
+        let _store = PackagesRootGuard::new("action-invalid-replacement");
+        let root = temp_package_root("action-invalid-replacement");
+        write_action_package_fixture(&root);
+        let mut request = local_install_request(&root);
+        install_local_package(&request).unwrap();
+        let installed = super::installed_package_root("data_integration");
+        let receipt = std::fs::read(installed.join(super::INSTALL_MANIFEST_FILE_NAME)).unwrap();
+        std::fs::write(
+            super::installed_package_data_root("data_integration").join("state.json"),
+            "preserved",
+        )
+        .unwrap();
+        request.replace = true;
+        std::fs::write(root.join("cargo-ai-actions.json"), "{\"schema_version\":2}").unwrap();
+        assert!(install_local_package(&request).is_err());
+        assert_eq!(
+            std::fs::read(installed.join(super::INSTALL_MANIFEST_FILE_NAME)).unwrap(),
+            receipt
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                installed
+                    .join(super::INSTALLED_PACKAGE_DIR_NAME)
+                    .join("page.js")
+            )
+            .unwrap(),
+            "fixture script"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                super::installed_package_data_root("data_integration").join("state.json")
+            )
+            .unwrap(),
+            "preserved"
+        );
+        remove_temp_dir_if_present(&root);
     }
 
     #[tokio::test]

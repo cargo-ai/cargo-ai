@@ -361,6 +361,23 @@ pub(crate) async fn machine_run(
 }
 
 pub async fn run(sub_m: &ArgMatches) -> bool {
+    match crate::execution_policy::scope_inherited(Box::pin(run_scoped(sub_m))).await {
+        Ok(succeeded) => succeeded,
+        Err(_) => {
+            super::machine::record_error(super::machine::Failure::new(
+                "action.execution_policy_invalid",
+                "The inherited execution policy is invalid or unavailable.",
+            ));
+            eprintln!("action.execution_policy_invalid: The inherited execution policy is invalid or unavailable.");
+            false
+        }
+    }
+}
+
+async fn run_scoped(sub_m: &ArgMatches) -> bool {
+    if sub_m.get_one::<String>("action").is_some() {
+        return run_client_action(sub_m).await;
+    }
     if is_account_run_invocation(sub_m) {
         return crate::commands::account::run_account_agent(sub_m).await;
     }
@@ -552,6 +569,204 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         ),
     )
     .await
+}
+
+async fn run_client_action(selected: &ArgMatches) -> bool {
+    match prepare_client_action(selected) {
+        Ok((prepared, settings, policy)) => {
+            let root = Some(prepared.project_root.clone());
+            let source = AgentDefinitionSource::LocalPath(
+                prepared.definition_path.to_string_lossy().into_owned(),
+            );
+            let definition = match crate::runtime_definition::RuntimeAgentDefinition::from_str(
+                &prepared.definition_json,
+            ) {
+                Ok(definition) => definition,
+                Err(_) => {
+                    return reject_client_action(super::machine::Failure::new(
+                        "runtime.invalid_definition",
+                        "The action definition is invalid.",
+                    ))
+                }
+            };
+            let context = prepared
+                .installed
+                .as_ref()
+                .map(|installed| installed.context.clone());
+            let usage = usage_agent_info_for_definition_source(
+                &source,
+                &prepared.definition_json,
+                root.as_deref(),
+            );
+            let attribution = attribution_for_definition_source(
+                &source,
+                &prepared.definition_json,
+                root.as_deref(),
+                context.as_ref(),
+            );
+            super::machine::record_client_action(json!({
+                "interface": prepared.interface, "action": prepared.action,
+                "binding": prepared.binding,
+            }));
+            // Keep the validated package lease alive through the entire invocation.
+            let _lease = prepared.installed;
+            super::runtime_actions::scope_declaring_project_root(
+                root.clone(),
+                policy.scope(
+                    super::runtime::run_with_definition_in_context_and_usage_agent(
+                        &settings,
+                        &definition,
+                        root,
+                        Some(usage),
+                        context,
+                        Some(attribution),
+                    ),
+                ),
+            )
+            .await
+        }
+        Err(error) => reject_client_action(error),
+    }
+}
+
+fn reject_client_action(error: super::machine::Failure) -> bool {
+    eprintln!("x {}", error.message);
+    super::machine::record_error(error);
+    false
+}
+
+fn prepare_client_action(
+    selected: &ArgMatches,
+) -> Result<
+    (
+        super::client_actions::PreparedAction,
+        ArgMatches,
+        crate::execution_policy::ExecutionPolicy,
+    ),
+    super::machine::Failure,
+> {
+    use super::client_actions as actions;
+    let raw = actions::read_request_stdin().map_err(|_| {
+        super::machine::Failure::new(
+            "action.invalid_request",
+            "The action request must be bounded UTF-8 JSON.",
+        )
+    })?;
+    let request = actions::parse_request(&raw).map_err(actions::action_failure)?;
+    if selected.get_one::<String>("interface") != Some(&request.interface)
+        || selected.get_one::<String>("action") != Some(&request.action)
+    {
+        return Err(super::machine::Failure::new(
+            "action.invalid_request",
+            "Action request selectors do not match the CLI selectors.",
+        ));
+    }
+    let target = actions::load_target(
+        selected.get_one::<String>("project").map(Path::new),
+        selected.get_one::<String>("package").map(String::as_str),
+    )
+    .map_err(actions::action_failure)?;
+    let prepared = actions::prepare(&target.root, &request).map_err(actions::action_failure)?;
+    if let Some(installed) = prepared.installed.as_ref() {
+        let current = std::env::current_dir().map_err(|_| {
+            super::machine::Failure::new(
+                "action.invalid_target",
+                "The caller project could not be inspected.",
+            )
+        })?;
+        let caller = caller_project_root_for_installed_context(Some(&installed.context), &current)
+            .map_err(|_| {
+                super::machine::Failure::new(
+                    "action.invalid_target",
+                    "The caller project is invalid.",
+                )
+            })?;
+        if let Some(caller) = caller {
+            if fs::canonicalize(&caller).ok()
+                != fs::canonicalize(&installed.context.package_payload_root).ok()
+            {
+                super::local_packages::validate_installed_alias_dependency_for_project(
+                    &installed.context.alias,
+                    &caller,
+                )
+                .map_err(|_| {
+                    super::machine::Failure::new(
+                        "action.invalid_target",
+                        "The installed action package does not satisfy the caller dependency.",
+                    )
+                })?;
+            }
+        }
+    }
+    let policy = crate::execution_policy::ExecutionPolicy::parse(&prepared.execution_policy)
+        .map_err(|_| {
+            super::machine::Failure::new(
+                "action.execution_policy_invalid",
+                "The action execution policy is invalid.",
+            )
+        })?;
+    let settings = action_runtime_matches(selected, &prepared.run_vars, &prepared.input_overrides)?;
+    Ok((prepared, settings, policy))
+}
+
+/// Preserves admitted runtime settings while supplying only validated business mappings.
+fn action_runtime_matches(
+    selected: &ArgMatches,
+    run_vars: &[String],
+    input_overrides: &[String],
+) -> Result<ArgMatches, super::machine::Failure> {
+    let mut words = vec![std::ffi::OsString::from("action-runtime")];
+    for (id, flag) in [
+        ("profile", "--profile"),
+        ("model", "--model"),
+        ("thinking", "--thinking"),
+        ("thinking_choice", "--thinking-choice"),
+        ("action_execution", "--action-execution"),
+        ("render_mode", "--render-mode"),
+        ("usage_log", "--usage-log"),
+    ] {
+        if let Some(value) = selected.get_one::<String>(id) {
+            words.extend([flag.into(), value.into()]);
+        }
+    }
+    for (id, flag) in [
+        ("max_output_tokens", "--max-output-tokens"),
+        ("max_agent_depth", "--max-agent-depth"),
+    ] {
+        if let Some(value) = selected.get_one::<u32>(id) {
+            words.extend([flag.into(), value.to_string().into()]);
+        }
+    }
+    for (id, flag) in [
+        ("inference_timeout_in_sec", "--inference-timeout-in-sec"),
+        ("max_runtime_in_sec", "--max-runtime-in-sec"),
+    ] {
+        if let Some(value) = selected.get_one::<u64>(id) {
+            words.extend([flag.into(), value.to_string().into()]);
+        }
+    }
+    for (id, flag) in [
+        ("ignore_tools", "--ignore-tools"),
+        ("thinking_provider_default", "--thinking-provider-default"),
+    ] {
+        if selected.get_flag(id) {
+            words.push(flag.into());
+        }
+    }
+    for assignment in run_vars {
+        words.extend(["--run-var".into(), assignment.into()]);
+    }
+    for assignment in input_overrides {
+        words.extend(["--input-override".into(), assignment.into()]);
+    }
+    crate::args::runtime_common::runtime_command("action-runtime", "Validated action runtime")
+        .try_get_matches_from(words)
+        .map_err(|_| {
+            super::machine::Failure::new(
+                "action.invalid_inputs",
+                "Validated action inputs could not be applied to the runtime.",
+            )
+        })
 }
 
 #[cfg(test)]

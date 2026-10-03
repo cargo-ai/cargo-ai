@@ -2681,6 +2681,60 @@ mod tests {
     }
 
     #[test]
+    fn action_assets_survive_validated_pull_and_tamper_preserves_previous_output() {
+        let source = temp_dir("action-pull-source");
+        let output = temp_dir("action-pull-output");
+        write_pull_source(&source, "demo");
+        let examples =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("templates/guidance/examples");
+        for path in [
+            "client-action-coordinator.json",
+            "client-action-review.json",
+            "client-action-controls.js",
+        ] {
+            fs::copy(examples.join(path), source.join(path)).unwrap();
+        }
+        fs::copy(
+            examples.join("client-actions.json"),
+            source.join("cargo-ai-actions.json"),
+        )
+        .unwrap();
+        let manifest = "format_version=1\nproject_name='demo'\nproject_version='1.0.0'\nassets=['cargo-ai-actions.json','client-action-controls.js']\nagent_definitions=['client-action-coordinator.json','client-action-review.json']\n";
+        fs::write(source.join("cargo-ai-package.toml"), manifest).unwrap();
+        let archive = create_package_archive_bytes(&source).unwrap();
+        let mut response = hosted_pull_response(&archive, "demo", "1.0.0");
+        response["package_manifest"] =
+            serde_json::to_value(toml::from_str::<toml::Value>(manifest).unwrap()).unwrap();
+        restore_pulled_project(&response, &output, false).unwrap();
+        for path in [
+            "cargo-ai-actions.json",
+            "client-action-controls.js",
+            "client-action-coordinator.json",
+            "client-action-review.json",
+        ] {
+            assert_eq!(
+                fs::read(source.join(path)).unwrap(),
+                fs::read(output.join(path)).unwrap()
+            );
+        }
+        let catalog = crate::commands::client_actions::discover(&output).unwrap();
+        assert_eq!(catalog.actions.len(), 3);
+        fs::write(source.join("client-action-controls.js"), "changed bytes").unwrap();
+        let changed = create_package_archive_bytes(&source).unwrap();
+        response["package_archive_base64"] =
+            serde_json::json!(base64::engine::general_purpose::STANDARD.encode(changed));
+        assert!(restore_pulled_project(&response, &output, true).is_err());
+        assert_eq!(
+            catalog.binding,
+            crate::commands::client_actions::discover(&output)
+                .unwrap()
+                .binding
+        );
+        fs::remove_dir_all(source).unwrap();
+        fs::remove_dir_all(output).unwrap();
+    }
+
+    #[test]
     fn forced_pull_restores_existing_output_after_late_activation_failure() {
         let transaction_root = temp_dir("transaction-late-failure");
         let source_root = transaction_root.join("source");

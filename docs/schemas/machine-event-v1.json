@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cargo-ai.org/schemas/machine-event-v1.json",
   "title": "Cargo AI run event v1",
-  "$comment": "Normal run NDJSON frames. Enforce 65536 bytes per progress record and 8388608 bytes per terminal record outside JSON Schema. Consumers must verify equal operation/root/invocation IDs, contiguous sequence, one start and one terminal frame, and matching terminal request_id. A bootstrap/crash/forced-kill or delivery failure can yield incomplete output.",
+  "$comment": "Normal run NDJSON frames. Enforce 65536 bytes per progress record and 8388608 bytes per terminal record outside JSON Schema. Consumers must verify equal operation/root/invocation IDs, contiguous sequence, one start and one terminal frame, and matching terminal request_id. A bootstrap/crash/forced-kill or delivery failure can yield incomplete output. Declared action correlation is additive after resolution; operation_started precedes validation and has no client_action. Correlation does not grant authority or idempotency.",
   "type": "object",
   "properties": {
     "schema_version": {
@@ -11,6 +11,7 @@
     "event_type": {
       "enum": [
         "operation_started",
+        "client_action_resolved",
         "provider_completed",
         "thinking_resolved",
         "action_started",
@@ -45,6 +46,9 @@
     },
     "data": {
       "type": "object"
+    },
+    "client_action": {
+      "$ref": "#/$defs/client_action"
     }
   },
   "required": [
@@ -59,6 +63,22 @@
   ],
   "additionalProperties": true,
   "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "client_action_resolved"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/client_action"
+          }
+        }
+      }
+    },
     {
       "if": {
         "properties": {
@@ -442,5 +462,29 @@
         }
       }
     }
-  ]
+  ],
+  "$defs": {
+    "client_action": {
+      "type": "object",
+      "properties": {
+        "interface": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "binding": {
+          "$ref": "action-binding-v1.json"
+        }
+      },
+      "required": [
+        "interface",
+        "action",
+        "binding"
+      ],
+      "additionalProperties": true
+    }
+  }
 }

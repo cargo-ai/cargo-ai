@@ -6,6 +6,10 @@ Use this file when a user opens a blank folder and wants help creating their fir
 
 Model selection works without a thinking setting. When a user requests one, inspect installed capabilities, then query exact choices with `cargo ai models thinking --profile NAME --model MODEL_ID --output-format json`. A profile or invocation may use `--thinking VALUE` or `--thinking-provider-default`; profile set also supports `--clear-thinking`. Choices depend on the model/connection and have no universal ordering. Unavailable choices use provider default with an explanation. See [Thinking Selection](agent-definition-contract.md#thinking-selection) for action revision `2026-10-01.r1`, inheritance, child forwarding and rebuild limits.
 
+## Client Controls
+
+When the user wants buttons, native controls or page-free calls to declared agents, use `client-actions.md`. Keep task behavior in agents/coordinators, declare bounded business inputs, and let the client supply authorized execution/settings and verified resources. A schedule is a client policy over the same serialized request. Capability-probe the selected binary before promising support.
+
 ## First-Run Goal
 
 Do not start by asking the user to choose between a single agent, an action agent, or a parent/child setup.

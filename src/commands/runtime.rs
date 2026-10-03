@@ -1009,10 +1009,12 @@ fn configured_agent_action_max_depth_with_project_default(
     cli_override: Option<u32>,
     project_default: Option<u32>,
 ) -> u32 {
-    cli_override
-        .or_else(inherited_agent_action_max_depth)
-        .or(project_default)
-        .unwrap_or(DEFAULT_AGENT_ACTION_MAX_DEPTH)
+    crate::execution_policy::depth_limit(
+        cli_override
+            .or_else(inherited_agent_action_max_depth)
+            .or(project_default)
+            .unwrap_or(DEFAULT_AGENT_ACTION_MAX_DEPTH),
+    )
 }
 
 fn load_project_runtime_defaults(
@@ -1153,6 +1155,32 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     package_context: Option<crate::commands::local_packages::InstalledPackageRuntimeContext>,
     attribution_input: Option<crate::usage_attribution::AttributionInput>,
 ) -> bool {
+    match crate::execution_policy::scope_inherited(Box::pin(run_with_definition_scoped(
+        sub_m,
+        definition,
+        project_root,
+        usage_agent_info,
+        package_context,
+        attribution_input,
+    )))
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("x {error}");
+            false
+        }
+    }
+}
+
+async fn run_with_definition_scoped(
+    sub_m: &ArgMatches,
+    definition: &dyn InvocationDefinition,
+    project_root: Option<PathBuf>,
+    usage_agent_info: Option<serde_json::Value>,
+    package_context: Option<crate::commands::local_packages::InstalledPackageRuntimeContext>,
+    attribution_input: Option<crate::usage_attribution::AttributionInput>,
+) -> bool {
     let full_run_started_at = std::time::Instant::now();
 
     // Begin: Argument assignments
@@ -1250,6 +1278,15 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         inference_timeout_in_sec = timeout_arg;
     }
 
+    if let Err(error) = crate::execution_policy::check_explicit_limits(
+        sub_m.get_one::<u32>("max_output_tokens").copied(),
+        sub_m.get_one::<u64>("max_runtime_in_sec").copied(),
+        sub_m.get_one::<u32>("max_agent_depth").copied(),
+    ) {
+        eprintln!("x {error}");
+        return false;
+    }
+
     let max_agent_depth = configured_agent_action_max_depth_with_project_default(
         sub_m.get_one::<u32>("max_agent_depth").copied(),
         project_runtime_defaults
@@ -1278,6 +1315,22 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         }
     };
 
+    max_output_tokens = crate::execution_policy::output_limit(max_output_tokens);
+    if let Err(error) = crate::execution_policy::check(
+        selected_profile
+            .as_ref()
+            .map(|profile| profile.name.as_str()),
+        crate::execution_policy::RequestKind::Text,
+        crate::execution_policy::ModelSelection::named_or_default(&model),
+        thinking.as_ref(),
+        max_output_tokens,
+    ) {
+        eprintln!("x {error}");
+        return false;
+    }
+
+    #[cfg(test)]
+    crate::execution_policy::note_boundary("credentials");
     let has_explicit_token_override = explicit_token_override.is_some();
     if let Some((kind, profile_name)) = loaded_profile_message.as_ref() {
         for line in profile_selection_messages(
@@ -3283,6 +3336,62 @@ mod tests {
             result.is_ok(),
             "schema-backed agents should keep accepting inputs"
         );
+    }
+
+    #[tokio::test]
+    async fn policy_explicit_limit_expansion_fails_before_runtime_effects() {
+        let policy = crate::execution_policy::ExecutionPolicy::parse(&serde_json::json!({
+            "version":1,"allowed":[{"profile":null,"request_kind":"text","model":{"kind":"named","value":"fixture"},"thinking":{"mode":"provider_default"}}],
+            "limits":{"max_runtime_secs":60,"max_output_tokens":100,"max_agent_depth":2}
+        })).unwrap();
+        let definition = test_runtime_definition();
+        let before = crate::execution_policy::boundary_counts();
+        for (flag, value) in [
+            ("--max-output-tokens", "101"),
+            ("--max-runtime-in-sec", "61"),
+            ("--max-agent-depth", "3"),
+        ] {
+            let cmd = matches(&[
+                "cargo-ai", "run", "--server", "openai", "--model", "fixture", flag, value,
+            ]);
+            let runtime = cmd.subcommand_matches("run").unwrap();
+            policy
+                .scope(async {
+                    assert!(
+                        !super::run_with_definition_in_context(runtime, &definition, None).await
+                    );
+                    assert_eq!(crate::execution_policy::boundary_counts(), before);
+                })
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_root_denial_precedes_credentials_sessions_and_discovery() {
+        let policy = crate::execution_policy::ExecutionPolicy::parse(&serde_json::json!({
+            "version":1,"allowed":[],"limits":{"max_runtime_secs":60,"max_output_tokens":100,"max_agent_depth":2}
+        })).unwrap();
+        let definition = test_runtime_definition();
+        let cmd = matches(&[
+            "cargo-ai",
+            "run",
+            "--server",
+            "openai",
+            "--model",
+            "gpt-4o-mini",
+            "--thinking",
+            "high",
+            "--input-text",
+            "fixture",
+        ]);
+        let runtime = cmd.subcommand_matches("run").unwrap();
+        let before = crate::execution_policy::boundary_counts();
+        policy
+            .scope(async {
+                assert!(!super::run_with_definition_in_context(runtime, &definition, None).await);
+                assert_eq!(crate::execution_policy::boundary_counts(), before);
+            })
+            .await;
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@ mod agents;
 mod auth;
 #[cfg(feature = "developer-tools")]
 mod build;
+mod client_actions;
 mod credentials;
 mod guidance;
 #[cfg(feature = "developer-tools")]
@@ -56,6 +57,7 @@ fn cli_command(bin_name: &'static str) -> Command {
 
     command
         .subcommand(models::command())
+        .subcommand(client_actions::command())
         .subcommand(crate::commands::machine::command())
         .subcommand(new::command())
         .subcommand(init::command())

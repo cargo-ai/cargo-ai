@@ -12,6 +12,7 @@ Cargo AI turns readable JSON agent definitions into directly runnable workflows 
 
 - [Define inputs and structured output](./agent-definitions.md)
 - [Add actions and child agents](./actions-and-child-agents.md)
+- [Expose portable client actions](./client-actions.md)
 - [Work with projects and local tools](./projects-and-tools.md)
 
 ## Share and Manage

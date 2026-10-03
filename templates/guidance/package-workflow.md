@@ -42,6 +42,10 @@ Before building, use `cargo ai requirements --build-profile release` to inspect 
 
 The package permission request is also explicit. Omit `[package.permissions]` when subprocess execution is not needed; Cargo AI keeps it blocked by default. Unsupported permission keys or values fail during packaging. A hosted install or version transition still requires the user to review and accept an `allowed` subprocess request. Treat that acceptance as a publisher-trust decision: hosted Rust tool materialization may execute build scripts, procedural macros, and related Cargo build-time code without an operating-system sandbox, using the current user's ambient filesystem, environment, and network authority.
 
+## Client Action Assets
+
+For project-authored controls, use `client-actions.md`. Include project-root `cargo-ai-actions.json` and every declared presentation resource explicitly in the selected profile's `assets`. Include all catalog entrypoints in `agent_definitions` or `hatched_agents`; build/package validates references without copying excluded agents implicitly. The package format and strict inspection contract retain their own versions. A missing sidecar is an ordinary package; a malformed or unsupported present catalog fails before install replaces active state. Resource discovery returns verified bytes/identity rather than an internal package-store path. Existing permission acceptance, leases, `runtime/` rebuild rules and `data/` preservation still apply.
+
 ## Build And Local Install
 
 ```bash
