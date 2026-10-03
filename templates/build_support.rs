@@ -196,6 +196,7 @@ struct RunStep {
     reference_images: Option<Vec<GenerateImageReferenceSpec>>,
     input_mode: Option<ActionInputMode>,
     ignore_tools: bool,
+    produces_result: bool,
     platforms: Option<Vec<String>>,
 }
 
@@ -280,6 +281,7 @@ struct AgentConfig {
     actions: Vec<Action>,
     strict_definition: bool,
     rubric_enabled: bool,
+    result_declaration: Option<Value>,
 }
 
 // Shared build module: these symbols are used by cargo-ai's root build script,
@@ -541,6 +543,7 @@ fn parse_agent_config(root: &Value) -> Result<AgentConfig, BuildError> {
     )?;
 
     Ok(AgentConfig {
+        result_declaration: root.get("result").cloned(),
         inputs,
         runtime_vars,
         properties: parsed_properties,
@@ -828,7 +831,13 @@ fn parse_actions(
     let thinking_enabled = root_obj
         .get(AGENT_DEFINITION_SCHEMA_VERSION_KEY)
         .and_then(Value::as_str)
-        == Some(definition_validation::THINKING_SCHEMA_VERSION);
+        .is_some_and(|v| {
+            matches!(
+                v,
+                definition_validation::THINKING_SCHEMA_VERSION
+                    | definition_validation::RESULT_SCHEMA_VERSION
+            )
+        });
     let mut parsed = Vec::with_capacity(actions.len());
 
     for (action_idx, action_value) in actions.iter().enumerate() {
@@ -1012,6 +1021,7 @@ fn parse_actions(
                         reference_images: None,
                         input_mode: None,
                         ignore_tools: false,
+                        produces_result: false,
                         platforms,
                     }
                 }
@@ -1148,6 +1158,7 @@ fn parse_actions(
                         reference_images: None,
                         input_mode: None,
                         ignore_tools: false,
+                        produces_result: false,
                         platforms,
                     }
                 }
@@ -1291,6 +1302,7 @@ fn parse_actions(
                         reference_images: None,
                         input_mode,
                         ignore_tools,
+                        produces_result: false,
                         platforms,
                     }
                 }
@@ -1437,6 +1449,10 @@ fn parse_actions(
                         reference_images: None,
                         input_mode: None,
                         ignore_tools: false,
+                        produces_result: run_obj
+                            .get("produces_result")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
                         platforms,
                     }
                 }
@@ -1596,6 +1612,7 @@ fn parse_actions(
                         reference_images,
                         input_mode: None,
                         ignore_tools: false,
+                        produces_result: false,
                         platforms,
                     }
                 }
@@ -1676,6 +1693,7 @@ fn parse_actions(
                         reference_images: None,
                         input_mode: None,
                         ignore_tools: false,
+                        produces_result: false,
                         platforms,
                     }
                 }
@@ -1741,6 +1759,7 @@ fn parse_actions(
                         reference_images: None,
                         input_mode: None,
                         ignore_tools: false,
+                        produces_result: false,
                         platforms,
                     }
                 }
@@ -4672,6 +4691,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         reference_images: {},
                         input_mode: {},
                         ignore_tools: {},
+                        produces_result: {},
                         platforms: {},
                     }}",
                     rust_string_literal(&run_step.kind),
@@ -4707,6 +4727,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     reference_images,
                     input_mode,
                     run_step.ignore_tools,
+                    run_step.produces_result,
                     platforms
                 )
             })
@@ -4763,6 +4784,16 @@ fn render_agent_model(config: &AgentConfig) -> String {
         .join("");
     let has_output_schema_properties = !config.properties.is_empty();
     let rubric_enabled = config.rubric_enabled;
+    let result_declaration = config
+        .result_declaration
+        .as_ref()
+        .map(|value| {
+            format!(
+                "Some(serde_json::from_str({}).expect(\"generated result declaration\"))",
+                rust_string_literal(&value.to_string())
+            )
+        })
+        .unwrap_or_else(|| "None".to_string());
     let action_execution = match config.action_execution {
         ActionExecutionMode::Sequential => "ActionExecutionMode::Sequential",
         ActionExecutionMode::Parallel => "ActionExecutionMode::Parallel",
@@ -4836,6 +4867,10 @@ pub fn inputs() -> Vec<Input> {{
 
 pub fn has_output_schema_properties() -> bool {{
     {has_output_schema_properties}
+}}
+
+pub fn result_declaration() -> Option<serde_json::Value> {{
+    {result_declaration}
 }}
 
 pub fn rubric_enabled() -> bool {{
@@ -4986,6 +5021,8 @@ pub struct RunStep {{
     reference_images: Option<Vec<GenerateImageReference>>,
     input_mode: Option<ActionInputMode>,
     ignore_tools: bool,
+    #[serde(default)]
+    produces_result: bool,
     platforms: Option<Vec<String>>,
 }}
 

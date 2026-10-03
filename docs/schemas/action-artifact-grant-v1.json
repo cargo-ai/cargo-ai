@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/action-artifact-grant-v1.json",
+  "title": "Cargo AI trusted-host-only artifact read grant",
+  "$comment": "Never forward this record or its locator to an untrusted page. reference is a content identity, not a signature, bearer permission or proof of historical issuance. Native consent and exact registry lookup authorize use; CLI verifies context, confinement and bytes.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "reference": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "mime_type": {
+      "enum": [
+        "text/plain",
+        "application/json",
+        "image/png",
+        "audio/wav"
+      ]
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4194304
+    },
+    "content_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "interface": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+      "not": {
+        "enum": [
+          "constructor",
+          "prototype",
+          "__proto__"
+        ]
+      }
+    },
+    "binding": {
+      "$ref": "action-binding-v1.json"
+    },
+    "data_context_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "scope": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+      "not": {
+        "enum": [
+          "constructor",
+          "prototype",
+          "__proto__"
+        ]
+      }
+    },
+    "relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    }
+  },
+  "required": [
+    "schema_version",
+    "reference",
+    "mime_type",
+    "size_bytes",
+    "content_sha256",
+    "interface",
+    "binding",
+    "data_context_sha256",
+    "scope",
+    "relative_path"
+  ],
+  "additionalProperties": false
+}

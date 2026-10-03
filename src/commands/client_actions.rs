@@ -1,4 +1,4 @@
-//! Passive declared actions and immutable resources for application callers.
+//! Declared actions, business inputs and authorized resources for application callers.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -24,7 +24,7 @@ pub(crate) struct ActionError {
     pub(crate) message: &'static str,
 }
 impl ActionError {
-    fn new(code: &'static str, message: &'static str) -> Self {
+    pub(crate) fn new(code: &'static str, message: &'static str) -> Self {
         Self { code, message }
     }
     fn catalog(_: impl std::fmt::Display) -> Self {
@@ -112,6 +112,8 @@ pub(crate) struct InterfaceDocument {
     pub(crate) resources: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) presentation: Option<PresentationDocument>,
+    #[serde(default)]
+    pub(crate) artifact_scopes: Vec<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -133,6 +135,8 @@ struct CatalogDocument {
     interfaces: Vec<InterfaceDocument>,
     #[serde(default)]
     resources: Vec<ResourceDocument>,
+    #[serde(default)]
+    artifact_scopes: Vec<super::action_artifacts::ArtifactScope>,
 }
 
 /// Opaque content identity. A source root, target, or resource change invalidates it.
@@ -158,9 +162,12 @@ pub(crate) struct ActionCatalog {
     pub(crate) limits: Value,
     pub(crate) capabilities: Vec<&'static str>,
     pub(crate) binding: ActionBinding,
-    pub(crate) actions: Vec<ActionDocument>,
+    pub(crate) actions: Vec<Value>,
     pub(crate) resources: Vec<ResourceDocument>,
     pub(crate) interfaces: Vec<InterfaceDocument>,
+    pub(crate) artifact_scopes: Vec<super::action_artifacts::ArtifactScope>,
+    pub(crate) supported_catalog_versions: Vec<u32>,
+    pub(crate) supported_request_versions: Vec<u32>,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -173,6 +180,8 @@ pub(crate) struct ActionRequest {
     pub(crate) execution_policy: Value,
     #[serde(default)]
     pub(crate) attachment_grants: BTreeMap<String, AttachmentGrant>,
+    #[serde(default)]
+    pub(crate) artifact_access: Option<super::action_artifacts::Permission>,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -192,6 +201,7 @@ pub(crate) struct PreparedAction {
     pub(crate) input_overrides: Vec<String>,
     pub(crate) installed: Option<super::local_packages::CheckedInstalledPackageRuntime>,
     pub(crate) execution_policy: Value,
+    pub(crate) artifact_context: Option<super::action_artifacts::Context>,
 }
 struct LoadedCatalog {
     root: PathBuf,
@@ -269,6 +279,160 @@ struct ResourceRequest {
     resource: String,
     expected_binding: ActionBinding,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactReadRequest {
+    schema_version: u32,
+    interface: String,
+    expected_binding: ActionBinding,
+    reference: String,
+    read_grant: super::action_artifacts::ReadGrant,
+}
+
+fn artifact_error(error: super::action_artifacts::ArtifactError) -> ActionError {
+    ActionError::new(error.code, error.message)
+}
+
+fn artifact_context(
+    loaded: &LoadedCatalog,
+    interface: &InterfaceDocument,
+    allowed_scopes: Vec<String>,
+) -> Result<super::action_artifacts::Context, ActionError> {
+    let (data_root, identity) = if let Some(installed) = &loaded.installed {
+        let receipt_identity = super::local_packages::artifact_installation_identity(installed)
+            .map_err(|_| {
+                ActionError::new(
+                    "artifact.stale_context",
+                    "The installed artifact context could not be verified.",
+                )
+            })?;
+        (
+            installed.context.package_data_root.clone(),
+            json!({"installation":receipt_identity,"root":installed.context.package_data_root}),
+        )
+    } else {
+        let config = super::action_artifacts::read_owned_bytes(
+            &loaded.root,
+            ".cargo-ai/project.toml",
+            MAX_DEFINITION_BYTES,
+        )
+        .map_err(|_| {
+            ActionError::new(
+                "artifact.stale_context",
+                "The project artifact context could not be verified.",
+            )
+        })?;
+        let metadata = std::str::from_utf8(&config).ok().ok_or_else(|| {
+            ActionError::new(
+                "artifact.stale_context",
+                "The project artifact context could not be verified.",
+            )
+        })?;
+        if !super::runtime_data::uses_project_data(metadata).map_err(|_| {
+            ActionError::new(
+                "artifact.stale_context",
+                "The project artifact context could not be verified.",
+            )
+        })? {
+            return Err(ActionError::new(
+                "artifact.access_denied",
+                "Artifact scopes require explicit project runtime-data adoption.",
+            ));
+        }
+        let path = loaded.root.join(super::runtime_data::PROJECT_DATA_PATH);
+        (
+            path,
+            json!({"project":loaded.root,"configuration":sha256(&config)}),
+        )
+    };
+    let mut identity_bytes = b"cargo-ai.artifact-data-context.v1\0".to_vec();
+    identity_bytes.extend(serde_json::to_vec(&identity).map_err(ActionError::catalog)?);
+    Ok(super::action_artifacts::Context {
+        data_root,
+        data_context_sha256: sha256(&identity_bytes),
+        interface: interface.id.clone(),
+        binding: serde_json::to_value(&loaded.binding).map_err(ActionError::catalog)?,
+        scopes: loaded.document.artifact_scopes.clone(),
+        allowed_scopes,
+    })
+}
+
+tokio::task_local! {
+    static RESULT_ARTIFACT_CONTEXT: Option<super::action_artifacts::Context>;
+}
+
+pub(crate) async fn scope_result_artifacts<F: std::future::Future>(
+    context: Option<super::action_artifacts::Context>,
+    future: F,
+) -> F::Output {
+    RESULT_ARTIFACT_CONTEXT.scope(context, future).await
+}
+
+pub(crate) fn current_result_artifact_context() -> Option<super::action_artifacts::Context> {
+    RESULT_ARTIFACT_CONTEXT
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn validate_result_artifact_scopes(scopes: &[String]) -> Result<(), String> {
+    if scopes.is_empty() {
+        return Ok(());
+    }
+    let context = current_result_artifact_context().ok_or_else(|| {
+        "artifact.access_denied: A declared action and native artifact permission are required."
+            .to_string()
+    })?;
+    if scopes
+        .iter()
+        .any(|scope| !context.allowed_scopes.contains(scope))
+    {
+        return Err(
+            "artifact.access_denied: Producer scopes exceed the authorized action scopes.".into(),
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn export_result_artifacts(
+    nominations: &[crate::business_schema::ArtifactNomination],
+    scopes: &[String],
+) -> Result<(), String> {
+    if nominations.is_empty() {
+        return Ok(());
+    }
+    let result = (|| {
+        let mut context = current_result_artifact_context().ok_or_else(|| {
+            ActionError::new(
+                "artifact.access_denied",
+                "Artifact export requires a declared authorized action.",
+            )
+        })?;
+        validate_result_artifact_scopes(scopes).map_err(|_| {
+            ActionError::new(
+                "artifact.access_denied",
+                "Artifact producer scopes are not authorized.",
+            )
+        })?;
+        context.allowed_scopes.retain(|id| scopes.contains(id));
+        super::action_artifacts::issue(&context, nominations).map_err(artifact_error)
+    })();
+    match result {
+        Ok((references, grants)) => {
+            super::machine::record_result_artifacts(json!(references), json!(grants));
+            Ok(())
+        }
+        Err(_) => {
+            let message = "Artifact export failed; committed business effects may remain. No artifact grants were issued.";
+            super::machine::record_error(
+                super::machine::Failure::new("artifact.export_failed", message)
+                    .with_data(json!({"partial":true})),
+            );
+            Err(format!("artifact.export_failed: {message}"))
+        }
+    }
+}
+
 pub(crate) fn machine_run(matches: &clap::ArgMatches) -> Result<Value, super::machine::Failure> {
     let (command, args) = matches.subcommand().ok_or_else(|| {
         super::machine::Failure::new("cli.invalid_input", "Missing actions command.")
@@ -301,9 +465,62 @@ pub(crate) fn machine_run(matches: &clap::ArgMatches) -> Result<Value, super::ma
             }
             let prepared = prepare(&target.root, &request).map_err(action_failure)?;
             Ok(
-                json!({"schema_version":1,"valid":true,"execution_authorized":false,"interface":prepared.interface,"action":prepared.action,"binding":prepared.binding,
+                json!({"schema_version":2,"valid":true,"execution_authorized":false,"interface":prepared.interface,"action":prepared.action,"binding":prepared.binding,
                 "mappings":{"runtime_vars":prepared.run_vars.iter().filter_map(|value|value.split_once('=').map(|(name,_)|name)).collect::<Vec<_>>(),"inputs":prepared.input_overrides.iter().filter_map(|value|value.split_once('=').map(|(name,_)|name)).collect::<Vec<_>>()}}),
             )
+        }
+        "artifact" => {
+            let raw = read_request_stdin().map_err(|_| {
+                super::machine::Failure::new(
+                    "artifact.invalid_request",
+                    "Invalid bounded artifact request.",
+                )
+            })?;
+            let value =
+                crate::business_schema::strict_json_bounded(raw.as_bytes(), MAX_REQUEST_BYTES, 32)
+                    .map_err(|_| {
+                        super::machine::Failure::new(
+                            "artifact.invalid_request",
+                            "Invalid artifact request JSON.",
+                        )
+                    })?;
+            let request: ArtifactReadRequest = serde_json::from_value(value).map_err(|_| {
+                super::machine::Failure::new(
+                    "artifact.invalid_request",
+                    "Invalid artifact request.",
+                )
+            })?;
+            if request.schema_version != 1
+                || args.get_one::<String>("interface") != Some(&request.interface)
+            {
+                return Err(super::machine::Failure::new(
+                    "artifact.invalid_request",
+                    "Artifact selectors or request revision do not match.",
+                ));
+            }
+            let loaded = load_catalog(&target.root).map_err(action_failure)?;
+            if loaded.binding != request.expected_binding {
+                return Err(super::machine::Failure::new(
+                    "artifact.stale_binding",
+                    "Artifact binding changed; obtain a fresh reference.",
+                ));
+            }
+            let interface = loaded
+                .document
+                .interfaces
+                .iter()
+                .find(|interface| interface.id == request.interface)
+                .ok_or_else(|| {
+                    super::machine::Failure::new(
+                        "artifact.access_denied",
+                        "The artifact interface is unavailable.",
+                    )
+                })?;
+            let context = artifact_context(&loaded, interface, interface.artifact_scopes.clone())
+                .map_err(action_failure)?;
+            // Both the target and catalog leases remain held until verified bytes are returned.
+            super::action_artifacts::read(&context, &request.read_grant, &request.reference)
+                .map_err(|error| super::machine::Failure::new(error.code, error.message))
         }
         "resource" => {
             let raw =
@@ -350,18 +567,38 @@ pub(crate) fn action_failure(error: ActionError) -> super::machine::Failure {
 }
 
 pub(crate) fn limits() -> Value {
-    json!({"catalog_bytes":MAX_CATALOG_BYTES,"actions":256,"interfaces":64,"resources":64,"request_bytes":MAX_REQUEST_BYTES,"business_depth":MAX_DEPTH,"array_items":1024,"object_members":MAX_MEMBERS,"resource_bytes":MAX_RESOURCE_BYTES,"inventory_bytes":MAX_INVENTORY_BYTES,"definition_bytes":MAX_DEFINITION_BYTES,"attachment_bytes":MAX_ATTACHMENT_BYTES,"string_bytes":64*1024})
+    json!({"catalog_bytes":MAX_CATALOG_BYTES,"actions":256,"interfaces":64,"resources":64,"request_bytes":MAX_REQUEST_BYTES,"business_depth":MAX_DEPTH,"array_items":1024,"object_members":MAX_MEMBERS,"resource_bytes":MAX_RESOURCE_BYTES,"inventory_bytes":MAX_INVENTORY_BYTES,"definition_bytes":MAX_DEFINITION_BYTES,"attachment_bytes":MAX_ATTACHMENT_BYTES,"string_bytes":64*1024,"business_key_bytes":128,"result_bytes":65536,"producer_payload_bytes":131072,"artifact":{"read_types":super::action_artifacts::SUPPORTED_TYPES,"file_bytes":super::action_artifacts::MAX_ARTIFACT_BYTES,"request_bytes":super::action_artifacts::MAX_REQUEST_BYTES,"nominations":64,"format_chunks":4096,"json_depth":32,"json_nodes":65536,"response_bytes":8*1024*1024,"native_confinement":cfg!(any(target_os="linux",target_os="macos",windows)),"authorization":"trusted_host_grant"}})
 }
 pub(crate) fn discover(root: &Path) -> Result<ActionCatalog, ActionError> {
     let loaded = load_catalog(root)?;
+    let actions = loaded
+        .document
+        .actions
+        .iter()
+        .map(|action| {
+            let mut value = serde_json::to_value(action).map_err(ActionError::catalog)?;
+            let definition =
+                strict_json(&loaded.files[&action.target]).map_err(ActionError::catalog)?;
+            value["result"] = definition.get("result").cloned().unwrap_or(Value::Null);
+            Ok(value)
+        })
+        .collect::<Result<Vec<_>, ActionError>>()?;
     Ok(ActionCatalog {
-        schema_version: 1,
+        schema_version: 2,
         limits: limits(),
-        capabilities: vec!["execution_policy.v1"],
+        capabilities: vec![
+            "execution_policy.v1",
+            "business_inputs.v1",
+            "structured_results.v1",
+            "artifact_access.v1",
+        ],
         binding: loaded.binding,
-        actions: loaded.document.actions,
+        actions,
         resources: loaded.document.resources,
         interfaces: loaded.document.interfaces,
+        artifact_scopes: loaded.document.artifact_scopes,
+        supported_catalog_versions: vec![2],
+        supported_request_versions: vec![2],
     })
 }
 pub(crate) fn parse_request(raw: &str) -> Result<ActionRequest, ActionError> {
@@ -371,7 +608,7 @@ pub(crate) fn parse_request(raw: &str) -> Result<ActionRequest, ActionError> {
     let value = strict_json(raw.as_bytes()).map_err(ActionError::inputs)?;
     validate_envelope_bounds(&value, 0).map_err(ActionError::inputs)?;
     if let Some(version) = value.get("schema_version").and_then(Value::as_u64) {
-        if version != 1 {
+        if version != 2 {
             return Err(ActionError::new(
                 "action.unsupported_contract",
                 "Unsupported action request contract version.",
@@ -393,7 +630,7 @@ pub(crate) fn parse_request(raw: &str) -> Result<ActionRequest, ActionError> {
     Ok(request)
 }
 pub(crate) fn prepare(root: &Path, request: &ActionRequest) -> Result<PreparedAction, ActionError> {
-    if request.schema_version != 1 {
+    if request.schema_version != 2 {
         return Err(ActionError::new(
             "action.unsupported_contract",
             "Unsupported action request contract version.",
@@ -455,6 +692,27 @@ pub(crate) fn prepare(root: &Path, request: &ActionRequest) -> Result<PreparedAc
     let definition_json = String::from_utf8(definition_bytes.clone())
         .map_err(|_| "Action definition must be UTF-8 JSON".to_string())?;
     let definition = crate::runtime_definition::RuntimeAgentDefinition::from_str(&definition_json)?;
+    let raw_definition = strict_json(definition_json.as_bytes()).map_err(ActionError::catalog)?;
+    let producer_scopes: Vec<String> = serde_json::from_value(
+        raw_definition
+            .get("result")
+            .and_then(|value| value.get("artifact_scopes"))
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    )
+    .map_err(ActionError::catalog)?;
+    let allowed_scopes = super::action_artifacts::validate_access(
+        &loaded.document.artifact_scopes,
+        &interface.artifact_scopes,
+        &producer_scopes,
+        request.artifact_access.as_ref(),
+    )
+    .map_err(artifact_error)?;
+    let artifact_context = if allowed_scopes.is_empty() {
+        None
+    } else {
+        Some(artifact_context(&loaded, interface, allowed_scopes)?)
+    };
     let named = definition.named_inputs();
     let mut run_vars = action
         .constants
@@ -622,6 +880,7 @@ pub(crate) fn prepare(root: &Path, request: &ActionRequest) -> Result<PreparedAc
         input_overrides,
         installed: loaded.installed,
         execution_policy: request.execution_policy.clone(),
+        artifact_context,
     })
 }
 pub(crate) fn resource(
@@ -708,7 +967,7 @@ fn load_catalog(root: &Path) -> Result<LoadedCatalog, ActionError> {
     validate_envelope_bounds(&value, 0)?;
     let document: CatalogDocument =
         serde_json::from_value(value).map_err(|e| format!("Invalid action catalog: {e}"))?;
-    if document.schema_version != 1 {
+    if document.schema_version != 2 {
         return Err(ActionError::new(
             "action.unsupported_contract",
             "Unsupported action catalog contract version.",
@@ -725,6 +984,7 @@ fn load_catalog(root: &Path) -> Result<LoadedCatalog, ActionError> {
                 .into(),
         );
     }
+    super::action_artifacts::validate_scopes(&document.artifact_scopes).map_err(artifact_error)?;
     let mut ids = BTreeSet::new();
     let mut files = BTreeMap::new();
     let mut total_bytes = bytes.len();
@@ -755,7 +1015,14 @@ fn load_catalog(root: &Path) -> Result<LoadedCatalog, ActionError> {
             std::str::from_utf8(&target_bytes).map_err(|_| "Action definition must be UTF-8")?;
         let definition = crate::runtime_definition::RuntimeAgentDefinition::from_str(text)?;
         for capability in &action.required_capabilities {
-            if capability != "execution_policy.v1" {
+            if ![
+                "execution_policy.v1",
+                "business_inputs.v1",
+                "structured_results.v1",
+                "artifact_access.v1",
+            ]
+            .contains(&capability.as_str())
+            {
                 return Err(ActionError::new(
                     "action.unsupported_capability",
                     "The action requires an unsupported execution capability.",
@@ -822,6 +1089,14 @@ fn load_catalog(root: &Path) -> Result<LoadedCatalog, ActionError> {
         {
             return Err("Interface subsets exceed their limits or contain no action.".into());
         }
+        // Check interface declarations without conferring runtime permission.
+        super::action_artifacts::validate_access(
+            &document.artifact_scopes,
+            &interface.artifact_scopes,
+            &[],
+            None,
+        )
+        .map_err(artifact_error)?;
         let mut action_ids = BTreeSet::new();
         for id in &interface.actions {
             if !action_ids.insert(id) || !document.actions.iter().any(|action| &action.id == id) {
@@ -871,76 +1146,9 @@ fn load_catalog(root: &Path) -> Result<LoadedCatalog, ActionError> {
     })
 }
 
-// Retain duplicate-key rejection before converting catalogs/requests to Value;
-// ordinary JSON maps would otherwise silently replace earlier declarations.
-fn strict_json(bytes: &[u8]) -> Result<Value, serde_json::Error> {
-    struct UniqueValue(Value);
-    impl<'de> Deserialize<'de> for UniqueValue {
-        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            struct Visitor;
-            impl<'de> serde::de::Visitor<'de> for Visitor {
-                type Value = UniqueValue;
-                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                    f.write_str("JSON with unique object keys")
-                }
-                fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
-                    Ok(UniqueValue(Value::Bool(value)))
-                }
-                fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
-                    Ok(UniqueValue(value.into()))
-                }
-                fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
-                    Ok(UniqueValue(value.into()))
-                }
-                fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
-                    serde_json::Number::from_f64(value)
-                        .map(|n| UniqueValue(Value::Number(n)))
-                        .ok_or_else(|| E::custom("Nonfinite number"))
-                }
-                fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                    Ok(UniqueValue(value.into()))
-                }
-                fn visit_string<E: serde::de::Error>(
-                    self,
-                    value: String,
-                ) -> Result<Self::Value, E> {
-                    Ok(UniqueValue(value.into()))
-                }
-                fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                    Ok(UniqueValue(Value::Null))
-                }
-                fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                    Ok(UniqueValue(Value::Null))
-                }
-                fn visit_seq<A: serde::de::SeqAccess<'de>>(
-                    self,
-                    mut sequence: A,
-                ) -> Result<Self::Value, A::Error> {
-                    let mut values = Vec::new();
-                    while let Some(UniqueValue(value)) = sequence.next_element()? {
-                        values.push(value);
-                    }
-                    Ok(UniqueValue(Value::Array(values)))
-                }
-                fn visit_map<A: serde::de::MapAccess<'de>>(
-                    self,
-                    mut map: A,
-                ) -> Result<Self::Value, A::Error> {
-                    let mut values = Map::new();
-                    while let Some((key, UniqueValue(value))) =
-                        map.next_entry::<String, UniqueValue>()?
-                    {
-                        if values.insert(key, value).is_some() {
-                            return Err(serde::de::Error::custom("Duplicate JSON object key"));
-                        }
-                    }
-                    Ok(UniqueValue(Value::Object(values)))
-                }
-            }
-            deserializer.deserialize_any(Visitor)
-        }
-    }
-    serde_json::from_slice::<UniqueValue>(bytes).map(|UniqueValue(value)| value)
+// Reject duplicates and excessive structure before converting catalogs/requests to Value.
+fn strict_json(bytes: &[u8]) -> Result<Value, String> {
+    crate::business_schema::strict_json_bounded(bytes, MAX_DEFINITION_BYTES, 64)
 }
 
 fn insert_inventory(
@@ -1085,299 +1293,13 @@ fn validate_envelope_bounds(value: &Value, depth: usize) -> Result<(), String> {
     Ok(())
 }
 fn validate_value_bounds(value: &Value, depth: usize) -> Result<(), String> {
-    if depth > MAX_DEPTH {
-        return Err("Action JSON exceeds the eight-level nesting limit.".into());
-    }
-    match value {
-        Value::Object(values) => {
-            if values.len() > MAX_MEMBERS {
-                return Err("Action JSON object exceeds its 64-member limit.".into());
-            }
-            for (key, value) in values {
-                if key.len() > 1024 {
-                    return Err("Action JSON key exceeds its length limit.".into());
-                }
-                validate_value_bounds(value, depth + 1)?;
-            }
-        }
-        Value::Array(values) => {
-            if values.len() > 1024 {
-                return Err("Action JSON array exceeds its 1024-item limit.".into());
-            }
-            for value in values {
-                validate_value_bounds(value, depth + 1)?;
-            }
-        }
-        Value::String(text) if text.len() > 64 * 1024 => {
-            return Err("Action JSON string exceeds its 64 KiB limit.".into())
-        }
-        _ => {}
-    }
-    Ok(())
+    crate::business_schema::validate_value_bounds(value, depth)
 }
 fn validate_schema(schema: &Value, depth: usize) -> Result<(), String> {
-    if depth > MAX_DEPTH {
-        return Err("Action schema nesting exceeds its limit.".into());
-    }
-    let object = schema
-        .as_object()
-        .ok_or("Action input schemas must be objects")?;
-    let kind = object
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or("Action input schemas require one explicit type")?;
-    let allowed: &[&str] = match kind {
-        "object" => &[
-            "type",
-            "properties",
-            "required",
-            "additionalProperties",
-            "description",
-        ],
-        "array" => &["type", "items", "minItems", "maxItems", "description"],
-        "string" => &["type", "minLength", "maxLength", "enum", "description"],
-        "integer" | "number" => &["type", "minimum", "maximum", "enum", "description"],
-        "boolean" => &["type", "enum", "description"],
-        _ => return Err(format!("Unsupported action input schema type `{kind}`.")),
-    };
-    for key in object.keys() {
-        if !allowed.contains(&key.as_str()) {
-            return Err(format!("Unsupported action input schema keyword `{key}`.").into());
-        }
-    }
-    if object.get("description").is_some_and(|v| !v.is_string()) {
-        return Err("Schema description must be a string.".into());
-    }
-    match kind {
-        "object" => {
-            if object.get("additionalProperties") != Some(&Value::Bool(false)) {
-                return Err("Action object schemas require additionalProperties:false.".into());
-            }
-            let properties = object
-                .get("properties")
-                .and_then(Value::as_object)
-                .ok_or("Action object schemas require properties")?;
-            if properties.len() > MAX_MEMBERS {
-                return Err("Too many action input properties.".into());
-            }
-            for (name, schema) in properties {
-                identifier(name, "Action input name")?;
-                if matches!(
-                    name.as_str(),
-                    "profile"
-                        | "model"
-                        | "thinking"
-                        | "server"
-                        | "token"
-                        | "settings"
-                        | "config"
-                        | "execution_limits"
-                ) {
-                    return Err(
-                        "Action business schemas must not declare reserved execution fields."
-                            .into(),
-                    );
-                }
-                validate_schema(schema, depth + 1)?;
-            }
-            let mut seen = BTreeSet::new();
-            if let Some(required) = object.get("required") {
-                for value in required
-                    .as_array()
-                    .ok_or("Schema required must be an array")?
-                {
-                    let name = value
-                        .as_str()
-                        .ok_or("Schema required names must be strings")?;
-                    if !properties.contains_key(name) || !seen.insert(name) {
-                        return Err(
-                            "Schema required contains an undeclared or duplicate input.".into()
-                        );
-                    }
-                }
-            }
-        }
-        "array" => {
-            validate_schema(
-                object.get("items").ok_or("Action arrays require items")?,
-                depth + 1,
-            )?;
-            validate_range(object, "minItems", "maxItems", 1024)?;
-        }
-        "string" => {
-            validate_range(object, "minLength", "maxLength", 64 * 1024)?;
-        }
-        "integer" | "number" => {
-            for key in ["minimum", "maximum"] {
-                if object.get(key).is_some_and(|v| !v.is_number()) {
-                    return Err(format!("Schema {key} must be a number.").into());
-                }
-            }
-            if let (Some(min), Some(max)) = (
-                object.get("minimum").and_then(Value::as_f64),
-                object.get("maximum").and_then(Value::as_f64),
-            ) {
-                if min > max {
-                    return Err("Schema minimum exceeds maximum.".into());
-                }
-            }
-        }
-        _ => {}
-    }
-    if let Some(values) = object.get("enum") {
-        let values = values.as_array().ok_or("Schema enum must be an array")?;
-        if values.is_empty() || values.len() > 128 {
-            return Err("Schema enum requires 1–128 values.".into());
-        }
-        let mut base = object.clone();
-        base.remove("enum");
-        for (index, value) in values.iter().enumerate() {
-            validate_input_value(&Value::Object(base.clone()), value, depth)?;
-            if values[..index].contains(value) {
-                return Err("Schema enum contains duplicate values.".into());
-            }
-        }
-    }
-    Ok(())
-}
-fn validate_range(
-    object: &Map<String, Value>,
-    min_key: &str,
-    max_key: &str,
-    limit: u64,
-) -> Result<(), String> {
-    let mut min = 0;
-    let mut max = limit;
-    for (key, slot) in [(min_key, &mut min), (max_key, &mut max)] {
-        if let Some(value) = object.get(key) {
-            *slot = value.as_u64().filter(|n| *n <= limit).ok_or_else(|| {
-                format!("Schema {key} must be an unsigned integer no larger than {limit}")
-            })?;
-        }
-    }
-    if min > max {
-        return Err(format!("Schema {min_key} exceeds {max_key}.").into());
-    }
-    Ok(())
+    crate::business_schema::validate_schema(schema, depth)
 }
 fn validate_input_value(schema: &Value, value: &Value, depth: usize) -> Result<(), String> {
-    if depth > MAX_DEPTH {
-        return Err("Action input nesting exceeds its limit.".into());
-    }
-    if schema
-        .get("enum")
-        .and_then(Value::as_array)
-        .is_some_and(|values| !values.contains(value))
-    {
-        return Err("Action input is outside its declared enum.".into());
-    }
-    match schema
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or("Missing schema type")?
-    {
-        "object" => {
-            let object = value.as_object().ok_or("Action input requires an object")?;
-            let properties = schema
-                .get("properties")
-                .and_then(Value::as_object)
-                .ok_or("Missing schema properties")?;
-            for name in schema
-                .get("required")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                if !object.contains_key(name.as_str().ok_or("Invalid required input")?) {
-                    return Err(format!("Required action input `{name}` is missing.").into());
-                }
-            }
-            for (name, value) in object {
-                validate_input_value(
-                    properties
-                        .get(name)
-                        .ok_or_else(|| format!("Undeclared action input `{name}`."))?,
-                    value,
-                    depth + 1,
-                )?;
-            }
-        }
-        "array" => {
-            let values = value.as_array().ok_or("Action input requires an array")?;
-            check_length(schema, values.len(), "minItems", "maxItems", 1024)?;
-            for value in values {
-                validate_input_value(
-                    schema.get("items").ok_or("Missing array items")?,
-                    value,
-                    depth + 1,
-                )?;
-            }
-        }
-        "string" => check_length(
-            schema,
-            value
-                .as_str()
-                .ok_or("Action input requires a string")?
-                .chars()
-                .count(),
-            "minLength",
-            "maxLength",
-            64 * 1024,
-        )?,
-        "boolean" => {
-            if !value.is_boolean() {
-                return Err("Action input requires a Boolean.".into());
-            }
-        }
-        kind @ ("integer" | "number") => {
-            if !value.is_number()
-                || (kind == "integer" && value.as_i64().is_none() && value.as_u64().is_none())
-            {
-                return Err(format!("Action input requires {kind}.").into());
-            }
-            if schema
-                .get("minimum")
-                .is_some_and(|bound| numeric_cmp(value, bound) == Some(std::cmp::Ordering::Less))
-                || schema.get("maximum").is_some_and(|bound| {
-                    numeric_cmp(value, bound) == Some(std::cmp::Ordering::Greater)
-                })
-            {
-                return Err("Action input is outside its declared numeric range.".into());
-            }
-        }
-        _ => return Err("Unsupported action input schema type.".into()),
-    }
-    Ok(())
-}
-fn numeric_cmp(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
-    let integer = |value: &Value| {
-        value
-            .as_i64()
-            .map(i128::from)
-            .or_else(|| value.as_u64().map(i128::from))
-    };
-    match (integer(left), integer(right)) {
-        (Some(left), Some(right)) => Some(left.cmp(&right)),
-        _ => left.as_f64()?.partial_cmp(&right.as_f64()?),
-    }
-}
-fn check_length(
-    schema: &Value,
-    length: usize,
-    min: &str,
-    max: &str,
-    limit: usize,
-) -> Result<(), String> {
-    if length < schema.get(min).and_then(Value::as_u64).unwrap_or(0) as usize
-        || length
-            > schema
-                .get(max)
-                .and_then(Value::as_u64)
-                .unwrap_or(limit as u64) as usize
-    {
-        return Err("Action input exceeds its declared length/count bounds.".into());
-    }
-    Ok(())
+    crate::business_schema::validate_value(schema, value, depth)
 }
 fn mapped_text(value: &Value, encoding: Option<&str>) -> Result<String, String> {
     match encoding {
@@ -1417,7 +1339,7 @@ fn validate_mappings(
         let kind = properties[name]
             .get("type")
             .and_then(Value::as_str)
-            .ok_or("Missing input type")?;
+            .unwrap_or("nullable");
         match mapping {
             InputMapping::RuntimeVar(mapping) => {
                 identifier(&mapping.runtime_var, "Runtime variable mapping")?;
@@ -1435,11 +1357,10 @@ fn validate_mappings(
                     crate::RuntimeVarType::Number => "number",
                 };
                 if let Some(encoding) = mapping.encoding.as_deref() {
-                    if encoding != "json"
-                        || expected != "string"
-                        || !matches!(kind, "array" | "object")
-                    {
-                        return Err("JSON action mappings require a structured value and string runtime variable.".into());
+                    if encoding != "json" || expected != "string" {
+                        return Err(
+                            "JSON action mappings require a string runtime variable.".into()
+                        );
                     }
                 } else if kind != expected && !(expected == "number" && kind == "integer") {
                     return Err(
@@ -1458,18 +1379,12 @@ fn validate_mappings(
                     .find(|input| input.name.as_deref() == Some(mapping.input.as_str()))
                     .ok_or("Action maps an undeclared named input")?;
                 if let Some(encoding) = mapping.encoding.as_deref() {
-                    if encoding != "json"
-                        || input.kind != crate::InputKind::Text
-                        || !matches!(kind, "array" | "object")
-                    {
-                        return Err(
-                            "JSON action input mappings require a structured value and text input."
-                                .into(),
-                        );
+                    if encoding != "json" || input.kind != crate::InputKind::Text {
+                        return Err("JSON action input mappings require a text input.".into());
                     }
                 }
                 if input.kind == crate::InputKind::Text
-                    && matches!(kind, "array" | "object")
+                    && matches!(kind, "array" | "object" | "null" | "nullable")
                     && mapping.encoding.is_none()
                 {
                     return Err(
@@ -1518,7 +1433,14 @@ fn validate_mappings(
         }
     }
     for capability in &action.required_capabilities {
-        if capability != "execution_policy.v1" {
+        if ![
+            "execution_policy.v1",
+            "business_inputs.v1",
+            "structured_results.v1",
+            "artifact_access.v1",
+        ]
+        .contains(&capability.as_str())
+        {
             return Err(format!("Unsupported required action capability `{capability}`.").into());
         }
     }
@@ -1651,7 +1573,7 @@ mod tests {
             fixture
         }
         fn catalog() -> Value {
-            json!({"schema_version":1,"actions":[{"id":"generate","target":"agent.json","input_schema":{"type":"object","properties":{"panel_ids":{"type":"array","items":{"type":"string","minLength":1},"minItems":1,"maxItems":16}},"required":["panel_ids"],"additionalProperties":false},"mappings":{"panel_ids":{"runtime_var":"panel_ids_json","encoding":"json"}},"required_capabilities":["execution_policy.v1"]}],"interfaces":[{"id":"panels","actions":["generate"],"resources":["page","script"],"presentation":{"entrypoint":"page"}},{"id":"native","actions":["generate"]}],"resources":[{"id":"page","path":"page.html","mime_type":"text/html"},{"id":"script","path":"page.js","mime_type":"text/javascript"}]})
+            json!({"schema_version":2,"actions":[{"id":"generate","target":"agent.json","input_schema":{"type":"object","properties":{"panel_ids":{"type":"array","items":{"type":"string","minLength":1},"minItems":1,"maxItems":16}},"required":["panel_ids"],"additionalProperties":false},"mappings":{"panel_ids":{"runtime_var":"panel_ids_json","encoding":"json"}},"required_capabilities":["execution_policy.v1"]}],"interfaces":[{"id":"panels","actions":["generate"],"resources":["page","script"],"presentation":{"entrypoint":"page"}},{"id":"native","actions":["generate"]}],"resources":[{"id":"page","path":"page.html","mime_type":"text/html"},{"id":"script","path":"page.js","mime_type":"text/javascript"}]})
         }
         fn write_catalog(&self, value: &Value) {
             fs::write(
@@ -1662,13 +1584,14 @@ mod tests {
         }
         fn request(&self) -> ActionRequest {
             ActionRequest {
-                schema_version: 1,
+                schema_version: 2,
                 interface: "panels".into(),
                 action: "generate".into(),
                 inputs: serde_json::from_value(json!({"panel_ids":["p1","p2"]})).unwrap(),
                 expected_binding: discover(&self.root).unwrap().binding,
                 execution_policy: json!({"version":1,"allowed":[],"limits":{"max_runtime_secs":60,"max_output_tokens":512,"max_agent_depth":4}}),
                 attachment_grants: BTreeMap::new(),
+                artifact_access: None,
             }
         }
     }
@@ -1758,7 +1681,7 @@ mod tests {
         let fixture = Fixture::new();
         let base = Fixture::catalog();
         let mut candidate = base.clone();
-        candidate["schema_version"] = json!(2);
+        candidate["schema_version"] = json!(1);
         fixture.write_catalog(&candidate);
         assert_eq!(
             discover(&fixture.root).unwrap_err().code,
@@ -1841,7 +1764,7 @@ mod tests {
         assert!(validate_input_value(&schema, &json!(9007199254740993u64), 0).is_err());
         assert!(validate_input_value(&schema, &json!(9007199254740992u64), 0).is_ok());
         assert_eq!(
-            parse_request(r#"{"schema_version":2}"#).unwrap_err().code,
+            parse_request(r#"{"schema_version":1}"#).unwrap_err().code,
             "action.unsupported_contract"
         );
     }

@@ -2,6 +2,7 @@
 // Cargo AI supplies the CLI contract; this callback is not a shipped browser API.
 export function bindPanelControls(root, host, selectedPanelIds) {
   let pending = false;
+  let reconciliationRequired = false;
   const buttons = [...root.querySelectorAll("button[data-action]")];
   const status = root.querySelector("[data-current-action]");
   if (typeof host?.submit !== "function") {
@@ -11,7 +12,7 @@ export function bindPanelControls(root, host, selectedPanelIds) {
   }
 
   async function submit(button) {
-    if (pending) return;
+    if (pending || reconciliationRequired) return;
     const action = button.dataset.action;
     if (!["generate-one", "generate-selected", "review"].includes(action)) return;
     const panelIds = action === "generate-one"
@@ -36,10 +37,11 @@ export function bindPanelControls(root, host, selectedPanelIds) {
         : `Finished: ${terminal.outcome}`;
     } catch {
       // Loss of terminal evidence cannot establish whether effects occurred.
-      status.textContent = "Completion unverified; reconcile before retrying.";
+      reconciliationRequired = true;
+      status.textContent = "Completion unverified; use native reconciliation before resuming.";
     } finally {
       pending = false;
-      buttons.forEach(control => { control.disabled = false; });
+      buttons.forEach(control => { control.disabled = reconciliationRequired; });
     }
   }
 

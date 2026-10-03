@@ -77,6 +77,20 @@ fn actual_cli_and_copied_cli_declare_exactly_one_matching_run_capability() {
             .expect("actual CLI must retain exactly one complete runtime declaration");
         assert!(passive.is_cli_run());
         assert!(passive.supports_thinking());
+        let declaration = serde_json::to_value(passive).unwrap();
+        assert_eq!(declaration["revision"], 4);
+        assert_eq!(
+            declaration["structured_results"]["execution_checking"],
+            true
+        );
+        assert_eq!(
+            declaration["structured_results"]["terminal_delivery"],
+            passive.is_cli_run()
+        );
+        assert_eq!(
+            declaration["structured_results"]["artifact_read"],
+            passive.is_cli_run()
+        );
         let output = fixture
             .command(artifact)
             .args(["capabilities", "--output-format", "json"])
@@ -109,6 +123,20 @@ fn actual_generated_and_copied_binary_inspect_agree_with_passive_capabilities() 
             .expect("emitted binary must retain exactly one complete runtime declaration");
         assert!(!passive.is_cli_run());
         assert!(passive.supports_thinking());
+        let declaration = serde_json::to_value(passive).unwrap();
+        assert_eq!(declaration["revision"], 4);
+        assert_eq!(
+            declaration["structured_results"]["execution_checking"],
+            true
+        );
+        assert_eq!(
+            declaration["structured_results"]["terminal_delivery"],
+            passive.is_cli_run()
+        );
+        assert_eq!(
+            declaration["structured_results"]["artifact_read"],
+            passive.is_cli_run()
+        );
         let output = fixture
             .command(artifact)
             .args(["inspect", "--json"])

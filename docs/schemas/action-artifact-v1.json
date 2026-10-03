@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/action-artifact-v1.json",
+  "title": "Cargo AI verified finite artifact payload",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "binding": {
+      "$ref": "action-binding-v1.json"
+    },
+    "interface": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+      "not": {
+        "enum": [
+          "constructor",
+          "prototype",
+          "__proto__"
+        ]
+      }
+    },
+    "reference": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "mime_type": {
+      "enum": [
+        "text/plain",
+        "application/json",
+        "image/png",
+        "audio/wav"
+      ]
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4194304
+    },
+    "content_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "encoding": {
+      "const": "base64"
+    },
+    "data": {
+      "type": "string",
+      "contentEncoding": "base64"
+    }
+  },
+  "required": [
+    "schema_version",
+    "binding",
+    "interface",
+    "reference",
+    "mime_type",
+    "size_bytes",
+    "content_sha256",
+    "encoding",
+    "data"
+  ],
+  "additionalProperties": true
+}

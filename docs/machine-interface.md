@@ -33,18 +33,21 @@ Selected execution owns child process groups on Unix and native jobs on Windows,
 
 ## Declared actions
 
-Action-capable builds advertise `actions list`, `actions validate`, `actions resource` and the `run` action selector. Use the explicit `--project PATH` or `--package ALIAS` target; action discovery does not infer a catalog from the working directory. See [client action authoring](client-actions.md) and [action payloads](machine-payloads.md#declared-client-actions).
+Action-capable builds advertise `actions list`, `actions validate`, `actions resource`, `actions artifact` and the `run` action selector. Use the explicit `--project PATH` or `--package ALIAS` target; action discovery does not infer a catalog from the working directory. See [client action authoring](client-actions.md) and [action payloads](machine-payloads.md#declared-client-actions).
 
 ```sh
 cargo ai actions list --project ./project --output-format json
 cargo ai actions validate --project ./project --interface panels --action generate-selected --request-stdin --output-format json < request.json
 cargo ai actions resource --project ./project --interface panels --resource controls --request-stdin --output-format json < resource-request.json
+cargo ai actions artifact --project ./project --interface panels --request-stdin --output-format json < artifact-request.json
 cargo ai run --project ./project --interface panels --action generate-selected --action-request-stdin --output-format ndjson < request.json
 ```
 
 The finite operations are passive reads/validation. They do not compile or execute code, resolve provider credentials, contact providers or initialize incidental home state. `validate` reports `execution_authorized:false`: it does not grant permission or certify later execution. Business input values are not echoed in its mapping descriptors. A file/image grant may read the authorized attachment to verify its supplied digest.
 
-The host constructs the bounded stdin request, expected catalog-wide binding, scoped attachment grants and typed execution policy. Interface/action IDs must match the flags. `run` action selection is mutually exclusive with existing definition sources; it retains root profile/settings resolution, shared package/runtime permissions and current JSON/NDJSON/private-result controls. Settings queries remain the existing profile/model commands with their own effects. Host policy constrains effective supported declarative root, media and child choices, including fallback, before their corresponding credential/provider/launch boundaries; it is not an OS sandbox or authority for arbitrary trusted tool code.
+The replacement interface requires catalog 2 and action request 2, rejecting older action-interface revisions before execution. Outer machine/event, execution-policy and static-resource versions remain 1. The host constructs the bounded stdin request, expected catalog-wide binding, scoped attachment grants and typed execution policy. Interface/action IDs must match the flags. `run` action selection is mutually exclusive with existing definition sources; it retains root profile/settings resolution, shared package/runtime permissions and current JSON/NDJSON/private-result controls. Settings queries remain the existing profile/model commands with their own effects. Host policy constrains effective supported declarative root, media and child choices, including fallback, before their corresponding credential/provider/launch boundaries; it is not an OS sandbox or authority for arbitrary trusted tool code.
+
+Selected tool results require definition revision `2026-10-03.r1` and advertised `structured_results.v1`; artifact reads require `artifact_access.v1`, native scope consent and a retained host-only grant. Read types/size/confinement and host renderer capabilities are distinct. See [business results and authorized reads](machine-payloads.md#shared-business-schema-and-selected-results). Runtime revision 4 advertises generated validation/execution checking separately from CLI terminal delivery/artifact reads.
 
 After resolution, terminal `data.client_action`, `client_action_resolved` progress and subsequent NDJSON event `client_action` metadata contain `{interface,action,binding}`. `operation_started` occurs before validation and has no action metadata. The operation/root/invocation IDs and terminal semantics remain the existing run lifecycle. No input values, client session handles, schedule records or idempotency promise are added to that correlation.
 

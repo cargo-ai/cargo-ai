@@ -610,16 +610,19 @@ async fn run_client_action(selected: &ArgMatches) -> bool {
             }));
             // Keep the validated package lease alive through the entire invocation.
             let _lease = prepared.installed;
-            super::runtime_actions::scope_declaring_project_root(
-                root.clone(),
-                policy.scope(
-                    super::runtime::run_with_definition_in_context_and_usage_agent(
-                        &settings,
-                        &definition,
-                        root,
-                        Some(usage),
-                        context,
-                        Some(attribution),
+            super::client_actions::scope_result_artifacts(
+                prepared.artifact_context,
+                super::runtime_actions::scope_declaring_project_root(
+                    root.clone(),
+                    policy.scope(
+                        super::runtime::run_with_definition_in_context_and_usage_agent(
+                            &settings,
+                            &definition,
+                            root,
+                            Some(usage),
+                            context,
+                            Some(attribution),
+                        ),
                     ),
                 ),
             )

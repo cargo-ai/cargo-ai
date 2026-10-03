@@ -36,7 +36,7 @@ fn request(command: Command) -> Command {
                 .long("request-stdin")
                 .action(ArgAction::SetTrue)
                 .required(true)
-                .help("Read a bounded action or resource request from stdin"),
+                .help("Read a bounded action, resource or artifact request from stdin"),
         )
 }
 
@@ -60,6 +60,9 @@ pub(crate) fn command() -> Command {
                     .required(true),
             ),
         )
+        .subcommand(request(Command::new("artifact").about(
+            "Read an authorized artifact under its exact content and context identity",
+        )))
         .subcommand(
             request(
                 Command::new("resource")

@@ -3,9 +3,11 @@ mod config;
 mod credentials;
 #[path = "../definition_validation.rs"]
 mod definition_validation;
+use definition_validation::business_schema;
 mod execution_policy;
 mod generated_capabilities;
 mod providers;
+mod result_capture;
 mod runtime_data;
 mod runtime_media;
 mod runtime_thinking;
@@ -3206,6 +3208,15 @@ async fn main() {
 }
 
 async fn run_with_matches(cmd_args: clap::ArgMatches) {
+    if result_declaration()
+        .as_ref()
+        .and_then(|d| d.get("artifact_scopes"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|scopes| !scopes.is_empty())
+    {
+        eprintln!("Artifact result delivery requires the authorized Cargo AI action runtime.");
+        std::process::exit(1);
+    }
     let config = load_config();
     let project_root = match std::env::current_dir()
         .map_err(|error| format!("Failed to inspect current project directory: {error}"))
@@ -4831,6 +4842,9 @@ async fn run_tool_step(
     };
     let mut command = tokio::process::Command::new(&binary_path);
     command.arg("invoke");
+    if step.produces_result {
+        command.kill_on_drop(true);
+    }
     if let Some(root) = provider_context.project_data.as_ref() {
         command.current_dir(root.ensure_directory()?);
     }
@@ -4845,38 +4859,50 @@ async fn run_tool_step(
                 action_name, tool_name, error
             )
         })?;
-    let mut child = child;
-    {
-        use tokio::io::AsyncWriteExt;
-        let mut stdin = child.stdin.take().ok_or_else(|| {
-            format!(
-                "Action '{}' failed to open stdin for tool '{}'.",
-                action_name, tool_name
-            )
-        })?;
-        stdin.write_all(&request_bytes).await.map_err(|error| {
-            format!(
-                "Action '{}' failed to write invoke request for tool '{}': {}",
-                action_name, tool_name, error
-            )
-        })?;
-    }
+    let output = if step.produces_result {
+        result_capture::wait(child,remaining,&request_bytes).await.map_err(|error| {
+            if error.kind()==std::io::ErrorKind::InvalidData {
+                "runtime.result_limit: The selected producer exceeded its bounded subprocess channel.".to_string()
+            } else {
+                "Selected producer execution did not complete within its runtime budget.".to_string()
+            }
+        })?
+    } else {
+        let mut child = child;
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut stdin = child.stdin.take().ok_or_else(|| {
+                format!(
+                    "Action '{}' failed to open stdin for tool '{}'.",
+                    action_name, tool_name
+                )
+            })?;
+            stdin.write_all(&request_bytes).await.map_err(|error| {
+                format!(
+                    "Action '{}' failed to write invoke request for tool '{}': {}",
+                    action_name, tool_name, error
+                )
+            })?;
+        }
 
-    let output = match tokio::time::timeout(remaining, child.wait_with_output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            return Err(format!(
-                "Action '{}' failed while waiting for tool '{}': {}",
-                action_name, tool_name, error
-            ));
-        }
-        Err(_) => {
-            return Err(action_runtime_timeout_message(
-                action_name,
-                runtime_budget,
-                &format!("while waiting for tool '{}'", tool_name),
-            ));
-        }
+        let output = match tokio::time::timeout(remaining, child.wait_with_output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => {
+                return Err(format!(
+                    "Action '{}' failed while waiting for tool '{}': {}",
+                    action_name, tool_name, error
+                ));
+            }
+            Err(_) => {
+                return Err(action_runtime_timeout_message(
+                    action_name,
+                    runtime_budget,
+                    &format!("while waiting for tool '{}'", tool_name),
+                ));
+            }
+        };
+
+        output
     };
 
     emit_action_output_bytes(action_index, action_name, &output.stderr);
@@ -4887,7 +4913,22 @@ async fn run_tool_step(
         ));
     }
 
-    let result = validate_tool_invoke_response(&contract.resolved, &output.stdout)?;
+    let result = validate_tool_invoke_response(&contract.resolved, &output.stdout)
+        .map_err(|error|if step.produces_result {"runtime.result_invalid: The selected producer returned an invalid tool protocol response.".to_string()} else {error})?;
+    if step.produces_result {
+        let declaration =
+            result_declaration().ok_or("Selected producer has no result declaration.")?;
+        let selected =
+            business_schema::decode_producer_result(result.as_deref(), &declaration["schema"])
+                .map_err(|error| error.to_string())?;
+        let nominations = selected.artifacts.map_err(|error| error.to_string())?;
+        business_schema::validate_nominations(&nominations)?;
+        if !nominations.is_empty() {
+            return Err(
+                "Artifact result delivery requires the authorized Cargo AI action runtime.".into(),
+            );
+        }
+    }
     if let Some(output_variable) = step.output_variable.as_deref() {
         let value = result.ok_or_else(|| {
             format!(
@@ -4905,7 +4946,7 @@ async fn run_tool_step(
         }
         Ok(Some((output_variable.to_string(), value)))
     } else {
-        if let Some(result) = result {
+        if let Some(result) = result.filter(|_| !step.produces_result) {
             print_action_line(
                 action_index,
                 action_name,

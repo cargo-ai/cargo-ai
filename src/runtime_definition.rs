@@ -52,6 +52,7 @@ pub(crate) struct RuntimeAgentDefinition {
     actions: Vec<crate::Action>,
     strict_definition: bool,
     rubric_enabled: bool,
+    result_declaration: Option<Value>,
 }
 
 impl RuntimeAgentDefinition {
@@ -89,6 +90,7 @@ impl RuntimeAgentDefinition {
         let actions = parse_actions(root_obj, &named_input_kinds)?;
 
         Ok(Self {
+            result_declaration: root.get("result").cloned(),
             named_inputs,
             runtime_var_specs,
             schema_properties,
@@ -201,6 +203,10 @@ impl RuntimeAgentDefinition {
 }
 
 impl crate::commands::runtime::InvocationDefinition for RuntimeAgentDefinition {
+    fn result_declaration(&self) -> Option<Value> {
+        self.result_declaration.clone()
+    }
+
     fn rubric_enabled(&self) -> bool {
         RuntimeAgentDefinition::rubric_enabled(self)
     }
@@ -857,7 +863,13 @@ fn parse_actions(
     let thinking_enabled = root_obj
         .get(crate::definition_validation::VERSION_KEY)
         .and_then(Value::as_str)
-        == Some(crate::definition_validation::THINKING_SCHEMA_VERSION);
+        .is_some_and(|v| {
+            matches!(
+                v,
+                crate::definition_validation::THINKING_SCHEMA_VERSION
+                    | crate::definition_validation::RESULT_SCHEMA_VERSION
+            )
+        });
     let mut parsed = Vec::with_capacity(actions.len());
     for (action_index, raw_action) in actions.iter().enumerate() {
         let action_path = format!("$.actions[{action_index}]");
@@ -978,7 +990,7 @@ fn parse_run_step(
                 inputs: None,
                 reference_images: None,
                 input_mode: None,
-                ignore_tools: false,
+                ignore_tools: false, produces_result: false,
                 platforms,
             })
         }
@@ -1011,7 +1023,7 @@ fn parse_run_step(
                 inputs: None,
                 reference_images: None,
                 input_mode: None,
-                ignore_tools: false,
+                ignore_tools: false, produces_result: false,
                 platforms,
             })
         }
@@ -1051,6 +1063,7 @@ fn parse_run_step(
                 reference_images: None,
                 input_mode,
                 ignore_tools: optional_boolean_field(run_obj, "ignore_tools", path)?.unwrap_or(false),
+                produces_result: false,
                 platforms,
             })
         }
@@ -1083,7 +1096,7 @@ fn parse_run_step(
                 inputs: None,
                 reference_images: None,
                 input_mode: None,
-                ignore_tools: false,
+                ignore_tools: false, produces_result: run_obj.get("produces_result").and_then(Value::as_bool).unwrap_or(false),
                 platforms,
             })
         }
@@ -1133,7 +1146,7 @@ fn parse_run_step(
                     named_input_kinds,
                 )?,
                 input_mode: None,
-                ignore_tools: false,
+                ignore_tools: false, produces_result: false,
                 platforms,
             })
         }
@@ -1157,7 +1170,7 @@ fn parse_run_step(
                 text: Some(parse_string_parts_field(run_obj, "text", path)?),
                 agent: None, usage_log: None, tool_name: None, tool_params: BTreeMap::new(),
                 run_vars: None, input_overrides: None, inputs: None, reference_images: None,
-                input_mode: None, ignore_tools: false, platforms,
+                input_mode: None, ignore_tools: false, produces_result: false, platforms,
             })
         }
         "transcribe_audio" => {
@@ -1176,7 +1189,7 @@ fn parse_run_step(
                 args: Vec::new(), prompt: None, path: None, subject: None, text: None,
                 agent: None, usage_log: None, tool_name: None, tool_params: BTreeMap::new(),
                 run_vars: None, input_overrides: None, inputs: None, reference_images: None,
-                input_mode: None, ignore_tools: false, platforms,
+                input_mode: None, ignore_tools: false, produces_result: false, platforms,
             })
         }
         other => Err(format!(

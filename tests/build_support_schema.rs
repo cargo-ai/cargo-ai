@@ -2443,14 +2443,14 @@ fn installed_authoring_examples_use_valid_strict_contracts() {
             ) {
                 // These documents use the action contract, exercised through
                 // the real CLI in client_action_contracts, rather than codegen.
-                assert_eq!(value["schema_version"], 1, "{}", path.display());
+                assert_eq!(value["schema_version"], 2, "{}", path.display());
                 action_documents += 1;
                 continue;
             }
             assert!(
                 matches!(
                     value["agent_definition_schema_version"].as_str(),
-                    Some("2026-09-09.r1" | "2026-09-19.r1" | "2026-10-01.r1")
+                    Some("2026-09-09.r1" | "2026-09-19.r1" | "2026-10-01.r1" | "2026-10-03.r1")
                 ),
                 "{}",
                 path.display()
@@ -2581,4 +2581,30 @@ fn rubric_output_bounds_compare_exactly_in_generated_raw_validation() {
         assert_eq!(actual.is_ok(), accepted, "{name}: {output}: {actual:?}");
     });
     assert_eq!(count, 29);
+}
+
+#[test]
+fn selected_result_definition_codegen_preserves_explicit_producer_and_business_schema() {
+    use serde_json::json;
+    let definition = json!({"agent_definition_schema_version":"2026-10-03.r1","agent_schema":{"type":"object","properties":{}},"result":{"source":"tool","schema":{"type":"object","properties":{"settings":{"type":["string","null"]}},"required":["settings"],"additionalProperties":false},"artifact_scopes":["exports"]},"actions":[{"name":"save","logic":{"==":[1,1]},"run":[{"kind":"tool","name":"store","produces_result":true,"output_variable":"captured"}]}]});
+    let generated = build_support::generate_agent_model_from_str(&definition.to_string()).unwrap();
+    assert!(generated.contains("pub fn result_declaration()"));
+    assert!(generated.contains("produces_result: true"));
+    assert!(generated.contains("Some(\"captured\".to_string())"));
+    let mut missing = definition.clone();
+    missing["actions"][0]["run"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("produces_result");
+    assert!(build_support::generate_agent_model_from_str(&missing.to_string()).is_err());
+    let mut duplicate = definition.clone();
+    let selected = duplicate["actions"][0]["run"][0].clone();
+    duplicate["actions"][0]["run"]
+        .as_array_mut()
+        .unwrap()
+        .push(selected);
+    assert!(build_support::generate_agent_model_from_str(&duplicate.to_string()).is_err());
+    let mut prior = definition;
+    prior["agent_definition_schema_version"] = json!("2026-10-01.r1");
+    assert!(build_support::generate_agent_model_from_str(&prior.to_string()).is_err());
 }

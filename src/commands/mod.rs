@@ -2,6 +2,7 @@
 //!
 //! Each submodule owns one command area and keeps `main.rs` dispatch-only.
 pub mod account;
+pub(crate) mod action_artifacts;
 pub mod add;
 pub mod agents;
 pub mod auth;
@@ -40,6 +41,7 @@ pub mod runtime_actions;
 pub(crate) mod runtime_data;
 pub mod scaffold;
 pub(crate) mod secret_input;
+pub(crate) mod structured_results;
 pub mod tools;
 pub mod version;
 

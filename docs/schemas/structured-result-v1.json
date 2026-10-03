@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/structured-result-v1.json",
+  "title": "Cargo AI selected tool result",
+  "$comment": "The selected tool protocol result is a STRING containing this JSON wrapper, not a separate subprocess channel. Runtime enforces 131072 payload bytes, 65536 serialized business bytes, the declared schema, safe paths and unique nomination IDs. A valid business result survives failed artifact export.",
+  "$ref": "#/$defs/producer_payload",
+  "$defs": {
+    "declaration": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "const": "tool"
+        },
+        "schema": {
+          "$ref": "business-schema-v1.json"
+        },
+        "artifact_scopes": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "not": {
+              "enum": [
+                "constructor",
+                "prototype",
+                "__proto__"
+              ]
+            }
+          }
+        }
+      },
+      "required": [
+        "source",
+        "schema"
+      ],
+      "additionalProperties": false
+    },
+    "producer_payload": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "business-schema-v1.json#/$defs/value"
+        },
+        "artifacts": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                "not": {
+                  "enum": [
+                    "constructor",
+                    "prototype",
+                    "__proto__"
+                  ]
+                }
+              },
+              "scope": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                "not": {
+                  "enum": [
+                    "constructor",
+                    "prototype",
+                    "__proto__"
+                  ]
+                }
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "mime_type": {
+                "enum": [
+                  "text/plain",
+                  "application/json",
+                  "image/png",
+                  "audio/wav"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "scope",
+              "path",
+              "mime_type"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "nomination": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+          "not": {
+            "enum": [
+              "constructor",
+              "prototype",
+              "__proto__"
+            ]
+          }
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+          "not": {
+            "enum": [
+              "constructor",
+              "prototype",
+              "__proto__"
+            ]
+          }
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "mime_type": {
+          "enum": [
+            "text/plain",
+            "application/json",
+            "image/png",
+            "audio/wav"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "scope",
+        "path",
+        "mime_type"
+      ],
+      "additionalProperties": false
+    },
+    "terminal_result": {
+      "type": "object",
+      "properties": {
+        "availability": {
+          "enum": [
+            "available",
+            "not_produced"
+          ]
+        },
+        "content_included": {
+          "type": "boolean"
+        },
+        "content": {},
+        "artifact_references": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "action-artifact-descriptor-v1.json"
+          }
+        },
+        "artifact_read_grants": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "action-artifact-grant-v1.json"
+          }
+        }
+      },
+      "required": [
+        "availability"
+      ],
+      "additionalProperties": true,
+      "$comment": "content also serves ordinary model results. Only selected tool content uses the shared bounded business schema. All three private fields require explicit result inclusion; grants are host-only."
+    }
+  }
+}

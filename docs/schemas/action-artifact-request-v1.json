@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/action-artifact-request-v1.json",
+  "title": "Cargo AI passive artifact read request",
+  "$comment": "At most 65536 UTF-8 bytes. Select explicit project/package and matching interface in argv. No path override or arbitrary file selector.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "interface": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+      "not": {
+        "enum": [
+          "constructor",
+          "prototype",
+          "__proto__"
+        ]
+      }
+    },
+    "expected_binding": {
+      "$ref": "action-binding-v1.json"
+    },
+    "reference": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "read_grant": {
+      "$ref": "action-artifact-grant-v1.json"
+    }
+  },
+  "required": [
+    "schema_version",
+    "interface",
+    "expected_binding",
+    "reference",
+    "read_grant"
+  ],
+  "additionalProperties": false
+}

@@ -116,6 +116,9 @@ enum RuntimeInputMode {
 }
 
 pub(crate) trait InvocationDefinition: Sync {
+    fn result_declaration(&self) -> Option<serde_json::Value> {
+        None
+    }
     fn named_inputs(&self) -> Vec<crate::Input>;
     fn runtime_var_specs(&self) -> Vec<crate::RuntimeVarSpec>;
     fn action_execution(&self) -> crate::ActionExecutionMode;
@@ -1155,13 +1158,24 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
     package_context: Option<crate::commands::local_packages::InstalledPackageRuntimeContext>,
     attribution_input: Option<crate::usage_attribution::AttributionInput>,
 ) -> bool {
-    match crate::execution_policy::scope_inherited(Box::pin(run_with_definition_scoped(
-        sub_m,
-        definition,
-        project_root,
-        usage_agent_info,
-        package_context,
-        attribution_input,
+    let result_context = super::structured_results::Context::new(
+        definition.result_declaration(),
+        super::runtime_actions::current_agent_action_depth() == 0,
+    );
+    if let Err(error) = result_context.preflight() {
+        eprintln!("x {error}");
+        return false;
+    }
+    match crate::execution_policy::scope_inherited(Box::pin(super::structured_results::scope(
+        Some(result_context),
+        run_with_definition_scoped(
+            sub_m,
+            definition,
+            project_root,
+            usage_agent_info,
+            package_context,
+            attribution_input,
+        ),
     )))
     .await
     {
@@ -1957,7 +1971,9 @@ async fn run_with_definition_scoped(
         }
     };
 
-    if super::runtime_actions::current_agent_action_depth() == 0 {
+    if super::runtime_actions::current_agent_action_depth() == 0
+        && definition.result_declaration().is_none()
+    {
         super::machine::record_result(&output);
     }
     match super::runtime_actions::apply_actions_with_data(

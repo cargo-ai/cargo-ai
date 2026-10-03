@@ -189,6 +189,14 @@ fn outcome(error: Option<&Failure>) -> &'static str {
         Some(_) => "failed",
     }
 }
+fn payload_schema(command: &str) -> String {
+    let revision = if matches!(command, "actions list" | "actions validate") {
+        2
+    } else {
+        1
+    };
+    format!("cargo-ai.{}.v{revision}", command.replace(' ', "."))
+}
 fn envelope(
     command: &str,
     id: &str,
@@ -196,7 +204,7 @@ fn envelope(
     error: Option<&Failure>,
     warnings: Vec<Value>,
 ) -> Value {
-    json!({"schema_version":1,"payload_schema":format!("cargo-ai.{}.v1",command.replace(' ',".")),"command":command,"build":build(),"request_id":id,"context":context(),"outcome":outcome(error),"data":data,"warnings":warnings,"error":error.map(|e|json!({"code":e.code,"message":e.message,"retryable":e.retryable})),"completion":{"terminal":true,"complete":true}})
+    json!({"schema_version":1,"payload_schema":payload_schema(command),"command":command,"build":build(),"request_id":id,"context":context(),"outcome":outcome(error),"data":data,"warnings":warnings,"error":error.map(|e|json!({"code":e.code,"message":e.message,"retryable":e.retryable})),"completion":{"terminal":true,"complete":true}})
 }
 fn write_value(value: &Value, limit: usize) -> io::Result<()> {
     let bytes = serde_json::to_vec(value)?;
@@ -397,6 +405,20 @@ pub(crate) fn record_result(value: &Value) {
         }
     }
 }
+/// Retains authorized export metadata only when private terminal content was requested.
+pub(crate) fn record_result_artifacts(references: Value, grants: Value) {
+    if !selected() {
+        return;
+    }
+    if let Some(observer) = OBSERVER.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        if observer.content {
+            if let Some(output) = observer.output.as_mut() {
+                output["artifact_references"] = references;
+                output["artifact_read_grants"] = grants;
+            }
+        }
+    }
+}
 pub(crate) fn record_artifact(value: Value) {
     if selected() {
         if let Some(o) = OBSERVER.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
@@ -500,6 +522,7 @@ fn contracts() -> Vec<Value> {
         "actions list",
         "actions validate",
         "actions resource",
+        "actions artifact",
         "profile list",
         "profile show",
         "profile add",
@@ -537,7 +560,7 @@ fn contracts() -> Vec<Value> {
     let mut values: Vec<Value> = finite.iter().map(|name| {
         let effects=match *name {
             "capabilities"|"version"=>vec!["none"],
-            "actions list"|"actions validate"|"actions resource"=>vec!["explicit_project_or_installed_package_read"],
+            "actions list"|"actions validate"|"actions resource"|"actions artifact"=>vec!["explicit_project_or_installed_package_read"],
             "profile list"=>vec!["configuration_read"],
             "profile show"=>vec!["configuration_read","credential_presence_lookup"],
             "models list"|"models thinking"=>vec!["connection_read","provider_catalog_read"],
@@ -552,18 +575,19 @@ fn contracts() -> Vec<Value> {
         };
         let variants=match *name {
             "packages list"=>json!([{"selector":"installed","pagination":"limit_and_all","legacy_default_limit":20},{"selector":"account","pagination":"all_and_existing_limit"}]),
-            "actions list"|"actions validate"|"actions resource"=>json!([{"selector":"explicit_project"},{"selector":"installed_package_alias"}]),
+            "actions list"|"actions validate"|"actions resource"|"actions artifact"=>json!([{"selector":"explicit_project"},{"selector":"installed_package_alias"}]),
             "packages inspect"=>json!([{"selector":"installed_alias"},{"selector":"account_name_and_optional_version"}]),
             "models list"|"models thinking"=>json!([{"selector":"saved_profile","api_key_store":"explicit_file_only","auth_modes":["none","api_key","openai_account"]},{"selector":"draft_server_auth","api_key_input":"stdin","auth_modes":["none","api_key","openai_account"],"account_provider":"openai"}]),
             "usage summary"|"usage runs"|"usage show"=>json!([{"domain_schema_version":1},{"domain_schema_version":2}]),
             "account deactivate"=>json!([{"deletion_request":false},{"deletion_request":true,"requires":"matching_confirm_email"}]),
             _=>json!([]),
         };
-        json!({"command":name,"payload_schema":format!("cargo-ai.{}.v1",name.replace(' ',".")),"formats":["json"],"schema_versions":[1],"effects":effects,"variants":variants,"interaction":if *name=="auth login openai"{"existing_terminal_protocol_exception"}else{"noninteractive_explicit_consent_required_when_applicable"}})
+        json!({"command":name,"payload_schema":payload_schema(name),"formats":["json"],"schema_versions":[1],"effects":effects,"variants":variants,"interaction":if *name=="auth login openai"{"existing_terminal_protocol_exception"}else{"noninteractive_explicit_consent_required_when_applicable"}})
     }).collect();
     values.push(json!({"command":"run","formats":["json","ndjson"],"schema_versions":[1],"private_content":"explicit_opt_in","opaque_children":"exit_status_only","thinking":{"selection":"tagged_provider_default_or_exact_choice","settings":["choice","provider_default","on","off"],"flags":["--thinking","--thinking-provider-default","--thinking-choice"],"terminal_outcomes":true,"action_definition_revision":"2026-10-01.r1"}}));
     let run = values.last_mut().expect("run contract was appended");
-    run["client_actions"] = json!({"schema_version":1,"selector":"--action","request_input":"--action-request-stdin","execution_policy":"required","definition_binding":"required","client_action_correlation":true,"idempotency":false,"limits":super::client_actions::limits()});
+    run["client_actions"] = json!({"schema_version":2,"catalog_versions":[2],"request_versions":[2],"selector":"--action","request_input":"--action-request-stdin","execution_policy":"required","definition_binding":"required","client_action_correlation":true,"idempotency":false,"limits":super::client_actions::limits()});
+    run["structured_results"] = json!({"definition_revision":"2026-10-03.r1","source":"selected_root_tool","business_types":["object","array","string","integer","number","boolean","null"],"nullable_union":"T_or_null","private_content":"--include-result-content","descendants":"no_root_publication","artifact_access":{"permission_version":1,"descriptor_version":1,"read_grant_version":1,"read_command":"actions artifact","request_version":1,"native_confinement":cfg!(any(target_os="linux",target_os="macos",windows)),"limits":super::client_actions::limits()["artifact"]}});
     if cfg!(feature = "developer-tools") {
         values.push(json!({"command":"package","formats":["json"],"schema_versions":[1]}));
     }
@@ -668,10 +692,21 @@ pub(crate) async fn dispatch(matches: &ArgMatches) -> Option<i32> {
         .unwrap_or_else(|e| e.into_inner())
         .take()
         .unwrap();
-    let (data, error) = match result {
+    let (mut data, error) = match result {
         Ok(data) => (data, None),
         Err(e) => (e.data.clone(), Some(e)),
     };
+    // Cancellation and interrupted tasks bypass runtime_outcome. Preserve any
+    // already validated root result without changing the terminal failure.
+    if path == "run" && data.get("result").is_none() {
+        if let Some(known_result) = &observer.output {
+            if !data.is_object() {
+                data = json!({});
+            }
+            data["result"] = known_result.clone();
+            data["execution"] = json!({"completed": false});
+        }
+    }
     let mut warnings = thinking_warnings(&observer);
     if observer.truncated {
         warnings.push(json!({"code":"cli.output_truncated","message":"Some bounded diagnostic or artifact metadata was omitted."}));
@@ -817,7 +852,7 @@ pub(crate) fn runtime_outcome(succeeded: bool) -> Result<Value, Failure> {
             "Invocation no longer accepts runtime results.",
         ));
     };
-    let data = json!({"execution":{"completed":succeeded},"result":o.output.take().unwrap_or_else(||json!({"availability":"not_produced"})),"artifacts":o.artifacts,"child_instrumentation":if o.child_instrumentation{"no_opaque_children"}else{"unavailable"},"effects":{"external":"may_have_been_applied","replay_safe":false}});
+    let data = json!({"execution":{"completed":succeeded},"result":o.output.clone().unwrap_or_else(||json!({"availability":"not_produced"})),"artifacts":o.artifacts,"child_instrumentation":if o.child_instrumentation{"no_opaque_children"}else{"unavailable"},"effects":{"external":"may_have_been_applied","replay_safe":false}});
     if succeeded && o.error.is_none() {
         Ok(data)
     } else {

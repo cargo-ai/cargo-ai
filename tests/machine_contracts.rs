@@ -410,6 +410,62 @@ fn runtime_provider_results_require_explicit_private_content_opt_in() {
 }
 
 #[test]
+fn capabilities_distinguish_replacement_actions_and_selected_result_delivery() {
+    let f = Fixture::new("result-capabilities");
+    let output = run(&f, &["capabilities"]);
+    let value = response(&output);
+    let contracts = value["data"]["contracts"].as_array().unwrap();
+    for (name, payload) in [
+        ("actions list", "cargo-ai.actions.list.v2"),
+        ("actions validate", "cargo-ai.actions.validate.v2"),
+        ("actions artifact", "cargo-ai.actions.artifact.v1"),
+        ("actions resource", "cargo-ai.actions.resource.v1"),
+    ] {
+        let contract = contracts
+            .iter()
+            .find(|item| item["command"] == name)
+            .unwrap();
+        assert_eq!(contract["payload_schema"], payload);
+        assert_eq!(contract["schema_versions"], json!([1]));
+    }
+    let run = contracts
+        .iter()
+        .find(|item| item["command"] == "run")
+        .unwrap();
+    assert_eq!(run["client_actions"]["catalog_versions"], json!([2]));
+    assert_eq!(run["client_actions"]["request_versions"], json!([2]));
+    let results = &run["structured_results"];
+    assert_eq!(results["definition_revision"], "2026-10-03.r1");
+    assert_eq!(
+        results["business_types"],
+        json!(["object", "array", "string", "integer", "number", "boolean", "null"])
+    );
+    assert_eq!(
+        results["artifact_access"]["limits"]["file_bytes"],
+        4 * 1024 * 1024
+    );
+    assert_eq!(
+        results["artifact_access"]["limits"]["read_types"],
+        json!(["text/plain", "application/json", "image/png", "audio/wav"])
+    );
+    assert_eq!(
+        value["data"]["runtime_capabilities"]["structured_results"]["terminal_delivery"],
+        true
+    );
+    for (source, revision) in [
+        (include_str!("../docs/schemas/action-catalog-v2.json"), 2),
+        (include_str!("../docs/schemas/action-request-v2.json"), 2),
+        (
+            include_str!("../docs/schemas/action-artifact-request-v1.json"),
+            1,
+        ),
+    ] {
+        let schema: Value = serde_json::from_str(source).unwrap();
+        assert_eq!(schema["properties"]["schema_version"]["const"], revision);
+    }
+}
+
+#[test]
 fn inventory_leaf_prerequisites_never_fall_back_to_prose_or_network() {
     let f = Fixture::new("machine-inventory");
     configure(&f);

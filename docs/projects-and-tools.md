@@ -115,6 +115,8 @@ Define and validate:
 - an accurate `resource_profile` for filesystem, network, subprocess, environment, credentials, UI, and background-process behavior;
 - the `invoke` behavior and its failure modes.
 
+A definition using `2026-10-03.r1` may select one root tool step with `produces_result:true`. Its existing protocol result string then contains `{data:BUSINESS_VALUE,artifacts:[NOMINATION]}`; Cargo AI validates the bounded business schema and publishes through the existing root terminal with explicit private-content consent. `output_variable` remains a string capture. Null/malformed output is not a provider-result fallback. See [selected results and artifact access](../templates/guidance/client-actions.md#business-data-and-selected-tool-results).
+
 Tool params may be `string`, `boolean`, `integer`, `number`, `array`, or `object`. Cargo AI validates only the top-level kind for arrays and objects; the tool owns deeper deserialization and shape validation. A step with `output_variable` requires the actual `invoke` result to be a non-null string even though the `describe` result schema is nullable.
 
 ## Build, inspect, and validate

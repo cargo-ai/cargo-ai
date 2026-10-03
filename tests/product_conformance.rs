@@ -4,7 +4,11 @@ mod support;
 #[path = "product_conformance/usage_attribution.rs"]
 mod usage_attribution;
 
+use base64::Engine as _;
+use serde_json::{json, Value};
 use std::fs;
+use std::io::Write;
+use std::process::Stdio;
 
 use support::{
     assert_success, copy_tree, openai_success_response, output_text, repository_root, Fixture,
@@ -60,7 +64,12 @@ fn version_scaffold_guidance_and_invalid_definition_are_process_safe() {
 
 #[test]
 fn real_cli_package_lifecycle_is_isolated_and_fail_closed() {
-    let fixture = Fixture::new("lifecycle");
+    let mut fixture = Fixture::new("lifecycle");
+    // Select canonical test ownership roots before configuring the CLI. Artifact
+    // reads must not weaken no-follow traversal for OS temporary-path aliases.
+    fixture.root = fs::canonicalize(&fixture.root).unwrap();
+    fixture.cargo_ai_home = fs::canonicalize(&fixture.cargo_ai_home).unwrap();
+    fixture.fallback_home = fs::canonicalize(&fixture.fallback_home).unwrap();
     let fallback_sentinel = fixture.fallback_home.join("sentinel.txt");
     fs::write(&fallback_sentinel, "unchanged").expect("fallback sentinel should be written");
     let project = fixture.root.join("source");
@@ -68,6 +77,7 @@ fn real_cli_package_lifecycle_is_isolated_and_fail_closed() {
         &repository_root().join("tests/fixtures/package_lifecycle"),
         &project,
     );
+    prepare_lifecycle_artifact_contract(&fixture, &project);
     let package_root = fixture.root.join("package");
 
     let package = fixture
@@ -144,7 +154,158 @@ fn real_cli_package_lifecycle_is_isolated_and_fail_closed() {
         .expect("package reinstall should start");
     assert_success(&reinstall, "package reinstall");
 
+    fs::write(fixture.cargo_ai_home.join("config.toml"), "secret_store='file'\ndefault_profile='fixture'\n[[profile]]\nname='fixture'\nserver='ollama'\nmodel='fixture-model'\nauth_mode='none'\n").unwrap();
+    let catalog = lifecycle_machine(
+        &fixture,
+        &project,
+        &["actions", "list", "--package", "lifecycle"],
+        None,
+    );
+    assert_eq!(catalog["outcome"], "succeeded", "{catalog}");
+    let binding = catalog["data"]["binding"].clone();
+    let action_request = json!({"schema_version":2,"interface":"reports","action":"save","inputs":{},"expected_binding":binding,
+        "execution_policy":{"version":1,"allowed":[{"profile":"fixture","request_kind":"text","model":{"kind":"named","value":"fixture-model"},"thinking":{"mode":"provider_default"}}],"limits":{"max_runtime_secs":60,"max_output_tokens":512,"max_agent_depth":4}},
+        "artifact_access":{"version":1,"scopes":["exports"]}});
+    let issued = lifecycle_machine(
+        &fixture,
+        &project,
+        &[
+            "run",
+            "--package",
+            "lifecycle",
+            "--interface",
+            "reports",
+            "--action",
+            "save",
+            "--action-request-stdin",
+            "--include-result-content",
+        ],
+        Some(&action_request),
+    );
+    assert_eq!(issued["outcome"], "succeeded", "{issued}");
+    assert_eq!(
+        issued["data"]["result"]["content"],
+        json!({"owner":"alias","version":"1"})
+    );
+    let result = &issued["data"]["result"];
+    let read_request = json!({"schema_version":1,"interface":"reports","expected_binding":binding,"reference":result["artifact_references"][0]["reference"],"read_grant":result["artifact_read_grants"][0]});
+    assert!(result["artifact_references"][0]
+        .get("relative_path")
+        .is_none());
+    let artifact_args = [
+        "actions",
+        "artifact",
+        "--package",
+        "lifecycle",
+        "--interface",
+        "reports",
+        "--request-stdin",
+    ];
+    let bytes = lifecycle_machine(&fixture, &project, &artifact_args, Some(&read_request));
+    assert_eq!(bytes["outcome"], "succeeded", "{bytes}");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(bytes["data"]["data"].as_str().unwrap())
+            .unwrap(),
+        b"alias-owned report"
+    );
     let data_root = fixture.cargo_ai_home.join("packages/lifecycle/data");
+    assert_eq!(
+        fs::read(data_root.join("exports/report.txt")).unwrap(),
+        b"alias-owned report"
+    );
+    assert!(!project.join("exports").exists());
+    assert!(!project.join(".cargo-ai/data").exists());
+    assert!(!fixture
+        .cargo_ai_home
+        .join("packages/lifecycle/package/exports")
+        .exists());
+    // The retained grant is independent of the caller's working directory, and
+    // neither a consuming project's data nor immutable package bytes can replace it.
+    let unrelated = fixture.root.join("unrelated");
+    fs::create_dir_all(unrelated.join(".cargo-ai/data/exports")).unwrap();
+    fs::write(
+        unrelated.join(".cargo-ai/data/exports/report.txt"),
+        "unrelated project data",
+    )
+    .unwrap();
+    let other_cwd = lifecycle_machine(&fixture, &unrelated, &artifact_args, Some(&read_request));
+    assert_eq!(other_cwd["outcome"], "succeeded", "{other_cwd}");
+    assert_eq!(
+        other_cwd["data"]["content_sha256"],
+        bytes["data"]["content_sha256"]
+    );
+    let mut tampered = read_request.clone();
+    tampered["read_grant"]["relative_path"] = json!("../../package/qualification_smoke.json");
+    assert_ne!(
+        lifecycle_machine(&fixture, &project, &artifact_args, Some(&tampered))["outcome"],
+        "succeeded"
+    );
+    fs::write(data_root.join("business-version.json"), "2").unwrap();
+    assert_eq!(
+        lifecycle_machine(
+            &fixture,
+            &project,
+            &["actions", "list", "--package", "lifecycle"],
+            None
+        )["data"]["binding"],
+        binding
+    );
+    assert_eq!(
+        lifecycle_machine(&fixture, &project, &artifact_args, Some(&read_request))["outcome"],
+        "succeeded"
+    );
+    // Reuse this package and compiled source tool for upgrade and exact rollback.
+    for (from, to, downgrade) in [("0.1.0", "0.2.0", false), ("0.2.0", "0.1.0", true)] {
+        let path = project.join(".cargo-ai/project.toml");
+        let contents = fs::read_to_string(&path).unwrap();
+        fs::write(
+            &path,
+            contents.replace(
+                &format!("version = \"{from}\""),
+                &format!("version = \"{to}\""),
+            ),
+        )
+        .unwrap();
+        let packaged = fixture
+            .cargo_ai_command(&project)
+            .args(["--no-update-check", "package", "default", "--output-dir"])
+            .arg(&package_root)
+            .arg("--force")
+            .output()
+            .unwrap();
+        assert_success(&packaged, "repackage lifecycle revision");
+        let mut command = fixture.cargo_ai_command(&project);
+        command
+            .args(["--no-update-check", "packages", "install"])
+            .arg(&package_root)
+            .args(["--as", "lifecycle"]);
+        if downgrade {
+            command.arg("--downgrade");
+        }
+        assert_success(&command.output().unwrap(), "install lifecycle revision");
+        let current = lifecycle_machine(
+            &fixture,
+            &project,
+            &["actions", "list", "--package", "lifecycle"],
+            None,
+        );
+        assert_eq!(current["data"]["binding"]["package"]["version"], to);
+        assert_eq!(
+            fs::read(data_root.join("exports/report.txt")).unwrap(),
+            b"alias-owned report"
+        );
+        assert_eq!(
+            fs::read(data_root.join("business-version.json")).unwrap(),
+            b"2"
+        );
+        let stale = lifecycle_machine(&fixture, &project, &artifact_args, Some(&read_request));
+        assert_ne!(stale["outcome"], "succeeded", "{stale}");
+        if downgrade {
+            assert_eq!(current["data"]["binding"], binding);
+            assert_eq!(stale["error"]["code"], "artifact.stale_context", "{stale}");
+        }
+    }
     fs::create_dir_all(&data_root).expect("package data root should be created");
     fs::write(data_root.join("keep.txt"), "protected").expect("package data should be written");
     let protected_uninstall = fixture
@@ -168,6 +329,61 @@ fn real_cli_package_lifecycle_is_isolated_and_fail_closed() {
         .expect("explicit uninstall should start");
     assert_success(&uninstall, "explicit package uninstall");
     assert!(!fixture.cargo_ai_home.join("packages/lifecycle").exists());
+    let reinstalled = fixture
+        .cargo_ai_command(&project)
+        .args(["--no-update-check", "packages", "install"])
+        .arg(&package_root)
+        .args(["--as", "lifecycle"])
+        .output()
+        .unwrap();
+    assert_success(&reinstalled, "reinstall identical lifecycle package");
+    let fresh = lifecycle_machine(
+        &fixture,
+        &project,
+        &["actions", "list", "--package", "lifecycle"],
+        None,
+    );
+    assert_eq!(fresh["data"]["binding"], binding);
+    let old = lifecycle_machine(&fixture, &project, &artifact_args, Some(&read_request));
+    assert_eq!(old["error"]["code"], "artifact.stale_context", "{old}");
+    let regenerated = lifecycle_machine(
+        &fixture,
+        &project,
+        &[
+            "run",
+            "--package",
+            "lifecycle",
+            "--interface",
+            "reports",
+            "--action",
+            "save",
+            "--action-request-stdin",
+            "--include-result-content",
+        ],
+        Some(&action_request),
+    );
+    assert_eq!(regenerated["outcome"], "succeeded", "{regenerated}");
+    assert_ne!(
+        regenerated["data"]["result"]["artifact_references"][0]["reference"],
+        read_request["reference"]
+    );
+    assert_eq!(
+        fs::read(data_root.join("exports/report.txt")).unwrap(),
+        b"alias-owned report"
+    );
+    let cleanup = fixture
+        .cargo_ai_command(&project)
+        .args([
+            "--no-update-check",
+            "packages",
+            "uninstall",
+            "lifecycle",
+            "--delete-data",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&cleanup, "cleanup reinstalled fixture");
+    assert!(!fixture.cargo_ai_home.join("packages/lifecycle").exists());
     let staging = fixture.cargo_ai_home.join("packages/.staging");
     assert!(
         !staging.exists()
@@ -180,6 +396,92 @@ fn real_cli_package_lifecycle_is_isolated_and_fail_closed() {
         fs::read_to_string(fallback_sentinel).expect("fallback sentinel should be readable"),
         "unchanged"
     );
+}
+
+fn lifecycle_machine(
+    fixture: &Fixture,
+    cwd: &std::path::Path,
+    args: &[&str],
+    request: Option<&Value>,
+) -> Value {
+    let mut command = fixture.cargo_ai_command(cwd);
+    command
+        .args(["--no-update-check"])
+        .args(args)
+        .args(["--output-format", "json"]);
+    let output = if let Some(request) = request {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(request.to_string().as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    } else {
+        command.output().unwrap()
+    };
+    let response: Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|_| panic!("Invalid lifecycle frame: {}", output_text(&output)));
+    assert_eq!(
+        output.status.success(),
+        response["outcome"] == "succeeded",
+        "{response}"
+    );
+    assert_eq!(response["completion"]["terminal"], true, "{response}");
+    response
+}
+
+fn prepare_lifecycle_artifact_contract(fixture: &Fixture, project: &std::path::Path) {
+    assert_success(
+        &fixture
+            .cargo_ai_command(project)
+            .args(["--no-update-check", "add", "tool", "artifact_writer"])
+            .output()
+            .unwrap(),
+        "scaffold lifecycle result tool",
+    );
+    // The fixture implements the tool protocol in its dependency-free binary.
+    fs::remove_file(project.join("tools/artifact_writer/src/lib.rs")).unwrap();
+    fs::write(
+        project.join("tools/artifact_writer/Cargo.toml"),
+        "[package]\nname = \"artifact_writer\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("tools/artifact_writer/Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"artifact_writer\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let description = json!({"protocol_version":1,"name":"artifact_writer","description":"Write an alias-owned report.","params":{},"result":{"type":"string","nullable":true},"resource_profile":{"network":"none","filesystem_read":"required","filesystem_write":"required","subprocess":"none","env_read":"none","credential_access":"none"},"self_test":{"supported":false,"safe":false},"examples":{"minimal_invoke":{"protocol_version":1,"params":{}},"full_invoke":{"protocol_version":1,"params":{}}}}).to_string();
+    let response = json!({"protocol_version":1,"result":json!({"data":{"owner":"alias","version":"1"},"artifacts":[{"id":"report","scope":"exports","path":"report.txt","mime_type":"text/plain"}]}).to_string()}).to_string();
+    fs::write(project.join("tools/artifact_writer/src/main.rs"),format!(r##"
+use std::io::Read;
+fn main() {{
+    if std::env::args().nth(1).as_deref()==Some("describe") {{ println!("{{}}",r#"{description}"#);return; }}
+    let mut request=String::new();std::io::stdin().read_to_string(&mut request).unwrap();
+    std::fs::create_dir_all("exports").unwrap();
+    if !std::path::Path::new("exports/report.txt").exists() {{ std::fs::write("exports/report.txt",b"alias-owned report").unwrap(); }}
+    println!("{{}}",r#"{response}"#);
+}}
+"##)).unwrap();
+    fs::write(project.join("report.json"),json!({"agent_definition_schema_version":"2026-10-03.r1","agent_schema":{"type":"object","properties":{}},"result":{"source":"tool","schema":{"type":"object","properties":{"owner":{"type":"string"},"version":{"type":"string"}},"required":["owner","version"],"additionalProperties":false},"artifact_scopes":["exports"]},"actions":[{"name":"save","logic":{"==":[1,1]},"run":[{"kind":"tool","name":"artifact_writer","params":{},"produces_result":true}]}]}).to_string()).unwrap();
+    fs::write(project.join("cargo-ai-actions.json"),json!({"schema_version":2,"actions":[{"id":"save","target":"report.json","input_schema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"mappings":{}}],"interfaces":[{"id":"reports","actions":["save"],"artifact_scopes":["exports"]}],"artifact_scopes":[{"id":"exports","path":"exports","mime_types":["text/plain"]}]}).to_string()).unwrap();
+    let path = project.join(".cargo-ai/project.toml");
+    let metadata = fs::read_to_string(&path)
+        .unwrap()
+        .replace(
+            "agent_definitions = [\"qualification_smoke.json\"]",
+            "agent_definitions = [\"qualification_smoke.json\", \"report.json\"]",
+        )
+        .replace("tools = []", "tools = [\"artifact_writer\"]")
+        .replace("assets = []", "assets = [\"cargo-ai-actions.json\"]");
+    fs::write(path, metadata).unwrap();
 }
 
 fn data_cli(fixture: &Fixture, root: &std::path::Path, args: &[&str]) -> std::process::Output {

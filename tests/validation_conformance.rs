@@ -490,6 +490,8 @@ fn interpreted_and_emitted_outputs_preserve_authority_and_reject_before_consumpt
             "emitted suite must execute {module}"
         );
     }
+    selected_result_generated_parity(&fixture, &project);
+
     for line in unit_text
         .lines()
         .filter(|line| line.starts_with("test result:"))
@@ -551,4 +553,147 @@ fn strict_external_schema_references_are_rejected_without_fetching() {
         );
     }
     assert!(!fixture.cargo_ai_home.join("agents/external_probe").exists());
+}
+
+fn selected_result_generated_parity(fixture: &Fixture, project: &Path) {
+    let definition = json!({"agent_definition_schema_version":"2026-10-03.r1","agent_schema":{"type":"object","properties":{}},"runtime_vars":{"envelope":{"type":"string"},"enabled":{"type":"boolean","default":true}},"result":{"source":"tool","schema":{"type":"object","properties":{"settings":{"type":"object","properties":{"model":{"type":"string"},"config":{"type":["string","null"]}},"required":["model","config"],"additionalProperties":false},"version":{"type":"string"}},"required":["settings","version"],"additionalProperties":false}},"actions":[{"name":"selected","logic":{"==":[1,1]},"run":[{"kind":"tool","name":"envelope_probe","produces_result":true,"output_variable":"captured","when":{"==":[{"var":"runtime.enabled"},true]},"params":{"mode":"envelope","value":{"var":"runtime.envelope"}}},{"kind":"tool","name":"envelope_probe","when":{"==":[{"var":"runtime.enabled"},true]},"params":{"mode":"capture","value":{"var":"captured"}}}]}]});
+    fs::write(project.join("selected.json"), definition.to_string()).unwrap();
+    assert_success(
+        &cli(
+            fixture,
+            project,
+            &[
+                "hatch",
+                "selected_result_probe",
+                "--config",
+                "selected.json",
+                "--keep-project",
+            ],
+        ),
+        "hatch selected result producer",
+    );
+    let executable = project.join(format!(
+        "selected_result_probe{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    let data = json!({"settings":{"model":"private-selected-business","config":null},"version":"18446744073709551615"});
+    let raw = json!({"data":data}).to_string();
+    let envelope = json!({"protocol_version":1,"result":raw});
+    let command = |emitted: bool| {
+        if emitted {
+            fixture.command(&executable, project)
+        } else {
+            let mut command = fixture.cargo_ai_command(project);
+            command.args(["--no-update-check", "run", "--config", "selected.json"]);
+            command
+        }
+    };
+    for emitted in [false, true] {
+        let output = command(emitted)
+            .args([
+                "--render-mode",
+                "append-only",
+                "--run-var",
+                &format!("envelope={envelope}"),
+            ])
+            .output()
+            .unwrap();
+        assert_success(
+            &output,
+            "selected result execution and unchanged output capture",
+        );
+        assert!(
+            !output_text(&output).contains("private-selected-business"),
+            "selected raw payload cannot appear in runtime prose"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join(".cargo-ai/data/captured.txt")).unwrap(),
+            raw
+        );
+        fs::remove_file(project.join(".cargo-ai/data/captured.txt")).unwrap();
+        for (envelope, code) in [
+            (
+                json!({"protocol_version":1,"result":null}),
+                "runtime.result_missing",
+            ),
+            (
+                json!({"protocol_version":1,"result":"private-selected-invalid"}),
+                "runtime.result_invalid",
+            ),
+            (
+                json!({"protocol_version":1,"result":"null"}),
+                "runtime.result_invalid",
+            ),
+            (
+                json!({"protocol_version":1,"result":json!({"data":7}).to_string()}),
+                "runtime.result_schema",
+            ),
+            (
+                json!({"protocol_version":1,"result":r#"{"data":{},"data":{}}"#}),
+                "runtime.result_invalid",
+            ),
+            (
+                json!({"protocol_version":1,"result":json!({"data":data,"artifacts":[{"id":"report","scope":"exports","path":"private-nomination.txt","mime_type":"text/plain"}]}).to_string()}),
+                "Artifact",
+            ),
+        ] {
+            let output = command(emitted)
+                .args([
+                    "--render-mode",
+                    "append-only",
+                    "--run-var",
+                    &format!("envelope={envelope}"),
+                ])
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            assert!(
+                output_text(&output).contains(code),
+                "{code}: {}",
+                output_text(&output)
+            );
+            assert!(!output_text(&output).contains("private-selected-invalid"));
+            assert!(!output_text(&output).contains("private-nomination.txt"));
+            assert!(!project.join(".cargo-ai/data/captured.txt").exists());
+        }
+    }
+    for include in [false, true] {
+        let mut cmd = command(false);
+        cmd.args([
+            "--run-var",
+            &format!("envelope={envelope}"),
+            "--output-format",
+            "json",
+        ]);
+        if include {
+            cmd.arg("--include-result-content");
+        }
+        let output = cmd.output().unwrap();
+        assert_success(&output, "selected result machine delivery");
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["data"]["result"]["availability"], "available");
+        if include {
+            assert_eq!(response["data"]["result"]["content"], data);
+        } else {
+            assert!(response["data"]["result"].get("content").is_none());
+            assert!(!output_text(&output).contains("private-selected-business"));
+        }
+        fs::remove_file(project.join(".cargo-ai/data/captured.txt")).unwrap();
+    }
+    let skipped = command(false)
+        .args([
+            "--run-var",
+            &format!("envelope={envelope}"),
+            "--run-var",
+            "enabled=false",
+            "--output-format",
+            "json",
+            "--include-result-content",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&skipped, "skipped producer");
+    let response: Value = serde_json::from_slice(&skipped.stdout).unwrap();
+    assert_eq!(response["data"]["result"]["availability"], "not_produced");
+    assert!(response["error"].is_null());
 }

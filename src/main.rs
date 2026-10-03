@@ -21,6 +21,7 @@ mod config;
 mod credentials;
 #[path = "../templates/definition_validation.rs"]
 mod definition_validation;
+use definition_validation::business_schema;
 #[path = "../templates/src/execution_policy.rs"]
 mod execution_policy;
 mod generated_capabilities;
