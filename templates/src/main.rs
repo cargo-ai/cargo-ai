@@ -5459,25 +5459,6 @@ fn resolve_step_profile_name(
     Ok(Some(profile_name))
 }
 
-#[cfg(test)]
-async fn resolve_generate_image_step_profile_context(
-    profile: Option<&RunArg>,
-    data: &serde_json::Value,
-    action_name: &str,
-    invocation_timeout_in_sec: u64,
-) -> Result<Option<ActionProviderContext>, String> {
-    resolve_media_step_profile_context(
-        profile,
-        data,
-        action_name,
-        invocation_timeout_in_sec,
-        "generate_image",
-        None,
-        None,
-    )
-    .await
-}
-
 async fn resolve_media_step_context(
     step: &crate::RunStep,
     data: &serde_json::Value,
