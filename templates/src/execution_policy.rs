@@ -168,20 +168,25 @@ pub fn current() -> Option<ExecutionPolicy> {
     INVOCATION_POLICY.try_with(Clone::clone).ok().flatten()
 }
 
+#[cfg(cargo_ai_cli)]
 pub fn inheritance_requested() -> bool {
     std::env::var_os(CHILD_POLICY_ENV).is_some()
         || std::env::var_os(CHILD_POLICY_REQUIRED_ENV).is_some()
 }
 
 pub fn inherited() -> Result<Option<ExecutionPolicy>, String> {
-    if !inheritance_requested() {
-        return Ok(None);
-    }
     let required = std::env::var_os(CHILD_POLICY_REQUIRED_ENV);
-    if required.as_ref().is_some_and(|value| value != "1") {
+    parse_inherited(required.as_deref(), std::env::var(CHILD_POLICY_ENV))
+}
+
+fn parse_inherited(
+    required: Option<&std::ffi::OsStr>,
+    encoded: Result<String, std::env::VarError>,
+) -> Result<Option<ExecutionPolicy>, String> {
+    if required.is_some_and(|value| value != "1") {
         return Err(invalid());
     }
-    match std::env::var(CHILD_POLICY_ENV) {
+    match encoded {
         Ok(encoded) => ExecutionPolicy::parse_bytes(encoded.as_bytes()).map(Some),
         Err(std::env::VarError::NotPresent) if required.is_none() => Ok(None),
         Err(_) => Err(invalid()),
@@ -581,37 +586,43 @@ mod tests {
             .await;
         std::fs::remove_dir_all(root).unwrap();
     }
-    #[tokio::test]
-    async fn malformed_present_inheritance_never_becomes_unrestricted() {
-        let previous = std::env::var_os(CHILD_POLICY_ENV);
-        let previous_required = std::env::var_os(CHILD_POLICY_REQUIRED_ENV);
-        std::env::set_var(CHILD_POLICY_REQUIRED_ENV, "1");
-        std::env::remove_var(CHILD_POLICY_ENV);
-        assert!(
-            scope_inherited(async { panic!("missing required inheritance entered runtime") })
-                .await
-                .is_err()
+    #[test]
+    fn malformed_present_inheritance_never_becomes_unrestricted() {
+        let required = Some(std::ffi::OsStr::new("1"));
+        assert_eq!(
+            parse_inherited(None, Err(std::env::VarError::NotPresent)).unwrap(),
+            None
         );
+        assert!(parse_inherited(required, Err(std::env::VarError::NotPresent)).is_err());
         for encoded in [
             String::new(),
             "null".into(),
             "{}".into(),
             "x".repeat(MAX_POLICY_BYTES + 1),
         ] {
-            std::env::set_var(CHILD_POLICY_ENV, encoded);
-            assert!(scope_inherited(async {
-                panic!("malformed inherited policy entered runtime")
-            })
-            .await
+            for marker in [None, required] {
+                assert!(parse_inherited(marker, Ok(encoded.clone())).is_err());
+            }
+        }
+        for marker in ["", "0", "true"] {
+            assert!(parse_inherited(
+                Some(std::ffi::OsStr::new(marker)),
+                Ok(serde_json::to_string(&policy()).unwrap())
+            )
             .is_err());
         }
-        match previous {
-            Some(value) => std::env::set_var(CHILD_POLICY_ENV, value),
-            None => std::env::remove_var(CHILD_POLICY_ENV),
-        }
-        match previous_required {
-            Some(value) => std::env::set_var(CHILD_POLICY_REQUIRED_ENV, value),
-            None => std::env::remove_var(CHILD_POLICY_REQUIRED_ENV),
+        for marker in [None, required] {
+            assert!(parse_inherited(
+                marker,
+                Err(std::env::VarError::NotUnicode(std::ffi::OsString::from(
+                    "non-Unicode fixture"
+                )))
+            )
+            .is_err());
+            assert_eq!(
+                parse_inherited(marker, Ok(serde_json::to_string(&policy()).unwrap())).unwrap(),
+                Some(policy())
+            );
         }
     }
     #[test]
