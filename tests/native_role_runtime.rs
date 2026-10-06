@@ -114,6 +114,23 @@ impl Drop for Provider {
         }
     }
 }
+fn fixture_base_dir(runner_temp: Option<std::ffi::OsString>) -> PathBuf {
+    runner_temp
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+#[test]
+fn fixture_base_prefers_nonempty_runner_temp() {
+    assert_eq!(
+        fixture_base_dir(Some("runner-temp".into())),
+        PathBuf::from("runner-temp")
+    );
+    assert_eq!(fixture_base_dir(Some("".into())), std::env::temp_dir());
+    assert_eq!(fixture_base_dir(None), std::env::temp_dir());
+}
+
 struct Fixture {
     root: PathBuf,
     home: PathBuf,
@@ -123,11 +140,15 @@ struct Fixture {
 impl Fixture {
     fn new(provider: &Provider) -> Self {
         let id = uuid::Uuid::new_v4().simple().to_string();
-        let root = std::env::temp_dir().join(format!("nrr-{:x}-{}", std::process::id(), &id[..12]));
+        let root = fixture_base_dir(std::env::var_os("RUNNER_TEMP")).join(format!(
+            "nrr-{:x}-{}",
+            std::process::id(),
+            &id[..12]
+        ));
         fs::create_dir(&root).unwrap();
-        fs::create_dir(root.join("home")).unwrap();
+        fs::create_dir(root.join("h")).unwrap();
         let root = root.canonicalize().unwrap();
-        let home = root.join("home");
+        let home = root.join("h");
         fs::write(home.join("config.toml"), format!(
             "secret_store='file'\ndefault_profile='a'\n[[profile]]\nname='a'\nserver='openai'\nmodel='wrong-profile-default-a'\nauth_mode='api_key'\nurl='{}'\ntemperature=0.9\n[[profile]]\nname='b'\nserver='openai'\nmodel='wrong-profile-default-b'\nauth_mode='api_key'\nurl='{}'\ntemperature=0.8\n", provider.url, provider.url)).unwrap();
         fs::write(
@@ -1587,7 +1608,7 @@ fn installed_native_roles_preserve_private_mapping_and_public_structural_executi
         );
     }
     assert!(!installed.join("host-role-bindings.json").exists());
-    assert!(!installed.join("home").exists());
+    assert!(!installed.join(fixture.home.file_name().unwrap()).exists());
     let discovered = machine(
         &fixture,
         &["actions", "list", "--package", "native-fixture"],

@@ -405,6 +405,9 @@ struct SetFailure {
     legacy_message: String,
     effects: Value,
 }
+const STORE_TOKEN_FAILURE: &str = "x Failed to store the profile token. Check credential-store access and configuration; setup is incomplete.";
+const CLEAR_TOKEN_FAILURE: &str =
+    "x Failed to clear the profile token. Check credential-store access and configuration.";
 impl SetFailure {
     fn new(code: &'static str, legacy_message: &str, effects: Value) -> Self {
         Self {
@@ -412,6 +415,14 @@ impl SetFailure {
             legacy_message: legacy_message.to_owned(),
             effects,
         }
+    }
+
+    fn context_unavailable(reason: &str, operation: Option<&str>, effects: Value) -> Self {
+        let message = match operation {
+            Some(operation) => format!("{operation} {reason}"),
+            None => reason.to_owned(),
+        };
+        Self::new("profile.context_unavailable", &message, effects)
     }
 }
 fn run_set_with_writer(
@@ -465,12 +476,17 @@ fn set_outcome(
     } else {
         None
     };
+    let token_failure_message = if set_m.get_flag("clear_token") {
+        Some(CLEAR_TOKEN_FAILURE)
+    } else {
+        token.as_ref().map(|_| STORE_TOKEN_FAILURE)
+    };
     let _context_lock = crate::credentials::role_context::root()
         .and_then(|root| crate::credentials::role_context::lock_at(&root))
         .map_err(|_| {
-            SetFailure::new(
-                "profile.context_unavailable",
+            SetFailure::context_unavailable(
                 "Profile context could not be locked safely; no profile changes were applied.",
+                token_failure_message,
                 effects.clone(),
             )
         })?;
@@ -580,9 +596,9 @@ fn set_outcome(
 
     if !metadata_changes.is_empty() || token.is_some() || set_m.get_flag("clear_token") {
         crate::credentials::role_context::before_mutation(Some(name), false).map_err(|_| {
-            SetFailure::new(
-                "profile.context_unavailable",
+            SetFailure::context_unavailable(
                 "Profile context could not be invalidated safely; no profile changes were applied.",
+                token_failure_message,
                 effects.clone(),
             )
         })?;
@@ -592,14 +608,22 @@ fn set_outcome(
         if store::clear_profile_token(name).is_err() {
             effects["credential"] = json!("unknown");
             effects["local"] = json!("unknown");
-            return Err(SetFailure::new("credentials.persist_failed", "x Failed to clear the profile token. Check credential-store access and configuration.", effects));
+            return Err(SetFailure::new(
+                "credentials.persist_failed",
+                CLEAR_TOKEN_FAILURE,
+                effects,
+            ));
         }
         token_change = Some("cleared");
     } else if let Some(ref token) = token {
         if store::store_profile_token(name, token.as_str()).is_err() {
             effects["credential"] = json!("unknown");
             effects["local"] = json!("unknown");
-            return Err(SetFailure::new("credentials.persist_failed", "x Failed to store the profile token. Check credential-store access and configuration; setup is incomplete.", effects));
+            return Err(SetFailure::new(
+                "credentials.persist_failed",
+                STORE_TOKEN_FAILURE,
+                effects,
+            ));
         }
         token_change = Some("updated");
     }
@@ -1221,6 +1245,52 @@ mod tests {
         assert_eq!(error.effects["metadata"], "unknown");
         assert_eq!(error.effects["credential"], "unapplied");
         assert!(!error.legacy_message.contains("synthetic-private-secret"));
+    }
+
+    #[test]
+    fn context_failure_preserves_token_operation_diagnostics_and_unapplied_effects() {
+        let home = crate::commands::secret_input::test_support::Home::new();
+        let path = crate::credentials::store::credentials_path();
+        let malformed = "malformed private-secret credential document";
+        std::fs::write(&path, malformed).unwrap();
+        let config = std::fs::read(home.path.join("config.toml")).unwrap();
+        for (operation, message) in [
+            (
+                vec!["--token", "synthetic-new-token"],
+                super::STORE_TOKEN_FAILURE,
+            ),
+            (vec!["--clear-token"], super::CLEAR_TOKEN_FAILURE),
+            (
+                vec!["--default"],
+                "Profile context could not be invalidated safely; no profile changes were applied.",
+            ),
+        ] {
+            let mut words = vec!["profile", "set", "example"];
+            words.extend(operation);
+            let args = machine_args(&words);
+            let error = super::set_outcome(args.subcommand_matches("set").unwrap(), |_| {
+                panic!("context failure must precede metadata persistence")
+            })
+            .unwrap_err();
+            assert_eq!(error.code, "profile.context_unavailable");
+            assert!(error.legacy_message.starts_with(message));
+            assert!(error
+                .legacy_message
+                .contains("Profile context could not be invalidated safely"));
+            assert!(error
+                .effects
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|value| value == "unapplied"));
+            assert!(!format!("{error:?}").contains("private-secret"));
+            assert!(!format!("{error:?}").contains("synthetic-new-token"));
+            assert_eq!(std::fs::read(&path).unwrap(), malformed.as_bytes());
+            assert_eq!(
+                std::fs::read(home.path.join("config.toml")).unwrap(),
+                config
+            );
+        }
     }
 
     #[test]
