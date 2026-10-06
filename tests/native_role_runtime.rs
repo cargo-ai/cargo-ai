@@ -146,9 +146,9 @@ impl Fixture {
             &id[..12]
         ));
         fs::create_dir(&root).unwrap();
-        fs::create_dir(root.join("h")).unwrap();
-        let root = root.canonicalize().unwrap();
         let home = root.join("h");
+        fs::create_dir(&home).unwrap();
+        let root = root.canonicalize().unwrap();
         fs::write(home.join("config.toml"), format!(
             "secret_store='file'\ndefault_profile='a'\n[[profile]]\nname='a'\nserver='openai'\nmodel='wrong-profile-default-a'\nauth_mode='api_key'\nurl='{}'\ntemperature=0.9\n[[profile]]\nname='b'\nserver='openai'\nmodel='wrong-profile-default-b'\nauth_mode='api_key'\nurl='{}'\ntemperature=0.8\n", provider.url, provider.url)).unwrap();
         fs::write(
@@ -1600,7 +1600,11 @@ fn installed_native_roles_preserve_private_mapping_and_public_structural_executi
         &["packages", "install", "export", "--as", "native-fixture"],
     );
     fixture.contexts = [fixture.refresh("a"), fixture.refresh("b")];
-    let installed = fixture.home.join("packages/native-fixture/package");
+    let installed = fixture
+        .home
+        .join("packages/native-fixture/package")
+        .canonicalize()
+        .unwrap();
     for name in ["root.json", "status.json", "cargo-ai-actions.json"] {
         assert_eq!(
             fs::read(installed.join(name)).unwrap(),

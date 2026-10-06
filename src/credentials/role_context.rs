@@ -264,7 +264,7 @@ pub(crate) fn keychain_interaction_lock() -> Result<KeychainInteractionGuard, St
     Ok(KeychainInteractionGuard { _lock: lock })
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, cargo_ai_cli)))]
 fn with_interaction_disabled<T>(
     mut get: impl FnMut() -> Result<bool, String>,
     mut set: impl FnMut(bool) -> Result<(), String>,
