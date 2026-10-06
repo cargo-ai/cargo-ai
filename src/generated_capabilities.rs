@@ -214,34 +214,29 @@ pub fn definition_for_artifact(artifact: &Path) -> Result<String, CapabilityRead
             return Err(CapabilityReadError::Oversized);
         }
         window.extend_from_slice(&block[..count]);
-        let mut consumed = 0;
-        while let Some(index) = window[consumed..]
-            .windows(record::DEFINITION_OPEN.len())
-            .position(|v| v == record::DEFINITION_OPEN)
-        {
-            let start = consumed + index;
-            if window.len() < start + 96 {
-                consumed = start;
-                break;
-            }
-            let frame = &window[start..start + 96];
-            if frame[80..] != record::DEFINITION_CLOSE
-                || !frame[16..80]
-                    .iter()
-                    .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+        for frame in window.windows(96) {
+            // Child readers contain standalone framing constants too. Only a
+            // complete frame declares an identity, as with runtime capabilities.
+            if !frame.starts_with(&record::DEFINITION_OPEN)
+                || !frame.ends_with(&record::DEFINITION_CLOSE)
             {
-                return Err(CapabilityReadError::Malformed);
+                continue;
             }
             if found.is_some() {
                 return Err(CapabilityReadError::Conflicting);
+            }
+            if !frame[16..80]
+                .iter()
+                .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+            {
+                return Err(CapabilityReadError::Malformed);
             }
             found = Some(
                 String::from_utf8(frame[16..80].to_vec())
                     .map_err(|_| CapabilityReadError::Malformed)?,
             );
-            consumed = start + 96;
         }
-        let keep = window.len().saturating_sub(95).max(consumed);
+        let keep = window.len().saturating_sub(95);
         window.drain(..keep);
     }
     found.ok_or(CapabilityReadError::Missing)
@@ -345,6 +340,75 @@ mod tests {
             .concat(),
         );
         std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            definition_for_artifact(&path),
+            Err(CapabilityReadError::Conflicting)
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn definition_identity_ignores_standalone_constants_and_spans_read_boundaries() {
+        let path =
+            std::env::temp_dir().join(format!("cargo-ai-definition-{}", uuid::Uuid::new_v4()));
+        let digest = "a".repeat(64);
+        let frame = [
+            record::DEFINITION_OPEN.as_slice(),
+            digest.as_bytes(),
+            record::DEFINITION_CLOSE.as_slice(),
+        ]
+        .concat();
+        for split in 1..frame.len() {
+            let mut bytes = record::DEFINITION_OPEN.to_vec();
+            bytes.extend_from_slice(&record::DEFINITION_CLOSE);
+            bytes.resize(READ_BLOCK_SIZE - split, b'x');
+            bytes.extend_from_slice(&frame);
+            bytes.extend_from_slice(&record::DEFINITION_OPEN);
+            bytes.extend_from_slice(&[b'x'; 96]);
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(definition_for_artifact(&path).unwrap(), digest);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn definition_identity_requires_one_complete_well_formed_record() {
+        let path =
+            std::env::temp_dir().join(format!("cargo-ai-definition-{}", uuid::Uuid::new_v4()));
+        let frame = [
+            record::DEFINITION_OPEN.as_slice(),
+            "a".repeat(64).as_bytes(),
+            record::DEFINITION_CLOSE.as_slice(),
+        ]
+        .concat();
+        for len in 0..frame.len() {
+            std::fs::write(&path, &frame[..len]).unwrap();
+            assert_eq!(
+                definition_for_artifact(&path),
+                Err(CapabilityReadError::Missing)
+            );
+        }
+        let mut tampered = frame.clone();
+        tampered[16] = b'g';
+        std::fs::write(&path, &tampered).unwrap();
+        assert_eq!(
+            definition_for_artifact(&path),
+            Err(CapabilityReadError::Malformed)
+        );
+        tampered[16] = b'A';
+        std::fs::write(&path, &tampered).unwrap();
+        assert_eq!(
+            definition_for_artifact(&path),
+            Err(CapabilityReadError::Malformed)
+        );
+        tampered = frame.clone();
+        tampered[95] ^= 1;
+        std::fs::write(&path, &tampered).unwrap();
+        assert_eq!(
+            definition_for_artifact(&path),
+            Err(CapabilityReadError::Missing)
+        );
+        std::fs::write(&path, [frame.as_slice(), frame.as_slice()].concat()).unwrap();
         assert_eq!(
             definition_for_artifact(&path),
             Err(CapabilityReadError::Conflicting)

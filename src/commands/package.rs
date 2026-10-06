@@ -516,7 +516,15 @@ fn assemble_package_root(
             .collect::<Vec<_>>(),
         &build_profile.assets,
     )?;
-    validate_private_role_exports(project_root, &build_profile)?;
+    validate_private_role_exports(
+        project_root,
+        build_profile
+            .agent_definitions
+            .iter()
+            .chain(&build_profile.hatched_agents)
+            .chain(&build_profile.assets),
+        &build_profile.tools,
+    )?;
     validate_output_source_boundaries(project_root, &build_profile, output_root)?;
     prepare_output_root(project_root, output_root, force)?;
 
@@ -1062,17 +1070,13 @@ fn write_package_manifest(
 
 /// Checks the finite selected payload before any existing output is replaced.
 /// This recognizes native private record formats; it is not a general secret scanner.
-fn validate_private_role_exports(
+pub(super) fn validate_private_role_exports<'a>(
     project_root: &Path,
-    profile: &BuildProfileDocument,
+    selected_paths: impl Iterator<Item = &'a String>,
+    tools: &[String],
 ) -> Result<(), String> {
     let mut entries = Vec::new();
-    for path in profile
-        .agent_definitions
-        .iter()
-        .chain(&profile.hatched_agents)
-        .chain(&profile.assets)
-    {
+    for path in selected_paths {
         let relative = validate_project_relative_path(path, "Packaged path")?;
         entries.push((
             project_root.join(&relative),
@@ -1080,7 +1084,7 @@ fn validate_private_role_exports(
             super::add::guidance::packaging::is_bundle_path(&relative),
         ));
     }
-    for tool in &profile.tools {
+    for tool in tools {
         let source = load_project_source_tool_context(project_root, tool)?;
         entries.push((
             project_root.join(source.source_root_relative_path),
@@ -1190,6 +1194,16 @@ fn validate_private_role_file(path: &Path) -> Result<(), String> {
         .read_to_end(&mut bytes)
         .map_err(|_| "Cannot inspect selected package file")?;
     if bytes.len() > 4 * 1024 * 1024 {
+        return Ok(());
+    }
+    // The published request example contains a synthetic policy. Only its exact
+    // embedded bytes are portable; filenames and customized copies grant no exemption.
+    if bytes.as_slice()
+        == include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/templates/guidance/examples/client-action-request.json"
+        ))
+    {
         return Ok(());
     }
     let json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
@@ -2020,6 +2034,37 @@ agent_definitions = ["agents/demo.json"]
                 }
             }
         }
+    }
+
+    #[test]
+    fn only_exact_canonical_request_bytes_are_exempt_from_private_record_scanning() {
+        let root = temp_dir("canonical-request-export");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("renamed-example.txt");
+        let canonical = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/templates/guidance/examples/client-action-request.json"
+        ));
+        let mut value: serde_json::Value = serde_json::from_slice(canonical).unwrap();
+        assert!(super::contains_private_role_record(&value));
+        fs::write(&source, canonical).unwrap();
+        super::validate_private_role_file(&source).unwrap();
+
+        value["execution_policy"]["allowed"][0]["profile"] = serde_json::json!("personal-profile");
+        let customized = serde_json::to_vec(&value).unwrap();
+        fs::write(&source, &customized).unwrap();
+        assert!(super::validate_private_role_file(&source)
+            .unwrap_err()
+            .contains("private role record"));
+        assert_eq!(fs::read(&source).unwrap(), customized);
+
+        let wrapped = serde_json::json!({
+            "example": serde_json::from_slice::<serde_json::Value>(canonical).unwrap(),
+            "copied": {"profile_uuid":"private-uuid","connection_generation":"private-generation"}
+        });
+        fs::write(&source, serde_json::to_vec(&wrapped).unwrap()).unwrap();
+        assert!(super::validate_private_role_file(&source).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

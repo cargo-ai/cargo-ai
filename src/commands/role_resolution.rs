@@ -658,21 +658,25 @@ mod tests {
 
     #[test]
     fn installed_native_role_example_is_a_verified_portable_catalog() {
-        let fixture = Fixture::new();
-        let guidance = include_str!("../../templates/guidance/client-actions.md");
-        let example = guidance
-            .split("```json\n")
-            .skip(1)
-            .filter_map(|section| section.split_once("```"))
-            .map(|(json, _)| json)
-            .find(|json| json.contains("\"schema_version\": 3"))
-            .expect("Installed guidance includes the native catalog example");
-        fs::write(fixture.root.join(client_actions::CATALOG_FILE), example).unwrap();
-        let catalog = client_actions::discover(&fixture.root).unwrap();
-        assert_eq!(catalog.schema_version, 3);
-        let registry = catalog.role_registry.unwrap();
-        assert_eq!(registry.call_sites[0].id, "review-root");
-        assert_eq!(registry.contexts[0].key.action, "review");
+        let canonical =
+            include_str!("../../templates/guidance/client-actions.md").replace("\r\n", "\n");
+        for guidance in [canonical.clone(), canonical.replace('\n', "\r\n")] {
+            let fixture = Fixture::new();
+            let guidance = guidance.replace("\r\n", "\n");
+            let example = guidance
+                .split("```json\n")
+                .skip(1)
+                .filter_map(|section| section.split_once("```"))
+                .map(|(json, _)| json)
+                .find(|json| json.contains("\"schema_version\": 3"))
+                .expect("Installed guidance includes the native catalog example");
+            fs::write(fixture.root.join(client_actions::CATALOG_FILE), example).unwrap();
+            let catalog = client_actions::discover(&fixture.root).unwrap();
+            assert_eq!(catalog.schema_version, 3);
+            let registry = catalog.role_registry.unwrap();
+            assert_eq!(registry.call_sites[0].id, "review-root");
+            assert_eq!(registry.contexts[0].key.action, "review");
+        }
     }
 
     #[test]

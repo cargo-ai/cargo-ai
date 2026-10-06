@@ -16,6 +16,7 @@ const MAX_FRAMES: usize = 1024;
 type Owned = crate::commands::machine_process::OwnedChild;
 #[cfg(not(cargo_ai_cli))]
 struct Owned {
+    #[cfg(unix)]
     pid: u32,
     #[cfg(windows)]
     handle: usize,
@@ -29,6 +30,7 @@ impl Owned {
         #[cfg(windows)]
         let handle = windows::attach(child)?;
         let owned = Self {
+            #[cfg(unix)]
             pid,
             #[cfg(windows)]
             handle,

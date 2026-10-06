@@ -50,7 +50,7 @@ struct Extended {
     peak_job: usize,
 }
 #[link(name = "kernel32")]
-extern "system" {
+unsafe extern "system" {
     fn CreateJobObjectW(attributes: *mut c_void, name: *const u16) -> *mut c_void;
     fn SetInformationJobObject(
         job: *mut c_void,

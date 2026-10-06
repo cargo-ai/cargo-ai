@@ -336,6 +336,15 @@ fn assemble_build_root(
         &build_profile.assets,
     )?;
     validate_build_input_boundaries(project_root, build_profile, output_root)?;
+    super::package::validate_private_role_exports(
+        project_root,
+        build_profile
+            .agent_definitions
+            .iter()
+            .chain(&build_profile.hatched_agents)
+            .chain(&build_profile.assets),
+        &build_profile.tools,
+    )?;
     prepare_output_root(output_root, force)?;
     write_generated_project_metadata(
         output_root.path.as_path(),

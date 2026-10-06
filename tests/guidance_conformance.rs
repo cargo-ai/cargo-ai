@@ -266,6 +266,55 @@ fn build_and_package_exclude_incidental_guidance_and_keep_declared_assets() {
             .join("assets/vendor/.cargo-ai/guidance/start-here.md")
             .is_file());
         assert!(explicit.join("assets/vendor/CLAUDE.md").is_file());
+        let example =
+            Path::new("assets/vendor/.cargo-ai/guidance/examples/client-action-request.json");
+        let canonical = include_bytes!("../templates/guidance/examples/client-action-request.json");
+        assert_eq!(fs::read(explicit.join(example)).unwrap(), canonical);
+
+        let mut customized: serde_json::Value = serde_json::from_slice(canonical).unwrap();
+        customized["execution_policy"]["allowed"][0]["profile"] =
+            serde_json::json!("personal-profile");
+        let wrapped = serde_json::json!({
+            "example": serde_json::from_slice::<serde_json::Value>(canonical).unwrap(),
+            "copied": {"profile_uuid":"private-uuid","connection_generation":"private-generation"}
+        });
+        for private_record in [customized, wrapped] {
+            fs::write(
+                root.join(example),
+                serde_json::to_vec(&private_record).unwrap(),
+            )
+            .unwrap();
+            let source_before = snapshot(&root);
+            let output_before = snapshot(&explicit);
+            let private_copy = cli(
+                &fixture,
+                &root,
+                &[
+                    "--no-update-check",
+                    command,
+                    "explicit",
+                    "--output-dir",
+                    explicit.to_str().unwrap(),
+                    "--force",
+                ],
+            );
+            assert!(
+                !private_copy.status.success(),
+                "a familiar guidance path cannot exempt private policy"
+            );
+            assert!(output_text(&private_copy).contains("private role record"));
+            assert_eq!(
+                snapshot(&explicit),
+                output_before,
+                "private-copy rejection preserves existing output"
+            );
+            assert_eq!(
+                snapshot(&root),
+                source_before,
+                "private-copy rejection preserves customized source"
+            );
+            fs::write(root.join(example), canonical).unwrap();
+        }
         let forbidden = fixture.root.join(format!("{command}-forbidden"));
         let result = cli(
             &fixture,
