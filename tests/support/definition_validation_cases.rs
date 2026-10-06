@@ -19,6 +19,34 @@ const PARTS: usize = 1_024;
 const DATA_PATH: &str = "$.actions[0].run[0].params.data";
 const STEP_PATH: &str = "$.actions[0].run[0]";
 
+pub fn visit_native_role_voice_cases(mut visit: impl FnMut(&str, &Value, bool)) {
+    for version in [
+        "2026-09-09.r1",
+        "2026-09-19.r1",
+        "2026-10-01.r1",
+        "2026-10-03.r1",
+        "2026-10-06.r1",
+    ] {
+        let base = json!({"agent_definition_schema_version":version,"agent_schema":{"type":"object","properties":{}},"actions":[{"name":"speak","logic":{"==":[1,1]},"run":[{"kind":"generate_audio","text":"Hello","path":"speech.wav"}]}]});
+        visit(
+            &format!("{version}:omitted"),
+            &base,
+            version == "2026-10-06.r1",
+        );
+        for (name, voice, accepted) in [
+            ("literal", json!("coral"), true),
+            ("null", Value::Null, false),
+            ("blank", json!(" "), false),
+            ("boolean", json!(true), false),
+            ("undeclared", json!({"var":"runtime.missing"}), false),
+        ] {
+            let mut value = base.clone();
+            value["actions"][0]["run"][0]["voice"] = voice;
+            visit(&format!("{version}:{name}"), &value, accepted);
+        }
+    }
+}
+
 pub fn rubric_definition() -> Value {
     json!({
         "agent_definition_schema_version": "2026-09-19.r1",

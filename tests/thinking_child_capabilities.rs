@@ -78,7 +78,8 @@ fn actual_cli_and_copied_cli_declare_exactly_one_matching_run_capability() {
         assert!(passive.is_cli_run());
         assert!(passive.supports_thinking());
         let declaration = serde_json::to_value(passive).unwrap();
-        assert_eq!(declaration["revision"], 4);
+        assert_eq!(declaration["revision"], 5);
+        assert!(passive.supports_native_roles());
         assert_eq!(
             declaration["structured_results"]["execution_checking"],
             true
@@ -124,7 +125,8 @@ fn actual_generated_and_copied_binary_inspect_agree_with_passive_capabilities() 
         assert!(!passive.is_cli_run());
         assert!(passive.supports_thinking());
         let declaration = serde_json::to_value(passive).unwrap();
-        assert_eq!(declaration["revision"], 4);
+        assert_eq!(declaration["revision"], 5);
+        assert!(passive.supports_native_roles());
         assert_eq!(
             declaration["structured_results"]["execution_checking"],
             true
@@ -146,6 +148,10 @@ fn actual_generated_and_copied_binary_inspect_agree_with_passive_capabilities() 
         assert_eq!(
             inspect["runtime_capabilities"],
             serde_json::to_value(passive).unwrap()
+        );
+        assert_eq!(
+            generated_capabilities::definition_for_artifact(artifact).unwrap(),
+            inspect["definition_sha256"].as_str().unwrap(),
         );
     }
 }
@@ -188,6 +194,37 @@ fn argument_capture_child(fixture: &Fixture, artifact: &Path, declaration: Decla
     }
     fs::write(artifact, script).unwrap();
     fs::set_permissions(artifact, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn native_support_does_not_substitute_for_exact_definition_provenance() {
+    let fixture = Fixture::new();
+    let artifact = fixture.root.join("native-child");
+    argument_capture_child(&fixture, &artifact, Declaration::Generated);
+    assert!(generated_capabilities::capabilities_for_artifact(&artifact)
+        .unwrap()
+        .supports_native_roles());
+    assert!(generated_capabilities::definition_for_artifact(&artifact).is_err());
+
+    let expected = "a".repeat(64);
+    let mut bytes = fs::read(&artifact).unwrap();
+    bytes.extend_from_slice(&generated_capability_record::DEFINITION_OPEN);
+    bytes.extend_from_slice(expected.as_bytes());
+    bytes.extend_from_slice(&generated_capability_record::DEFINITION_CLOSE);
+    fs::write(&artifact, &bytes).unwrap();
+    assert_eq!(
+        generated_capabilities::definition_for_artifact(&artifact).unwrap(),
+        expected
+    );
+    assert_ne!(
+        generated_capabilities::definition_for_artifact(&artifact).unwrap(),
+        "b".repeat(64)
+    );
+    assert!(
+        !fixture.root.join("executions").exists(),
+        "Provenance inspection must never run the artifact"
+    );
 }
 
 #[cfg(unix)]

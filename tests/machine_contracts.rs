@@ -432,8 +432,15 @@ fn capabilities_distinguish_replacement_actions_and_selected_result_delivery() {
         .iter()
         .find(|item| item["command"] == "run")
         .unwrap();
-    assert_eq!(run["client_actions"]["catalog_versions"], json!([2]));
-    assert_eq!(run["client_actions"]["request_versions"], json!([2]));
+    assert_eq!(run["client_actions"]["catalog_versions"], json!([2, 3]));
+    assert_eq!(run["client_actions"]["request_versions"], json!([2, 3]));
+    let roles = &run["native_roles"];
+    assert_eq!(roles["role_contract_version"], 1);
+    assert_eq!(roles["binding_authorizes_execution"], false);
+    assert_eq!(roles["operation_access"], "unverified_until_invocation");
+    assert_eq!(roles["session"]["version"], 1);
+    assert_eq!(roles["session"]["control_ack_deadline_ms"], 2_000);
+    assert_eq!(roles["session"]["max_control_frames"], 256);
     let results = &run["structured_results"];
     assert_eq!(results["definition_revision"], "2026-10-03.r1");
     assert_eq!(

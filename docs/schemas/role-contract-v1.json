@@ -1,0 +1,933 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/role-contract-v1.json",
+  "title": "Cargo AI portable native role registry v1",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "roles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/role_declaration"
+      },
+      "maxItems": 64
+    },
+    "call_sites": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/call_site"
+      },
+      "maxItems": 256
+    },
+    "contexts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/role_context"
+      },
+      "maxItems": 256,
+      "minItems": 1
+    },
+    "tool_content": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9_.-]+$"
+      },
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "maxItems": 256
+      }
+    }
+  },
+  "required": [
+    "version",
+    "roles",
+    "call_sites",
+    "contexts"
+  ],
+  "additionalProperties": false,
+  "$comment": "Portable declarations contain no host profile/account selections. Optional nonpersonal provider/model recommendations are advisory only. Runtime additionally validates exact inventory, locators, operation-kind consistency, unique IDs, cross-role relations, every role used by a site, every site used by a context, native tool source identities and context reachability. Bindings, recommendations and evidence cannot confer execution authority.",
+  "$defs": {
+    "requirements": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "enum": [
+            "text_generation",
+            "image_generation",
+            "speech_generation",
+            "transcription"
+          ]
+        },
+        "input_modalities": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "text",
+              "image",
+              "audio"
+            ]
+          },
+          "maxItems": 4,
+          "uniqueItems": true
+        },
+        "structured_output": {
+          "type": "boolean"
+        },
+        "settings": {
+          "$ref": "#/$defs/allowed_settings"
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "additionalProperties": false
+    },
+    "settings": {
+      "type": "object",
+      "properties": {
+        "thinking": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "const": "provider_default"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "const": "choice"
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "mode",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "const": "on"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "const": "off"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "voice": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "format": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        }
+      },
+      "additionalProperties": false
+    },
+    "role_context": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.-]+$"
+            },
+            "interface": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.-]+$"
+            },
+            "mode": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.-]+$"
+            }
+          },
+          "required": [
+            "action",
+            "interface",
+            "mode"
+          ],
+          "additionalProperties": false
+        },
+        "call_sites": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          },
+          "maxItems": 256
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          },
+          "maxItems": 64
+        },
+        "data_scopes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          },
+          "maxItems": 64
+        },
+        "limits": {
+          "$ref": "action-execution-policy-v1.json#/properties/limits"
+        }
+      },
+      "required": [
+        "key",
+        "call_sites",
+        "limits"
+      ],
+      "additionalProperties": false
+    },
+    "binding_revision": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/role_binding"
+          },
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "version",
+        "revision",
+        "bindings"
+      ],
+      "additionalProperties": false
+    },
+    "role_binding": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "profile_uuid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "connection_generation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "settings": {
+          "$ref": "#/$defs/settings"
+        }
+      },
+      "required": [
+        "role",
+        "profile",
+        "profile_uuid",
+        "connection_generation",
+        "provider",
+        "model"
+      ],
+      "additionalProperties": false
+    },
+    "capability_evidence": {
+      "type": "object",
+      "properties": {
+        "profile_uuid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "connection_generation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "operation": {
+          "enum": [
+            "text_generation",
+            "image_generation",
+            "speech_generation",
+            "transcription"
+          ]
+        },
+        "input_modalities": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "text",
+              "image",
+              "audio"
+            ]
+          },
+          "maxItems": 4,
+          "uniqueItems": true
+        },
+        "structured_output": {
+          "type": "boolean"
+        },
+        "settings": {
+          "$ref": "#/$defs/settings"
+        },
+        "status": {
+          "enum": [
+            "compatible",
+            "incompatible",
+            "unknown",
+            "stale",
+            "unavailable"
+          ]
+        },
+        "evidence_revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "provenance": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "valid_until_unix_secs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "operation_evidence": {
+          "$ref": "model-operation-evidence-v1.json#/$defs/assessment"
+        }
+      },
+      "required": [
+        "profile_uuid",
+        "connection_generation",
+        "provider",
+        "model",
+        "operation",
+        "input_modalities",
+        "structured_output",
+        "settings",
+        "status",
+        "evidence_revision",
+        "provenance",
+        "valid_until_unix_secs"
+      ],
+      "additionalProperties": true
+    },
+    "resolution": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "identity": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "binding_revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "binding_identity": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "context": {
+          "type": "object",
+          "properties": {
+            "project_identity": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "environment_identity": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "package_identity": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "runtime_contract": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "connection_context_identity": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "consent_identity": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "project_identity",
+            "environment_identity",
+            "package_identity",
+            "runtime_contract",
+            "connection_context_identity",
+            "consent_identity"
+          ],
+          "additionalProperties": false
+        },
+        "scope": {
+          "$ref": "#/$defs/role_context"
+        },
+        "calls": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "call_site": {
+                "$ref": "#/$defs/call_site"
+              },
+              "selection": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "action-execution-policy-v1.json#/$defs/selection"
+                  }
+                ]
+              },
+              "settings": {
+                "$ref": "#/$defs/settings"
+              },
+              "compatibility": {
+                "enum": [
+                  "compatible",
+                  "incompatible",
+                  "unknown",
+                  "stale",
+                  "unavailable"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/capability_evidence"
+                }
+              }
+            },
+            "required": [
+              "call_site",
+              "selection",
+              "settings",
+              "compatibility",
+              "reason",
+              "evidence"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "required_selections": {
+          "type": "array",
+          "items": {
+            "$ref": "action-execution-policy-v1.json#/$defs/selection"
+          }
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "execution_authorized": {
+          "const": false
+        },
+        "invocation_access": {
+          "const": "unverified"
+        }
+      },
+      "required": [
+        "version",
+        "identity",
+        "binding_revision",
+        "binding_identity",
+        "context",
+        "scope",
+        "calls",
+        "required_selections",
+        "ready",
+        "execution_authorized",
+        "invocation_access"
+      ],
+      "additionalProperties": true
+    },
+    "role_declaration": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "requirements": {
+          "$ref": "#/$defs/requirements"
+        },
+        "different_model_from": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          },
+          "maxItems": 64
+        },
+        "recommendations": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/role_recommendation"
+          },
+          "default": [],
+          "description": "Optional advisory suggestions; absent/empty is valid and empty is omitted from serialized native catalogs."
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "purpose",
+        "requirements"
+      ],
+      "additionalProperties": false
+    },
+    "call_site": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "locator": {
+          "type": "object",
+          "properties": {
+            "definition": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "site": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.-]+$"
+            }
+          },
+          "required": [
+            "definition",
+            "site"
+          ],
+          "additionalProperties": false
+        },
+        "kind": {
+          "enum": [
+            "root",
+            "image",
+            "audio",
+            "transcription",
+            "child",
+            "tool_child"
+          ]
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "fixed": {
+          "type": "object",
+          "properties": {
+            "profile": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model": {
+              "$ref": "action-execution-policy-v1.json#/$defs/selection/properties/model"
+            },
+            "settings": {
+              "$ref": "#/$defs/settings"
+            }
+          },
+          "required": [
+            "model"
+          ],
+          "additionalProperties": false
+        },
+        "requirements": {
+          "$ref": "#/$defs/requirements"
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "artifact": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "input_schema": {
+          "$ref": "business-schema-v1.json"
+        }
+      },
+      "required": [
+        "id",
+        "locator",
+        "kind",
+        "requirements"
+      ],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "role"
+          ],
+          "not": {
+            "required": [
+              "fixed"
+            ]
+          }
+        },
+        {
+          "required": [
+            "fixed"
+          ],
+          "not": {
+            "required": [
+              "role"
+            ]
+          }
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "child",
+                "tool_child"
+              ]
+            }
+          },
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "role"
+                ]
+              },
+              {
+                "required": [
+                  "fixed"
+                ]
+              }
+            ]
+          },
+          "$comment": "Structural child only when native verified target has no root inference; runtime enforces actual source schema and reachable descendant selections."
+        }
+      ]
+    },
+    "allowed_settings": {
+      "type": "object",
+      "properties": {
+        "thinking": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "const": "provider_default"
+                  }
+                },
+                "required": [
+                  "mode"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "const": "choice"
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "mode",
+                  "value"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "const": "on"
+                  }
+                },
+                "required": [
+                  "mode"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "const": "off"
+                  }
+                },
+                "required": [
+                  "mode"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "voice": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "format": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "temperature": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "minItems": 1,
+          "maxItems": 32
+        }
+      },
+      "additionalProperties": false
+    },
+    "role_recommendation": {
+      "type": "object",
+      "description": "Optional nonpersonal portable suggestion. Never supplies a binding, capability evidence, access verification or consent; suggested operation/settings do not constrain role requirements or resolution.",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+            }
+          ],
+          "$comment": "Native validation additionally limits UTF-8 encoded length to 256 bytes and rejects blank text and all Unicode control characters."
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+            }
+          ],
+          "$comment": "Native validation additionally limits UTF-8 encoded length to 256 bytes and rejects blank text and all Unicode control characters."
+        },
+        "operation": {
+          "enum": [
+            "text_generation",
+            "image_generation",
+            "speech_generation",
+            "transcription"
+          ]
+        },
+        "settings": {
+          "$ref": "#/$defs/settings",
+          "default": {},
+          "$comment": "Native validation also limits each serialized setting value to 1024 bytes."
+        },
+        "provenance": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "allOf": [
+              {
+                "pattern": "\\S"
+              },
+              {
+                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+              }
+            ],
+            "$comment": "Native validation additionally limits UTF-8 encoded length to 2048 bytes and rejects blank text and all Unicode control characters."
+          }
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+            }
+          ],
+          "$comment": "Native validation additionally limits UTF-8 encoded length to 2048 bytes and rejects blank text and all Unicode control characters."
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "operation",
+        "provenance",
+        "rationale"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,1048 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/action-catalog-v3.json",
+  "title": "Cargo AI portable action catalog v3",
+  "$comment": "Opt-in native role catalog; catalog 2 remains supported. Runtime validates the complete finite native call inventory and exact generated capability/source provenance before execution.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 3
+    },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/action"
+      }
+    },
+    "interfaces": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/interface"
+      }
+    },
+    "resources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "not": {
+              "enum": [
+                "execution_policy",
+                "expected_binding",
+                "attachment_grants",
+                "constructor",
+                "prototype",
+                "__proto__"
+              ]
+            }
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "mime_type": {
+            "enum": [
+              "text/html",
+              "text/css",
+              "text/javascript",
+              "text/plain",
+              "application/json",
+              "image/png",
+              "image/jpeg",
+              "image/gif",
+              "image/webp",
+              "image/svg+xml"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "mime_type"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 64
+    },
+    "artifact_scopes": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "not": {
+              "enum": [
+                "constructor",
+                "prototype",
+                "__proto__"
+              ]
+            }
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "mime_types": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "text/plain",
+                "application/json",
+                "image/png",
+                "audio/wav"
+              ]
+            }
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "mime_types"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "role_registry": {
+      "$ref": "role-contract-v1.json"
+    }
+  },
+  "required": [
+    "schema_version",
+    "actions",
+    "interfaces",
+    "role_registry"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "action": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+          "not": {
+            "enum": [
+              "execution_policy",
+              "expected_binding",
+              "attachment_grants",
+              "constructor",
+              "prototype",
+              "__proto__"
+            ]
+          }
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "Canonical project-relative JSON entrypoint explicitly selected in build/package."
+        },
+        "input_schema": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/input_schema"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "object"
+                }
+              }
+            }
+          ]
+        },
+        "mappings": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+            "not": {
+              "enum": [
+                "__proto__",
+                "prototype",
+                "constructor"
+              ]
+            },
+            "$comment": "Runtime additionally enforces at most 128 UTF-8 bytes."
+          },
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "runtime_var": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                    "not": {
+                      "enum": [
+                        "execution_policy",
+                        "expected_binding",
+                        "attachment_grants",
+                        "constructor",
+                        "prototype",
+                        "__proto__"
+                      ]
+                    }
+                  },
+                  "encoding": {
+                    "type": "string",
+                    "const": "json"
+                  }
+                },
+                "required": [
+                  "runtime_var"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "input": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                    "not": {
+                      "enum": [
+                        "execution_policy",
+                        "expected_binding",
+                        "attachment_grants",
+                        "constructor",
+                        "prototype",
+                        "__proto__"
+                      ]
+                    }
+                  },
+                  "encoding": {
+                    "type": "string",
+                    "const": "json"
+                  }
+                },
+                "required": [
+                  "input"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "constants": {
+          "type": "object",
+          "properties": {
+            "runtime_vars": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                "not": {
+                  "enum": [
+                    "execution_policy",
+                    "expected_binding",
+                    "attachment_grants",
+                    "constructor",
+                    "prototype",
+                    "__proto__"
+                  ]
+                }
+              },
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              }
+            },
+            "inputs": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                "not": {
+                  "enum": [
+                    "execution_policy",
+                    "expected_binding",
+                    "attachment_grants",
+                    "constructor",
+                    "prototype",
+                    "__proto__"
+                  ]
+                }
+              },
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "required_capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "execution_policy.v1",
+              "business_inputs.v1",
+              "structured_results.v1",
+              "artifact_access.v1",
+              "native_roles.v1"
+            ]
+          }
+        }
+      },
+      "required": [
+        "id",
+        "target",
+        "input_schema",
+        "mappings"
+      ],
+      "additionalProperties": false
+    },
+    "interface": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+          "not": {
+            "enum": [
+              "execution_policy",
+              "expected_binding",
+              "attachment_grants",
+              "constructor",
+              "prototype",
+              "__proto__"
+            ]
+          }
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "not": {
+              "enum": [
+                "execution_policy",
+                "expected_binding",
+                "attachment_grants",
+                "constructor",
+                "prototype",
+                "__proto__"
+              ]
+            }
+          }
+        },
+        "resources": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "not": {
+              "enum": [
+                "execution_policy",
+                "expected_binding",
+                "attachment_grants",
+                "constructor",
+                "prototype",
+                "__proto__"
+              ]
+            }
+          },
+          "maxItems": 64
+        },
+        "presentation": {
+          "type": "object",
+          "properties": {
+            "entrypoint": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "not": {
+                "enum": [
+                  "execution_policy",
+                  "expected_binding",
+                  "attachment_grants",
+                  "constructor",
+                  "prototype",
+                  "__proto__"
+                ]
+              }
+            }
+          },
+          "required": [
+            "entrypoint"
+          ],
+          "additionalProperties": false
+        },
+        "artifact_scopes": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "not": {
+              "enum": [
+                "constructor",
+                "prototype",
+                "__proto__"
+              ]
+            }
+          }
+        }
+      },
+      "required": [
+        "id",
+        "actions"
+      ],
+      "additionalProperties": false
+    },
+    "input_schema": {
+      "$ref": "business-schema-v1.json"
+    },
+    "mapping": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "runtime_var": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "not": {
+                "enum": [
+                  "execution_policy",
+                  "expected_binding",
+                  "attachment_grants",
+                  "constructor",
+                  "prototype",
+                  "__proto__"
+                ]
+              }
+            },
+            "encoding": {
+              "type": "string",
+              "const": "json"
+            }
+          },
+          "required": [
+            "runtime_var"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "not": {
+                "enum": [
+                  "execution_policy",
+                  "expected_binding",
+                  "attachment_grants",
+                  "constructor",
+                  "prototype",
+                  "__proto__"
+                ]
+              }
+            },
+            "encoding": {
+              "type": "string",
+              "const": "json"
+            }
+          },
+          "required": [
+            "input"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "discovery": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 3
+        },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                "not": {
+                  "enum": [
+                    "execution_policy",
+                    "expected_binding",
+                    "attachment_grants",
+                    "constructor",
+                    "prototype",
+                    "__proto__"
+                  ]
+                }
+              },
+              "label": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "description": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024,
+                "description": "Canonical project-relative JSON entrypoint explicitly selected in build/package."
+              },
+              "input_schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/input_schema"
+                  },
+                  {
+                    "properties": {
+                      "type": {
+                        "const": "object"
+                      }
+                    }
+                  }
+                ]
+              },
+              "mappings": {
+                "type": "object",
+                "maxProperties": 64,
+                "propertyNames": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+                  "not": {
+                    "enum": [
+                      "__proto__",
+                      "prototype",
+                      "constructor"
+                    ]
+                  },
+                  "$comment": "Runtime additionally enforces at most 128 UTF-8 bytes."
+                },
+                "additionalProperties": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "runtime_var": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                          "not": {
+                            "enum": [
+                              "execution_policy",
+                              "expected_binding",
+                              "attachment_grants",
+                              "constructor",
+                              "prototype",
+                              "__proto__"
+                            ]
+                          }
+                        },
+                        "encoding": {
+                          "type": "string",
+                          "const": "json"
+                        }
+                      },
+                      "required": [
+                        "runtime_var"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "input": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                          "not": {
+                            "enum": [
+                              "execution_policy",
+                              "expected_binding",
+                              "attachment_grants",
+                              "constructor",
+                              "prototype",
+                              "__proto__"
+                            ]
+                          }
+                        },
+                        "encoding": {
+                          "type": "string",
+                          "const": "json"
+                        }
+                      },
+                      "required": [
+                        "input"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "constants": {
+                "type": "object",
+                "properties": {
+                  "runtime_vars": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                      "not": {
+                        "enum": [
+                          "execution_policy",
+                          "expected_binding",
+                          "attachment_grants",
+                          "constructor",
+                          "prototype",
+                          "__proto__"
+                        ]
+                      }
+                    },
+                    "additionalProperties": {
+                      "type": [
+                        "string",
+                        "number",
+                        "boolean"
+                      ]
+                    }
+                  },
+                  "inputs": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                      "not": {
+                        "enum": [
+                          "execution_policy",
+                          "expected_binding",
+                          "attachment_grants",
+                          "constructor",
+                          "prototype",
+                          "__proto__"
+                        ]
+                      }
+                    },
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "required_capabilities": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "enum": [
+                    "execution_policy.v1",
+                    "business_inputs.v1",
+                    "structured_results.v1",
+                    "artifact_access.v1",
+                    "native_roles.v1"
+                  ]
+                }
+              },
+              "result": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "structured-result-v1.json#/$defs/declaration"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "target",
+              "input_schema",
+              "mappings",
+              "result"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "interfaces": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/interface"
+          }
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                "not": {
+                  "enum": [
+                    "execution_policy",
+                    "expected_binding",
+                    "attachment_grants",
+                    "constructor",
+                    "prototype",
+                    "__proto__"
+                  ]
+                }
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "mime_type": {
+                "enum": [
+                  "text/html",
+                  "text/css",
+                  "text/javascript",
+                  "text/plain",
+                  "application/json",
+                  "image/png",
+                  "image/jpeg",
+                  "image/gif",
+                  "image/webp",
+                  "image/svg+xml"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "mime_type"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 64
+        },
+        "binding": {
+          "$ref": "action-binding-v1.json"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "contains": {
+            "const": "execution_policy.v1"
+          }
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "catalog_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current value is 262144."
+            },
+            "actions": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current value is 256."
+            },
+            "interfaces": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current value is 64."
+            },
+            "resources": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current value is 64."
+            },
+            "request_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current value is 65536."
+            },
+            "business_depth": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current value is 8."
+            },
+            "array_items": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current value is 1024."
+            },
+            "object_members": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current value is 64."
+            },
+            "resource_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current value is 4194304."
+            },
+            "inventory_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current value is 16777216."
+            },
+            "definition_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current value is 1048576."
+            },
+            "attachment_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current value is 10485760."
+            },
+            "string_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Advertised compiled limit; current value is 65536."
+            },
+            "producer_payload_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Current compiled limit: 131072."
+            },
+            "business_key_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Current compiled limit: 128."
+            },
+            "result_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Current compiled limit: 65536."
+            },
+            "artifact": {
+              "type": "object",
+              "properties": {
+                "request_bytes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "nominations": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "authorization": {
+                  "const": "trusted_host_grant"
+                },
+                "read_types": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "text/plain",
+                      "application/json",
+                      "image/png",
+                      "audio/wav"
+                    ]
+                  }
+                },
+                "file_bytes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "native_confinement": {
+                  "type": "boolean"
+                },
+                "format_chunks": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "json_depth": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "json_nodes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "response_bytes": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "catalog_bytes",
+            "actions",
+            "interfaces",
+            "resources",
+            "request_bytes",
+            "business_depth",
+            "array_items",
+            "object_members",
+            "resource_bytes",
+            "inventory_bytes",
+            "definition_bytes",
+            "attachment_bytes",
+            "string_bytes"
+          ],
+          "additionalProperties": true
+        },
+        "artifact_scopes": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                "not": {
+                  "enum": [
+                    "constructor",
+                    "prototype",
+                    "__proto__"
+                  ]
+                }
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "mime_types": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4,
+                "uniqueItems": true,
+                "items": {
+                  "enum": [
+                    "text/plain",
+                    "application/json",
+                    "image/png",
+                    "audio/wav"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "mime_types"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "supported_catalog_versions": {
+          "const": [
+            2,
+            3
+          ]
+        },
+        "supported_request_versions": {
+          "const": [
+            2,
+            3
+          ]
+        },
+        "role_registry": {
+          "$ref": "role-contract-v1.json"
+        }
+      },
+      "required": [
+        "schema_version",
+        "binding",
+        "actions",
+        "interfaces",
+        "resources",
+        "capabilities",
+        "limits",
+        "supported_catalog_versions",
+        "supported_request_versions",
+        "artifact_scopes",
+        "role_registry"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

@@ -23,6 +23,14 @@ pub struct RuntimeCapabilities {
     structured_results: Option<StructuredResultCapabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_policy: Option<ExecutionPolicyCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_roles: Option<NativeRoleCapabilities>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+struct NativeRoleCapabilities {
+    version: u32,
+    control: &'static str,
+    boundaries: &'static [&'static str],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -47,6 +55,9 @@ struct ExecutionPolicyCapabilities {
 }
 
 impl RuntimeCapabilities {
+    pub fn supports_native_roles(self) -> bool {
+        self.native_roles.is_some()
+    }
     pub fn supports_execution_policy(self) -> bool {
         self.execution_policy.is_some()
     }
@@ -55,15 +66,15 @@ impl RuntimeCapabilities {
     }
 
     pub fn supports_thinking(self) -> bool {
-        matches!(self.revision, 1 | 2 | 3 | REVISION)
+        matches!(self.revision, 1 | 2 | 3 | 4 | REVISION)
     }
 
     pub fn supports_toggle(self) -> bool {
-        matches!(self.revision, 2 | 3 | REVISION)
+        matches!(self.revision, 2 | 3 | 4 | REVISION)
     }
 
     pub fn supports_exact_choice_flag(self) -> bool {
-        matches!(self.revision, 2 | 3 | REVISION)
+        matches!(self.revision, 2 | 3 | 4 | REVISION)
     }
 }
 
@@ -101,7 +112,14 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
     let mut policy = encoded_record(cli_run);
     policy[payload..payload + 4].copy_from_slice(&3u32.to_le_bytes());
     policy[payload + 4..payload + 8].copy_from_slice(&0b1111_1111u32.to_le_bytes());
-    if record != encoded_record(cli_run) && record != legacy && record != prior && record != policy
+    let mut result = encoded_record(cli_run);
+    result[payload..payload + 4].copy_from_slice(&4u32.to_le_bytes());
+    result[payload + 4..payload + 8].copy_from_slice(&0b1_1111_1111u32.to_le_bytes());
+    if record != encoded_record(cli_run)
+        && record != legacy
+        && record != prior
+        && record != policy
+        && record != result
     {
         return Err(CapabilityReadError::Unsupported);
     }
@@ -112,17 +130,26 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
             "cargo-ai.generated-runtime"
         },
         revision,
-        structured_results: (revision == REVISION).then_some(StructuredResultCapabilities {
-            definition_revision: "2026-10-03.r1",
-            validation: true,
-            execution_checking: true,
-            terminal_delivery: cli_run,
-            artifact_read: cli_run,
-        }),
-        execution_policy: matches!(revision, 3 | REVISION).then_some(ExecutionPolicyCapabilities {
+        native_roles: (revision == REVISION).then_some(NativeRoleCapabilities {
             version: 1,
-            boundaries: &["root", "media", "descendants"],
+            control: "framed_native_session.v1",
+            boundaries: &["root", "media", "descendants", "declared_tool_children"],
         }),
+        structured_results: matches!(revision, 4 | REVISION).then_some(
+            StructuredResultCapabilities {
+                definition_revision: "2026-10-03.r1",
+                validation: true,
+                execution_checking: true,
+                terminal_delivery: cli_run,
+                artifact_read: cli_run,
+            },
+        ),
+        execution_policy: matches!(revision, 3 | 4 | REVISION).then_some(
+            ExecutionPolicyCapabilities {
+                version: 1,
+                boundaries: &["root", "media", "descendants"],
+            },
+        ),
         thinking: ThinkingCapabilities {
             flags: if revision == 1 {
                 &["--thinking", "--thinking-provider-default"]
@@ -158,6 +185,66 @@ pub fn capabilities_for_artifact(
     let file =
         File::open(artifact).map_err(|error| CapabilityReadError::Unreadable(error.kind()))?;
     capabilities_from_reader(file, MAX_ARTIFACT_BYTES)
+}
+
+/// Passive bounded source identity lookup; never executes an artifact's inspect command.
+pub fn definition_for_artifact(artifact: &Path) -> Result<String, CapabilityReadError> {
+    let metadata =
+        std::fs::metadata(artifact).map_err(|e| CapabilityReadError::Unreadable(e.kind()))?;
+    if !metadata.is_file() {
+        return Err(CapabilityReadError::NotRegularFile);
+    }
+    if metadata.len() > MAX_ARTIFACT_BYTES {
+        return Err(CapabilityReadError::Oversized);
+    }
+    let mut file = File::open(artifact).map_err(|e| CapabilityReadError::Unreadable(e.kind()))?;
+    let mut window = Vec::new();
+    let mut block = [0u8; READ_BLOCK_SIZE];
+    let mut total = 0;
+    let mut found = None;
+    loop {
+        let count = file
+            .read(&mut block)
+            .map_err(|e| CapabilityReadError::Unreadable(e.kind()))?;
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        if total > MAX_ARTIFACT_BYTES {
+            return Err(CapabilityReadError::Oversized);
+        }
+        window.extend_from_slice(&block[..count]);
+        let mut consumed = 0;
+        while let Some(index) = window[consumed..]
+            .windows(record::DEFINITION_OPEN.len())
+            .position(|v| v == record::DEFINITION_OPEN)
+        {
+            let start = consumed + index;
+            if window.len() < start + 96 {
+                consumed = start;
+                break;
+            }
+            let frame = &window[start..start + 96];
+            if frame[80..] != record::DEFINITION_CLOSE
+                || !frame[16..80]
+                    .iter()
+                    .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+            {
+                return Err(CapabilityReadError::Malformed);
+            }
+            if found.is_some() {
+                return Err(CapabilityReadError::Conflicting);
+            }
+            found = Some(
+                String::from_utf8(frame[16..80].to_vec())
+                    .map_err(|_| CapabilityReadError::Malformed)?,
+            );
+            consumed = start + 96;
+        }
+        let keep = window.len().saturating_sub(95).max(consumed);
+        window.drain(..keep);
+    }
+    found.ok_or(CapabilityReadError::Missing)
 }
 
 fn capabilities_from_reader(
@@ -212,6 +299,7 @@ pub(crate) fn test_record(revision: u32) -> Vec<u8> {
         1 => 0b1111u32,
         2 => 0b111_1111,
         3 => 0b1111_1111,
+        4 => 0b1_1111_1111,
         _ => record::THINKING_CAPABILITIES,
     };
     record[payload + 4..payload + 8].copy_from_slice(&bits.to_le_bytes());
@@ -223,6 +311,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_roles_require_new_revision_and_exact_embedded_definition() {
+        assert!(!decode_record(&test_record(4))
+            .unwrap()
+            .supports_native_roles());
+        assert!(decode_record(&test_record(4))
+            .unwrap()
+            .structured_results
+            .is_some());
+        assert!(decode_record(&encoded_record(false))
+            .unwrap()
+            .supports_native_roles());
+        let path =
+            std::env::temp_dir().join(format!("cargo-ai-definition-{}", uuid::Uuid::new_v4()));
+        let digest = "a".repeat(64);
+        let mut bytes = vec![b'x'; READ_BLOCK_SIZE - 7];
+        bytes.extend(
+            [
+                record::DEFINITION_OPEN.as_slice(),
+                digest.as_bytes(),
+                record::DEFINITION_CLOSE.as_slice(),
+            ]
+            .concat(),
+        );
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(definition_for_artifact(&path).unwrap(), digest);
+        bytes.extend(
+            [
+                record::DEFINITION_OPEN.as_slice(),
+                "b".repeat(64).as_bytes(),
+                record::DEFINITION_CLOSE.as_slice(),
+            ]
+            .concat(),
+        );
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            definition_for_artifact(&path),
+            Err(CapabilityReadError::Conflicting)
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn declares_only_exact_thinking_flags_and_settings() {
         let caps = decode_record(&encoded_record(false)).unwrap();
         assert!(caps.supports_thinking());
@@ -231,7 +361,8 @@ mod tests {
             serde_json::to_value(caps).unwrap(),
             serde_json::json!({
                 "runtime": "cargo-ai.generated-runtime",
-                "revision": 4,
+                "revision": 5,
+                "native_roles":{"version":1,"control":"framed_native_session.v1","boundaries":["root","media","descendants","declared_tool_children"]},
                 "structured_results":{"definition_revision":"2026-10-03.r1","validation":true,"execution_checking":true,"terminal_delivery":false,"artifact_read":false},
                 "execution_policy": {"version":1,"boundaries":["root","media","descendants"]},
                 "thinking": {

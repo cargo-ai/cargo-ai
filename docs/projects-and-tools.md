@@ -243,3 +243,41 @@ For complete resource and dependency review criteria, see [Tool hardening](../te
 ## Attribute usage to the consuming project
 
 Local usage captures the project containing the root invocation's working directory as its consuming workspace, separately from an installed package's payload location. Child agents and updated tool bridges retain that root caller even when their working directory changes. Rebuild older generated agents/tools to gain the updated context forwarding; missing historical attribution remains unknown. See [usage dimensions](../templates/guidance/usage-ledger.md#local-attribution-and-dimension-queries) for environment-scoped queries.
+
+### Native role child requests
+
+New tool scaffolds keep protocol 1 as their default and advertise
+`supported_protocol_versions: [1, 2]` in `describe`. Existing protocol 1 tools
+and finite stdin invocations retain their behavior. Native role execution
+requires advertised protocol 2 before invoking a tool that can request a child.
+
+Protocol 2 keeps stdin open and exchanges one JSON object per line. The initial
+request contains only `protocol_version: 2`, `type: "invoke"`, and business
+`params`. Tools receive no private role bindings, profile inventory, credentials,
+or native authorization policy. A declared child can be requested from author
+code with:
+
+```rust
+let result = context.invoke_declared("summarize-child", business_inputs)?;
+```
+
+The call-site id and closed business inputs must match the package declaration.
+The tool emits `child_request` with `protocol_version`, `request_id`, `call_site`,
+and `inputs`. The native parent validates the declaration and active authorization
+before dispatch, then sends a matching `child_result` with business `result` and
+safe `error` fields. This helper serializes requests and rejects mismatched
+responses. Native mode rejects `invoke_agent` and arbitrary child artifact
+selection. On completion the tool emits `type: "result"` with the existing
+nullable string result. A tool must not write logs or extra frames to stdout;
+use stderr for diagnostics.
+
+Private connection context validation never opens a credential prompt. File
+storage uses the existing owner-only credential file. Guided keychain validation
+uses noninteractive native reads on macOS, Windows, and Linux; macOS temporarily
+disables optional keychain UI under a process-wide credential-operation lock and
+restores the original setting before returning. Locked or inaccessible stores,
+failed UI suppression/restoration, and backends without a qualified
+noninteractive read (including iOS and BSD Secret Service) return unavailable.
+Use explicit profile setup and `cargo ai profile refresh-context NAME` to repair
+context after making the selected credential store accessible. Passive discovery
+and resolution never repair metadata or switch storage backends.

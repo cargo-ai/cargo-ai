@@ -137,6 +137,8 @@ struct CatalogDocument {
     resources: Vec<ResourceDocument>,
     #[serde(default)]
     artifact_scopes: Vec<super::action_artifacts::ArtifactScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role_registry: Option<crate::role_contract::RoleRegistry>,
 }
 
 /// Opaque content identity. A source root, target, or resource change invalidates it.
@@ -168,6 +170,16 @@ pub(crate) struct ActionCatalog {
     pub(crate) artifact_scopes: Vec<super::action_artifacts::ArtifactScope>,
     pub(crate) supported_catalog_versions: Vec<u32>,
     pub(crate) supported_request_versions: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) role_registry: Option<crate::role_contract::RoleRegistry>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RoleExecution {
+    pub(crate) binding_revision: crate::role_contract::BindingRevision,
+    #[serde(default)]
+    pub(crate) resolution_id: Option<String>,
+    pub(crate) mode: String,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -182,6 +194,8 @@ pub(crate) struct ActionRequest {
     pub(crate) attachment_grants: BTreeMap<String, AttachmentGrant>,
     #[serde(default)]
     pub(crate) artifact_access: Option<super::action_artifacts::Permission>,
+    #[serde(default)]
+    pub(crate) role_execution: Option<RoleExecution>,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -202,6 +216,7 @@ pub(crate) struct PreparedAction {
     pub(crate) installed: Option<super::local_packages::CheckedInstalledPackageRuntime>,
     pub(crate) execution_policy: Value,
     pub(crate) artifact_context: Option<super::action_artifacts::Context>,
+    pub(crate) role_execution: Option<RoleExecution>,
 }
 struct LoadedCatalog {
     root: PathBuf,
@@ -451,7 +466,7 @@ pub(crate) fn machine_run(matches: &clap::ArgMatches) -> Result<Value, super::ma
                 )
             })
         }
-        "validate" => {
+        "validate" | "resolve" => {
             let raw =
                 read_request_stdin().map_err(|error| action_failure(ActionError::inputs(error)))?;
             let request = parse_request(&raw).map_err(action_failure)?;
@@ -463,9 +478,18 @@ pub(crate) fn machine_run(matches: &clap::ArgMatches) -> Result<Value, super::ma
                     "Action request selectors do not match the CLI selectors.",
                 ));
             }
+            if command == "resolve" {
+                let resolution = super::role_resolution::resolve(&target.root, &request)?;
+                return serde_json::to_value(resolution).map_err(|_| {
+                    super::machine::Failure::new(
+                        "cli.serialization_failed",
+                        "Could not serialize role resolution.",
+                    )
+                });
+            }
             let prepared = prepare(&target.root, &request).map_err(action_failure)?;
             Ok(
-                json!({"schema_version":2,"valid":true,"execution_authorized":false,"interface":prepared.interface,"action":prepared.action,"binding":prepared.binding,
+                json!({"schema_version":request.schema_version,"valid":true,"execution_authorized":false,"interface":prepared.interface,"action":prepared.action,"binding":prepared.binding,
                 "mappings":{"runtime_vars":prepared.run_vars.iter().filter_map(|value|value.split_once('=').map(|(name,_)|name)).collect::<Vec<_>>(),"inputs":prepared.input_overrides.iter().filter_map(|value|value.split_once('=').map(|(name,_)|name)).collect::<Vec<_>>()}}),
             )
         }
@@ -584,21 +608,31 @@ pub(crate) fn discover(root: &Path) -> Result<ActionCatalog, ActionError> {
         })
         .collect::<Result<Vec<_>, ActionError>>()?;
     Ok(ActionCatalog {
-        schema_version: 2,
+        schema_version: loaded.document.schema_version,
         limits: limits(),
-        capabilities: vec![
+        capabilities: [
             "execution_policy.v1",
             "business_inputs.v1",
             "structured_results.v1",
             "artifact_access.v1",
-        ],
+        ]
+        .into_iter()
+        .chain(
+            loaded
+                .document
+                .role_registry
+                .is_some()
+                .then_some("native_roles.v1"),
+        )
+        .collect(),
         binding: loaded.binding,
         actions,
         resources: loaded.document.resources,
         interfaces: loaded.document.interfaces,
         artifact_scopes: loaded.document.artifact_scopes,
-        supported_catalog_versions: vec![2],
-        supported_request_versions: vec![2],
+        supported_catalog_versions: vec![2, 3],
+        supported_request_versions: vec![2, 3],
+        role_registry: loaded.document.role_registry,
     })
 }
 pub(crate) fn parse_request(raw: &str) -> Result<ActionRequest, ActionError> {
@@ -608,7 +642,7 @@ pub(crate) fn parse_request(raw: &str) -> Result<ActionRequest, ActionError> {
     let value = strict_json(raw.as_bytes()).map_err(ActionError::inputs)?;
     validate_envelope_bounds(&value, 0).map_err(ActionError::inputs)?;
     if let Some(version) = value.get("schema_version").and_then(Value::as_u64) {
-        if version != 2 {
+        if ![2, 3].contains(&version) {
             return Err(ActionError::new(
                 "action.unsupported_contract",
                 "Unsupported action request contract version.",
@@ -616,6 +650,18 @@ pub(crate) fn parse_request(raw: &str) -> Result<ActionRequest, ActionError> {
         }
     }
     let request: ActionRequest = serde_json::from_value(value).map_err(ActionError::inputs)?;
+    if (request.schema_version == 3) != request.role_execution.is_some() {
+        return Err(ActionError::new(
+            "role.unsupported_contract",
+            "Private role execution requires action request version 3.",
+        ));
+    }
+    if let Some(role) = &request.role_execution {
+        identifier(&role.mode, "Feature mode").map_err(ActionError::inputs)?;
+        if let Some(identity) = &role.resolution_id {
+            validate_digest(identity).map_err(ActionError::inputs)?;
+        }
+    }
     identifier(&request.action, "Action ID").map_err(ActionError::inputs)?;
     identifier(&request.interface, "Interface ID").map_err(ActionError::inputs)?;
     validate_value_bounds(&Value::Object(request.inputs.clone()), 0)
@@ -630,7 +676,7 @@ pub(crate) fn parse_request(raw: &str) -> Result<ActionRequest, ActionError> {
     Ok(request)
 }
 pub(crate) fn prepare(root: &Path, request: &ActionRequest) -> Result<PreparedAction, ActionError> {
-    if request.schema_version != 2 {
+    if ![2, 3].contains(&request.schema_version) {
         return Err(ActionError::new(
             "action.unsupported_contract",
             "Unsupported action request contract version.",
@@ -645,6 +691,36 @@ pub(crate) fn prepare(root: &Path, request: &ActionRequest) -> Result<PreparedAc
         )
     })?;
     let mut loaded = load_catalog(root)?;
+    if (request.schema_version == 3) != request.role_execution.is_some()
+        || loaded.document.role_registry.is_some() != request.role_execution.is_some()
+    {
+        return Err(ActionError::new(
+            "role.unsupported_contract",
+            "This action requires matching native role execution and catalog contracts.",
+        ));
+    }
+    if let (Some(registry), Some(role)) = (&loaded.document.role_registry, &request.role_execution)
+    {
+        crate::role_contract::validate_bindings(registry, &role.binding_revision)
+            .map_err(role_error)?;
+        let identity = role.resolution_id.as_ref().ok_or_else(|| {
+            ActionError::new(
+                "role.resolution_required",
+                "Role execution requires the exact reviewed resolution identity.",
+            )
+        })?;
+        validate_digest(identity).map_err(ActionError::inputs)?;
+        if !registry.contexts.iter().any(|context| {
+            context.key.action == request.action
+                && context.key.interface == request.interface
+                && context.key.mode == role.mode
+        }) {
+            return Err(ActionError::new(
+                "role.unknown_context",
+                "The requested action, interface and feature mode is not declared.",
+            ));
+        }
+    }
     if loaded.binding != request.expected_binding {
         return Err(ActionError::new(
             "action.stale_binding",
@@ -701,9 +777,23 @@ pub(crate) fn prepare(root: &Path, request: &ActionRequest) -> Result<PreparedAc
             .unwrap_or_else(|| json!([])),
     )
     .map_err(ActionError::catalog)?;
+    let scoped_data = request
+        .role_execution
+        .as_ref()
+        .and_then(|execution| {
+            loaded.document.role_registry.as_ref().and_then(|registry| {
+                registry.contexts.iter().find(|context| {
+                    context.key.action == request.action
+                        && context.key.interface == request.interface
+                        && context.key.mode == execution.mode
+                })
+            })
+        })
+        .map(|context| &context.data_scopes)
+        .unwrap_or(&interface.artifact_scopes);
     let allowed_scopes = super::action_artifacts::validate_access(
         &loaded.document.artifact_scopes,
-        &interface.artifact_scopes,
+        scoped_data,
         &producer_scopes,
         request.artifact_access.as_ref(),
     )
@@ -881,6 +971,7 @@ pub(crate) fn prepare(root: &Path, request: &ActionRequest) -> Result<PreparedAc
         installed: loaded.installed,
         execution_policy: request.execution_policy.clone(),
         artifact_context,
+        role_execution: request.role_execution.clone(),
     })
 }
 pub(crate) fn resource(
@@ -967,10 +1058,16 @@ fn load_catalog(root: &Path) -> Result<LoadedCatalog, ActionError> {
     validate_envelope_bounds(&value, 0)?;
     let document: CatalogDocument =
         serde_json::from_value(value).map_err(|e| format!("Invalid action catalog: {e}"))?;
-    if document.schema_version != 2 {
+    if ![2, 3].contains(&document.schema_version) {
         return Err(ActionError::new(
             "action.unsupported_contract",
             "Unsupported action catalog contract version.",
+        ));
+    }
+    if (document.schema_version == 3) != document.role_registry.is_some() {
+        return Err(ActionError::new(
+            "role.unsupported_contract",
+            "Role declarations require catalog version 3 and its role registry.",
         ));
     }
     if document.actions.is_empty()
@@ -1020,6 +1117,7 @@ fn load_catalog(root: &Path) -> Result<LoadedCatalog, ActionError> {
                 "business_inputs.v1",
                 "structured_results.v1",
                 "artifact_access.v1",
+                "native_roles.v1",
             ]
             .contains(&capability.as_str())
             {
@@ -1123,6 +1221,16 @@ fn load_catalog(root: &Path) -> Result<LoadedCatalog, ActionError> {
             }
         }
     }
+    if let Some(registry) = &document.role_registry {
+        validate_role_inventory(
+            &root,
+            &document,
+            registry,
+            &installed,
+            &mut files,
+            &mut total_bytes,
+        )?;
+    }
     let inventory: Vec<_> = files
         .iter()
         .map(|(path, bytes)| json!({"path":path,"sha256":sha256(bytes)}))
@@ -1144,6 +1252,588 @@ fn load_catalog(root: &Path) -> Result<LoadedCatalog, ActionError> {
         files,
         installed,
     })
+}
+
+fn role_error(error: crate::role_contract::RoleError) -> ActionError {
+    ActionError::new(error.code, error.message)
+}
+
+/// Private native file evidence. Never serialize this absolute-path inventory into package data.
+pub(crate) fn verified_role_inventory(
+    root: &Path,
+) -> Result<BTreeMap<String, String>, ActionError> {
+    let loaded = load_catalog(root)?;
+    if loaded.document.role_registry.is_none() {
+        return Err(ActionError::new(
+            "role.unsupported_contract",
+            "Native role inventory requires a role catalog.",
+        ));
+    }
+    let mut inventory = BTreeMap::new();
+    for (key, bytes) in &loaded.files {
+        let (path, digest) = if let Some(relative) = key.strip_prefix("native-child:") {
+            (
+                confined_file(&loaded.root, relative)?,
+                String::from_utf8(bytes.clone()).map_err(ActionError::catalog)?,
+            )
+        } else if let Some(tool) = key.strip_prefix("native-tool:") {
+            let (name, target) = tool
+                .split_once(':')
+                .ok_or_else(|| ActionError::catalog("Invalid private tool evidence"))?;
+            let runtime_root = if let Some(checked) = &loaded.installed {
+                super::local_packages::resolve_package_runtime_tools_root(&checked.context)?
+                    .ok_or_else(|| ActionError::catalog("Missing private tool runtime"))?
+            } else {
+                super::tools::project_tools_root(&loaded.root)
+            };
+            let manifest_path = confined_file(&runtime_root, &format!("{name}/tool.json"))?;
+            let raw = read_bounded(&manifest_path, MAX_DEFINITION_BYTES, "Native tool identity")?;
+            if target == "manifest" {
+                (manifest_path, sha256(&raw))
+            } else {
+                let manifest = strict_json(&raw).map_err(ActionError::catalog)?;
+                let relative = manifest
+                    .get("artifacts")
+                    .and_then(|v| v.get(target))
+                    .and_then(|v| v.get("path"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| ActionError::catalog("Missing native tool artifact"))?;
+                (
+                    confined_file(&runtime_root.join(name), relative)?,
+                    String::from_utf8(bytes.clone()).map_err(ActionError::catalog)?,
+                )
+            }
+        } else {
+            (confined_file(&loaded.root, key)?, sha256(bytes))
+        };
+        inventory.insert(path.to_string_lossy().into_owned(), digest);
+    }
+    let catalog = confined_file(&loaded.root, CATALOG_FILE)?;
+    inventory.insert(
+        catalog.to_string_lossy().into_owned(),
+        loaded.binding.catalog_sha256,
+    );
+    Ok(inventory)
+}
+
+/// Resolve one declared action context against native, already validated context evidence.
+/// The returned selections are policy inputs; they do not authorize an invocation.
+pub(crate) fn resolve_roles_from_context(
+    root: &Path,
+    expected: &ActionBinding,
+    key: &crate::role_contract::ContextKey,
+    revision: &crate::role_contract::BindingRevision,
+    context: &crate::role_contract::ResolutionContext,
+    evidence: &[crate::role_contract::CapabilityEvidence],
+    now_unix_secs: u64,
+) -> Result<crate::role_contract::Resolution, ActionError> {
+    let loaded = load_catalog(root)?;
+    if &loaded.binding != expected {
+        return Err(ActionError::new(
+            "action.stale_binding",
+            "The complete package action binding changed; rediscover before review.",
+        ));
+    }
+    let package_identity =
+        crate::role_contract::canonical_identity(&loaded.binding).map_err(role_error)?;
+    if context.package_identity != package_identity {
+        return Err(ActionError::new(
+            "role.stale_context",
+            "The role resolution package context is stale.",
+        ));
+    }
+    let registry = loaded.document.role_registry.as_ref().ok_or_else(|| {
+        ActionError::new(
+            "role.unsupported_contract",
+            "This catalog does not declare native roles.",
+        )
+    })?;
+    crate::role_contract::resolve(registry, key, revision, context, evidence, now_unix_secs)
+        .map_err(role_error)
+}
+
+fn validate_role_inventory(
+    root: &Path,
+    document: &CatalogDocument,
+    registry: &crate::role_contract::RoleRegistry,
+    installed: &Option<super::local_packages::CheckedInstalledPackageRuntime>,
+    files: &mut BTreeMap<String, Vec<u8>>,
+    total_bytes: &mut usize,
+) -> Result<(), ActionError> {
+    use crate::role_contract::{CallKind, CallLocator};
+    crate::role_contract::validate_registry(registry).map_err(role_error)?;
+    let mut definitions = BTreeSet::new();
+    for action in &document.actions {
+        definitions.insert(action.target.clone());
+    }
+    for site in &registry.call_sites {
+        definitions.insert(site.locator.definition.clone());
+        if let Some(target) = &site.target {
+            definitions.insert(target.clone());
+        }
+        if let Some(schema) = &site.input_schema {
+            validate_schema(schema, 0)?;
+        }
+    }
+    if definitions.len() > crate::role_contract::MAX_CALL_SITES {
+        return Err(ActionError::catalog("Too many role definitions"));
+    }
+    let mut actual = BTreeMap::new();
+    let mut tools = BTreeSet::new();
+    for path in &definitions {
+        if let Some(checked) = installed {
+            if !checked
+                .context
+                .entrypoints
+                .iter()
+                .any(|entry| entry.path == *path && entry.runnable)
+            {
+                return Err(ActionError::catalog(
+                    "Role definition must be an exported native entrypoint",
+                ));
+            }
+        }
+        let bytes = read_bounded(
+            &confined_file(root, path)?,
+            MAX_DEFINITION_BYTES,
+            "Role definition",
+        )?;
+        let text = std::str::from_utf8(&bytes).map_err(ActionError::catalog)?;
+        crate::runtime_definition::RuntimeAgentDefinition::from_str(text)?;
+        let definition = strict_json(&bytes).map_err(ActionError::catalog)?;
+        if definition
+            .pointer("/agent_schema/properties")
+            .and_then(Value::as_object)
+            .is_some_and(|properties| !properties.is_empty())
+        {
+            actual.insert(
+                CallLocator {
+                    definition: path.clone(),
+                    site: "root".into(),
+                },
+                (CallKind::Root, definition.clone(), None),
+            );
+        }
+        for (action_index, action) in definition["actions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            for (step_index, step) in action["run"].as_array().into_iter().flatten().enumerate() {
+                let kind = match step["kind"].as_str() {
+                    Some("generate_image") => CallKind::Image,
+                    Some("generate_audio") => CallKind::Audio,
+                    Some("transcribe_audio") => CallKind::Transcription,
+                    Some("agent") => CallKind::Child,
+                    Some("tool") => {
+                        if let Some(name) = step["name"].as_str() {
+                            tools.insert((path.clone(), name.to_string()));
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let target = if kind == CallKind::Child {
+                    let target = step
+                        .get("artifact")
+                        .or_else(|| step.get("agent"))
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            ActionError::catalog("Role child target must be finite and declarative")
+                        })?;
+                    let target = target.strip_prefix("./").unwrap_or(target);
+                    let relative = Path::new(path)
+                        .parent()
+                        .unwrap_or(Path::new(""))
+                        .join(target);
+                    let target = relative
+                        .to_str()
+                        .ok_or_else(|| ActionError::catalog("Invalid child target"))?
+                        .replace('\\', "/");
+                    if crate::role_contract::portable_definition(&target)
+                        && definitions.contains(&target)
+                    {
+                        Some(target)
+                    } else {
+                        let declared = registry.call_sites.iter().find(|site| site.locator.definition == *path && site.locator.site == format!("actions.{action_index}.run.{step_index}") && site.artifact.as_ref() == Some(&target)).ok_or_else(|| ActionError::catalog("Generated child requires an exact artifact and source declaration"))?;
+                        let artifact_path = confined_file(root, &target)?;
+                        let capability = crate::generated_capabilities::capabilities_for_artifact(
+                            &artifact_path,
+                        )
+                        .map_err(|_| {
+                            ActionError::catalog("Generated native role child requires rebuilding")
+                        })?;
+                        if !capability.supports_native_roles() {
+                            return Err(ActionError::catalog(
+                                "Generated native role child does not support this contract",
+                            ));
+                        }
+                        let source = declared.target.as_ref().ok_or_else(|| {
+                            ActionError::catalog("Generated child source is missing")
+                        })?;
+                        let source_value = strict_json(&read_bounded(
+                            &confined_file(root, source)?,
+                            MAX_DEFINITION_BYTES,
+                            "Generated child source",
+                        )?)
+                        .map_err(ActionError::catalog)?;
+                        let source_identity =
+                            crate::role_contract::canonical_identity(&source_value)
+                                .map_err(role_error)?;
+                        if crate::generated_capabilities::definition_for_artifact(&artifact_path)
+                            .ok()
+                            .as_deref()
+                            != Some(&source_identity)
+                        {
+                            return Err(ActionError::catalog(
+                                "Generated child source changed; rebuild the declared artifact",
+                            ));
+                        }
+                        let artifact_bytes = read_bounded(
+                            &artifact_path,
+                            128 * 1024 * 1024,
+                            "Generated native child",
+                        )?;
+                        insert_inventory(
+                            files,
+                            total_bytes,
+                            &format!("native-child:{target}"),
+                            sha256(&artifact_bytes).into_bytes(),
+                        )?;
+                        Some(source.clone())
+                    }
+                } else {
+                    None
+                };
+                actual.insert(
+                    CallLocator {
+                        definition: path.clone(),
+                        site: format!("actions.{action_index}.run.{step_index}"),
+                    },
+                    (kind, step.clone(), target),
+                );
+            }
+        }
+        insert_inventory(files, total_bytes, path, bytes)?;
+    }
+    for site in &registry.call_sites {
+        if site.kind == CallKind::ToolChild {
+            let parts: Vec<_> = site.locator.site.split('.').collect();
+            if parts.len() != 3
+                || !tools.contains(&(site.locator.definition.clone(), parts[1].to_string()))
+            {
+                return Err(ActionError::catalog(
+                    "Tool call site must name a tool used by its declaring definition",
+                ));
+            }
+            let target = site.target.as_ref().unwrap();
+            let definition = strict_json(
+                files
+                    .get(target)
+                    .ok_or_else(|| ActionError::catalog("Missing native tool child definition"))?,
+            )
+            .map_err(ActionError::catalog)?;
+            if site
+                .input_schema
+                .as_ref()
+                .and_then(|v| v.get("properties"))
+                .and_then(Value::as_object)
+                .is_none_or(|props| {
+                    props.keys().any(|key| {
+                        definition
+                            .get("runtime_vars")
+                            .and_then(|v| v.get(key))
+                            .is_none()
+                    })
+                })
+            {
+                return Err(ActionError::catalog(
+                    "Tool child business keys must name declared child runtime variables",
+                ));
+            }
+            if let Some(artifact) = &site.artifact {
+                let path = confined_file(root, artifact)?;
+                let capabilities = crate::generated_capabilities::capabilities_for_artifact(&path)
+                    .map_err(|_| ActionError::catalog("Native tool child requires rebuilding"))?;
+                let source =
+                    crate::role_contract::canonical_identity(&definition).map_err(role_error)?;
+                if !capabilities.supports_native_roles()
+                    || capabilities.is_cli_run()
+                    || crate::generated_capabilities::definition_for_artifact(&path)
+                        .ok()
+                        .as_deref()
+                        != Some(&source)
+                {
+                    return Err(ActionError::catalog(
+                        "Native tool child source or contract requires rebuilding",
+                    ));
+                }
+                let bytes = read_bounded(&path, 128 * 1024 * 1024, "Native tool child")?;
+                insert_inventory(
+                    files,
+                    total_bytes,
+                    &format!("native-child:{artifact}"),
+                    sha256(&bytes).into_bytes(),
+                )?;
+            }
+            continue;
+        }
+        let (kind, selectors, target) = actual.remove(&site.locator).ok_or_else(|| {
+            ActionError::catalog("Role call site is not an actual native location")
+        })?;
+        if kind != site.kind || target != site.target {
+            return Err(ActionError::catalog(
+                "Role call kind or target does not match its native definition",
+            ));
+        }
+        for selector in ["profile", "model", "thinking"] {
+            if let Some(value) = selectors.get(selector) {
+                if site.role.is_some() {
+                    return Err(ActionError::catalog(
+                        "Mapped call sites cannot silently replace explicit native selectors",
+                    ));
+                }
+                let fixed = site.fixed.as_ref().ok_or_else(|| {
+                    ActionError::catalog(
+                        "Structural child declarations cannot hide explicit native selectors",
+                    )
+                })?;
+                let expected = match selector {
+                    "profile" => serde_json::to_value(&fixed.profile).unwrap_or(Value::Null),
+                    "model" => match &fixed.model {
+                        crate::execution_policy::ModelSelection::Named { value } => {
+                            Value::String(value.clone())
+                        }
+                        _ => Value::Null,
+                    },
+                    _ => fixed
+                        .settings
+                        .get("thinking")
+                        .cloned()
+                        .unwrap_or_else(|| json!({"mode":"provider_default"})),
+                };
+                if value != &expected {
+                    return Err(ActionError::catalog(
+                        "Fixed call declarations must disclose exact native selectors",
+                    ));
+                }
+            }
+        }
+    }
+    if !actual.is_empty() {
+        return Err(ActionError::catalog(
+            "Every native root, media and direct child call must be declared",
+        ));
+    }
+    let tool_names: BTreeSet<_> = tools.iter().map(|(_, name)| name).collect();
+    if registry
+        .tool_content
+        .keys()
+        .any(|name| !tool_names.contains(name))
+    {
+        return Err(ActionError::catalog(
+            "Role tool inventory contains an unrelated tool",
+        ));
+    }
+    for name in tool_names {
+        let content = registry.tool_content.get(name).ok_or_else(|| {
+            ActionError::catalog("Native role tools require an explicit portable source inventory")
+        })?;
+        if content.is_empty()
+            || content.len() > 256
+            || content.iter().collect::<BTreeSet<_>>().len() != content.len()
+        {
+            return Err(ActionError::catalog(
+                "Role tool source inventory is empty, duplicated or oversized",
+            ));
+        }
+        let manifest_relative = format!(".cargo-ai/tools/{name}/tool.json");
+        let manifest_bytes = read_bounded(
+            &confined_file(root, &manifest_relative)?,
+            MAX_DEFINITION_BYTES,
+            "Role tool manifest",
+        )?;
+        let manifest = strict_json(&manifest_bytes).map_err(ActionError::catalog)?;
+        let source_manifest = manifest
+            .pointer("/source/manifest_path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ActionError::catalog("Role tools require portable source-backed manifests")
+            })?;
+        if !content.iter().any(|path| path == source_manifest) {
+            return Err(ActionError::catalog(
+                "Role tool source inventory omits its source manifest",
+            ));
+        }
+        let source_root = Path::new(source_manifest)
+            .parent()
+            .ok_or_else(|| ActionError::catalog("Role tool source needs a containing directory"))?;
+        if source_root.as_os_str().is_empty() {
+            return Err(ActionError::catalog(
+                "Role tool source must be in its own directory",
+            ));
+        }
+        let mut source_files = Vec::new();
+        collect_role_source_files(root, source_root, &mut source_files, 0)?;
+        if source_files.iter().any(|path| !content.contains(path))
+            || content.iter().any(|path| !source_files.contains(path))
+        {
+            return Err(ActionError::catalog(
+                "Role tool inventory must contain the complete portable source tree",
+            ));
+        }
+        insert_inventory(files, total_bytes, &manifest_relative, manifest_bytes)?;
+        for path in content {
+            insert_inventory(
+                files,
+                total_bytes,
+                path,
+                read_bounded(
+                    &confined_file(root, path)?,
+                    MAX_DEFINITION_BYTES,
+                    "Role tool source",
+                )?,
+            )?;
+        }
+        // Runtime binaries are host-bound evidence; they are never added to portable content.
+        let runtime_root = if let Some(checked) = installed {
+            super::local_packages::resolve_package_runtime_tools_root(&checked.context)?
+                .ok_or_else(|| ActionError::catalog("Installed role tool runtime is unavailable"))?
+        } else {
+            super::tools::project_tools_root(root)
+        };
+        let runtime_manifest_path = confined_file(&runtime_root, &format!("{name}/tool.json"))?;
+        let runtime_manifest = strict_json(&read_bounded(
+            &runtime_manifest_path,
+            MAX_DEFINITION_BYTES,
+            "Native role tool manifest",
+        )?)
+        .map_err(ActionError::catalog)?;
+        insert_inventory(
+            files,
+            total_bytes,
+            &format!("native-tool:{name}:manifest"),
+            serde_json::to_vec(&runtime_manifest).map_err(ActionError::catalog)?,
+        )?;
+        let artifacts = runtime_manifest
+            .get("artifacts")
+            .and_then(Value::as_object)
+            .ok_or_else(|| ActionError::catalog("Native role tool artifacts are unavailable"))?;
+        if artifacts.len() > 16 {
+            return Err(ActionError::catalog("Too many native role tool artifacts"));
+        }
+        for (target, artifact) in artifacts {
+            let relative = artifact
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ActionError::catalog("Invalid native role tool artifact"))?;
+            let base = runtime_root.join(name);
+            let binary_path = confined_file(&base, relative)?;
+            let binary =
+                read_bounded(&binary_path, 128 * 1024 * 1024, "Native role tool artifact")?;
+            insert_inventory(
+                files,
+                total_bytes,
+                &format!("native-tool:{name}:{target}"),
+                sha256(&binary).into_bytes(),
+            )?;
+        }
+    }
+    for context in &registry.contexts {
+        let action = document
+            .actions
+            .iter()
+            .find(|a| a.id == context.key.action)
+            .ok_or_else(|| ActionError::catalog("Unknown role action dependency"))?;
+        let interface = document
+            .interfaces
+            .iter()
+            .find(|i| i.id == context.key.interface && i.actions.contains(&action.id))
+            .ok_or_else(|| ActionError::catalog("Unknown role interface dependency"))?;
+        if context
+            .resources
+            .iter()
+            .any(|id| !interface.resources.contains(id))
+            || context
+                .data_scopes
+                .iter()
+                .any(|id| !interface.artifact_scopes.contains(id))
+            || (registry.call_sites.iter().any(|site| {
+                site.locator.definition == action.target && site.kind == CallKind::Root
+            }) && !context.call_sites.iter().any(|id| {
+                registry.call_sites.iter().any(|site| {
+                    &site.id == id
+                        && site.locator.definition == action.target
+                        && site.kind == CallKind::Root
+                })
+            }))
+        {
+            return Err(ActionError::catalog(
+                "Role action context must retain its native root and declared resource/data scopes",
+            ));
+        }
+    }
+    for interface in &document.interfaces {
+        for action in &interface.actions {
+            if !registry
+                .contexts
+                .iter()
+                .any(|c| c.key.action == *action && c.key.interface == interface.id)
+            {
+                return Err(ActionError::catalog(
+                    "Every action and interface requires an explicit feature-mode declaration",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_role_source_files(
+    root: &Path,
+    relative: &Path,
+    files: &mut Vec<String>,
+    depth: usize,
+) -> Result<(), ActionError> {
+    if depth > 16 || files.len() > 256 {
+        return Err(ActionError::catalog(
+            "Role tool source inventory exceeds its finite bounds",
+        ));
+    }
+    let directory = super::local_packages::resolve_existing_path_under_root(
+        root,
+        relative,
+        "Role tool source",
+    )?;
+    for entry in fs::read_dir(directory).map_err(ActionError::catalog)? {
+        let entry = entry.map_err(ActionError::catalog)?;
+        let name = entry.file_name();
+        if matches!(name.to_str(), Some("target" | ".git")) {
+            continue;
+        }
+        let path = relative.join(name);
+        let kind = entry.file_type().map_err(ActionError::catalog)?;
+        if kind.is_symlink() {
+            return Err(ActionError::catalog(
+                "Role tool sources cannot contain links",
+            ));
+        }
+        if kind.is_dir() {
+            collect_role_source_files(root, &path, files, depth + 1)?;
+        } else if kind.is_file() {
+            files.push(
+                path.to_str()
+                    .ok_or_else(|| ActionError::catalog("Role tool source path is not portable"))?
+                    .replace('\\', "/"),
+            );
+        } else {
+            return Err(ActionError::catalog(
+                "Role tool source contains an unsupported file",
+            ));
+        }
+    }
+    Ok(())
 }
 
 // Reject duplicates and excessive structure before converting catalogs/requests to Value.
@@ -1511,6 +2201,15 @@ pub(crate) fn validate_distribution(
             .into());
         }
     }
+    if let Some(registry) = &loaded.document.role_registry {
+        for site in &registry.call_sites {
+            for path in std::iter::once(&site.locator.definition).chain(site.target.as_ref()) {
+                if !targets.contains(path) {
+                    return Err("Every role call-site definition and native target must be explicitly selected by this profile.".into());
+                }
+            }
+        }
+    }
     for resource in &loaded.document.resources {
         if !assets
             .iter()
@@ -1592,6 +2291,7 @@ mod tests {
                 execution_policy: json!({"version":1,"allowed":[],"limits":{"max_runtime_secs":60,"max_output_tokens":512,"max_agent_depth":4}}),
                 attachment_grants: BTreeMap::new(),
                 artifact_access: None,
+                role_execution: None,
             }
         }
     }
@@ -1599,6 +2299,221 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    fn role_fixture() -> (Fixture, Value) {
+        let fixture = Fixture::new();
+        fs::write(fixture.root.join("agent.json"), serde_json::to_vec(&json!({"agent_definition_schema_version":"2026-10-03.r1","agent_schema":{"type":"object","properties":{"answer":{"type":"string"}}},"actions":[]})).unwrap()).unwrap();
+        let mut catalog = Fixture::catalog();
+        catalog["schema_version"] = json!(3);
+        catalog["actions"][0]["input_schema"] =
+            json!({"type":"object","properties":{},"required":[],"additionalProperties":false});
+        catalog["actions"][0]["mappings"] = json!({});
+        let requirements = json!({"operation":"text_generation","input_modalities":["text"],"structured_output":false,"settings":{}});
+        catalog["role_registry"] = json!({"version":1,"roles":[{"id":"writer","label":"Writer","purpose":"Write content","requirements":requirements}],"call_sites":[{"id":"root","locator":{"definition":"agent.json","site":"root"},"kind":"root","role":"writer","requirements":requirements}],"contexts":[{"key":{"action":"generate","interface":"panels","mode":"default"},"call_sites":["root"],"resources":["page"],"limits":{"max_runtime_secs":60,"max_output_tokens":512,"max_agent_depth":4}},{"key":{"action":"generate","interface":"native","mode":"default"},"call_sites":["root"],"resources":[],"limits":{"max_runtime_secs":60,"max_output_tokens":512,"max_agent_depth":4}}]});
+        fixture.write_catalog(&catalog);
+        crate::runtime_definition::RuntimeAgentDefinition::from_str(
+            &fs::read_to_string(fixture.root.join("agent.json")).unwrap(),
+        )
+        .unwrap();
+        crate::role_contract::validate_registry(
+            &serde_json::from_value(catalog["role_registry"].clone()).unwrap(),
+        )
+        .unwrap();
+        (fixture, catalog)
+    }
+
+    #[test]
+    fn role_contract_shared_role_does_not_grant_another_interfaces_resources() {
+        let (fixture, mut catalog) = role_fixture();
+        let mut other_action = catalog["actions"][0].clone();
+        other_action["id"] = json!("narrate");
+        catalog["actions"]
+            .as_array_mut()
+            .unwrap()
+            .push(other_action);
+        catalog["interfaces"][0]["resources"] = json!(["page"]);
+        catalog["interfaces"][1]["actions"] = json!(["narrate"]);
+        catalog["interfaces"][1]["resources"] = json!(["script"]);
+        catalog["role_registry"]["contexts"][1]["key"]["action"] = json!("narrate");
+        catalog["role_registry"]["contexts"][1]["resources"] = json!(["script"]);
+        fixture.write_catalog(&catalog);
+        let discovered = discover(&fixture.root).unwrap();
+        assert_eq!(discovered.role_registry.unwrap().roles.len(), 1);
+        assert!(resource(&fixture.root, "panels", "page", &discovered.binding).is_ok());
+        assert!(resource(&fixture.root, "native", "script", &discovered.binding).is_ok());
+        assert_eq!(
+            resource(&fixture.root, "panels", "script", &discovered.binding)
+                .unwrap_err()
+                .code,
+            "action.resource_denied"
+        );
+        assert_eq!(
+            resource(&fixture.root, "native", "page", &discovered.binding)
+                .unwrap_err()
+                .code,
+            "action.resource_denied"
+        );
+    }
+
+    #[test]
+    fn role_contract_discovery_is_package_wide_and_legacy_requests_cannot_ignore_roles() {
+        let (fixture, _) = role_fixture();
+        let discovery = discover(&fixture.root).unwrap();
+        let registry = discovery.role_registry.unwrap();
+        assert_eq!(registry.roles.len(), 1);
+        assert_eq!(registry.contexts.len(), 2);
+        assert!(discovery.capabilities.contains(&"native_roles.v1"));
+        let mut request = fixture.request();
+        request.inputs.clear();
+        assert_eq!(
+            prepare(&fixture.root, &request).unwrap_err().code,
+            "role.unsupported_contract"
+        );
+        request.schema_version = 3;
+        request.role_execution = Some(RoleExecution {
+            binding_revision: crate::role_contract::BindingRevision {
+                version: 1,
+                revision: "draft".into(),
+                bindings: vec![],
+            },
+            resolution_id: None,
+            mode: "default".into(),
+        });
+        assert_eq!(
+            prepare(&fixture.root, &request).unwrap_err().code,
+            "role.resolution_required"
+        );
+    }
+
+    #[test]
+    fn role_contract_catalog_rejects_omitted_native_sites_and_wrong_feature_dependencies() {
+        let (fixture, mut catalog) = role_fixture();
+        catalog["role_registry"]["call_sites"][0]["locator"]["site"] = json!("actions.0.run.0");
+        fixture.write_catalog(&catalog);
+        assert!(discover(&fixture.root).is_err());
+        catalog["role_registry"]["call_sites"][0]["locator"]["site"] = json!("root");
+        catalog["role_registry"]["contexts"][1]["resources"] = json!(["page"]);
+        fixture.write_catalog(&catalog);
+        assert!(discover(&fixture.root).is_err());
+        catalog["role_registry"]["contexts"][1]["resources"] = json!([]);
+        catalog["schema_version"] = json!(2);
+        fixture.write_catalog(&catalog);
+        assert_eq!(
+            discover(&fixture.root).unwrap_err().code,
+            "role.unsupported_contract"
+        );
+    }
+
+    #[test]
+    fn role_contract_source_identity_invalidates_whole_package_review() {
+        let (fixture, _) = role_fixture();
+        let before = discover(&fixture.root).unwrap().binding;
+        fs::write(fixture.root.join("page.js"), "changed-resource").unwrap();
+        let after = discover(&fixture.root).unwrap().binding;
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn role_contract_structural_children_require_no_fabricated_root_role() {
+        let (fixture, mut catalog) = role_fixture();
+        let mut definition = json!({"agent_definition_schema_version":"2026-10-03.r1","agent_schema":{"type":"object","properties":{}},"actions":[]});
+        fs::write(
+            fixture.root.join("child.json"),
+            serde_json::to_vec(&definition).unwrap(),
+        )
+        .unwrap();
+        definition["actions"] = json!([{"name":"launch","logic":{"==":[1,1]},"run":[{"kind":"agent","artifact":"./child.json"}]}]);
+        fs::write(
+            fixture.root.join("agent.json"),
+            serde_json::to_vec(&definition).unwrap(),
+        )
+        .unwrap();
+        catalog["role_registry"]["roles"] = json!([]);
+        catalog["role_registry"]["call_sites"] = json!([{"id":"launch","locator":{"definition":"agent.json","site":"actions.0.run.0"},"kind":"child","target":"child.json","requirements":{"operation":"text_generation"}}]);
+        for context in catalog["role_registry"]["contexts"].as_array_mut().unwrap() {
+            context["call_sites"] = json!(["launch"]);
+        }
+        fixture.write_catalog(&catalog);
+        let registry = discover(&fixture.root).unwrap().role_registry.unwrap();
+        assert!(registry.roles.is_empty());
+        assert_eq!(registry.call_sites.len(), 1);
+        assert!(registry.call_sites[0].role.is_none());
+        assert!(registry.call_sites[0].fixed.is_none());
+    }
+
+    #[test]
+    fn role_contract_tool_manifest_source_and_native_artifact_drift_change_binding() {
+        let (fixture, mut catalog) = role_fixture();
+        let mut definition: Value =
+            serde_json::from_slice(&fs::read(fixture.root.join("agent.json")).unwrap()).unwrap();
+        fs::write(
+            fixture.root.join("child.json"),
+            serde_json::to_vec(&definition).unwrap(),
+        )
+        .unwrap();
+        definition["actions"] =
+            json!([{"name":"call","logic":{"==":[1,1]},"run":[{"kind":"tool","name":"helper"}]}]);
+        fs::write(
+            fixture.root.join("agent.json"),
+            serde_json::to_vec(&definition).unwrap(),
+        )
+        .unwrap();
+        let root = catalog["role_registry"]["call_sites"][0].clone();
+        let mut child = root.clone();
+        child["id"] = json!("child-root");
+        child["locator"]["definition"] = json!("child.json");
+        let mut tool = root;
+        tool["id"] = json!("tool-child");
+        tool["kind"] = json!("tool_child");
+        tool["locator"]["site"] = json!("tools.helper.child");
+        tool["target"] = json!("child.json");
+        tool["input_schema"] =
+            json!({"type":"object","properties":{},"required":[],"additionalProperties":false});
+        catalog["role_registry"]["call_sites"]
+            .as_array_mut()
+            .unwrap()
+            .extend([child, tool]);
+        for context in catalog["role_registry"]["contexts"].as_array_mut().unwrap() {
+            context["call_sites"] = json!(["root", "tool-child", "child-root"]);
+        }
+        catalog["role_registry"]["tool_content"] =
+            json!({"helper":["tools/helper/Cargo.toml","tools/helper/src/main.rs"]});
+        fs::create_dir_all(fixture.root.join("tools/helper/src")).unwrap();
+        fs::create_dir_all(fixture.root.join(".cargo-ai/tools/helper/bin")).unwrap();
+        fs::write(
+            fixture.root.join("tools/helper/Cargo.toml"),
+            "[package]\nname='helper'\nversion='0.1.0'\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.root.join("tools/helper/src/main.rs"),
+            "fn main() {}\n",
+        )
+        .unwrap();
+        fs::write(fixture.root.join(".cargo-ai/tools/helper/tool.json"),serde_json::to_vec(&json!({"schema_version":1,"tool_id":"helper","source":{"manifest_path":"tools/helper/Cargo.toml"},"artifacts":{"test-target":{"path":"bin/helper"}}})).unwrap()).unwrap();
+        fs::write(
+            fixture.root.join(".cargo-ai/tools/helper/bin/helper"),
+            "native-fixture-one",
+        )
+        .unwrap();
+        fixture.write_catalog(&catalog);
+        let before = discover(&fixture.root).unwrap().binding;
+        fs::write(
+            fixture.root.join(".cargo-ai/tools/helper/bin/helper"),
+            "native-fixture-two",
+        )
+        .unwrap();
+        let binary_change = discover(&fixture.root).unwrap().binding;
+        assert_ne!(before, binary_change);
+        fs::write(
+            fixture.root.join("tools/helper/src/main.rs"),
+            "fn main() { panic!() }\n",
+        )
+        .unwrap();
+        assert_ne!(binary_change, discover(&fixture.root).unwrap().binding);
+        fs::write(fixture.root.join("tools/helper/src/unlisted.rs"), "hidden").unwrap();
+        assert!(discover(&fixture.root).is_err());
     }
 
     #[test]

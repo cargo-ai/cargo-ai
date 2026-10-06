@@ -140,6 +140,8 @@ pub(crate) struct ToolDescribeExamples {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ToolDescribeDocument {
     pub(crate) protocol_version: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) supported_protocol_versions: Vec<u32>,
     pub(crate) name: String,
     pub(crate) description: String,
     #[serde(default)]
@@ -148,6 +150,12 @@ pub(crate) struct ToolDescribeDocument {
     pub(crate) resource_profile: ToolDescribeResourceProfile,
     pub(crate) self_test: ToolDescribeSelfTest,
     pub(crate) examples: ToolDescribeExamples,
+}
+
+impl ToolDescribeDocument {
+    pub(crate) fn supports_protocol(&self, version: u32) -> bool {
+        self.protocol_version == version || self.supported_protocol_versions.contains(&version)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1696,7 +1704,7 @@ fn run_owned_tool_command_capture_stdout(
     Ok(output.stdout)
 }
 
-fn validate_describe_document(
+pub(crate) fn validate_describe_document(
     describe: &ToolDescribeDocument,
     resolved: &ResolvedTool,
 ) -> Result<(), String> {
@@ -1704,6 +1712,26 @@ fn validate_describe_document(
         return Err(format!(
             "Tool '{}' reports unsupported protocol_version {} in describe.",
             resolved.tool_id, describe.protocol_version
+        ));
+    }
+    if describe
+        .supported_protocol_versions
+        .iter()
+        .any(|v| !matches!(v, 1 | 2))
+        || (!describe.supported_protocol_versions.is_empty()
+            && !describe
+                .supported_protocol_versions
+                .contains(&describe.protocol_version))
+        || describe
+            .supported_protocol_versions
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != describe.supported_protocol_versions.len()
+    {
+        return Err(format!(
+            "Tool '{}' reports invalid supported_protocol_versions in describe.",
+            resolved.tool_id
         ));
     }
     if describe.name.trim().is_empty() {
@@ -2911,6 +2939,7 @@ pub(crate) fn invoke(
         };
         let describe = ToolDescribeDocument {
             protocol_version: 1,
+            supported_protocol_versions: Vec::new(),
             name: "hello_tool".to_string(),
             description: "Example tool.".to_string(),
             params: BTreeMap::new(),
@@ -2959,6 +2988,7 @@ pub(crate) fn invoke(
         };
         let describe = ToolDescribeDocument {
             protocol_version: 1,
+            supported_protocol_versions: Vec::new(),
             name: "hello_tool".to_string(),
             description: "Example tool.".to_string(),
             params: BTreeMap::from([
@@ -3013,5 +3043,121 @@ pub(crate) fn invoke(
 
         validate_describe_document(&describe, &resolved)
             .expect("array/object params should be accepted");
+        assert!(describe.supports_protocol(1));
+        assert!(!describe.supports_protocol(2));
+        let mut describe = describe;
+        describe.supported_protocol_versions = vec![1, 2];
+        assert!(describe.supports_protocol(2));
+        validate_describe_document(&describe, &resolved).unwrap();
+        for versions in [vec![2], vec![1, 1], vec![1, 3]] {
+            describe.supported_protocol_versions = versions;
+            assert!(validate_describe_document(&describe, &resolved).is_err());
+        }
+    }
+
+    #[test]
+    fn scaffolded_tool_protocol_two_keeps_native_child_channel_open() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::Stdio;
+        let _guard = crate::commands::runtime_actions::TEST_ENV_LOCK
+            .lock()
+            .unwrap();
+        let root = temp_dir("native-tool-child");
+        fs::create_dir_all(root.join(".cargo-ai")).unwrap();
+        fs::write(root.join(".cargo-ai/project.toml"), "format_version = 1\n").unwrap();
+        scaffold_local_tool(&root, "native_tool").unwrap();
+        let source = root.join("tools/native_tool/src/tool.rs");
+        let tool = fs::read_to_string(&source)
+            .unwrap()
+            .replace(
+                "let _params = params;",
+                "let value = context.invoke_declared(\"declared-child\", params)?;",
+            )
+            .replace("let _context = context;", "")
+            .replace("Ok(None)", "Ok(Some(value.to_string()))");
+        fs::write(source, tool).unwrap();
+        let manifest = root.join("tools/native_tool/Cargo.toml");
+        for command in ["test", "build"] {
+            let result = cargo_command()
+                .arg(command)
+                .arg("--manifest-path")
+                .arg(&manifest)
+                .arg("--target")
+                .arg(crate::cargo_ai_metadata::current_build_target())
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        let binary = root
+            .join("tools/native_tool/target")
+            .join(crate::cargo_ai_metadata::current_build_target())
+            .join("debug")
+            .join(if cfg!(windows) {
+                "native_tool.exe"
+            } else {
+                "native_tool"
+            });
+        let describe = Command::new(&binary).arg("describe").output().unwrap();
+        let describe: super::ToolDescribeDocument =
+            serde_json::from_slice(&describe.stdout).unwrap();
+        assert!(describe.supports_protocol(1) && describe.supports_protocol(2));
+        struct OwnedChild(std::process::Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = OwnedChild(
+            Command::new(&binary)
+                .arg("invoke")
+                .current_dir(&root)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut input = child.0.stdin.take().unwrap();
+        let output = child.0.stdout.take().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(output).lines() {
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        writeln!(input,"{{\"protocol_version\":2,\"type\":\"invoke\",\"params\":{{\"text\":\"business input\"}}}}").unwrap();
+        input.flush().unwrap();
+        let request = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        assert_eq!(request["type"], "child_request");
+        assert_eq!(request["call_site"], "declared-child");
+        assert_eq!(request["inputs"], json!({"text":"business input"}));
+        assert_eq!(request.as_object().unwrap().len(), 5);
+        let response = json!({"protocol_version":2,"type":"child_result","request_id":request["request_id"],"result":{"summary":"business result"},"error":null});
+        writeln!(input, "{response}").unwrap();
+        input.flush().unwrap();
+        let terminal = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        let terminal: serde_json::Value = serde_json::from_str(&terminal).unwrap();
+        assert_eq!(
+            terminal,
+            json!({"protocol_version":2,"type":"result","result":"{\"summary\":\"business result\"}"})
+        );
+        drop(input);
+        assert!(child.0.wait().unwrap().success());
+        reader.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -132,6 +132,7 @@ fn both_supported_strict_revisions_keep_unknown_keyword_rejection() {
         "2026-09-19.r1",
         "2026-10-01.r1",
         "2026-10-03.r1",
+        "2026-10-06.r1",
     ] {
         assert!(build_support::generate_agent_model_from_str(&minimal_agentcfg(version)).is_ok());
         let config = minimal_agentcfg_with_header(&format!(

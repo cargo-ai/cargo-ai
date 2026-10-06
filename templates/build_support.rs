@@ -412,6 +412,19 @@ pub fn generate_agent_build_provenance_source_with_values(
         "static AGENT_RUNTIME_CAPABILITY_RECORD: [u8; {}] = [{bytes}];\n",
         capability_record.len()
     ));
+    let mut definition_record = Vec::with_capacity(96);
+    definition_record.extend_from_slice(&crate::generated_capability_record::DEFINITION_OPEN);
+    definition_record.extend_from_slice(definition_sha256.as_bytes());
+    definition_record.extend_from_slice(&crate::generated_capability_record::DEFINITION_CLOSE);
+    let bytes = definition_record
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    generated.push_str(&format!(
+        "#[used]\nstatic AGENT_DEFINITION_IDENTITY_RECORD: [u8; {}] = [{bytes}];\n",
+        definition_record.len()
+    ));
     Ok(generated)
 }
 
@@ -836,6 +849,7 @@ fn parse_actions(
                 v,
                 definition_validation::THINKING_SCHEMA_VERSION
                     | definition_validation::RESULT_SCHEMA_VERSION
+                    | definition_validation::NATIVE_ROLE_SCHEMA_VERSION
             )
         });
     let mut parsed = Vec::with_capacity(actions.len());
@@ -1635,12 +1649,26 @@ fn parse_actions(
                     )?;
                     let profile =
                         parse_optional_profile_field(run_obj, &run_path, action_field_types)?;
-                    let voice = parse_required_string_run_arg_field(
-                        run_obj,
-                        "voice",
-                        &run_path,
-                        action_field_types,
-                    )?;
+                    let voice = if root_obj
+                        .get(AGENT_DEFINITION_SCHEMA_VERSION_KEY)
+                        .and_then(Value::as_str)
+                        == Some(definition_validation::NATIVE_ROLE_SCHEMA_VERSION)
+                    {
+                        parse_optional_string_run_arg_field(
+                            run_obj,
+                            "voice",
+                            &run_path,
+                            action_field_types,
+                            "generate_audio `voice`",
+                        )?
+                    } else {
+                        Some(parse_required_string_run_arg_field(
+                            run_obj,
+                            "voice",
+                            &run_path,
+                            action_field_types,
+                        )?)
+                    };
                     let text = parse_string_parts_field(
                         run_obj,
                         "text",
@@ -1671,7 +1699,7 @@ fn parse_actions(
                         program: None,
                         model,
                         profile,
-                        voice: Some(voice),
+                        voice,
                         audio_path: None,
                         output_variable: None,
                         status_variable,

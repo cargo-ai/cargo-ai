@@ -477,7 +477,10 @@ fn build_target() -> String {
     format!("{arch}-{vendor}-{os}{abi}")
 }
 
+// Native role execution preserves the configuration snapshot reviewed by its host.
+// Missing optional attribution remains unknown instead of initializing config mid-run.
 fn environment_identity(initialize: bool) -> Identity {
+    let initialize = initialize && crate::role_runtime::current().is_none();
     let path = crate::config::loader::config_path();
     let id = if initialize {
         ensure_environment_id_at(&path)

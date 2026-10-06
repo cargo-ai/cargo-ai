@@ -23,6 +23,38 @@ const BUILD_RERUN_PATHS: &[&str] = &[
 
 const TEMPLATE_SOURCES: &[TemplateSource] = &[
     TemplateSource {
+        destination: "src/role_transport.rs",
+        source: "src/role_transport.rs",
+    },
+    TemplateSource {
+        destination: "src/role_child.rs",
+        source: "src/role_child.rs",
+    },
+    TemplateSource {
+        destination: "src/owned_process_windows.rs",
+        source: "src/owned_process_windows.rs",
+    },
+    TemplateSource {
+        destination: "src/role_runtime.rs",
+        source: "src/role_runtime.rs",
+    },
+    TemplateSource {
+        destination: "src/role_contract.rs",
+        source: "src/role_contract.rs",
+    },
+    TemplateSource {
+        destination: "src/role_session.rs",
+        source: "src/role_session.rs",
+    },
+    TemplateSource {
+        destination: "src/credentials/role_context.rs",
+        source: "src/credentials/role_context.rs",
+    },
+    TemplateSource {
+        destination: "src/providers/operation_metadata.rs",
+        source: "../src/providers/operation_metadata.rs",
+    },
+    TemplateSource {
         destination: "src/providers/thinking.rs",
         source: "../src/providers/thinking.rs",
     },

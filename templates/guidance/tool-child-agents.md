@@ -45,3 +45,20 @@ For opted-in project runs, tools write relative to `.cargo-ai/data/`, while sibl
 If `artifact_root` is absent, the bridge retains its previous cwd-based contract. New scaffolds include this support. Cargo AI upgrades do not rewrite existing user tool bridges. Review an older bridge before opting an existing project into runtime data; adopting the setting alone does not repair its child lookup. An explicit source update and rebuild may be needed, with user changes preserved. This field grants no additional permission and does not change depth, profile, runtime-budget, or usage forwarding.
 
 Updated bridge context includes the root consuming workspace for usage attribution. Forward it through the supplied bridge with run correlation; do not recalculate it from a tool's runtime-data directory or use it as filesystem authorization. Child runtimes resolve their own package, environment and executable provenance. Existing tool bridges require an explicit source update/rebuild; user-owned files are not automatically overwritten. Read `usage-ledger.md` for the local attribution contract.
+
+## Declared children in a native role session
+
+Native role sessions use the scaffold's tool protocol 2 and `InvocationContext::invoke_declared`, rather than selecting a child artifact/profile inside the tool. Declare the exact `tool_child` call site in catalog 3's `role_registry`, with locator `tools.<tool-name>.<site>`, verified child JSON `target`, optional generated `artifact`, role or fixed selection, operation requirements and closed business `input_schema`. Include the complete exact tool source inventory in `role_registry.tool_content`. Rebuild older scaffolds/artifacts; missing native capability or generated source identity fails before child launch.
+
+From the author-owned `src/tool.rs` invocation body:
+
+```rust
+let inputs = BTreeMap::from([("message".to_owned(), serde_json::json!("Review this draft"))]);
+let child_result = context.invoke_declared("review-child", inputs)?;
+Ok(Some(serde_json::to_string(&child_result)
+    .map_err(|_| ToolError::new("Child business result could not be encoded."))?))
+```
+
+The declared call-site ID must match the native registry. The child's source definition declares the corresponding runtime variable `message`; business input keys map to same-name child runtime variables through existing `--run-var`, with arrays/objects JSON encoded into explicitly string variables. No model/profile/credential/selectors are injected into business data. The native parent validates input schema, package/source identity, current binding generation, exact scoped policy and invocation-wide admission, mediates launch and returns only business result/error. Procedural looping stays in the tool, but each declared child requires its own admission; an undeclared dynamic call or legacy `invoke_agent` call fails in a native session. Direct shell spawning is not a supported native role fallback.
+
+Ordinary non-role tool calls retain the existing helper contract. Native role revocation/cancellation prevents new admissions and propagates owned-child cleanup; already admitted work may settle. Missing child terminal/control evidence is completion unknown, never an empty successful result. See `client-actions.md` for the host session, private binding storage and uncertainty rules.

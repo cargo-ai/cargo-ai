@@ -361,6 +361,20 @@ pub(crate) async fn machine_run(
 }
 
 pub async fn run(sub_m: &ArgMatches) -> bool {
+    if sub_m.get_flag("native_role_child") {
+        return match crate::role_transport::native_child_start() {
+            Ok(context) => {
+                context
+                    .scope(async {
+                        let succeeded = run_scoped(sub_m).await;
+                        let delivered = crate::role_runtime::finish_native(succeeded).is_ok();
+                        succeeded && delivered
+                    })
+                    .await
+            }
+            Err(_) => false,
+        };
+    }
     match crate::execution_policy::scope_inherited(Box::pin(run_scoped(sub_m))).await {
         Ok(succeeded) => succeeded,
         Err(_) => {
@@ -573,7 +587,7 @@ async fn run_scoped(sub_m: &ArgMatches) -> bool {
 
 async fn run_client_action(selected: &ArgMatches) -> bool {
     match prepare_client_action(selected) {
-        Ok((prepared, settings, policy)) => {
+        Ok((prepared, settings, policy, role_context)) => {
             let root = Some(prepared.project_root.clone());
             let source = AgentDefinitionSource::LocalPath(
                 prepared.definition_path.to_string_lossy().into_owned(),
@@ -610,11 +624,11 @@ async fn run_client_action(selected: &ArgMatches) -> bool {
             }));
             // Keep the validated package lease alive through the entire invocation.
             let _lease = prepared.installed;
-            super::client_actions::scope_result_artifacts(
+            let execution = super::client_actions::scope_result_artifacts(
                 prepared.artifact_context,
                 super::runtime_actions::scope_declaring_project_root(
                     root.clone(),
-                    policy.scope(
+                    policy.scope(Box::pin(
                         super::runtime::run_with_definition_in_context_and_usage_agent(
                             &settings,
                             &definition,
@@ -623,10 +637,23 @@ async fn run_client_action(selected: &ArgMatches) -> bool {
                             context,
                             Some(attribution),
                         ),
-                    ),
+                    )),
                 ),
-            )
-            .await
+            );
+            if let Some(context) = role_context {
+                let session = context.session.clone();
+                super::machine::record_role_session(session.clone());
+                tokio::select! {
+                    result=context.scope(execution)=>result,
+                    _=session.canceled()=>{
+                        let _=super::machine_process::terminate_all();
+                        super::machine::record_error(super::machine::Failure::new("role.canceled","Native role invocation was canceled; admitted effects require reconciliation."));
+                        false
+                    },
+                }
+            } else {
+                execution.await
+            }
         }
         Err(error) => reject_client_action(error),
     }
@@ -645,17 +672,47 @@ fn prepare_client_action(
         super::client_actions::PreparedAction,
         ArgMatches,
         crate::execution_policy::ExecutionPolicy,
+        Option<crate::role_runtime::Context>,
     ),
     super::machine::Failure,
 > {
     use super::client_actions as actions;
-    let raw = actions::read_request_stdin().map_err(|_| {
-        super::machine::Failure::new(
-            "action.invalid_request",
-            "The action request must be bounded UTF-8 JSON.",
+    let (raw, session) = if selected.get_flag("role_session") {
+        if selected
+            .get_one::<String>("output_format")
+            .map(String::as_str)
+            != Some("ndjson")
+        {
+            return Err(super::machine::Failure::new(
+                "role.unsupported_contract",
+                "Persistent role sessions require NDJSON output.",
+            ));
+        }
+        let (raw, session) = crate::role_transport::host_start().map_err(|_| {
+            super::machine::Failure::new(
+                "role.invalid_control",
+                "The persistent role bootstrap is invalid.",
+            )
+        })?;
+        (raw, Some(session))
+    } else {
+        (
+            actions::read_request_stdin().map_err(|_| {
+                super::machine::Failure::new(
+                    "action.invalid_request",
+                    "The action request must be bounded UTF-8 JSON.",
+                )
+            })?,
+            None,
         )
-    })?;
+    };
     let request = actions::parse_request(&raw).map_err(actions::action_failure)?;
+    if request.role_execution.is_some() != session.is_some() {
+        return Err(super::machine::Failure::new(
+            "role.unsupported_contract",
+            "Role-bearing actions require the persistent native session protocol.",
+        ));
+    }
     if selected.get_one::<String>("interface") != Some(&request.interface)
         || selected.get_one::<String>("action") != Some(&request.action)
     {
@@ -709,7 +766,67 @@ fn prepare_client_action(
             )
         })?;
     let settings = action_runtime_matches(selected, &prepared.run_vars, &prepared.input_overrides)?;
-    Ok((prepared, settings, policy))
+    let role_context = if let Some(session) = session {
+        let execution = prepared
+            .role_execution
+            .as_ref()
+            .expect("role bootstrap checked");
+        let resolution = super::role_resolution::resolve(&target.root, &request)?;
+        if !resolution.ready
+            || execution.resolution_id.as_deref() != Some(resolution.identity.as_str())
+        {
+            return Err(super::machine::Failure::new(
+                "role.stale_resolution",
+                "Resolve and review this exact action context before execution.",
+            ));
+        }
+        let definition = prepared
+            .definition_path
+            .strip_prefix(&prepared.project_root)
+            .map_err(|_| {
+                super::machine::Failure::new(
+                    "role.invalid_context",
+                    "The action definition escapes the verified project.",
+                )
+            })?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let content_identities =
+            actions::verified_role_inventory(&target.root).map_err(actions::action_failure)?;
+        if actions::discover(&target.root)
+            .map_err(actions::action_failure)?
+            .binding
+            != request.expected_binding
+        {
+            return Err(super::machine::Failure::new(
+                "role.package_changed",
+                "Package content changed during role preparation.",
+            ));
+        }
+        let bootstrap = crate::role_runtime::Bootstrap {
+            version: 1,
+            resolution,
+            bindings: execution.binding_revision.clone(),
+            policy: policy.clone(),
+            definition,
+            package_root: prepared.project_root.clone(),
+            content_identities,
+            parent_permit_id: None,
+            invocation_id: session.invocation_id.clone(),
+            binding_revision: session.binding_revision.clone(),
+        };
+        Some(
+            crate::role_runtime::Context::new(bootstrap, session).map_err(|_| {
+                super::machine::Failure::new(
+                    "role.invalid_context",
+                    "The native role execution context is unavailable or unauthorized.",
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+    Ok((prepared, settings, policy, role_context))
 }
 
 /// Preserves admitted runtime settings while supplying only validated business mappings.

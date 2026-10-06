@@ -11,11 +11,13 @@ mod tool;
 pub(crate) use agent_bridge::{
     ActionExecutionMode, AgentInputMode, ChildAgentOutcome, ChildAgentRequest, InvocationContext,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io;
+use std::io::{self, BufReader, Read, Write};
+
+thread_local! { static INPUT: std::cell::RefCell<BufReader<io::Stdin>> = std::cell::RefCell::new(BufReader::new(io::stdin())); }
 
 const PROTOCOL_VERSION: u32 = 1;
 
@@ -28,13 +30,19 @@ pub fn run(command: Option<&str>) -> Result<(), ToolError> {
             Ok(())
         }
         Some("invoke") => {
-            let stdin = io::stdin();
-            let request: InvokeRequest = serde_json::from_reader(stdin.lock())?;
+            let request: InvokeRequest = read_protocol_message()?;
+            if request.protocol_version == PROTOCOL_VERSION {
+                INPUT.with(|input| {
+                    let mut trailing = String::new();
+                    input.borrow_mut().read_to_string(&mut trailing)?;
+                    if !trailing.trim().is_empty() {
+                        return Err(ToolError::new("Trailing legacy invocation input."));
+                    }
+                    Ok(())
+                })?;
+            }
             let response = invoke(request)?;
-            let stdout = io::stdout();
-            serde_json::to_writer(stdout.lock(), &response)?;
-            println!();
-            Ok(())
+            write_protocol_message(&response)
         }
         Some(other) => Err(ToolError::new(format!(
             "Unsupported command '{other}'. Use 'describe' or 'invoke'."
@@ -48,6 +56,7 @@ pub fn run(command: Option<&str>) -> Result<(), ToolError> {
 fn describe_document() -> DescribeDocument {
     DescribeDocument {
         protocol_version: PROTOCOL_VERSION,
+        supported_protocol_versions: vec![1, 2],
         name: tool::TOOL_NAME.to_string(),
         description: tool::description().to_string(),
         params: tool::params(),
@@ -57,11 +66,13 @@ fn describe_document() -> DescribeDocument {
         examples: Examples {
             minimal_invoke: InvokeRequest {
                 protocol_version: PROTOCOL_VERSION,
+                kind: None,
                 params: tool::minimal_example_params(),
                 runtime_context: None,
             },
             full_invoke: InvokeRequest {
                 protocol_version: PROTOCOL_VERSION,
+                kind: None,
                 params: tool::full_example_params(),
                 runtime_context: None,
             },
@@ -70,17 +81,44 @@ fn describe_document() -> DescribeDocument {
 }
 
 fn invoke(request: InvokeRequest) -> Result<InvokeResponse, ToolError> {
-    if request.protocol_version != PROTOCOL_VERSION {
-        return Err(ToolError::new(format!(
-            "Unsupported protocol_version {}. Expected {}.",
-            request.protocol_version, PROTOCOL_VERSION
-        )));
+    let native = request.protocol_version == 2;
+    if (native && (request.kind.as_deref() != Some("invoke") || request.runtime_context.is_some()))
+        || (!native && (request.protocol_version != PROTOCOL_VERSION || request.kind.is_some()))
+    {
+        return Err(ToolError::new("Unsupported tool invocation protocol."));
     }
-
+    let context = if native {
+        InvocationContext::native()
+    } else {
+        request.runtime_context.unwrap_or_default()
+    };
     Ok(InvokeResponse {
-        protocol_version: PROTOCOL_VERSION,
-        result: tool::invoke(request.params, request.runtime_context.unwrap_or_default())?,
+        protocol_version: request.protocol_version,
+        kind: if native { Some("result") } else { None },
+        result: tool::invoke(request.params, context)?,
     })
+}
+
+// Reading one object leaves stdin available for native child-result messages.
+// The parent owns framing limits, cancellation and request admission.
+pub(crate) fn read_protocol_message<T: DeserializeOwned>() -> Result<T, ToolError> {
+    INPUT.with(|input| {
+        let mut input = input.borrow_mut();
+        serde_json::Deserializer::from_reader(&mut *input)
+            .into_iter::<T>()
+            .next()
+            .ok_or_else(|| ToolError::new("Native tool input closed before its response."))?
+            .map_err(ToolError::from)
+    })
+}
+
+pub(crate) fn write_protocol_message<T: Serialize>(message: &T) -> Result<(), ToolError> {
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    serde_json::to_writer(&mut output, message)?;
+    output.write_all(b"\n")?;
+    output.flush()?;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -113,6 +151,7 @@ impl From<serde_json::Error> for ToolError {
 #[derive(Debug, Serialize)]
 struct DescribeDocument {
     protocol_version: u32,
+    supported_protocol_versions: Vec<u32>,
     name: String,
     description: String,
     params: BTreeMap<String, ParamSpec>,
@@ -173,8 +212,11 @@ struct Examples {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct InvokeRequest {
     protocol_version: u32,
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
     #[serde(default)]
     params: BTreeMap<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,5 +226,41 @@ struct InvokeRequest {
 #[derive(Debug, Serialize)]
 struct InvokeResponse {
     protocol_version: u32,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    kind: Option<&'static str>,
     result: Option<String>,
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+    #[test]
+    fn describe_preserves_legacy_and_advertises_native_mediation() {
+        let description = serde_json::to_value(describe_document()).unwrap();
+        assert_eq!(description["protocol_version"], 1);
+        assert_eq!(
+            description["supported_protocol_versions"],
+            serde_json::json!([1, 2])
+        );
+    }
+    #[test]
+    fn native_context_rejects_arbitrary_child_targets() {
+        let context = InvocationContext::native();
+        assert!(
+            context
+                .invoke_agent(ChildAgentRequest::new("./child.json"))
+                .is_err()
+        );
+        assert!(
+            InvocationContext::default()
+                .invoke_declared("child", BTreeMap::new())
+                .is_err()
+        );
+    }
+    #[test]
+    fn native_invoke_rejects_host_context_and_unknown_fields() {
+        let bad: InvokeRequest = serde_json::from_value(serde_json::json!({"protocol_version":2,"type":"invoke","params":{},"runtime_context":{}})).unwrap();
+        assert!(invoke(bad).is_err());
+        assert!(serde_json::from_value::<InvokeRequest>(serde_json::json!({"protocol_version":2,"type":"invoke","params":{},"private_policy":{}})).is_err());
+    }
 }

@@ -14,6 +14,7 @@ pub(crate) mod openai;
 #[cfg(not(test))]
 mod openai;
 mod openai_compatible;
+pub(crate) mod operation_metadata;
 pub(crate) mod runtime;
 pub(crate) mod thinking;
 pub(crate) mod thinking_image;
@@ -25,7 +26,8 @@ pub(crate) use compatibility::validate_provider_compatibility;
 
 pub(crate) use error::{
     provider_error_messages, provider_url_origin, validate_provider_content_parts,
-    validate_provider_request, AuthenticationPolicy, ProviderError, ProviderKind,
+    validate_provider_request, AuthenticationPolicy, ProviderError, ProviderErrorKind,
+    ProviderKind,
 };
 pub(crate) use image::send_image_request_with_account_context;
 pub(crate) use media::{
@@ -48,6 +50,44 @@ pub(crate) async fn send_text_request(
 }
 
 pub(crate) async fn send_text_request_with_account_context(
+    provider: ProviderKind,
+    url: &str,
+    request: ProviderTextRequest<'_>,
+    account_id: Option<&str>,
+) -> Result<runtime::ProviderTextResponse, ProviderError> {
+    let mut modalities = vec!["text"];
+    for part in request.content_parts {
+        match part {
+            runtime::ContentPart::Image { .. } => {
+                if !modalities.contains(&"image") {
+                    modalities.push("image")
+                }
+            }
+            runtime::ContentPart::File { .. } => modalities.push("file"),
+            _ => {}
+        }
+    }
+    let permit = crate::role_runtime::admit_provider(
+        provider,
+        request.model,
+        crate::execution_policy::RequestKind::Text,
+        &modalities,
+        true,
+        crate::role_runtime::provider_settings(request.thinking, request.temperature),
+    )
+    .await
+    .map_err(|_| {
+        ProviderError::invalid_request(
+            provider,
+            "Native role context or authorization rejected this request.",
+        )
+    })?;
+    let result = send_text_request_admitted(provider, url, request, account_id).await;
+    crate::role_runtime::settle_provider(permit, &result);
+    result
+}
+
+async fn send_text_request_admitted(
     provider: ProviderKind,
     url: &str,
     request: ProviderTextRequest<'_>,
@@ -235,15 +275,35 @@ mod thinking_request_tests {
     }
     #[tokio::test]
     async fn boolean_thinking_uses_qualified_compatible_payloads_and_omits_unavailable_choice() {
-        for (setting, expected) in [(thinking::ThinkingSetting::On,Some("medium")),(thinking::ThinkingSetting::Off,Some("none")),(thinking::ThinkingSetting::Choice { value:"high".into() },None),(thinking::ThinkingSetting::ProviderDefault,None)] {
-            let support = thinking_metadata::ollama_support(&json!({"thinking":{"values":[false,true],"default":true}}), "fixture");
+        for (setting, expected) in [
+            (thinking::ThinkingSetting::On, Some("medium")),
+            (thinking::ThinkingSetting::Off, Some("none")),
+            (
+                thinking::ThinkingSetting::Choice {
+                    value: "high".into(),
+                },
+                None,
+            ),
+            (thinking::ThinkingSetting::ProviderDefault, None),
+        ] {
+            let support = thinking_metadata::ollama_support(
+                &json!({"thinking":{"values":[false,true],"default":true}}),
+                "fixture",
+            );
             let outcome = thinking::resolve(Some(&setting), "run", support);
-            assert_eq!(outcome.provider_value(true),expected);
-            let mut server=mockito::Server::new_async().await;
-            let request=server.mock("POST","/v1/chat/completions").match_request(move |request| {
-                let value: Value=serde_json::from_slice(request.body().unwrap()).unwrap();
-                value.get("reasoning_effort").and_then(Value::as_str)==expected && value.get("think").is_none()
-            }).with_status(200).with_body(r#"{"choices":[{"message":{"content":"{}"}}],"usage":{}}"#).create_async().await;
+            assert_eq!(outcome.provider_value(true), expected);
+            let mut server = mockito::Server::new_async().await;
+            let request = server
+                .mock("POST", "/v1/chat/completions")
+                .match_request(move |request| {
+                    let value: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+                    value.get("reasoning_effort").and_then(Value::as_str) == expected
+                        && value.get("think").is_none()
+                })
+                .with_status(200)
+                .with_body(r#"{"choices":[{"message":{"content":"{}"}}],"usage":{}}"#)
+                .create_async()
+                .await;
             let _=send_text_request(ProviderKind::Ollama,&format!("{}/v1/chat/completions",server.url()),ProviderTextRequest {
                 rubric_enabled:false,model:"fixture",content_parts:&[runtime::ContentPart::Text("fixture".into())],timeout_in_sec:5,token:"",response_schema:&json!({"type":"object","properties":{},"additionalProperties":false}),max_output_tokens:Some(8192),temperature:None,thinking:outcome.provider_value(true),
             }).await;

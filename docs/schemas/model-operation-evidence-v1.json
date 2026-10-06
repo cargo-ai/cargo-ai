@@ -1,0 +1,284 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/model-operation-evidence-v1.json",
+  "title": "Cargo AI reviewed operation evidence v1",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "evidence": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "provider": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "auth_transport": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "operation": {
+                "enum": [
+                  "text_generation",
+                  "image_generation",
+                  "speech_generation",
+                  "transcription"
+                ]
+              },
+              "endpoint_family": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "sources": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "reviewed_at": {
+                "type": "string"
+              },
+              "reviewed_at_unix": {
+                "type": "integer"
+              },
+              "expires_at_unix": {
+                "type": "integer"
+              },
+              "freshness": {
+                "enum": [
+                  "fresh",
+                  "stale"
+                ]
+              },
+              "adapter": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "source": {
+                "const": "reviewed_provider_documentation"
+              },
+              "qualification": {
+                "const": "existing_adapter_operation"
+              }
+            },
+            "additionalProperties": true,
+            "required": [
+              "revision",
+              "provider",
+              "model",
+              "auth_transport",
+              "operation",
+              "endpoint_family",
+              "sources",
+              "reviewed_at",
+              "reviewed_at_unix",
+              "expires_at_unix",
+              "freshness",
+              "adapter",
+              "source",
+              "qualification"
+            ]
+          },
+          "constraints": {
+            "type": "object",
+            "properties": {
+              "input_modalities": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "text",
+                    "image",
+                    "audio"
+                  ]
+                }
+              },
+              "output_modality": {
+                "enum": [
+                  "text",
+                  "image",
+                  "audio"
+                ]
+              },
+              "structured_output": {
+                "type": "boolean"
+              },
+              "thinking_choices": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "provider_default_thinking": {
+                "type": "boolean"
+              },
+              "formats": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "voices": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "temperature": {
+                "const": "unqualified"
+              },
+              "limitations": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "input_modalities",
+              "output_modality",
+              "structured_output",
+              "thinking_choices",
+              "provider_default_thinking",
+              "formats",
+              "voices",
+              "temperature",
+              "limitations"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "evidence",
+          "constraints"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "invocation_access": {
+      "const": "unverified"
+    }
+  },
+  "required": [
+    "schema_version",
+    "revision",
+    "records",
+    "invocation_access"
+  ],
+  "additionalProperties": true,
+  "$comment": "Reviewed documentation/adapter evidence is separate from live provider catalog metadata and invocation access. Exact provider, model, transport, endpoint, operation, input/output and settings constraints plus review/expiry must match. Missing evidence is unknown; stale evidence cannot make a positive claim.",
+  "$defs": {
+    "assessment": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "status": {
+          "enum": [
+            "compatible",
+            "incompatible",
+            "unknown",
+            "stale",
+            "unavailable"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "auth_transport": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "operation": {
+          "enum": [
+            "text_generation",
+            "image_generation",
+            "speech_generation",
+            "transcription"
+          ]
+        },
+        "endpoint_family": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "catalog_presence": {
+          "enum": [
+            "listed",
+            "absent",
+            "unknown"
+          ]
+        },
+        "invocation_access": {
+          "const": "unverified"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "constraints": {
+          "type": "object"
+        },
+        "dimensions": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "schema_version",
+        "status",
+        "reason",
+        "provider",
+        "model",
+        "auth_transport",
+        "operation",
+        "endpoint_family",
+        "catalog_presence",
+        "invocation_access",
+        "evidence",
+        "constraints",
+        "dimensions"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

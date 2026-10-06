@@ -1,0 +1,377 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/native-role-session-v1.json",
+  "title": "Cargo AI native host role session frames v1",
+  "$comment": "UTF-8 LF-delimited JSON frames bounded to 1048576 bytes including LF; the embedded action request remains at most 65536 bytes. NDJSON --role-session requires start first and stdin kept open. At most 256 subsequent successfully read control frames, excluding start, are handled; mismatched/malformed frames count, malformed terminates immediately, and after the 256th frame handler/ack attempt the invocation requests closure with control_limit and cancels without reading a 257th. This is a frame count, not a 4 MiB aggregate byte budget: accepted controls can total at most 256 * 1048576 wire bytes after the separately bounded start. Each acknowledgement attempt has a 2000 ms deadline from just before nonblocking enqueue to writer completion receipt; one pending writer queue slot. Full queue, write error or deadline expiry requests closure with control_output_lost and cancels and requests owned-child cleanup. No acknowledgement delivery is guaranteed on failure. EOF closes admission. Host controls carry exact revision; revocation closes admission before acknowledgement and cannot undo admitted effects. Internal child channel is not a host authority API. The terminal snapshot preserves the first closure reason, so later output loss or control-limit cancellation need not replace an earlier revoked reason.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/start"
+    },
+    {
+      "$ref": "#/$defs/control"
+    }
+  ],
+  "$defs": {
+    "start": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "const": "cargo_ai_role_session"
+        },
+        "version": {
+          "const": 1
+        },
+        "type": {
+          "const": "start"
+        },
+        "request": {
+          "$ref": "action-request-v3.json#/$defs/execution"
+        }
+      },
+      "required": [
+        "protocol",
+        "version",
+        "type",
+        "request"
+      ],
+      "additionalProperties": false
+    },
+    "control": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "const": "cargo_ai_role_session"
+        },
+        "version": {
+          "const": 1
+        },
+        "type": {
+          "enum": [
+            "revoke",
+            "cancel"
+          ]
+        },
+        "binding_revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "protocol",
+        "version",
+        "type",
+        "binding_revision"
+      ],
+      "additionalProperties": false,
+      "$comment": "Session permits at most 256 post-start frames, including mismatches. Malformed frames terminate immediately. Limits apply across the whole invocation, not per binding revision or control type."
+    },
+    "acknowledgement": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "const": "cargo_ai_role_session"
+        },
+        "version": {
+          "const": 1
+        },
+        "type": {
+          "enum": [
+            "revoked",
+            "canceled",
+            "control_rejected"
+          ]
+        },
+        "invocation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "binding_revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "duplicate": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outstanding": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "invocation_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "binding_revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "call_site": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "agent": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "parent_permit_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Immediate admitted native child or tool parent permit; null only at the session root. Join to permit_id, never completion order."
+              },
+              "target_agent": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1,
+                "maxLength": 1024,
+                "description": "Declared child target for launch attempts, including not-dispatched denials. agent remains the executing parent definition."
+              }
+            },
+            "required": [
+              "invocation_id",
+              "binding_revision",
+              "call_site",
+              "agent",
+              "kind",
+              "parent_permit_id",
+              "target_agent"
+            ],
+            "additionalProperties": true
+          },
+          "maxProperties": 256
+        },
+        "effects": {
+          "const": "admitted_work_may_settle"
+        },
+        "owned_child_cleanup": {
+          "enum": [
+            "requested",
+            "unconfirmed"
+          ]
+        },
+        "code": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol",
+        "version",
+        "type",
+        "invocation_id",
+        "binding_revision"
+      ],
+      "additionalProperties": true,
+      "$comment": "Separate from the droppable progress budget. Acknowledgement writer has a 2000 ms enqueue-to-completion deadline; backpressure/error cancels admission and requests owned-child cleanup. Absence of an acknowledgement leaves delivery uncertain."
+    },
+    "snapshot": {
+      "type": "object",
+      "properties": {
+        "invocation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "binding_revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "closed": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outstanding": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "invocation_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "binding_revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "call_site": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "agent": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "parent_permit_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Immediate admitted native child or tool parent permit; null only at the session root. Join to permit_id, never completion order."
+              },
+              "target_agent": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1,
+                "maxLength": 1024,
+                "description": "Declared child target for launch attempts, including not-dispatched denials. agent remains the executing parent definition."
+              }
+            },
+            "required": [
+              "invocation_id",
+              "binding_revision",
+              "call_site",
+              "agent",
+              "kind",
+              "parent_permit_id",
+              "target_agent"
+            ],
+            "additionalProperties": true
+          },
+          "maxProperties": 256
+        },
+        "outcomes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "boundary": {
+                "type": "object",
+                "properties": {
+                  "invocation_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
+                  "binding_revision": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
+                  "call_site": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
+                  "agent": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
+                  "kind": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
+                  "parent_permit_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "Immediate admitted native child or tool parent permit; null only at the session root. Join to permit_id, never completion order."
+                  },
+                  "target_agent": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "minLength": 1,
+                    "maxLength": 1024,
+                    "description": "Declared child target for launch attempts, including not-dispatched denials. agent remains the executing parent definition."
+                  }
+                },
+                "required": [
+                  "invocation_id",
+                  "binding_revision",
+                  "call_site",
+                  "agent",
+                  "kind",
+                  "parent_permit_id",
+                  "target_agent"
+                ],
+                "additionalProperties": true
+              },
+              "permit_id": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "cause": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "boundary",
+              "permit_id",
+              "state"
+            ],
+            "additionalProperties": true
+          },
+          "maxItems": 256
+        },
+        "omitted_outcomes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "invocation_id",
+        "binding_revision",
+        "closed",
+        "outstanding",
+        "outcomes",
+        "omitted_outcomes",
+        "complete"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

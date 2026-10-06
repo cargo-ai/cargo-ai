@@ -103,11 +103,41 @@ pub async fn run(matches: &ArgMatches) -> Result<Value, DiscoveryError> {
         })?;
         return discovery::thinking(connection, model).await;
     }
-    discovery::list(
+    let provider = discovery::provider_name(connection.provider);
+    let auth = connection.auth.as_str();
+    let request_endpoint = connection.request_endpoint.clone();
+    let mut catalog = discovery::list(
         connection,
         *matches.get_one::<u32>("page-limit").unwrap_or(&20),
     )
-    .await
+    .await?;
+    attach_operation_evidence(
+        &mut catalog,
+        provider,
+        auth,
+        &request_endpoint,
+        time::OffsetDateTime::now_utc().unix_timestamp(),
+    );
+    Ok(catalog)
+}
+
+fn attach_operation_evidence(
+    catalog: &mut Value,
+    provider: &str,
+    auth: &str,
+    endpoint: &str,
+    now_unix: i64,
+) {
+    if let Some(models) = catalog.get_mut("models").and_then(Value::as_array_mut) {
+        for model in models {
+            if let Some(id) = model.get("id").and_then(Value::as_str) {
+                let evidence = crate::providers::operation_metadata::evidence_for_connection(
+                    provider, id, auth, endpoint, now_unix,
+                );
+                model["operation_evidence"] = evidence;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -208,6 +238,58 @@ fn resolve_saved_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reviewed_operation_evidence_is_separate_from_provider_catalog_metadata() {
+        let mut catalog = serde_json::json!({"models":[
+            {"id":"gpt-image-2","metadata":{},"metadata_source":"provider","invocation_access":"unverified"},
+            {"id":"gpt-4o-mini-tts","metadata":{},"metadata_source":"provider","invocation_access":"unverified"},
+            {"id":"gpt-5.2","metadata":{},"metadata_source":"provider","invocation_access":"unverified"},
+            {"id":"catalog-presence-only","metadata":{},"metadata_source":"provider","invocation_access":"unverified"}
+        ]});
+        attach_operation_evidence(
+            &mut catalog,
+            "openai",
+            "api_key",
+            "https://api.openai.com/v1/chat/completions",
+            1_791_244_801,
+        );
+        for model in &catalog["models"].as_array().unwrap()[..3] {
+            assert_eq!(
+                model["operation_evidence"]["records"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                model["operation_evidence"]["invocation_access"],
+                "unverified"
+            );
+            assert_eq!(model["metadata"], serde_json::json!({}));
+            assert_eq!(model["metadata_source"], "provider");
+            assert_eq!(model["invocation_access"], "unverified");
+        }
+        assert!(catalog["models"][3]["operation_evidence"]["records"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        attach_operation_evidence(
+            &mut catalog,
+            "openai",
+            "openai_account",
+            "https://chatgpt.com/backend-api/codex/responses",
+            1_791_244_801,
+        );
+        assert!(catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|model| model["operation_evidence"]["records"]
+                .as_array()
+                .unwrap()
+                .is_empty()));
+    }
+
     fn home(mode: Option<&str>, auth: &str) -> std::path::PathBuf {
         let path =
             std::env::temp_dir().join(format!("cargo-ai-discovery-{}", uuid::Uuid::new_v4()));

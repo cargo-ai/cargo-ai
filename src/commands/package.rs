@@ -516,6 +516,7 @@ fn assemble_package_root(
             .collect::<Vec<_>>(),
         &build_profile.assets,
     )?;
+    validate_private_role_exports(project_root, &build_profile)?;
     validate_output_source_boundaries(project_root, &build_profile, output_root)?;
     prepare_output_root(project_root, output_root, force)?;
 
@@ -1059,6 +1060,151 @@ fn write_package_manifest(
     })
 }
 
+/// Checks the finite selected payload before any existing output is replaced.
+/// This recognizes native private record formats; it is not a general secret scanner.
+fn validate_private_role_exports(
+    project_root: &Path,
+    profile: &BuildProfileDocument,
+) -> Result<(), String> {
+    let mut entries = Vec::new();
+    for path in profile
+        .agent_definitions
+        .iter()
+        .chain(&profile.hatched_agents)
+        .chain(&profile.assets)
+    {
+        let relative = validate_project_relative_path(path, "Packaged path")?;
+        entries.push((
+            project_root.join(&relative),
+            false,
+            super::add::guidance::packaging::is_bundle_path(&relative),
+        ));
+    }
+    for tool in &profile.tools {
+        let source = load_project_source_tool_context(project_root, tool)?;
+        entries.push((
+            project_root.join(source.source_root_relative_path),
+            true,
+            false,
+        ));
+    }
+    fn visit(
+        root: &Path,
+        path: &Path,
+        tool: bool,
+        bundle: bool,
+        depth: usize,
+    ) -> Result<(), String> {
+        if depth > 64 {
+            return Err("Package source nesting exceeds its supported bound.".into());
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| "Package source escapes project")?;
+        if super::runtime_data::is_runtime_data(relative)
+            || super::add::guidance::packaging::skip_entry(root, path, bundle)?
+        {
+            return Ok(());
+        }
+        if relative.components().any(|part| matches!(part,Component::Normal(name) if ["role-bindings.json","cargo-ai-role-bindings.json","role-contexts.json"].iter().any(|reserved|name==*reserved))) {
+            return Err("Native private role records cannot be included in a portable package.".into());
+        }
+        let metadata = validate_project_source_path(root, path, "Selected package source")?;
+        if metadata.is_dir() {
+            if tool && path.file_name().is_some_and(|name| name == "target") {
+                return Ok(());
+            }
+            for item in fs::read_dir(path).map_err(|_| "Cannot inspect selected package source")? {
+                visit(
+                    root,
+                    &item
+                        .map_err(|_| "Cannot inspect selected package source")?
+                        .path(),
+                    tool,
+                    bundle,
+                    depth + 1,
+                )?;
+            }
+        } else if metadata.is_file() {
+            validate_private_role_file(path)?;
+        }
+        Ok(())
+    }
+    for (path, tool, bundle) in entries {
+        visit(project_root, &path, tool, bundle, 0)?
+    }
+    Ok(())
+}
+fn contains_private_role_record(value: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match value {
+        Value::Object(object) => {
+            let context = object.get("profile_uuid").is_some_and(Value::is_string)
+                && object
+                    .get("connection_generation")
+                    .is_some_and(Value::is_string);
+            let revision = object.get("bindings").is_some_and(Value::is_array)
+                && object.get("revision").is_some_and(Value::is_string)
+                && object.get("version").is_some();
+            let bootstrap = object
+                .get("protocol")
+                .and_then(Value::as_str)
+                .is_some_and(|v| matches!(v, "cargo_ai_role_session" | "cargo_ai_native_role"));
+            // Match closed native authorization records, not generic field names
+            // such as "profile", "allowed" or "scopes" in portable business data.
+            let policy = object.get("version").and_then(Value::as_u64) == Some(1)
+                && object.contains_key("allowed")
+                && object.contains_key("limits")
+                && serde_json::from_value::<crate::execution_policy::ExecutionPolicy>(
+                    value.clone(),
+                )
+                .is_ok();
+            let artifact_permission = object.get("version").and_then(Value::as_u64) == Some(1)
+                && object.contains_key("scopes")
+                && serde_json::from_value::<super::action_artifacts::Permission>(value.clone())
+                    .is_ok();
+            let artifact_grant = object.get("schema_version").and_then(Value::as_u64) == Some(1)
+                && object.contains_key("data_context_sha256")
+                && serde_json::from_value::<super::action_artifacts::ReadGrant>(value.clone())
+                    .is_ok();
+            context
+                || revision
+                || bootstrap
+                || policy
+                || artifact_permission
+                || artifact_grant
+                || object.values().any(contains_private_role_record)
+        }
+        Value::Array(values) => values.iter().any(contains_private_role_record),
+        _ => false,
+    }
+}
+fn validate_private_role_file(path: &Path) -> Result<(), String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    // Native requests and protected context records are bounded well below this.
+    // Unrelated large binary assets are not scanned or represented as safe secrets.
+    fs::File::open(path)
+        .map_err(|_| "Cannot inspect selected package file")?
+        .take(4 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot inspect selected package file")?;
+    if bytes.len() > 4 * 1024 * 1024 {
+        return Ok(());
+    }
+    let json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+    let value = json.or_else(|| {
+        std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|text| toml::from_str::<toml::Value>(text).ok())
+            .and_then(|value| serde_json::to_value(value).ok())
+    });
+    if value.as_ref().is_some_and(contains_private_role_record) {
+        return Err("A selected asset or tool source contains a native private role record; keep it in host-owned private state.".into());
+    }
+    Ok(())
+}
+
 fn copy_declared_path(
     project_root: &Path,
     relative_path: &str,
@@ -1117,6 +1263,7 @@ fn copy_file(project_root: &Path, source: &Path, dest: &Path) -> Result<(), Stri
     {
         return Err("Publication request receipts cannot be packaged.".into());
     }
+    validate_private_role_file(source)?;
     let metadata = validate_project_source_path(project_root, source, "Packaged file")?;
     if !metadata.is_file() {
         return Err(format!(
@@ -1754,6 +1901,221 @@ agent_definitions = ["agents/demo.json"]
             );
             let _ = fs::remove_dir_all(project_root);
         }
+    }
+
+    #[test]
+    fn private_binding_copy_rejected_before_replacing_output() {
+        for asset in ["assets/renamed.txt", "tools/helper/copied.toml"] {
+            let root = temp_dir("private-role-export");
+            fs::create_dir_all(root.join(std::path::Path::new(asset).parent().unwrap())).unwrap();
+            let content = if asset.ends_with("toml") {
+                "[copied]\nprofile_uuid = \"private-uuid\"\nconnection_generation = \"private-generation\"\n".replace("\\n","\n")
+            } else {
+                r#"{"version":1,"revision":"private-a","bindings":[]}"#.into()
+            };
+            fs::write(root.join(asset), content).unwrap();
+            let output = root.join("assembled");
+            fs::create_dir_all(&output).unwrap();
+            fs::write(output.join("preserved"), "previous").unwrap();
+            let profile = BuildProfileDocument {
+                assets: vec![std::path::Path::new(asset)
+                    .parent()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()],
+                ..Default::default()
+            };
+            let result = assemble_package_root(
+                &root,
+                "default",
+                None,
+                None,
+                &profile,
+                &PackagePermissionProfileDocument::default(),
+                &PackageDependencies::new(),
+                &PackageOutputRoot {
+                    path: output.clone(),
+                    explicit: true,
+                },
+                true,
+            );
+            assert!(result.unwrap_err().contains("private role record"));
+            assert_eq!(
+                fs::read_to_string(output.join("preserved")).unwrap(),
+                "previous"
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[test]
+    fn copied_native_authorization_records_preserve_existing_output() {
+        use serde_json::json;
+        let records = [
+            json!({"version":1,"allowed":[{"profile":"personal-profile","request_kind":"text","model":{"kind":"named","value":"exact-model"},"thinking":{"mode":"provider_default"}}],"limits":{"max_runtime_secs":60,"max_output_tokens":512,"max_agent_depth":4}}),
+            json!({"schema_version":1,"reference":"a".repeat(64),"interface":"viewer","binding":{"schema_version":1},"data_context_sha256":"b".repeat(64),"scope":"exports","relative_path":"private-note.txt","mime_type":"text/plain","size_bytes":8,"content_sha256":"c".repeat(64)}),
+            json!({"version":1,"scopes":["personal-reports"]}),
+        ];
+        for record in records {
+            for extension in ["json", "toml"] {
+                for tool_source in [false, true] {
+                    let root = temp_dir("private-authorization-export");
+                    let directory = if tool_source {
+                        write_source_tool_fixture(&root, "helper", "tools/helper/Cargo.toml");
+                        "tools/helper/nested"
+                    } else {
+                        "assets/nested"
+                    };
+                    fs::create_dir_all(root.join(directory)).unwrap();
+                    let wrapped = json!({"innocent_copy": record});
+                    let bytes = if extension == "json" {
+                        serde_json::to_vec(&wrapped).unwrap()
+                    } else {
+                        toml::to_string(&wrapped).unwrap().into_bytes()
+                    };
+                    fs::write(
+                        root.join(directory).join(format!("renamed.{extension}")),
+                        &bytes,
+                    )
+                    .unwrap();
+                    let output = root.join("assembled");
+                    fs::create_dir_all(&output).unwrap();
+                    fs::write(output.join("preserved"), "previous").unwrap();
+                    let profile = if tool_source {
+                        BuildProfileDocument {
+                            tools: vec!["helper".into()],
+                            ..Default::default()
+                        }
+                    } else {
+                        BuildProfileDocument {
+                            assets: vec!["assets".into()],
+                            ..Default::default()
+                        }
+                    };
+                    let result = assemble_package_root(
+                        &root,
+                        "default",
+                        None,
+                        None,
+                        &profile,
+                        &PackagePermissionProfileDocument::default(),
+                        &PackageDependencies::new(),
+                        &PackageOutputRoot {
+                            path: output.clone(),
+                            explicit: true,
+                        },
+                        true,
+                    );
+                    assert!(result.unwrap_err().contains("private role record"));
+                    assert_eq!(
+                        fs::read_to_string(output.join("preserved")).unwrap(),
+                        "previous"
+                    );
+                    assert_eq!(fs::read_dir(&output).unwrap().count(), 1);
+                    assert_eq!(
+                        fs::read(root.join(directory).join(format!("renamed.{extension}")))
+                            .unwrap(),
+                        bytes
+                    );
+                    fs::remove_dir_all(root).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn portable_role_declarations_are_not_private_records() {
+        assert!(!super::contains_private_role_record(
+            &serde_json::json!({"role_registry":{"version":1,"roles":[{"id":"illustration","requirements":{"operation":"image_generation"}}]}})
+        ));
+        assert!(super::contains_private_role_record(
+            &serde_json::json!({"innocent_name":[{"profile_uuid":"p","connection_generation":"g"}]})
+        ));
+        for portable in [
+            serde_json::to_value(PackagePermissionProfileDocument::default()).unwrap(),
+            serde_json::json!({"version":1,"allowed":["png"],"limits":{"width":1024},"scopes":["public"],"purpose":"business format"}),
+            serde_json::json!({"type":"object","properties":{"version":{"const":1},"allowed":{"type":"array"},"limits":{"type":"object"},"scopes":{"type":"array"}}}),
+            serde_json::json!({"fixed":{"profile":"example","model":{"kind":"named","value":"example-model"},"settings":{}},"requirements":{"operation":"text_generation"}}),
+        ] {
+            assert!(!super::contains_private_role_record(&portable));
+        }
+    }
+
+    #[test]
+    fn native_role_package_assembly_preserves_portable_contract_for_separate_recipients() {
+        use crate::commands::client_actions::{discover, CATALOG_FILE};
+        use serde_json::json;
+        let fixture = temp_dir("portable-native-roles");
+        let source = fixture.join("source");
+        fs::create_dir_all(&source).unwrap();
+        let child = json!({"agent_definition_schema_version":"2026-10-06.r1","agent_schema":{"type":"object","properties":{"answer":{"type":"string"}}},"actions":[]});
+        let mut root = child.clone();
+        root["actions"] = json!([{"name":"review","logic":{"==":[1,1]},"run":[{"kind":"agent","artifact":"./child.json"}]}]);
+        let requirements = json!({"operation":"text_generation","input_modalities":["text"],"structured_output":true,"settings":{}});
+        let catalog = json!({"schema_version":3,"actions":[{"id":"review","target":"root.json","input_schema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"mappings":{}}],"interfaces":[{"id":"native","actions":["review"]}],
+            "role_registry":{"version":1,"roles":[{"id":"writer","label":"Writer","purpose":"Review supplied business content","requirements":requirements}],"call_sites":[
+                {"id":"root","locator":{"definition":"root.json","site":"root"},"kind":"root","role":"writer","requirements":requirements},
+                {"id":"launch","locator":{"definition":"root.json","site":"actions.0.run.0"},"kind":"child","role":"writer","requirements":requirements,"target":"child.json"},
+                {"id":"child-root","locator":{"definition":"child.json","site":"root"},"kind":"root","role":"writer","requirements":requirements}],
+                "contexts":[{"key":{"action":"review","interface":"native","mode":"default"},"call_sites":["root","launch","child-root"],"resources":[],"data_scopes":[],"limits":{"max_runtime_secs":60,"max_output_tokens":512,"max_agent_depth":4}}]}});
+        let portable_files = [
+            ("root.json", serde_json::to_vec_pretty(&root).unwrap()),
+            ("child.json", serde_json::to_vec_pretty(&child).unwrap()),
+            (CATALOG_FILE, serde_json::to_vec_pretty(&catalog).unwrap()),
+        ];
+        for (path, bytes) in &portable_files {
+            fs::write(source.join(path), bytes).unwrap();
+        }
+        // Local setup is deliberately outside the selected portable package contents.
+        fs::write(source.join("host-role-bindings.json"), serde_json::to_vec(&json!({"version":1,"revision":"host-private","bindings":[{"profile_uuid":"private-profile","connection_generation":"private-generation"}]})).unwrap()).unwrap();
+        let original = discover(&source).unwrap();
+        let profile = BuildProfileDocument {
+            agent_definitions: vec!["root.json".into(), "child.json".into()],
+            assets: vec![CATALOG_FILE.into()],
+            ..Default::default()
+        };
+        let mut recipient_bindings = Vec::new();
+        for name in ["recipient-a", "recipient-b"] {
+            let output = fixture.join(name);
+            assemble_package_root(
+                &source,
+                "default",
+                None,
+                None,
+                &profile,
+                &PackagePermissionProfileDocument::default(),
+                &PackageDependencies::new(),
+                &PackageOutputRoot {
+                    path: output.clone(),
+                    explicit: true,
+                },
+                false,
+            )
+            .unwrap();
+            for (path, bytes) in &portable_files {
+                assert_eq!(fs::read(output.join(path)).unwrap(), *bytes);
+            }
+            assert!(!output.join("host-role-bindings.json").exists());
+            let recipient = discover(&output).unwrap();
+            assert_eq!(recipient.role_registry, original.role_registry);
+            assert_eq!(
+                recipient.binding.catalog_sha256,
+                original.binding.catalog_sha256
+            );
+            assert_eq!(
+                recipient.binding.content_sha256,
+                original.binding.content_sha256
+            );
+            assert_ne!(recipient.binding.root_sha256, original.binding.root_sha256);
+            assert!(!super::contains_private_role_record(
+                &serde_json::to_value(&recipient).unwrap()
+            ));
+            recipient_bindings.push(recipient.binding);
+        }
+        assert_ne!(
+            recipient_bindings[0].root_sha256,
+            recipient_bindings[1].root_sha256
+        );
+        fs::remove_dir_all(fixture).unwrap();
     }
 
     #[test]

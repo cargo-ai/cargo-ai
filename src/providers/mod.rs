@@ -11,6 +11,7 @@ mod image;
 mod media;
 mod ollama;
 mod openai;
+pub(crate) mod operation_metadata;
 #[cfg(test)]
 pub(crate) use openai::native_account_test_endpoint;
 mod openai_compatible;
@@ -25,7 +26,8 @@ pub(crate) use compatibility::validate_provider_compatibility;
 
 pub(crate) use error::{
     provider_error_messages, provider_url_origin, validate_provider_content_parts,
-    validate_provider_request, AuthenticationPolicy, ProviderError, ProviderKind,
+    validate_provider_request, AuthenticationPolicy, ProviderError, ProviderErrorKind,
+    ProviderKind,
 };
 pub(crate) use image::send_image_request_with_account_context;
 pub(crate) use media::{
@@ -48,6 +50,44 @@ pub(crate) async fn send_text_request(
 }
 
 pub(crate) async fn send_text_request_with_account_context(
+    provider: ProviderKind,
+    url: &str,
+    request: ProviderTextRequest<'_>,
+    account_id: Option<&str>,
+) -> Result<runtime::ProviderTextResponse, ProviderError> {
+    let mut modalities = vec!["text"];
+    for part in request.content_parts {
+        match part {
+            runtime::ContentPart::Image { .. } => {
+                if !modalities.contains(&"image") {
+                    modalities.push("image")
+                }
+            }
+            runtime::ContentPart::File { .. } => modalities.push("file"),
+            _ => {}
+        }
+    }
+    let permit = crate::role_runtime::admit_provider(
+        provider,
+        request.model,
+        crate::execution_policy::RequestKind::Text,
+        &modalities,
+        true,
+        crate::role_runtime::provider_settings(request.thinking, request.temperature),
+    )
+    .await
+    .map_err(|_| {
+        ProviderError::invalid_request(
+            provider,
+            "Native role context or authorization rejected this request.",
+        )
+    })?;
+    let result = send_text_request_admitted(provider, url, request, account_id).await;
+    crate::role_runtime::settle_provider(permit, &result);
+    result
+}
+
+async fn send_text_request_admitted(
     provider: ProviderKind,
     url: &str,
     request: ProviderTextRequest<'_>,

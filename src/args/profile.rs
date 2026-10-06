@@ -6,6 +6,9 @@ pub fn command() -> Command {
     Command::new("profile")
         .about("Manage connection profiles")
         .subcommand(Command::new("list").about("List all configured profiles"))
+        .subcommand(Command::new("refresh-context")
+            .about("Explicitly refresh private profile identity and connection context")
+            .arg(Arg::new("name").required(true).value_name("NAME")))
         .subcommand(
             Command::new("show")
                 .about("Show detailed information for a specific profile")
@@ -110,7 +113,8 @@ pub fn command() -> Command {
                             "clear_token",
                             "default",
                         ])
-                        .required(true),
+                        .required(true)
+                        .multiple(true),
                 )
                 .group(
                     ArgGroup::new("url_update")

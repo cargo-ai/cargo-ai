@@ -868,8 +868,13 @@ fn parse_actions(
                 v,
                 crate::definition_validation::THINKING_SCHEMA_VERSION
                     | crate::definition_validation::RESULT_SCHEMA_VERSION
+                    | crate::definition_validation::NATIVE_ROLE_SCHEMA_VERSION
             )
         });
+    let native_roles_enabled = root_obj
+        .get(crate::definition_validation::VERSION_KEY)
+        .and_then(Value::as_str)
+        == Some(crate::definition_validation::NATIVE_ROLE_SCHEMA_VERSION);
     let mut parsed = Vec::with_capacity(actions.len());
     for (action_index, raw_action) in actions.iter().enumerate() {
         let action_path = format!("$.actions[{action_index}]");
@@ -898,6 +903,7 @@ fn parse_actions(
                 run_path.as_str(),
                 named_input_kinds,
                 thinking_enabled,
+                native_roles_enabled,
             )?);
         }
 
@@ -939,6 +945,7 @@ fn parse_run_step(
     path: &str,
     named_input_kinds: &BTreeMap<String, crate::InputKind>,
     thinking_enabled: bool,
+    native_roles_enabled: bool,
 ) -> Result<crate::RunStep, String> {
     let run_obj = expect_object(value, path)?;
     let kind = required_string(run_obj, "kind", path)?.to_string();
@@ -1163,7 +1170,7 @@ fn parse_run_step(
                 model: optional_string_run_arg(run_obj, "model", path)?,
                 thinking: thinking.clone(),
                 profile: optional_string_run_arg(run_obj, "profile", path)?,
-                voice: Some(required_string_run_arg(run_obj, "voice", path)?),
+                voice: if native_roles_enabled {optional_string_run_arg(run_obj, "voice", path)?} else {Some(required_string_run_arg(run_obj, "voice", path)?)},
                 audio_path: None,
                 output_variable: None, status_variable, error_variable, failure_mode, when,
                 args: Vec::new(), prompt: None, path: Some(path_parts), subject: None,
@@ -2613,6 +2620,16 @@ mod build_support_test_support;
 #[cfg(test)]
 mod tests {
     use super::{build_support_test_support as build_support, RuntimeAgentDefinition};
+    #[test]
+    fn native_role_voice_revision_matches_runtime_validation() {
+        let mut count = 0;
+        super::boundary_cases::visit_native_role_voice_cases(|name, value, accepted| {
+            count += 1;
+            let actual = RuntimeAgentDefinition::from_str(&value.to_string());
+            assert_eq!(actual.is_ok(), accepted, "{name}: {actual:?}");
+        });
+        assert_eq!(count, 30);
+    }
     #[test]
     fn thinking_revision_matches_runtime_and_emitted_settings() {
         use crate::providers::thinking::ThinkingSetting;

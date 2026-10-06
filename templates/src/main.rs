@@ -5,6 +5,11 @@ mod credentials;
 mod definition_validation;
 use definition_validation::business_schema;
 mod execution_policy;
+mod role_contract;
+mod role_session;
+mod role_runtime;
+mod role_transport;
+mod role_child;
 mod generated_capabilities;
 mod providers;
 mod result_capture;
@@ -953,6 +958,8 @@ struct ToolDescribeExamples {
 #[derive(Clone, Debug, Deserialize)]
 struct ToolDescribeDocument {
     protocol_version: u32,
+    #[serde(default)]
+    supported_protocol_versions: Vec<u32>,
     name: String,
     description: String,
     #[serde(default)]
@@ -961,6 +968,12 @@ struct ToolDescribeDocument {
     resource_profile: ToolDescribeResourceProfile,
     self_test: serde_json::Value,
     examples: ToolDescribeExamples,
+}
+
+impl ToolDescribeDocument {
+    fn supports_protocol(&self, version: u32) -> bool {
+        self.protocol_version == version || self.supported_protocol_versions.contains(&version)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1504,6 +1517,12 @@ fn validate_describe_document(
             "Tool '{}' reports unsupported protocol_version {} in describe.",
             resolved.tool_id, describe.protocol_version
         ));
+    }
+    if describe.supported_protocol_versions.iter().any(|v| !matches!(v, 1 | 2))
+        || (!describe.supported_protocol_versions.is_empty() && !describe.supported_protocol_versions.contains(&describe.protocol_version))
+        || describe.supported_protocol_versions.iter().collect::<std::collections::BTreeSet<_>>().len() != describe.supported_protocol_versions.len()
+    {
+        return Err(format!("Tool '{}' reports invalid supported_protocol_versions in describe.", resolved.tool_id));
     }
     if describe.name.trim().is_empty() || describe.description.trim().is_empty() {
         return Err(format!(
@@ -2257,6 +2276,7 @@ fn keychain_enabled() -> bool {
     target_os = "openbsd"
 ))]
 fn load_account_tokens_from_keychain() -> Result<Option<AccountAuth>, String> {
+    let _interaction = credentials::role_context::keychain_interaction_lock()?;
     if !keychain_enabled() {
         return Err("keychain usage is disabled by CARGO_AI_DISABLE_KEYCHAIN".to_string());
     }
@@ -2416,6 +2436,7 @@ fn persist_account_tokens_to_keychain(
     access_token: &str,
     refresh_token: Option<&str>,
 ) -> Result<(), String> {
+    let _interaction = credentials::role_context::keychain_interaction_lock()?;
     if !keychain_enabled() {
         return Err("keychain usage is disabled by CARGO_AI_DISABLE_KEYCHAIN".to_string());
     }
@@ -3198,6 +3219,12 @@ fn parse_runtime_var_value(
 async fn main() {
     // Generation inserts provenance command dispatch after argument parsing.
     let cmd_args = args::build_cli();
+    if cmd_args.get_flag("native_role_child") {
+        match role_transport::native_child_start() {
+            Ok(context)=>{context.scope(async{run_with_matches(cmd_args).await;let _=role_runtime::finish_native(true);}).await;return;},
+            Err(error)=>{eprintln!("{error}");std::process::exit(1);},
+        }
+    }
     match execution_policy::scope_inherited(Box::pin(run_with_matches(cmd_args))).await {
         Ok(()) => {}
         Err(error) => {
@@ -3217,7 +3244,8 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
         eprintln!("Artifact result delivery requires the authorized Cargo AI action runtime.");
         std::process::exit(1);
     }
-    let config = load_config();
+    let native_action_only=crate::role_runtime::current().is_some() && !has_output_schema_properties();
+    let config = if native_action_only {None}else{load_config()};
     let project_root = match std::env::current_dir()
         .map_err(|error| format!("Failed to inspect current project directory: {error}"))
         .and_then(|dir| maybe_find_project_root(dir.as_path()))
@@ -3225,6 +3253,7 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
         Ok(project_root) => project_root,
         Err(error) => {
             eprintln!("❌ {error}");
+            if crate::role_runtime::current().is_some() {let _=crate::role_runtime::finish_native(false);}
             std::process::exit(1);
         }
     };
@@ -3238,6 +3267,7 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
             if std::env::var_os(usage_log::USAGE_ROOT_RUN_ID_ENV).is_none() {
                 usage_backup::opportunistic().await;
             }
+            if crate::role_runtime::current().is_some() {let _=crate::role_runtime::finish_native(false);}
             std::process::exit(1);
         }};
     }
@@ -3263,7 +3293,17 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
     let mut use_openai_account_transport = false;
     let mut openai_account_id = None;
 
-    let explicit_profile_name = cmd_args.get_one::<String>("profile").map(String::as_str);
+    let role_selection = match crate::role_runtime::root_selection(
+        cmd_args.get_one::<String>("profile").map(String::as_str),
+        cmd_args.get_one::<String>("model").map(String::as_str),
+        runtime_thinking::invocation_setting(&cmd_args).as_ref(),
+        has_output_schema_properties(),
+    ) { Ok(value)=>value, Err(error)=>{eprintln!("{error}");exit_failure!();} };
+    if role_selection.is_some() && ["server", "url", "token"].iter().any(|id| cmd_args.get_one::<String>(id).is_some()) {
+        eprintln!("{}",crate::role_runtime::failure("role.selector_conflict"));exit_failure!();
+    }
+    let explicit_profile_name = role_selection.as_ref().and_then(|c|c.selection.as_ref()).and_then(|s|s.profile.as_deref())
+        .or_else(||cmd_args.get_one::<String>("profile").map(String::as_str));
     match resolve_loaded_profile(config.as_ref(), explicit_profile_name) {
         Ok(Some((profile, kind))) => {
             thinking = profile.thinking.clone();
@@ -3320,6 +3360,14 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
         max_output_tokens = Some(max_output_tokens_arg);
     }
 
+    if let Some(call)=&role_selection {
+        if let Some(selection)=&call.selection {
+            model=match &selection.model {crate::execution_policy::ModelSelection::Named{value}=>value.clone(),_=>String::new()};
+            thinking=Some(selection.thinking.clone());thinking_source="native_role".into();
+            temperature=call.settings.get("temperature").and_then(serde_json::Value::as_f64);
+        }
+    }
+
     if let Err(error) = crate::execution_policy::check_explicit_limits(
         cmd_args.get_one::<u32>("max_output_tokens").copied(),
         cmd_args.get_one::<u64>("max_runtime_in_sec").copied(),
@@ -3342,7 +3390,7 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
             .and_then(|defaults| defaults.max_runtime_in_sec),
     );
 
-    let provider = match ProviderKind::from_server_value(&server) {
+    let provider = match if native_action_only {Some(ProviderKind::OpenAi)}else{ProviderKind::from_server_value(&server)} {
         Some(provider) => provider,
         None => {
             for line in unknown_server_messages(&server) {
@@ -3353,6 +3401,7 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
     };
 
     max_output_tokens = crate::execution_policy::output_limit(max_output_tokens);
+    if !native_action_only {
     if let Err(error) = crate::execution_policy::check(
         selected_profile
             .as_ref()
@@ -3366,11 +3415,13 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
         exit_failure!();
     }
 
+    }
     let explicit_token_override = cmd_args
         .get_one::<String>("token")
         .map(|token| token.to_string());
+
     #[cfg(test)]
-    crate::execution_policy::note_boundary("credentials");
+    if !native_action_only {crate::execution_policy::note_boundary("credentials");}
     let has_explicit_token_override = explicit_token_override.is_some();
     if let Some((kind, profile_name)) = loaded_profile_message.as_ref() {
         for line in profile_selection_messages(
@@ -3382,7 +3433,8 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
         }
     }
 
-    if let Some(cmd_token) = explicit_token_override {
+    if native_action_only {token=String::new();}
+    else if let Some(cmd_token) = explicit_token_override {
         println!("Using explicit --token override; bypassing profile auth-mode resolution.");
         token = cmd_token;
     } else {
@@ -3498,7 +3550,7 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
         }
         None => None,
     };
-    if !ignore_tools {
+    if !ignore_tools && crate::role_runtime::current().is_none() {
         if let Err(error) =
             audit_actions_for_tools(&actions, tool_resolver.as_ref(), current_action_platform())
         {
@@ -3838,6 +3890,7 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
         }
     };
 
+    if result_declaration().is_none() {if let Ok(value)=serde_json::to_value(&output) {crate::role_runtime::capture_business_result(&value);}}
     action_output.print_execution_header();
     if let Err(error) = apply_actions(
         &output,
@@ -4319,9 +4372,10 @@ async fn apply_actions_parallel(
         let abort_signal_clone = abort_signal.clone();
         let action_output_clone = action_output.clone();
         let execution_policy = crate::execution_policy::current();
+        let role_context = crate::role_runtime::current();
 
         lane_tasks.push(tokio::spawn(async move {
-            let lane_future = async move {
+            let lane_future = Box::pin(async move {
                 run_matching_action_steps(
                     action_index,
                     &action_clone,
@@ -4336,10 +4390,11 @@ async fn apply_actions_parallel(
                     &abort_signal_clone,
                 )
                 .await
-            };
+            });
 
             let lane_future =
-                crate::execution_policy::scope_optional(execution_policy, Box::pin(lane_future));
+                crate::execution_policy::scope_optional(execution_policy, lane_future);
+            let lane_future = crate::role_runtime::scope(role_context, lane_future);
 
             if let Some(output) = action_output_clone {
                 ACTION_OUTPUT.scope(output, lane_future).await
@@ -4478,7 +4533,12 @@ async fn run_matching_action_steps(
             matching_step_count,
         );
 
-        let step_result = if step.kind.eq_ignore_ascii_case("exec") {
+        let original_step_index = action.run.iter().position(|candidate| std::ptr::eq(candidate, step)).expect("matched source step");
+        // Keep the large branch future off the stack through nested task-local scopes.
+        let step_result = crate::role_runtime::scope_step(format!("actions.{action_index}.run.{original_step_index}"), Box::pin(async {
+        let bound_step = crate::role_runtime::apply_step(step)?;
+        let step = &bound_step;
+        if step.kind.eq_ignore_ascii_case("exec") {
             run_exec_step(
                 step,
                 &action_data,
@@ -4562,9 +4622,9 @@ async fn run_matching_action_steps(
                 action.name.as_str(),
                 format!("unsupported step kind '{}'; skipping step.", step.kind).as_str(),
             );
-            outcomes.push(StepExecutionOutcome::SoftFailureLogged);
-            continue;
-        };
+            Ok((StepExecutionOutcome::SoftFailureLogged, None))
+        }
+        })).await;
 
         match step_result {
             Ok((outcome, captured_output)) => {
@@ -4782,7 +4842,15 @@ async fn run_tool_step(
             action_name, tool_name
         )
     })?;
-    let contract = resolver.resolve_contract(tool_name)?;
+    let contract = if let Some(context)=crate::role_runtime::current() {
+        let resolved=resolver.resolve_tool(tool_name)?;
+        let remaining=remaining_runtime_duration(runtime_budget,"before native tool description").map_err(|_|crate::role_runtime::failure("role.timeout"))?;
+        let bytes=crate::role_child::describe(tokio::process::Command::new(&resolved.binary_path),context,tool_name,remaining).await?;
+        let value=crate::business_schema::strict_json_bounded(&bytes,4*1024*1024,32).map_err(|_|crate::role_runtime::failure("role.invalid_tool_description"))?;
+        let describe=serde_json::from_value(value).map_err(|_|crate::role_runtime::failure("role.invalid_tool_description"))?;
+        validate_describe_document(&describe,&resolved)?;
+        ToolContract {resolved,describe}
+    } else {resolver.resolve_contract(tool_name)?};
     let params = resolve_tool_invoke_params(step, data, action_name, &contract.describe)?;
     let current_depth = current_agent_action_depth();
     let usage_log_bridge_context = provider_context
@@ -4848,6 +4916,11 @@ async fn run_tool_step(
     if let Some(root) = provider_context.project_data.as_ref() {
         command.current_dir(root.ensure_directory()?);
     }
+    let output = if let Some(role_context)=crate::role_runtime::current() {
+        if !contract.describe.supports_protocol(2){return Err(crate::role_runtime::failure("role.tool_rebuild_required"))}
+        crate::role_child::tool(command,role_context,tool_name,serde_json::to_value(&params).map_err(|_|crate::role_runtime::failure("role.invalid_tool_inputs"))?,
+            crate::role_child::ChildOptions {current_depth,max_depth:max_agent_depth,max_runtime_secs:runtime_budget.max_runtime_secs,started_at_ms:runtime_budget.started_at_ms,deadline_ms:runtime_budget.deadline_ms},remaining).await?
+    } else {
     let child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -4905,6 +4978,9 @@ async fn run_tool_step(
         output
     };
 
+        output
+    };
+
     emit_action_output_bytes(action_index, action_name, &output.stderr);
     if !output.status.success() {
         return Err(format!(
@@ -4921,6 +4997,7 @@ async fn run_tool_step(
         let selected =
             business_schema::decode_producer_result(result.as_deref(), &declaration["schema"])
                 .map_err(|error| error.to_string())?;
+        crate::role_runtime::capture_business_result(&selected.data);
         let nominations = selected.artifacts.map_err(|error| error.to_string())?;
         business_schema::validate_nominations(&nominations)?;
         if !nominations.is_empty() {
@@ -5784,6 +5861,31 @@ async fn run_agent_step(
         &mut command,
         !matches!(invocation, ChildArtifactInvocation::DirectExecutable(_)),
     )?;
+    if let Some(role_context) = crate::role_runtime::current() {
+        let selected = role_context.selected()?;
+        let target = selected.call_site.target.as_deref().ok_or_else(|| crate::role_runtime::failure("role.child_target_conflict"))?;
+        let bootstrap = role_context.child_bootstrap(target)?;
+        crate::role_child::verify_command(&command, &bootstrap, !matches!(invocation, ChildArtifactInvocation::DirectExecutable(_)))?;
+        let (child_args, _) = child_input_args_with_data(
+            step.run_vars.as_deref(), step.input_overrides.as_deref(), step.input_mode,
+            step.inputs.as_deref(), data, action_name, named_inputs,
+            provider_context.project_data.as_ref(),
+        )?;
+        command.args(child_args);
+        command.current_dir(role_context.bootstrap.package_root.join(Path::new(&role_context.locator.definition).parent().unwrap_or(Path::new(""))));
+        if let Some(mode)=action_execution_override { command.args(["--action-execution",match mode { crate::ActionExecutionMode::Sequential=>"sequential",crate::ActionExecutionMode::Parallel=>"parallel" }]); }
+        if step.ignore_tools {command.arg("--ignore-tools");}
+        command.env(AGENT_ACTION_DEPTH_ENV,(current_depth+1).to_string());
+        command.env(AGENT_ACTION_MAX_DEPTH_ENV,max_agent_depth.to_string());
+        command.env(AGENT_ACTION_MAX_RUNTIME_SECS_ENV,runtime_budget.max_runtime_secs.to_string());
+        command.env(AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV,runtime_budget.started_at_ms.to_string());
+        command.env(AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV,runtime_budget.deadline_ms.to_string());
+        let remaining=remaining_runtime_duration(runtime_budget,"before native role child")
+            .map_err(|_|crate::role_runtime::failure("role.timeout"))?;
+        let result=crate::role_child::native(command,role_context,bootstrap,remaining).await?;
+        if result.error.is_some(){return Err(crate::role_runtime::failure("role.child_failed"))}
+        return Ok(StepExecutionOutcome::Completed);
+    }
     let child_profile =
         resolve_step_profile_name(step.profile.as_ref(), data, action_name, "agent")?.or_else(
             || {

@@ -55,6 +55,59 @@ pub(crate) async fn send_image_request_with_account_context(
     thinking: Option<&str>,
     max_output_tokens: Option<u32>,
 ) -> Result<ProviderImageResponse, ProviderError> {
+    let modalities = if reference_images.is_empty() {
+        vec!["text"]
+    } else {
+        vec!["text", "image"]
+    };
+    let mut settings = crate::role_runtime::provider_settings(thinking, None);
+    settings["format"] = serde_json::json!(format);
+    let permit = crate::role_runtime::admit_provider(
+        provider,
+        model,
+        crate::execution_policy::RequestKind::Image,
+        &modalities,
+        false,
+        settings,
+    )
+    .await
+    .map_err(|_| {
+        ProviderError::invalid_request(
+            provider,
+            "Native role context or authorization rejected this request.",
+        )
+    })?;
+    let result = send_image_request_admitted(
+        provider,
+        url,
+        model,
+        prompt,
+        timeout_in_sec,
+        token,
+        format,
+        reference_images,
+        account_id,
+        thinking,
+        max_output_tokens,
+    )
+    .await;
+    crate::role_runtime::settle_provider(permit, &result);
+    result
+}
+
+async fn send_image_request_admitted(
+    provider: ProviderKind,
+    url: &str,
+    model: &str,
+    prompt: &str,
+    timeout_in_sec: u64,
+    token: &str,
+    format: &str,
+    reference_images: &[ImageReference],
+    account_id: Option<&str>,
+    thinking: Option<&str>,
+    max_output_tokens: Option<u32>,
+) -> Result<ProviderImageResponse, ProviderError> {
     if !provider.capabilities().supports_generate_image {
         return Err(ProviderError::invalid_request(
             provider,

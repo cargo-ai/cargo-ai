@@ -404,6 +404,31 @@ pub(crate) async fn send_speech_request(
     url: &str,
     request: ProviderSpeechRequest<'_>,
 ) -> Result<ProviderAudioResponse, ProviderError> {
+    let permit = crate::role_runtime::admit_provider(
+        provider,
+        request.model.unwrap_or(""),
+        crate::execution_policy::RequestKind::Audio,
+        &["text"],
+        false,
+        serde_json::json!({"voice":request.voice,"format":request.format}),
+    )
+    .await
+    .map_err(|_| {
+        ProviderError::invalid_request(
+            provider,
+            "Native role context or authorization rejected this request.",
+        )
+    })?;
+    let result = send_speech_request_admitted(provider, url, request).await;
+    crate::role_runtime::settle_provider(permit, &result);
+    result
+}
+
+async fn send_speech_request_admitted(
+    provider: ProviderKind,
+    url: &str,
+    request: ProviderSpeechRequest<'_>,
+) -> Result<ProviderAudioResponse, ProviderError> {
     if !provider.capabilities().supports_generate_audio {
         return Err(ProviderError::invalid_request(
             provider,
@@ -569,6 +594,31 @@ fn multipart_audio(
 }
 
 pub(crate) async fn send_transcription_request(
+    provider: ProviderKind,
+    url: &str,
+    request: ProviderTranscriptionRequest<'_>,
+) -> Result<ProviderTranscriptResponse, ProviderError> {
+    let permit = crate::role_runtime::admit_provider(
+        provider,
+        request.model,
+        crate::execution_policy::RequestKind::Transcription,
+        &["audio"],
+        false,
+        serde_json::json!({}),
+    )
+    .await
+    .map_err(|_| {
+        ProviderError::invalid_request(
+            provider,
+            "Native role context or authorization rejected this request.",
+        )
+    })?;
+    let result = send_transcription_request_admitted(provider, url, request).await;
+    crate::role_runtime::settle_provider(permit, &result);
+    result
+}
+
+async fn send_transcription_request_admitted(
     provider: ProviderKind,
     url: &str,
     request: ProviderTranscriptionRequest<'_>,

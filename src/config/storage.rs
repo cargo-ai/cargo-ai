@@ -235,6 +235,11 @@ fn persist_loaded_document(
     backup_mode: BackupMode,
 ) -> Result<ConfigWriteOutcome, String> {
     let path = loaded.path();
+    let _context_mutation = crate::credentials::role_context::before_config_change(
+        path.parent().ok_or("Config directory is unavailable")?,
+        loaded.document(),
+        document,
+    )?;
     validate_config_path_safety(path).map_err(|error| error.to_string())?;
     ensure_source_unchanged(loaded)?;
     let serialized = serialize_and_validate(path, document)?;

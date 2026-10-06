@@ -51,6 +51,7 @@ struct Observer {
     child_instrumentation: bool,
     truncated: bool,
     client_action: Option<Value>,
+    role_session: Option<crate::role_session::Session>,
 }
 
 pub(crate) fn selected() -> bool {
@@ -204,7 +205,7 @@ fn envelope(
     error: Option<&Failure>,
     warnings: Vec<Value>,
 ) -> Value {
-    json!({"schema_version":1,"payload_schema":payload_schema(command),"command":command,"build":build(),"request_id":id,"context":context(),"outcome":outcome(error),"data":data,"warnings":warnings,"error":error.map(|e|json!({"code":e.code,"message":e.message,"retryable":e.retryable})),"completion":{"terminal":true,"complete":true}})
+    json!({"schema_version":1,"payload_schema":if matches!(command,"actions list"|"actions validate") && data.get("schema_version")==Some(&json!(3)){format!("cargo-ai.{}.v3",command.replace(' ',"."))}else{payload_schema(command)},"command":command,"build":build(),"request_id":id,"context":context(),"outcome":outcome(error),"data":data,"warnings":warnings,"error":error.map(|e|json!({"code":e.code,"message":e.message,"retryable":e.retryable})),"completion":{"terminal":true,"complete":true}})
 }
 fn write_value(value: &Value, limit: usize) -> io::Result<()> {
     let bytes = serde_json::to_vec(value)?;
@@ -349,6 +350,7 @@ async fn stop_operation(operation: &mut tokio::task::JoinHandle<Result<Value, Fa
     first && settled && lanes_settled && swept
 }
 pub(crate) fn record_error(error: Failure) {
+    crate::role_runtime::note_error(error.code);
     if selected() {
         if let Some(o) = OBSERVER.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
             if o.error.is_none() {
@@ -380,6 +382,7 @@ pub(crate) fn record_process_error(error: &io::Error) {
     ));
 }
 pub(crate) fn record_result(value: &Value) {
+    crate::role_runtime::capture_business_result(value);
     if selected() {
         if let Some(o) = OBSERVER.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
             if o.content
@@ -467,7 +470,25 @@ fn thinking_data(observer: &Observer) -> Value {
         "coverage":if observer.thinking_omitted == 0 {"complete_observed_scopes"} else {"bounded_partial"}})
 }
 
+pub(crate) fn operation_id() -> Option<String> {
+    OBSERVER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|observer| observer.id.clone())
+}
+pub(crate) fn record_role_session(session: crate::role_session::Session) {
+    if let Some(observer) = OBSERVER.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        observer.role_session = Some(session)
+    }
+}
 fn merge_thinking(mut data: Value, observer: &Observer) -> Value {
+    if let Some(session) = &observer.role_session {
+        if !data.is_object() {
+            data = json!({"operation_data":data});
+        }
+        data["native_role_execution"] = session.snapshot();
+    }
     if let Some(action) = &observer.client_action {
         if !data.is_object() {
             data = json!({"operation_data":data});
@@ -520,11 +541,13 @@ fn contracts() -> Vec<Value> {
         "capabilities",
         "version",
         "actions list",
+        "actions resolve",
         "actions validate",
         "actions resource",
         "actions artifact",
         "profile list",
         "profile show",
+        "profile refresh-context",
         "profile add",
         "profile set",
         "profile remove",
@@ -561,6 +584,8 @@ fn contracts() -> Vec<Value> {
         let effects=match *name {
             "capabilities"|"version"=>vec!["none"],
             "actions list"|"actions validate"|"actions resource"|"actions artifact"=>vec!["explicit_project_or_installed_package_read"],
+            "actions resolve"=>vec!["explicit_project_or_installed_package_read","protected_connection_context_read"],
+            "profile refresh-context"=>vec!["protected_context_metadata_mutation","selected_credential_read","no_provider_invocation"],
             "profile list"=>vec!["configuration_read"],
             "profile show"=>vec!["configuration_read","credential_presence_lookup"],
             "models list"|"models thinking"=>vec!["connection_read","provider_catalog_read"],
@@ -575,7 +600,7 @@ fn contracts() -> Vec<Value> {
         };
         let variants=match *name {
             "packages list"=>json!([{"selector":"installed","pagination":"limit_and_all","legacy_default_limit":20},{"selector":"account","pagination":"all_and_existing_limit"}]),
-            "actions list"|"actions validate"|"actions resource"|"actions artifact"=>json!([{"selector":"explicit_project"},{"selector":"installed_package_alias"}]),
+            "actions list"|"actions resolve"|"actions validate"|"actions resource"|"actions artifact"=>json!([{"selector":"explicit_project"},{"selector":"installed_package_alias"}]),
             "packages inspect"=>json!([{"selector":"installed_alias"},{"selector":"account_name_and_optional_version"}]),
             "models list"|"models thinking"=>json!([{"selector":"saved_profile","api_key_store":"explicit_file_only","auth_modes":["none","api_key","openai_account"]},{"selector":"draft_server_auth","api_key_input":"stdin","auth_modes":["none","api_key","openai_account"],"account_provider":"openai"}]),
             "usage summary"|"usage runs"|"usage show"=>json!([{"domain_schema_version":1},{"domain_schema_version":2}]),
@@ -586,7 +611,8 @@ fn contracts() -> Vec<Value> {
     }).collect();
     values.push(json!({"command":"run","formats":["json","ndjson"],"schema_versions":[1],"private_content":"explicit_opt_in","opaque_children":"exit_status_only","thinking":{"selection":"tagged_provider_default_or_exact_choice","settings":["choice","provider_default","on","off"],"flags":["--thinking","--thinking-provider-default","--thinking-choice"],"terminal_outcomes":true,"action_definition_revision":"2026-10-01.r1"}}));
     let run = values.last_mut().expect("run contract was appended");
-    run["client_actions"] = json!({"schema_version":2,"catalog_versions":[2],"request_versions":[2],"selector":"--action","request_input":"--action-request-stdin","execution_policy":"required","definition_binding":"required","client_action_correlation":true,"idempotency":false,"limits":super::client_actions::limits()});
+    run["client_actions"] = json!({"schema_version":2,"catalog_versions":[2,3],"request_versions":[2,3],"selector":"--action","request_input":"--action-request-stdin","execution_policy":"required","definition_binding":"required","client_action_correlation":true,"idempotency":false,"limits":super::client_actions::limits()});
+    run["native_roles"] = json!({"definition_revision":"2026-10-06.r1","role_contract_version":1,"catalog_version":3,"request_version":3,"resolver":"actions resolve","profile_context_refresh":"profile refresh-context","binding_authorizes_execution":false,"operation_access":"unverified_until_invocation","session":{"version":1,"selector":"--role-session","input":"bounded_json_lines","output":"ndjson","first_frame":"start","controls":["revoke","cancel"],"revision_specific":true,"eof":"closes_admission_and_cancels_invocation","revocation":"admitted_work_may_settle","control_acknowledgements":"reliable_separate_from_progress_budget","frame_bytes":crate::role_session::MAX_FRAME_BYTES,"control_ack_deadline_ms":crate::role_transport::CONTROL_ACK_DEADLINE_MS,"max_control_frames":crate::role_transport::MAX_CONTROL_FRAMES,"control_frames_exclude_start":true,"control_output_failure":"closes_admission_cancels_and_requests_owned_cleanup"},"tool_protocol":2,"generated_runtime":"verified_capability_and_source_identity_required","private_records":"host_owned_outside_package_payload_and_data"});
     run["structured_results"] = json!({"definition_revision":"2026-10-03.r1","source":"selected_root_tool","business_types":["object","array","string","integer","number","boolean","null"],"nullable_union":"T_or_null","private_content":"--include-result-content","descendants":"no_root_publication","artifact_access":{"permission_version":1,"descriptor_version":1,"read_grant_version":1,"read_command":"actions artifact","request_version":1,"native_confinement":cfg!(any(target_os="linux",target_os="macos",windows)),"limits":super::client_actions::limits()["artifact"]}});
     if cfg!(feature = "developer-tools") {
         values.push(json!({"command":"package","formats":["json"],"schema_versions":[1]}));
@@ -658,6 +684,7 @@ pub(crate) async fn dispatch(matches: &ArgMatches) -> Option<i32> {
         child_instrumentation: true,
         truncated: false,
         client_action: None,
+        role_session: None,
     });
     event("operation_started", json!({"command":path}));
     let owned_matches = matches.clone();
@@ -892,6 +919,7 @@ mod thinking_tests {
             child_instrumentation: true,
             truncated: false,
             client_action: None,
+            role_session: None,
         }
     }
 

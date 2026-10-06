@@ -589,7 +589,22 @@ fn keyring_entry(account: &str) -> Result<keyring::Entry, String> {
 ))]
 fn keychain_get(account: &str) -> Result<Option<String>, String> {
     #[cfg(test)]
+    if let Some(result) = CONTEXT_MOCK_KEYCHAIN.with(|mock| {
+        mock.borrow_mut().as_mut().map(|mock| {
+            mock.reads += 1;
+            if mock.fail_read == Some(mock.reads) {
+                Err("Injected unreadable keychain".to_owned())
+            } else {
+                Ok(mock.values.get(account).cloned())
+            }
+        })
+    }) {
+        return result;
+    }
+
+    #[cfg(test)]
     DISCOVERY_KEYCHAIN_LOOKUPS.with(|count| count.set(count.get() + 1));
+    let _interaction = super::role_context::keychain_interaction_lock()?;
     if !keychain_enabled() {
         return Err("keychain usage is disabled by CARGO_AI_DISABLE_KEYCHAIN".to_string());
     }
@@ -631,6 +646,25 @@ fn keychain_get(_account: &str) -> Result<Option<String>, String> {
     target_os = "openbsd"
 ))]
 fn keychain_set(account: &str, secret: &str) -> Result<(), String> {
+    #[cfg(test)]
+    if let Some(result) = CONTEXT_MOCK_KEYCHAIN.with(|mock| {
+        mock.borrow_mut().as_mut().map(|mock| {
+            mock.writes += 1;
+            let fail = mock.fail_write == Some(mock.writes);
+            if !fail || mock.write_before_error {
+                mock.values.insert(account.to_owned(), secret.to_owned());
+            }
+            if fail {
+                Err("Injected failed keychain write".to_owned())
+            } else {
+                Ok(())
+            }
+        })
+    }) {
+        return result;
+    }
+
+    let _interaction = super::role_context::keychain_interaction_lock()?;
     if !keychain_enabled() {
         return Err("keychain usage is disabled by CARGO_AI_DISABLE_KEYCHAIN".to_string());
     }
@@ -662,6 +696,25 @@ fn keychain_set(_account: &str, _secret: &str) -> Result<(), String> {
     target_os = "openbsd"
 ))]
 fn keychain_delete(account: &str) -> Result<(), String> {
+    #[cfg(test)]
+    if let Some(result) = CONTEXT_MOCK_KEYCHAIN.with(|mock| {
+        mock.borrow_mut().as_mut().map(|mock| {
+            mock.writes += 1;
+            let fail = mock.fail_write == Some(mock.writes);
+            if !fail || mock.write_before_error {
+                mock.values.remove(account);
+            }
+            if fail {
+                Err("Injected failed keychain deletion".to_owned())
+            } else {
+                Ok(())
+            }
+        })
+    }) {
+        return result;
+    }
+
+    let _interaction = super::role_context::keychain_interaction_lock()?;
     if !keychain_enabled() {
         return Err("keychain usage is disabled by CARGO_AI_DISABLE_KEYCHAIN".to_string());
     }
@@ -933,7 +986,9 @@ fn load_snapshot_from_keychain(profile_names: &[String]) -> Result<SecretSnapsho
 
 fn write_snapshot_to_file(path: &Path, snapshot: &SecretSnapshot) -> Result<(), String> {
     let mut credentials = read_credentials_file(path)?;
-    credentials.profile_tokens = snapshot.profile_tokens.clone();
+    credentials
+        .profile_tokens
+        .extend(snapshot.profile_tokens.clone());
     match &snapshot.account_tokens {
         Some(tokens) => {
             let account = credentials
@@ -942,7 +997,7 @@ fn write_snapshot_to_file(path: &Path, snapshot: &SecretSnapshot) -> Result<(), 
             account.access_token = Some(tokens.access_token.clone());
             account.refresh_token = tokens.refresh_token.clone();
         }
-        None => credentials.account = None,
+        None => {}
     }
     match &snapshot.openai_oauth_tokens {
         Some(tokens) => {
@@ -952,7 +1007,7 @@ fn write_snapshot_to_file(path: &Path, snapshot: &SecretSnapshot) -> Result<(), 
             openai_oauth.access_token = Some(tokens.access_token.clone());
             openai_oauth.refresh_token = tokens.refresh_token.clone();
         }
-        None => credentials.openai_oauth = None,
+        None => {}
     }
 
     write_credentials_file(path, &credentials)
@@ -982,10 +1037,7 @@ fn write_snapshot_to_keychain(snapshot: &SecretSnapshot) -> Result<(), String> {
                 }
             }
         }
-        None => {
-            keychain_delete(ACCOUNT_ACCESS_KEY)?;
-            keychain_delete(ACCOUNT_REFRESH_KEY)?;
-        }
+        None => {}
     }
 
     match &snapshot.openai_oauth_tokens {
@@ -998,10 +1050,7 @@ fn write_snapshot_to_keychain(snapshot: &SecretSnapshot) -> Result<(), String> {
                 }
             }
         }
-        None => {
-            keychain_delete(OPENAI_OAUTH_ACCESS_KEY)?;
-            keychain_delete(OPENAI_OAUTH_REFRESH_KEY)?;
-        }
+        None => {}
     }
 
     Ok(())
@@ -1232,6 +1281,14 @@ pub fn migrate_secret_store(
     dry_run: bool,
 ) -> Result<SecretStoreMigrationOutcome, String> {
     let source_mode = configured_secret_store_mode();
+    let _context_mutation = if !dry_run && source_mode != Some(target_mode) {
+        Some(super::role_context::before_migration(target_mode)?)
+    } else {
+        None
+    };
+    if configured_secret_store_mode() != source_mode {
+        return Err("Credential-store selection changed during migration preparation.".to_owned());
+    }
     let source_snapshot = source_snapshot_for_mode(source_mode)?;
 
     let migrated_profile_tokens = source_snapshot.profile_tokens.len();
@@ -1257,6 +1314,19 @@ pub fn migrate_secret_store(
         }
     }
 
+    let target_snapshot = match target_mode {
+        SecretStoreMode::File => load_snapshot_from_file(&credentials_path())?,
+        SecretStoreMode::Keychain => load_snapshot_from_keychain(
+            &source_snapshot
+                .profile_tokens
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+        )?,
+    };
+    if !snapshot_contains(&target_snapshot, &source_snapshot) {
+        return Err("Migrated credentials could not be verified; source credentials were retained and profile context remains unavailable.".to_owned());
+    }
     clear_source_after_migration(source_mode, target_mode)?;
 
     Ok(SecretStoreMigrationOutcome {
@@ -1300,6 +1370,7 @@ pub(crate) fn load_scoped_file_profile_token(
 }
 
 pub fn store_profile_token(profile_name: &str, token: &str) -> Result<(), String> {
+    let _context_mutation = super::role_context::before_mutation(Some(profile_name), false)?;
     if token.trim().is_empty() {
         return clear_profile_token(profile_name);
     }
@@ -1327,6 +1398,7 @@ pub fn store_profile_token(profile_name: &str, token: &str) -> Result<(), String
 }
 
 pub fn clear_profile_token(profile_name: &str) -> Result<(), String> {
+    let _context_mutation = super::role_context::before_mutation(Some(profile_name), false)?;
     let keychain_account = keychain_account_for_profile(profile_name);
     let _ = keychain_delete(&keychain_account);
     clear_profile_token_in_file_with_path(&credentials_path(), profile_name)
@@ -1356,6 +1428,7 @@ pub fn load_account_tokens() -> Result<Option<AccountTokens>, String> {
 }
 
 pub fn store_account_tokens(access_token: &str, refresh_token: Option<&str>) -> Result<(), String> {
+    let _context_mutation = super::role_context::before_mutation(None, false)?;
     if access_token.trim().is_empty() {
         return clear_account_tokens();
     }
@@ -1395,6 +1468,7 @@ pub fn store_account_tokens(access_token: &str, refresh_token: Option<&str>) -> 
 }
 
 pub fn clear_account_tokens() -> Result<(), String> {
+    let _context_mutation = super::role_context::before_mutation(None, false)?;
     let _ = keychain_delete(ACCOUNT_ACCESS_KEY);
     let _ = keychain_delete(ACCOUNT_REFRESH_KEY);
     clear_account_tokens_in_file_with_path(&credentials_path())
@@ -1431,6 +1505,7 @@ pub fn store_openai_oauth_tokens(
     access_token: &str,
     refresh_token: Option<&str>,
 ) -> Result<(), String> {
+    let _context_mutation = super::role_context::before_mutation(None, false)?;
     if access_token.trim().is_empty() {
         return clear_openai_oauth_tokens();
     }
@@ -1478,6 +1553,7 @@ pub fn store_openai_oauth_tokens(
 }
 
 pub fn clear_openai_oauth_tokens() -> Result<(), String> {
+    let _context_mutation = super::role_context::before_mutation(None, false)?;
     let _ = keychain_delete(OPENAI_OAUTH_ACCESS_KEY);
     let _ = keychain_delete(OPENAI_OAUTH_REFRESH_KEY);
     clear_openai_oauth_tokens_in_file_with_path(&credentials_path())
@@ -2142,4 +2218,171 @@ mod discovery_snapshot_tests {
             fs::remove_dir_all(home).unwrap();
         }
     }
+}
+
+// Context metadata shares the selected protected backend but never duplicates tokens.
+pub(crate) fn read_context_records(
+    root: &Path,
+    mode: SecretStoreMode,
+) -> Result<Option<super::role_context::ContextRecords>, String> {
+    let raw = match mode {
+        SecretStoreMode::File => read_credentials_file(&root.join("credentials.toml"))?
+            .other
+            .get("role_contexts")
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned),
+        SecretStoreMode::Keychain => {
+            context_keychain_get(&super::role_context::metadata_key(root))?
+        }
+    };
+    raw.map(|v| {
+        serde_json::from_str(&v).map_err(|_| "Private context metadata is invalid.".to_owned())
+    })
+    .transpose()
+}
+
+pub(crate) fn write_context_records(
+    root: &Path,
+    mode: SecretStoreMode,
+    records: &super::role_context::ContextRecords,
+) -> Result<(), String> {
+    let raw = serde_json::to_string(records)
+        .map_err(|_| "Private context metadata could not be serialized.".to_owned())?;
+    match mode {
+        SecretStoreMode::File => {
+            let path = root.join("credentials.toml");
+            let mut credentials = read_credentials_file(&path)?;
+            credentials
+                .other
+                .insert("role_contexts".to_owned(), toml::Value::String(raw));
+            write_credentials_file(&path, &credentials)
+        }
+        SecretStoreMode::Keychain => keychain_set(&super::role_context::metadata_key(root), &raw),
+    }
+}
+
+pub(crate) fn context_profile_token(
+    root: &Path,
+    mode: SecretStoreMode,
+    name: &str,
+) -> Result<Option<String>, String> {
+    match mode {
+        SecretStoreMode::File => {
+            load_profile_token_from_file_with_path(&root.join("credentials.toml"), name)
+        }
+        SecretStoreMode::Keychain => context_keychain_get(&keychain_account_for_profile(name)),
+    }
+    .map_err(|_| "Selected credential could not be inspected.".to_owned())
+}
+
+pub(crate) fn context_account_comparison() -> Result<String, String> {
+    let session = super::openai_oauth::load_codex_session()
+        .map_err(|_| "Selected session is unavailable.".to_owned())?
+        .ok_or("Selected session is unavailable.")?;
+    if session.access_token_expires_at_unix.is_none()
+        || super::openai_oauth::access_token_expired_or_near(
+            session.access_token_expires_at_unix,
+            super::openai_oauth::now_unix_seconds(),
+        )
+    {
+        return Err("Selected session freshness is unavailable.".to_owned());
+    }
+    super::role_context::session_file_comparison(&super::openai_oauth::codex_auth_path()?)
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct ContextMockKeychain {
+    pub values: BTreeMap<String, String>,
+    pub reads: usize,
+    pub writes: usize,
+    pub fail_read: Option<usize>,
+    pub fail_write: Option<usize>,
+    pub write_before_error: bool,
+}
+#[cfg(test)]
+thread_local! { pub(crate) static CONTEXT_MOCK_KEYCHAIN: std::cell::RefCell<Option<ContextMockKeychain>> = const { std::cell::RefCell::new(None) }; }
+
+#[cfg(test)]
+mod context_migration_tests {
+    use super::*;
+    #[test]
+    fn context_migration_writes_preserve_unrelated_destination_slots() {
+        let root = std::env::temp_dir().join(format!(
+            "cargo-ai-context-migration-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("credentials.toml");
+        let mut destination = CredentialsFile::default();
+        destination
+            .profile_tokens
+            .insert("unrelated".to_owned(), "keep-me".to_owned());
+        destination.account = Some(CredentialsAccount {
+            access_token: Some("keep-account".to_owned()),
+            ..Default::default()
+        });
+        destination.other.insert(
+            "future".to_owned(),
+            toml::Value::String("keep-future".to_owned()),
+        );
+        write_credentials_file(&path, &destination).unwrap();
+        let source = SecretSnapshot {
+            profile_tokens: BTreeMap::from([("migrated".to_owned(), "synthetic-token".to_owned())]),
+            ..Default::default()
+        };
+        write_snapshot_to_file(&path, &source).unwrap();
+        let saved = read_credentials_file(&path).unwrap();
+        assert_eq!(saved.profile_tokens["unrelated"], "keep-me");
+        assert_eq!(saved.profile_tokens["migrated"], "synthetic-token");
+        assert_eq!(
+            saved.account.unwrap().access_token.as_deref(),
+            Some("keep-account")
+        );
+        assert_eq!(saved.other["future"].as_str(), Some("keep-future"));
+        let mut mock = ContextMockKeychain::default();
+        mock.values
+            .insert(ACCOUNT_ACCESS_KEY.to_owned(), "keep-account".to_owned());
+        mock.values
+            .insert("profile/unrelated/token".to_owned(), "keep-me".to_owned());
+        CONTEXT_MOCK_KEYCHAIN.with(|m| *m.borrow_mut() = Some(mock));
+        write_snapshot_to_keychain(&source).unwrap();
+        CONTEXT_MOCK_KEYCHAIN.with(|m| {
+            let mut m = m.borrow_mut();
+            let mock = m.as_ref().unwrap();
+            assert_eq!(mock.values[ACCOUNT_ACCESS_KEY], "keep-account");
+            assert_eq!(mock.values["profile/unrelated/token"], "keep-me");
+            assert_eq!(mock.values["profile/migrated/token"], "synthetic-token");
+            *m = None;
+        });
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+fn snapshot_contains(saved: &SecretSnapshot, expected: &SecretSnapshot) -> bool {
+    expected
+        .profile_tokens
+        .iter()
+        .all(|(name, token)| saved.profile_tokens.get(name) == Some(token))
+        && expected.account_tokens.as_ref().is_none_or(|want| {
+            saved.account_tokens.as_ref().is_some_and(|got| {
+                want.access_token == got.access_token && want.refresh_token == got.refresh_token
+            })
+        })
+        && expected.openai_oauth_tokens.as_ref().is_none_or(|want| {
+            saved.openai_oauth_tokens.as_ref().is_some_and(|got| {
+                want.access_token == got.access_token && want.refresh_token == got.refresh_token
+            })
+        })
+}
+
+fn context_keychain_get(account: &str) -> Result<Option<String>, String> {
+    #[cfg(test)]
+    if CONTEXT_MOCK_KEYCHAIN.with(|mock| mock.borrow().is_some()) {
+        return keychain_get(account);
+    }
+    if !keychain_enabled() {
+        return Err("Selected credential store is unavailable.".to_owned());
+    }
+    super::role_context::noninteractive_keychain_read(|| keychain_get(account))
 }

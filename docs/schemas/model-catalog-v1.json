@@ -161,6 +161,9 @@
           },
           "invocation_access": {
             "const": "unverified"
+          },
+          "operation_evidence": {
+            "$ref": "model-operation-evidence-v1.json"
           }
         },
         "required": [

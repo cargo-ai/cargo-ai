@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/profile-context-v1.json",
+  "title": "Cargo AI explicit profile context refresh payload v1",
+  "type": "object",
+  "properties": {
+    "context": {
+      "type": "object",
+      "properties": {
+        "profile_uuid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "connection_generation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "profile_uuid",
+        "connection_generation"
+      ],
+      "additionalProperties": false
+    },
+    "postconditions_verified": {
+      "const": true
+    },
+    "effects": {
+      "type": "object",
+      "properties": {
+        "local": {
+          "const": "applied"
+        },
+        "remote": {
+          "const": "unapplied"
+        },
+        "context_metadata": {
+          "const": "applied"
+        }
+      },
+      "required": [
+        "local",
+        "remote",
+        "context_metadata"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "context",
+    "postconditions_verified",
+    "effects"
+  ],
+  "additionalProperties": true,
+  "$comment": "Successful profile refresh-context data only. Private protected metadata mutation; no provider call. UUID and generation are opaque selectors, not credential fingerprints or permission. Passive lookup expires after 24 hours and never repairs state."
+}

@@ -72,6 +72,11 @@ pub(crate) fn invoke(
     // let request = ChildAgentRequest::new("./child_agent.json")
     //     .add_text_input("hello from the tool");
     // context.invoke_agent(request)?;
+    //
+    // Native role execution uses a declared call-site id and closed business
+    // inputs instead of selecting an artifact/profile inside this tool:
+    // let result = context.invoke_declared("summarize-child", BTreeMap::new())?;
+    // The native parent resolves the child and returns only its business result.
     let _example_child_agent_request = ChildAgentRequest::new("./child_agent.json");
     Ok(None)
 }

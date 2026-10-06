@@ -730,6 +730,166 @@
               }
             }
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "runtime": {
+              "enum": [
+                "cargo-ai.generated-runtime",
+                "cargo-ai.cli-run-runtime"
+              ]
+            },
+            "revision": {
+              "const": 5
+            },
+            "thinking": {
+              "type": "object",
+              "properties": {
+                "flags": {
+                  "const": [
+                    "--thinking",
+                    "--thinking-provider-default",
+                    "--thinking-choice"
+                  ]
+                },
+                "settings": {
+                  "const": [
+                    "choice",
+                    "provider_default",
+                    "on",
+                    "off"
+                  ]
+                }
+              },
+              "required": [
+                "flags",
+                "settings"
+              ],
+              "additionalProperties": true
+            },
+            "execution_policy": {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "const": 1
+                },
+                "boundaries": {
+                  "const": [
+                    "root",
+                    "media",
+                    "descendants"
+                  ]
+                }
+              },
+              "required": [
+                "version",
+                "boundaries"
+              ],
+              "additionalProperties": true
+            },
+            "structured_results": {
+              "type": "object",
+              "properties": {
+                "definition_revision": {
+                  "const": "2026-10-03.r1"
+                },
+                "validation": {
+                  "const": true
+                },
+                "execution_checking": {
+                  "const": true
+                },
+                "terminal_delivery": {
+                  "type": "boolean"
+                },
+                "artifact_read": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "definition_revision",
+                "validation",
+                "execution_checking",
+                "terminal_delivery",
+                "artifact_read"
+              ],
+              "additionalProperties": false
+            },
+            "native_roles": {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "const": 1
+                },
+                "control": {
+                  "const": "framed_native_session.v1"
+                },
+                "boundaries": {
+                  "const": [
+                    "root",
+                    "media",
+                    "descendants",
+                    "declared_tool_children"
+                  ]
+                }
+              },
+              "required": [
+                "version",
+                "control",
+                "boundaries"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "runtime",
+            "revision",
+            "thinking",
+            "execution_policy",
+            "structured_results",
+            "native_roles"
+          ],
+          "additionalProperties": true,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "runtime": {
+                    "const": "cargo-ai.generated-runtime"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "structured_results": {
+                    "properties": {
+                      "terminal_delivery": {
+                        "const": false
+                      },
+                      "artifact_read": {
+                        "const": false
+                      }
+                    }
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "structured_results": {
+                    "properties": {
+                      "terminal_delivery": {
+                        "const": true
+                      },
+                      "artifact_read": {
+                        "const": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
         }
       ]
     }

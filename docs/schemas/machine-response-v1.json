@@ -10,7 +10,7 @@
     },
     "payload_schema": {
       "type": "string",
-      "pattern": "^cargo-ai\\.[a-z][a-z0-9_.-]*\\.v1$"
+      "pattern": "^cargo-ai\\.(?:actions\\.(?:list|validate)\\.v[23]|[a-z][a-z0-9_.-]*\\.v1)$"
     },
     "command": {
       "type": "string",
@@ -79,7 +79,12 @@
       "type": [
         "object",
         "null"
-      ]
+      ],
+      "properties": {
+        "native_role_execution": {
+          "$ref": "native-role-session-v1.json#/$defs/snapshot"
+        }
+      }
     },
     "warnings": {
       "type": "array",

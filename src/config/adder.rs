@@ -29,6 +29,9 @@ fn add_profile_impl(
     // `profile add` is metadata-only: secret writes are handled by
     // `cargo ai profile set ... --token`.
     new_profile.token = None;
+    let _context_lock =
+        crate::credentials::role_context::lock_at(&crate::credentials::role_context::root()?)?;
+    let context_profile_name = new_profile.name.clone();
 
     let mut cfg = load_config().unwrap_or(Config {
         usage: None,
@@ -93,6 +96,8 @@ fn add_profile_impl(
         }
     }
 
+    let _context_mutation =
+        crate::credentials::role_context::before_mutation(Some(&context_profile_name), true)?;
     let serialized = toml::to_string_pretty(&cfg)?;
     fs::write(config_path(), serialized)?;
 
