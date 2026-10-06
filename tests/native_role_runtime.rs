@@ -870,9 +870,9 @@ fn emitted_native_role_root_media_and_child_dispatch_are_scoped() {
     let provider = Provider::new();
     let mut fixture = Fixture::new(&provider);
     fixture.definitions(&fixture.root.join("child.json"));
-    let child = fixture.hatch("native_role_child_fixture", "child.json");
+    let child = fixture.hatch("nrc", "child.json");
     fixture.definitions(&child);
-    let root = fixture.hatch("native_role_root_fixture", "root.json");
+    let root = fixture.hatch("nrr", "root.json");
     fixture.contexts = [fixture.refresh("a"), fixture.refresh("b")];
     fs::copy(&child, fixture.root.join(child.file_name().unwrap())).unwrap();
     let original = fs::read(fixture.root.join("child.json")).unwrap();
@@ -915,7 +915,7 @@ fn exercise_child_lineage(emitted: bool) {
     let leaf = json!({"agent_definition_schema_version":"2026-10-06.r1","inputs":[{"type":"text","text":"Nested business input"}],"agent_schema":schema,"actions":[]});
     fs::write(fixture.root.join("leaf.json"), leaf.to_string()).unwrap();
     let leaf_artifact = if emitted {
-        let path = fixture.hatch("lineage_leaf", "leaf.json");
+        let path = fixture.hatch("nll", "leaf.json");
         fs::copy(&path, fixture.root.join(path.file_name().unwrap())).unwrap();
         path.file_name().unwrap().to_str().unwrap().to_owned()
     } else {
@@ -929,7 +929,7 @@ fn exercise_child_lineage(emitted: bool) {
     let child = json!({"agent_definition_schema_version":"2026-10-06.r1","inputs":[{"type":"text","text":"Repeated child business input"}],"agent_schema":schema,"actions":[{"name":"nested","logic":{"==":[1,1]},"run":[nested_step]}]});
     fs::write(fixture.root.join("child.json"), child.to_string()).unwrap();
     let child_artifact = if emitted {
-        let path = fixture.hatch("lineage_child", "child.json");
+        let path = fixture.hatch("nlc", "child.json");
         fs::copy(&path, fixture.root.join(path.file_name().unwrap())).unwrap();
         path.file_name().unwrap().to_str().unwrap().to_owned()
     } else {
@@ -941,7 +941,7 @@ fn exercise_child_lineage(emitted: bool) {
     ]});
     fs::write(fixture.root.join("root.json"), root.to_string()).unwrap();
     let executable = if emitted {
-        fixture.hatch("lineage_root", "root.json")
+        fixture.hatch("nlr", "root.json")
     } else {
         PathBuf::from(CLI)
     };
