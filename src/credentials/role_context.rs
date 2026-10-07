@@ -922,6 +922,14 @@ pub(crate) fn before_config_change(
         Some("keychain") => Some(SecretStoreMode::Keychain),
         _ => None,
     };
+    // Unrelated metadata can be persisted without opening protected credentials.
+    // Any possibly relevant change continues through the invalidation path below.
+    if old.get("secret_store") == new.get("secret_store")
+        && old.get("profile") == new.get("profile")
+        && old.get("openai_auth") == new.get("openai_auth")
+    {
+        return Ok(guard);
+    }
     if let Some(mode) = parse_mode(old) {
         // Any context-relevant config write breaks continuity, even if a later
         // write restores the old bytes. Unrelated config fields do not change it.
@@ -1100,6 +1108,44 @@ mod tests {
             "unavailable"
         );
     }
+    #[test]
+    fn irrelevant_config_metadata_does_not_open_an_unavailable_credential_store() {
+        let f = Fixture::new("file");
+        let config = f.0.join("config.toml");
+        let original = std::fs::read_to_string(&config).unwrap();
+        let before: toml::Value = toml::from_str(&original).unwrap();
+        let credentials = f.0.join("credentials.toml");
+        std::fs::remove_file(&credentials).unwrap();
+        std::fs::create_dir(&credentials).unwrap();
+        let mut metadata = before.clone();
+        metadata.as_table_mut().unwrap().insert(
+            "install_id".into(),
+            toml::Value::String("local-installation".into()),
+        );
+        metadata.as_table_mut().unwrap().insert(
+            "default_profile".into(),
+            toml::Value::String("other-profile".into()),
+        );
+        drop(before_config_change(&f.0, &before, &metadata).unwrap());
+        let mut profile = metadata.clone();
+        profile["profile"][0]["model"] = toml::Value::String("changed-model".into());
+        let mut auth = metadata.clone();
+        auth.as_table_mut().unwrap().insert(
+            "openai_auth".into(),
+            toml::Value::Table(toml::map::Map::from_iter([(
+                "locally_disabled".into(),
+                toml::Value::Boolean(true),
+            )])),
+        );
+        let mut store = metadata.clone();
+        store["secret_store"] = toml::Value::String("keychain".into());
+        for changed in [profile, auth, store] {
+            assert!(before_config_change(&f.0, &before, &changed).is_err());
+        }
+        assert!(credentials.is_dir());
+        assert_eq!(std::fs::read_to_string(config).unwrap(), original);
+    }
+
     #[test]
     fn benign_config_edits_preserve_only_affected_semantic_contexts() {
         let f = Fixture::new("file");
