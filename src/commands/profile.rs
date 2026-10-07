@@ -604,6 +604,11 @@ fn set_outcome(
     if !metadata_changes.is_empty() || token.is_some() || set_m.get_flag("clear_token") {
         let context_guard = || -> Result<_, String> {
             let root = crate::credentials::role_context::root()?;
+            // Explicit profile edits verify protected state before any mutation,
+            // including when the requested configuration itself is unchanged.
+            if let Some(mode) = store::configured_secret_store_mode() {
+                store::read_context_records(&root, mode)?;
+            }
             let proposed = toml::Value::try_from(&cfg).map_err(|_| "Invalid profile context")?;
             crate::credentials::role_context::before_config_change(
                 &root,
