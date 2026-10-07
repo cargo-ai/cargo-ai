@@ -515,6 +515,13 @@ fn set_outcome(
             ));
         }
     };
+    let context_config_before = toml::Value::try_from(&cfg).map_err(|_| {
+        SetFailure::context_unavailable(
+            "Profile context could not be inspected safely; no profile changes were applied.",
+            token_failure_message,
+            effects.clone(),
+        )
+    })?;
 
     let Some(profile) = cfg.profile.iter_mut().find(|profile| profile.name == *name) else {
         return Err(SetFailure::new(
@@ -595,7 +602,16 @@ fn set_outcome(
     }
 
     if !metadata_changes.is_empty() || token.is_some() || set_m.get_flag("clear_token") {
-        crate::credentials::role_context::before_mutation(Some(name), false).map_err(|_| {
+        let context_guard = || -> Result<_, String> {
+            let root = crate::credentials::role_context::root()?;
+            let proposed = toml::Value::try_from(&cfg).map_err(|_| "Invalid profile context")?;
+            crate::credentials::role_context::before_config_change(
+                &root,
+                &context_config_before,
+                &proposed,
+            )
+        };
+        context_guard().map_err(|_| {
             SetFailure::context_unavailable(
                 "Profile context could not be invalidated safely; no profile changes were applied.",
                 token_failure_message,
@@ -699,9 +715,47 @@ fn run_remove(remove_m: &ArgMatches) -> bool {
     }
 }
 
-/// Executes profile list/show/add/set/remove operations.
+fn validate_context(
+    args: &ArgMatches,
+) -> Result<crate::credentials::role_context::ContinuityReport, String> {
+    let name = args
+        .get_one::<String>("name")
+        .ok_or("Missing profile name")?;
+    let expected = crate::credentials::role_context::ProfileContextRef {
+        profile_uuid: args
+            .get_one::<String>("profile_uuid")
+            .ok_or("Missing profile identity")?
+            .clone(),
+        connection_generation: args
+            .get_one::<String>("connection_generation")
+            .ok_or("Missing connection generation")?
+            .clone(),
+    };
+    crate::credentials::role_context::validate_profile_context(
+        name,
+        &expected,
+        args.get_flag("renew"),
+    )
+}
+
+/// Executes profile and connection-context operations.
 pub fn run(sub_m: &ArgMatches) -> bool {
-    if let Some(args) = sub_m.subcommand_matches("refresh-context") {
+    if let Some(args) = sub_m.subcommand_matches("validate-context") {
+        match validate_context(args) {
+            Ok(report) => {
+                println!("Profile context: {}. {}", report.status, report.reason);
+                println!(
+                    "Execution ready: {}. Review required: {}.",
+                    report.execution_ready, report.review_required
+                );
+                true
+            }
+            Err(_) => {
+                eprintln!("Profile context validation could not be completed; retain saved choices and inspect the connection before retrying.");
+                false
+            }
+        }
+    } else if let Some(args) = sub_m.subcommand_matches("refresh-context") {
         match crate::credentials::role_context::refresh_profile_context(
             args.get_one::<String>("name").unwrap(),
         ) {
@@ -831,6 +885,21 @@ pub(crate) fn machine_run(matches: &ArgMatches) -> Result<Value, super::machine:
     let name = args
         .get_one::<String>("name")
         .ok_or_else(|| Failure::new("input.invalid", "A profile name is required."))?;
+    if command == "validate-context" {
+        let report = validate_context(args).map_err(|_| {
+            let effect = if args.get_flag("renew") { "unknown" } else { "unapplied" };
+            Failure::new("profile.context_unavailable", "Profile context validation could not be completed; retain saved choices and inspect the connection before retrying.")
+                .with_data(json!({"effects":{"local":effect,"remote":"unapplied","context_metadata":effect,"public_key_cache":effect}}))
+        })?;
+        let mut payload = serde_json::to_value(report).map_err(|_| {
+            Failure::new(
+                "profile.context_unavailable",
+                "Profile context validation could not be reported safely.",
+            )
+        })?;
+        payload["schema_version"] = json!(1);
+        return Ok(payload);
+    }
     if command == "refresh-context" {
         let reference = crate::credentials::role_context::refresh_profile_context(name).map_err(|_| Failure::new("profile.context_unavailable", "Profile context refresh could not be verified; inspect the selected configuration and credentials before retrying.").with_data(json!({"effects":{"local":"unknown","remote":"unapplied","context_metadata":"unknown"}})))?;
         return Ok(
@@ -1385,6 +1454,70 @@ mod tests {
         assert_eq!(
             response["ui"]["sections"][2]["items"][0]["value"].as_str(),
             Some("`cargo ai profile show my_open_ai`")
+        );
+    }
+
+    #[test]
+    fn profile_benign_edits_preserve_context_but_changed_model_requires_review() {
+        let _home = crate::commands::secret_input::test_support::Home::new();
+        crate::credentials::store::store_profile_token("example", "synthetic-stable-token")
+            .unwrap();
+        let first =
+            super::machine_run(&machine_args(&["profile", "refresh-context", "example"])).unwrap();
+        let context: crate::credentials::role_context::ProfileContextRef =
+            serde_json::from_value(first["context"].clone()).unwrap();
+        for options in [
+            vec!["--description", "A more useful description"],
+            vec!["--clear-description"],
+            vec!["--default"],
+            vec![
+                "--server",
+                "openai",
+                "--model",
+                "synthetic-model",
+                "--auth",
+                "api_key",
+            ],
+            vec![
+                "--clear-url",
+                "--clear-temperature",
+                "--clear-max-output-tokens",
+            ],
+        ] {
+            let mut words = vec!["profile", "set", "example"];
+            words.extend(options);
+            super::machine_run(&machine_args(&words)).unwrap();
+            assert!(crate::credentials::role_context::revalidate_profile_context(&context).is_ok());
+            let refreshed =
+                super::machine_run(&machine_args(&["profile", "refresh-context", "example"]))
+                    .unwrap();
+            assert_eq!(refreshed["context"], first["context"]);
+        }
+        let args = machine_args(&[
+            "profile",
+            "set",
+            "example",
+            "--token",
+            "synthetic-stable-token",
+        ]);
+        super::set_outcome(args.subcommand_matches("set").unwrap(), super::write_config).unwrap();
+        assert!(crate::credentials::role_context::revalidate_profile_context(&context).is_ok());
+
+        super::machine_run(&machine_args(&[
+            "profile",
+            "set",
+            "example",
+            "--model",
+            "different-model",
+        ]))
+        .unwrap();
+        assert!(crate::credentials::role_context::revalidate_profile_context(&context).is_err());
+        let changed =
+            super::machine_run(&machine_args(&["profile", "refresh-context", "example"])).unwrap();
+        assert_eq!(changed["context"]["profile_uuid"], context.profile_uuid);
+        assert_ne!(
+            changed["context"]["connection_generation"],
+            context.connection_generation
         );
     }
 

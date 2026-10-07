@@ -64,6 +64,9 @@ pub(crate) async fn send_image_request_with_account_context(
     settings["format"] = serde_json::json!(format);
     let permit = crate::role_runtime::admit_provider(
         provider,
+        url,
+        token,
+        account_id,
         model,
         crate::execution_policy::RequestKind::Image,
         &modalities,

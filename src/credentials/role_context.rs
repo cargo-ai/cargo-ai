@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 const UNAVAILABLE: &str =
     "Profile context is unavailable; explicitly refresh the selected profile context.";
 const STALE: &str = "Profile context changed; refresh and review the new connection generation.";
-const MAX_CONTEXT_AGE_SECONDS: u64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -22,10 +21,42 @@ pub struct ValidatedProfileContext {
     pub context: ProfileContextRef,
     pub profile_name: String,
     pub profile: Profile,
+    pub credential: ValidatedCredential,
+}
+
+#[derive(PartialEq, Eq)]
+pub enum ValidatedCredential {
+    None,
+    ApiKey(String),
+    OpenaiAccount { token: String, account_id: String },
+}
+impl ValidatedCredential {
+    pub fn token(&self) -> Option<&str> {
+        match self {
+            Self::None => None,
+            Self::ApiKey(token) | Self::OpenaiAccount { token, .. } => Some(token),
+        }
+    }
+    pub fn account_id(&self) -> Option<&str> {
+        match self {
+            Self::OpenaiAccount { account_id, .. } => Some(account_id),
+            _ => None,
+        }
+    }
+    pub fn matches(&self, token: &str, account_id: Option<&str>) -> bool {
+        self.token().unwrap_or_default() == token && self.account_id() == account_id
+    }
+}
+impl ValidatedProfileContext {
+    pub fn matches(&self, token: &str, account_id: Option<&str>) -> bool {
+        self.credential.matches(token, account_id)
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ContextRecord {
+    #[serde(default)]
+    pub(crate) version: u32,
     pub(crate) reference: ProfileContextRef,
     pub(crate) transaction: String,
     pub(crate) state: String,
@@ -35,6 +66,8 @@ pub(crate) struct ContextRecord {
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ContextRecords {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) keys: Option<super::access_continuity::KeyCache>,
     #[serde(default)]
     pub(crate) profiles: BTreeMap<String, ContextRecord>,
 }
@@ -107,7 +140,12 @@ fn selected_profile(config: &toml::Value, name: &str) -> Result<toml::Value, Str
     Ok(selected)
 }
 
-pub(crate) fn comparison(root: &Path, name: &str, salt: &str) -> Result<(String, Profile), String> {
+#[cfg(cargo_ai_cli)]
+pub(crate) fn legacy_comparison(
+    root: &Path,
+    name: &str,
+    salt: &str,
+) -> Result<(String, Profile), String> {
     let (config, mode) = config_at(root)?;
     let selected = selected_profile(&config, name)?;
     let profile: Profile = selected
@@ -191,41 +229,188 @@ pub fn revalidate_profile_context(context: &ProfileContextRef) -> Result<(), Str
     resolve_profile_context(&context.profile_uuid, &context.connection_generation).map(|_| ())
 }
 
+fn semantic_profile(value: &toml::Value) -> toml::Value {
+    // Serialization may materialize defaults during an otherwise benign profile edit.
+    // Canonicalize supported fields, while retaining unknown fields conservatively.
+    let profile: Result<Profile, _> = value.clone().try_into();
+    let mut canonical = profile
+        .ok()
+        .and_then(|profile| toml::Value::try_from(profile).ok())
+        .unwrap_or_else(|| value.clone());
+    if let Some(table) = canonical.as_table_mut() {
+        table.remove("description");
+        if let Some(original) = value.as_table() {
+            const KNOWN: &[&str] = &[
+                "name",
+                "server",
+                "model",
+                "url",
+                "token",
+                "timeout_in_sec",
+                "max_output_tokens",
+                "temperature",
+                "thinking",
+                "description",
+                "auth_mode",
+            ];
+            for (name, value) in original {
+                if !KNOWN.contains(&name.as_str()) {
+                    table.insert(name.clone(), value.clone());
+                }
+            }
+        }
+    }
+    canonical
+}
+
+fn comparison_with_snapshot(
+    root: &Path,
+    name: &str,
+    salt: &str,
+    keys: Option<&super::access_continuity::KeyCache>,
+) -> Result<(String, Profile, ValidatedCredential), String> {
+    use crate::config::schema::ProfileAuthMode;
+    let (config, mode) = config_at(root)?;
+    let selected = selected_profile(&config, name)?;
+    let profile: Profile = selected.clone().try_into().map_err(|_| UNAVAILABLE)?;
+    let mut hash = Sha256::new();
+    let semantic = semantic_profile(&selected).to_string();
+    for bytes in [
+        salt.as_bytes(),
+        root.to_string_lossy().as_bytes(),
+        mode.as_str().as_bytes(),
+        semantic.as_bytes(),
+    ] {
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    let credential = match profile.auth_mode {
+        ProfileAuthMode::ApiKey => {
+            let token = super::store::context_profile_token(root, mode, name)?
+                .filter(|s| !s.trim().is_empty())
+                .ok_or("credential_unavailable")?;
+            hash.update(token.as_bytes());
+            ValidatedCredential::ApiKey(token)
+        }
+        ProfileAuthMode::OpenaiAccount => {
+            if config
+                .get("openai_auth")
+                .and_then(|v| v.get("locally_disabled"))
+                .and_then(toml::Value::as_bool)
+                == Some(true)
+            {
+                return Err("credential_disabled".into());
+            }
+            let snapshot = super::access_continuity::account_snapshot(keys, now())?;
+            hash.update(snapshot.identity.as_bytes());
+            ValidatedCredential::OpenaiAccount {
+                token: snapshot.token,
+                account_id: snapshot.account,
+            }
+        }
+        ProfileAuthMode::None => ValidatedCredential::None,
+    };
+    Ok((format!("{:x}", hash.finalize()), profile, credential))
+}
+
+fn require_selected_authority(
+    records: &ContextRecords,
+    name: &str,
+    expected: &ContextRecord,
+) -> Result<(), String> {
+    let mut matches = records
+        .profiles
+        .iter()
+        .filter(|(_, record)| record.reference.profile_uuid == expected.reference.profile_uuid);
+    let (current_name, current) = matches.next().ok_or(UNAVAILABLE)?;
+    if matches.next().is_some() || current_name != name {
+        return Err(UNAVAILABLE.into());
+    }
+    // Refresh timestamps and other profiles do not change this connection's authority.
+    if current.version != expected.version
+        || current.state != expected.state
+        || current.reference != expected.reference
+        || current.transaction != expected.transaction
+        || current.comparison != expected.comparison
+    {
+        return Err(STALE.into());
+    }
+    Ok(())
+}
+
+#[cfg(all(test, cargo_ai_cli))]
+thread_local! {
+    static RESOLUTION_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> = const { std::cell::RefCell::new(None) };
+}
+
 pub(crate) fn resolve_at(
     root: &Path,
     uuid: &str,
     generation: &str,
 ) -> Result<ValidatedProfileContext, String> {
+    const UNSTABLE: &str = "context_verification_unstable";
     let (_, mode) = config_at(root)?;
     let records = super::store::read_context_records(root, mode)?.ok_or(UNAVAILABLE)?;
     let mut matches = records
         .profiles
         .iter()
-        .filter(|(_, record)| record.reference.profile_uuid == uuid);
+        .filter(|(_, r)| r.reference.profile_uuid == uuid);
     let (name, record) = matches.next().ok_or(UNAVAILABLE)?;
     if matches.next().is_some() || record.state != "active" {
-        return Err(UNAVAILABLE.to_owned());
+        return Err(UNAVAILABLE.into());
     }
-    if record.reference.connection_generation != generation
-        || now() < record.refreshed_at
-        || now() - record.refreshed_at > MAX_CONTEXT_AGE_SECONDS
-    {
-        return Err(STALE.to_owned());
+    if record.reference.connection_generation != generation {
+        return Err(STALE.into());
     }
-    let (current, profile) = comparison(root, name, &record.transaction)?;
+    if record.version != 2 {
+        return Err("legacy_context_requires_renewal".into());
+    }
+    let (current, profile, credential) =
+        comparison_with_snapshot(root, name, &record.transaction, records.keys.as_ref())?;
     if current != record.comparison {
-        return Err(STALE.to_owned());
+        return Err(STALE.into());
     }
-    // Catch a cooperating writer between credential inspection and admission.
-    if super::store::read_context_records(root, mode)?.as_ref() != Some(&records)
-        || comparison(root, name, &record.transaction)?.0 != current
+    let (after, _, after_credential) =
+        comparison_with_snapshot(root, name, &record.transaction, records.keys.as_ref())?;
+    if after != current || credential != after_credential {
+        return Err(UNSTABLE.into());
+    }
+    #[cfg(all(test, cargo_ai_cli))]
     {
-        return Err(STALE.to_owned());
+        let hook = RESOLUTION_READ_HOOK.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook(root);
+        }
+    }
+    if config_at(root)?.1 != mode {
+        return Err(UNSTABLE.into());
+    }
+    let latest = super::store::read_context_records(root, mode)?.ok_or(UNAVAILABLE)?;
+    require_selected_authority(&latest, name, record)?;
+    if matches!(&credential, ValidatedCredential::OpenaiAccount { .. })
+        && latest.keys != records.keys
+    {
+        // Evidence renewal is not revocation. Admit only the same credential after
+        // verification with the replacement keys, never merely the old cached keys.
+        let (latest_comparison, _, latest_credential) =
+            comparison_with_snapshot(root, name, &record.transaction, latest.keys.as_ref())?;
+        if latest_comparison != current || latest_credential != credential {
+            return Err(UNSTABLE.into());
+        }
+        if config_at(root)?.1 != mode {
+            return Err(UNSTABLE.into());
+        }
+        let final_records = super::store::read_context_records(root, mode)?.ok_or(UNAVAILABLE)?;
+        require_selected_authority(&final_records, name, record)?;
+        if final_records.keys != latest.keys {
+            return Err(UNSTABLE.into());
+        }
     }
     Ok(ValidatedProfileContext {
         context: record.reference.clone(),
         profile_name: name.clone(),
         profile,
+        credential,
     })
 }
 
@@ -436,46 +621,233 @@ fn write_verified(
     Ok(())
 }
 
-/// Explicit refresh is also the recovery action for pending metadata. It always
-/// issues a new generation; it never restores trust in an earlier generation.
+#[derive(Serialize)]
+pub struct ContinuityEffects {
+    pub local: String,
+    pub remote: String,
+    pub context_metadata: String,
+    pub public_key_cache: String,
+}
+#[derive(Serialize)]
+pub struct ContinuityReport {
+    pub status: String,
+    pub review_required: bool,
+    pub execution_ready: bool,
+    pub context: Option<ProfileContextRef>,
+    pub reason: String,
+    pub effects: ContinuityEffects,
+}
+fn report(status: &str, reason: &str, reference: Option<ProfileContextRef>) -> ContinuityReport {
+    ContinuityReport {
+        status: status.into(),
+        review_required: matches!(status, "changed" | "revoked"),
+        execution_ready: matches!(status, "unchanged" | "renewed"),
+        context: reference,
+        reason: reason.into(),
+        effects: ContinuityEffects {
+            local: "unapplied".into(),
+            remote: "unapplied".into(),
+            context_metadata: "unapplied".into(),
+            public_key_cache: "unapplied".into(),
+        },
+    }
+}
+fn classify(reason: &str) -> &'static str {
+    if reason.starts_with("unsupported_") {
+        "unsupported"
+    } else {
+        "unavailable"
+    }
+}
+fn is_account(root: &Path, name: &str) -> Result<bool, String> {
+    let (config, _) = config_at(root)?;
+    let selected = selected_profile(&config, name)?;
+    Ok(selected.get("auth_mode").and_then(toml::Value::as_str) == Some("openai_account"))
+}
+
+pub fn validate_profile_context(
+    name: &str,
+    expected: &ProfileContextRef,
+    renew: bool,
+) -> Result<ContinuityReport, String> {
+    validate_at(&root()?, name, expected, renew)
+}
+fn validate_at(
+    root: &Path,
+    name: &str,
+    expected: &ProfileContextRef,
+    renew: bool,
+) -> Result<ContinuityReport, String> {
+    let _lock = if renew { Some(lock_at(root)?) } else { None };
+    let (_, mode) = config_at(root)?;
+    let Some(mut records) = super::store::read_context_records(root, mode)? else {
+        return Ok(report(
+            "unavailable",
+            "context_missing",
+            Some(expected.clone()),
+        ));
+    };
+    let Some(original) = records.profiles.get(name).cloned() else {
+        return Ok(report("revoked", "profile_removed", Some(expected.clone())));
+    };
+    if original.reference != *expected || original.state != "active" {
+        return Ok(report(
+            "revoked",
+            "generation_not_active",
+            Some(expected.clone()),
+        ));
+    }
+    if !matches!(original.version, 0 | 2) {
+        return Ok(report(
+            "unsupported",
+            "unsupported_context_version",
+            Some(expected.clone()),
+        ));
+    }
+    if original.version == 0
+        && (!renew
+            || legacy_comparison(root, name, &original.transaction)
+                .map(|v| v.0)
+                .ok()
+                .as_ref()
+                != Some(&original.comparison))
+    {
+        return Ok(report(
+            "unavailable",
+            "legacy_context_requires_verified_enrollment",
+            Some(expected.clone()),
+        ));
+    }
+    let mut keys_refreshed = false;
+    if renew && is_account(root, name)? {
+        match super::access_continuity::fetch_keys(now()) {
+            Ok(keys) => {
+                records.keys = Some(keys);
+                keys_refreshed = true;
+            }
+            Err(reason) => return Ok(report(classify(&reason), &reason, Some(expected.clone()))),
+        }
+    }
+    let (current, _, credential) =
+        match comparison_with_snapshot(root, name, &original.transaction, records.keys.as_ref()) {
+            Ok(value) => value,
+            Err(reason) => return Ok(report(classify(&reason), &reason, Some(expected.clone()))),
+        };
+    if original.version == 2 && current != original.comparison {
+        return Ok(report(
+            "changed",
+            "connection_or_settings_changed",
+            Some(expected.clone()),
+        ));
+    }
+    // A routine renewal never repairs pending metadata or enrolls a different connection.
+    let (after, _, after_credential) =
+        comparison_with_snapshot(root, name, &original.transaction, records.keys.as_ref())?;
+    if current != after || credential != after_credential {
+        return Ok(report(
+            "unavailable",
+            "credential_changed_during_validation",
+            Some(expected.clone()),
+        ));
+    }
+    if renew && (keys_refreshed || original.version == 0) {
+        let entry = records.profiles.get_mut(name).unwrap();
+        entry.version = 2;
+        entry.comparison = current;
+        entry.refreshed_at = now();
+        write_verified(root, mode, &records)?;
+    }
+    resolve_at(
+        root,
+        &expected.profile_uuid,
+        &expected.connection_generation,
+    )?;
+    let renewed = renew && (keys_refreshed || original.version == 0);
+    let mut result = report(
+        if renewed { "renewed" } else { "unchanged" },
+        "continuity_verified",
+        Some(expected.clone()),
+    );
+    if renewed {
+        result.effects.local = "applied".into();
+        result.effects.context_metadata = "applied".into();
+    }
+    if keys_refreshed {
+        result.effects.public_key_cache = "applied".into();
+    }
+    Ok(result)
+}
+
+/// Explicit enrollment is idempotent for an unchanged active connection.
 pub fn refresh_profile_context(name: &str) -> Result<ProfileContextRef, String> {
     refresh_at(&root()?, name)
 }
-
 pub(crate) fn refresh_at(root: &Path, name: &str) -> Result<ProfileContextRef, String> {
     let _lock = lock_at(root)?;
     let (_, mode) = config_at(root)?;
     let mut records = super::store::read_context_records(root, mode)?.unwrap_or_default();
-    let transaction = uuid::Uuid::new_v4().to_string();
-    let profile_uuid = records
-        .profiles
-        .get(name)
-        .filter(|r| {
-            r.comparison.is_empty()
-                || comparison(root, name, &r.transaction).is_ok_and(|v| v.0 == r.comparison)
-        })
-        .map(|r| r.reference.profile_uuid.clone())
+    let existing = records.profiles.get(name).cloned();
+    if existing
+        .as_ref()
+        .is_some_and(|record| !matches!(record.version, 0 | 2))
+    {
+        return Err("unsupported_context_version".into());
+    }
+    if is_account(root, name)? {
+        records.keys = Some(super::access_continuity::fetch_keys(now())?);
+    }
+    let transaction = existing
+        .as_ref()
+        .map(|r| r.transaction.clone())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let reference = ProfileContextRef {
-        profile_uuid,
-        connection_generation: uuid::Uuid::new_v4().to_string(),
+    let (expected, _, credential) =
+        comparison_with_snapshot(root, name, &transaction, records.keys.as_ref())?;
+    let reusable = existing.as_ref().is_some_and(|record| {
+        record.state == "active"
+            && match record.version {
+                2 => record.comparison == expected,
+                0 => legacy_comparison(root, name, &record.transaction)
+                    .is_ok_and(|v| v.0 == record.comparison),
+                _ => false,
+            }
+    });
+    let reference = if reusable {
+        existing.as_ref().unwrap().reference.clone()
+    } else {
+        ProfileContextRef {
+            profile_uuid: existing
+                .as_ref()
+                .map(|r| r.reference.profile_uuid.clone())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            connection_generation: uuid::Uuid::new_v4().to_string(),
+        }
     };
-    let (expected, _) = comparison(root, name, &transaction)?;
+    if reusable && existing.as_ref().is_some_and(|r| r.version == 2) && !is_account(root, name)? {
+        return resolve_at(
+            root,
+            &reference.profile_uuid,
+            &reference.connection_generation,
+        )
+        .map(|v| v.context);
+    }
     records.profiles.insert(
-        name.to_owned(),
+        name.into(),
         ContextRecord {
+            version: 2,
             reference: reference.clone(),
             transaction: transaction.clone(),
-            state: "pending".to_owned(),
+            state: "pending".into(),
             comparison: expected.clone(),
             refreshed_at: now(),
         },
     );
     write_verified(root, mode, &records)?;
-    if config_at(root)?.1 != mode || comparison(root, name, &transaction)?.0 != expected {
-        return Err(STALE.to_owned());
+    let (after, _, after_credential) =
+        comparison_with_snapshot(root, name, &transaction, records.keys.as_ref())?;
+    if config_at(root)?.1 != mode || after != expected || credential != after_credential {
+        return Err(STALE.into());
     }
-    records.profiles.get_mut(name).unwrap().state = "active".to_owned();
+    records.profiles.get_mut(name).unwrap().state = "active".into();
     write_verified(root, mode, &records)?;
     resolve_at(
         root,
@@ -553,11 +925,31 @@ pub(crate) fn before_config_change(
     if let Some(mode) = parse_mode(old) {
         // Any context-relevant config write breaks continuity, even if a later
         // write restores the old bytes. Unrelated config fields do not change it.
-        if old.get("profile") != new.get("profile")
-            || old.get("openai_auth") != new.get("openai_auth")
-            || parse_mode(new) != Some(mode)
-        {
+        if parse_mode(new) != Some(mode) {
             invalidate_at(root, mode, None, false)?;
+        } else if let Some(records) = super::store::read_context_records(root, mode)? {
+            for name in records.profiles.keys() {
+                let before = selected_profile(old, name);
+                let after = selected_profile(new, name);
+                let account = before
+                    .as_ref()
+                    .ok()
+                    .and_then(|p| p.get("auth_mode"))
+                    .and_then(toml::Value::as_str)
+                    == Some("openai_account");
+                let disabled = |v: &toml::Value| {
+                    v.get("openai_auth")
+                        .and_then(|a| a.get("locally_disabled"))
+                        .and_then(toml::Value::as_bool)
+                        .unwrap_or(false)
+                };
+                if before.as_ref().ok().map(semantic_profile)
+                    != after.as_ref().ok().map(semantic_profile)
+                    || (account && disabled(old) != disabled(new))
+                {
+                    invalidate_at(root, mode, Some(name), after.is_err())?;
+                }
+            }
         }
     }
     if parse_mode(old) != parse_mode(new) {
@@ -655,8 +1047,8 @@ mod tests {
         assert_eq!(saved, std::fs::read(f.0.join("credentials.toml")).unwrap());
         let b = refresh_at(&f.0, "example").unwrap();
         assert_eq!(a.profile_uuid, b.profile_uuid);
-        assert_ne!(a.connection_generation, b.connection_generation);
-        assert!(f.resolve(&a).is_err());
+        assert_eq!(a.connection_generation, b.connection_generation);
+        assert!(f.resolve(&a).is_ok());
         assert!(f.resolve(&b).is_ok());
         let raw = std::fs::read_to_string(f.0.join("credentials.toml")).unwrap();
         assert!(raw.contains("preserved-secret") && raw.contains("preserved"));
@@ -665,6 +1057,165 @@ mod tests {
             .unwrap();
         let journal = serde_json::to_string(&records).unwrap();
         assert!(!journal.contains("synthetic-secret") && !journal.contains("preserved-secret"));
+    }
+    #[test]
+    fn continuity_read_and_renew_preserve_references_and_legacy_age_migration() {
+        let f = Fixture::new("file");
+        let a = refresh_at(&f.0, "example").unwrap();
+        let path = f.0.join("credentials.toml");
+        let before = std::fs::read(&path).unwrap();
+        for renew in [false, true] {
+            let result = validate_at(&f.0, "example", &a, renew).unwrap();
+            assert_eq!(result.status, "unchanged");
+            assert!(result.execution_ready);
+            assert!(!result.review_required);
+            assert_eq!(result.context, Some(a.clone()));
+            assert_eq!(before, std::fs::read(&path).unwrap());
+        }
+        let mut records = store::read_context_records(&f.0, SecretStoreMode::File)
+            .unwrap()
+            .unwrap();
+        let record = records.profiles.get_mut("example").unwrap();
+        record.version = 0;
+        record.refreshed_at = 0;
+        record.comparison = legacy_comparison(&f.0, "example", &record.transaction)
+            .unwrap()
+            .0;
+        store::write_context_records(&f.0, SecretStoreMode::File, &records).unwrap();
+        assert_eq!(
+            validate_at(&f.0, "example", &a, false).unwrap().status,
+            "unavailable"
+        );
+        let migrated = validate_at(&f.0, "example", &a, true).unwrap();
+        assert_eq!(migrated.status, "renewed");
+        assert_eq!(migrated.context, Some(a.clone()));
+        assert!(f.resolve(&a).is_ok());
+        let mut records = store::read_context_records(&f.0, SecretStoreMode::File)
+            .unwrap()
+            .unwrap();
+        records.profiles.get_mut("example").unwrap().version = 0;
+        store::write_context_records(&f.0, SecretStoreMode::File, &records).unwrap();
+        assert_eq!(
+            validate_at(&f.0, "example", &a, true).unwrap().status,
+            "unavailable"
+        );
+    }
+    #[test]
+    fn benign_config_edits_preserve_only_affected_semantic_contexts() {
+        let f = Fixture::new("file");
+        let a = refresh_at(&f.0, "example").unwrap();
+        let path = f.0.join("config.toml");
+        let before: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let mut benign = before.clone();
+        benign["profile"][0].as_table_mut().unwrap().insert(
+            "description".into(),
+            toml::Value::String("New label".into()),
+        );
+        benign.as_table_mut().unwrap().insert(
+            "default_profile".into(),
+            toml::Value::String("unrelated".into()),
+        );
+        {
+            let _guard = before_config_change(&f.0, &before, &benign).unwrap();
+            std::fs::write(&path, toml::to_string(&benign).unwrap()).unwrap();
+        }
+        assert_eq!(refresh_at(&f.0, "example").unwrap(), a);
+        assert!(f.resolve(&a).is_ok());
+        let mut changed = benign.clone();
+        changed["profile"][0]["model"] = toml::Value::String("other-model".into());
+        {
+            let _guard = before_config_change(&f.0, &benign, &changed).unwrap();
+            std::fs::write(&path, toml::to_string(&changed).unwrap()).unwrap();
+        }
+        assert!(f.resolve(&a).is_err());
+        {
+            let _guard = before_config_change(&f.0, &changed, &benign).unwrap();
+            std::fs::write(&path, toml::to_string(&benign).unwrap()).unwrap();
+        }
+        assert!(f.resolve(&a).is_err());
+        assert_ne!(refresh_at(&f.0, "example").unwrap(), a);
+    }
+    #[test]
+    fn signed_account_renewal_preserves_reference_and_pins_replacement_bytes() {
+        use super::super::access_continuity::test_support;
+        struct Reset(Option<std::ffi::OsString>);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                test_support::set_keys(None);
+                if let Some(value) = &self.0 {
+                    std::env::set_var("CODEX_HOME", value)
+                } else {
+                    std::env::remove_var("CODEX_HOME")
+                }
+            }
+        }
+        let f = Fixture::new("file");
+        let home = f.0.join("synthetic-codex");
+        let _reset = Reset(std::env::var_os("CODEX_HOME"));
+        std::env::set_var("CODEX_HOME", &home);
+        let path = f.0.join("config.toml");
+        std::fs::write(
+            &path,
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .replace("api_key", "openai_account"),
+        )
+        .unwrap();
+        let timestamp = now();
+        test_support::set_keys(Some(Ok(test_support::keys(timestamp))));
+        let mut claims = test_support::claims(timestamp);
+        let old = test_support::write_session(&home, &claims);
+        let reference = refresh_at(&f.0, "example").unwrap();
+        let selected = f.resolve(&reference).unwrap();
+        assert!(selected.matches(&old, Some("synthetic-account")));
+        claims["exp"] = serde_json::json!(timestamp + 7200);
+        claims["jti"] = serde_json::json!("renewed");
+        let new = test_support::write_session(&home, &claims);
+        let selected = f.resolve(&reference).unwrap();
+        assert!(selected.matches(&new, Some("synthetic-account")));
+        assert!(!selected.matches(&old, Some("synthetic-account")));
+        let renewed = validate_at(&f.0, "example", &reference, true).unwrap();
+        assert_eq!(renewed.status, "renewed");
+        assert_eq!(renewed.context, Some(reference.clone()));
+        let mut records = store::read_context_records(&f.0, SecretStoreMode::File)
+            .unwrap()
+            .unwrap();
+        records.keys = Some(test_support::keys(
+            timestamp - super::super::access_continuity::KEY_MAX_AGE - 1,
+        ));
+        store::write_context_records(&f.0, SecretStoreMode::File, &records).unwrap();
+        let retained = std::fs::read(f.0.join("credentials.toml")).unwrap();
+        assert_eq!(
+            validate_at(&f.0, "example", &reference, false)
+                .unwrap()
+                .status,
+            "unavailable"
+        );
+        test_support::set_keys(Some(Err("keys_unavailable".into())));
+        assert_eq!(
+            validate_at(&f.0, "example", &reference, true)
+                .unwrap()
+                .status,
+            "unavailable"
+        );
+        assert_eq!(
+            retained,
+            std::fs::read(f.0.join("credentials.toml")).unwrap()
+        );
+        test_support::set_keys(Some(Ok(test_support::keys(now()))));
+        assert_eq!(
+            validate_at(&f.0, "example", &reference, true)
+                .unwrap()
+                .context,
+            Some(reference.clone())
+        );
+        claims["sub"] = serde_json::json!("different-principal");
+        test_support::write_session(&home, &claims);
+        let changed = validate_at(&f.0, "example", &reference, true).unwrap();
+        assert_eq!(changed.status, "changed");
+        assert!(changed.review_required);
+        assert!(!changed.execution_ready);
+        assert!(f.resolve(&reference).is_err());
     }
     #[test]
     fn removal_recreation_and_explicit_mutation_do_not_restore_trust() {
@@ -680,7 +1231,7 @@ mod tests {
         assert!(f.resolve(&a).is_err() && f.resolve(&b).is_err());
     }
     #[test]
-    fn out_of_band_config_token_and_expiry_fail_without_repair() {
+    fn out_of_band_config_and_token_fail_but_elapsed_context_age_does_not() {
         let f = Fixture::new("file");
         let a = refresh_at(&f.0, "example").unwrap();
         let path = f.0.join("credentials.toml");
@@ -695,7 +1246,7 @@ mod tests {
             .unwrap();
         records.profiles.get_mut("example").unwrap().refreshed_at = 0;
         store::write_context_records(&f.0, SecretStoreMode::File, &records).unwrap();
-        assert!(f.resolve(&b).is_err());
+        assert!(f.resolve(&b).is_ok());
         let c = refresh_at(&f.0, "example").unwrap();
         let config = f.0.join("config.toml");
         std::fs::write(
@@ -706,6 +1257,186 @@ mod tests {
         )
         .unwrap();
         assert!(f.resolve(&c).is_err());
+    }
+    #[test]
+    fn selected_context_tolerates_benign_concurrent_metadata_but_checks_latest_authority() {
+        use super::super::access_continuity::test_support;
+        struct Reset(Option<std::ffi::OsString>);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                test_support::set_keys(None);
+                RESOLUTION_READ_HOOK.with(|slot| *slot.borrow_mut() = None);
+                if let Some(value) = &self.0 {
+                    std::env::set_var("CODEX_HOME", value);
+                } else {
+                    std::env::remove_var("CODEX_HOME");
+                }
+            }
+        }
+        for case in [
+            "unrelated_profile",
+            "renewed_keys",
+            "revoked",
+            "signer_removed",
+        ] {
+            let f = Fixture::new("file");
+            let _reset = Reset(std::env::var_os("CODEX_HOME"));
+            let codex = f.0.join("synthetic-codex");
+            std::env::set_var("CODEX_HOME", &codex);
+            let config = f.0.join("config.toml");
+            std::fs::write(
+                &config,
+                std::fs::read_to_string(&config)
+                    .unwrap()
+                    .replace("api_key", "openai_account"),
+            )
+            .unwrap();
+            let timestamp = now();
+            let token = test_support::write_session(&codex, &test_support::claims(timestamp));
+            test_support::set_keys(Some(Ok(test_support::keys(timestamp - 60))));
+            let reference = refresh_at(&f.0, "example").unwrap();
+            let hook_bytes = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let written_bytes = hook_bytes.clone();
+            RESOLUTION_READ_HOOK.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move |root| {
+                    let mut records = store::read_context_records(root, SecretStoreMode::File)
+                        .unwrap()
+                        .unwrap();
+                    match case {
+                        "unrelated_profile" => {
+                            let mut other = records.profiles["example"].clone();
+                            other.reference.profile_uuid = "unrelated-profile-uuid".into();
+                            records.profiles.insert("other".into(), other);
+                            records.profiles.get_mut("example").unwrap().refreshed_at += 1;
+                        }
+                        "renewed_keys" => records.keys = Some(test_support::keys(timestamp)),
+                        "revoked" => {
+                            records.profiles.get_mut("example").unwrap().state = "pending".into()
+                        }
+                        "signer_removed" => {
+                            records.keys = Some(test_support::keys_without_signer(timestamp))
+                        }
+                        _ => unreachable!(),
+                    }
+                    store::write_context_records(root, SecretStoreMode::File, &records).unwrap();
+                    *written_bytes.borrow_mut() =
+                        Some(std::fs::read(root.join("credentials.toml")).unwrap());
+                }))
+            });
+            let result = f.resolve(&reference);
+            match case {
+                "unrelated_profile" | "renewed_keys" => {
+                    let selected = result.unwrap();
+                    assert_eq!(selected.context, reference);
+                    assert!(selected.matches(&token, Some("synthetic-account")));
+                }
+                "revoked" => assert!(result.is_err()),
+                "signer_removed" => assert_eq!(result.err().as_deref(), Some("keys_unavailable")),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                hook_bytes.borrow().as_ref().unwrap(),
+                &std::fs::read(f.0.join("credentials.toml")).unwrap()
+            );
+        }
+    }
+    #[test]
+    fn renewed_account_metadata_write_fault_retains_exact_verified_reference() {
+        use super::super::access_continuity::test_support;
+        struct Reset(Option<std::ffi::OsString>);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                test_support::set_keys(None);
+                if let Some(value) = &self.0 {
+                    std::env::set_var("CODEX_HOME", value);
+                } else {
+                    std::env::remove_var("CODEX_HOME");
+                }
+            }
+        }
+        for write_before_error in [false, true] {
+            let f = Fixture::new("keychain");
+            let _reset = Reset(std::env::var_os("CODEX_HOME"));
+            let codex = f.0.join("synthetic-codex");
+            std::env::set_var("CODEX_HOME", &codex);
+            let config = f.0.join("config.toml");
+            std::fs::write(
+                &config,
+                std::fs::read_to_string(&config)
+                    .unwrap()
+                    .replace("api_key", "openai_account"),
+            )
+            .unwrap();
+            let timestamp = now();
+            let mut claims = test_support::claims(timestamp);
+            test_support::write_session(&codex, &claims);
+            test_support::set_keys(Some(Ok(test_support::keys(timestamp - 60))));
+            let reference = refresh_at(&f.0, "example").unwrap();
+            let before = store::read_context_records(&f.0, SecretStoreMode::Keychain)
+                .unwrap()
+                .unwrap();
+            claims["jti"] = serde_json::json!("routine-renewal");
+            let renewed = test_support::write_session(&codex, &claims);
+            let keys = test_support::keys(timestamp);
+            test_support::set_keys(Some(Ok(keys.clone())));
+            CONTEXT_MOCK_KEYCHAIN.with(|mock| {
+                let mut mock = mock.borrow_mut();
+                let mock = mock.as_mut().unwrap();
+                mock.fail_write = Some(mock.writes + 1);
+                mock.write_before_error = write_before_error;
+            });
+            assert!(validate_at(&f.0, "example", &reference, true).is_err());
+            CONTEXT_MOCK_KEYCHAIN
+                .with(|mock| mock.borrow_mut().as_mut().unwrap().fail_write = None);
+            let saved = store::read_context_records(&f.0, SecretStoreMode::Keychain)
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.profiles["example"].reference, reference);
+            assert_eq!(saved.profiles["example"].state, "active");
+            assert!(
+                saved.keys
+                    == if write_before_error {
+                        Some(keys)
+                    } else {
+                        before.keys
+                    }
+            );
+            assert!(f
+                .resolve(&reference)
+                .unwrap()
+                .matches(&renewed, Some("synthetic-account")));
+            CONTEXT_MOCK_KEYCHAIN.with(|mock| {
+                assert_eq!(
+                    mock.borrow().as_ref().unwrap().values["unrelated/account"],
+                    "preserved-secret"
+                )
+            });
+            assert_eq!(
+                validate_at(&f.0, "example", &reference, true)
+                    .unwrap()
+                    .context,
+                Some(reference)
+            );
+        }
+    }
+    #[test]
+    fn enrollment_preserves_unsupported_future_metadata() {
+        let f = Fixture::new("file");
+        let reference = refresh_at(&f.0, "example").unwrap();
+        let mut records = store::read_context_records(&f.0, SecretStoreMode::File)
+            .unwrap()
+            .unwrap();
+        records.profiles.get_mut("example").unwrap().version = 99;
+        store::write_context_records(&f.0, SecretStoreMode::File, &records).unwrap();
+        let saved = std::fs::read(f.0.join("credentials.toml")).unwrap();
+        assert!(refresh_at(&f.0, "example").is_err());
+        assert_eq!(
+            validate_at(&f.0, "example", &reference, true)
+                .unwrap()
+                .status,
+            "unsupported"
+        );
+        assert_eq!(saved, std::fs::read(f.0.join("credentials.toml")).unwrap());
     }
     #[test]
     fn keychain_pending_and_active_write_faults_require_explicit_recovery() {
@@ -736,7 +1467,11 @@ mod tests {
                 assert!(f.resolve(&repaired).is_ok());
                 if let Some(records) = saved {
                     for r in records.profiles.values() {
-                        assert!(f.resolve(&r.reference).is_err());
+                        if r.state == "pending" {
+                            assert!(f.resolve(&r.reference).is_err());
+                        } else {
+                            assert_eq!(r.reference, repaired);
+                        }
                     }
                 }
                 CONTEXT_MOCK_KEYCHAIN.with(|m| {
@@ -934,6 +1669,23 @@ mod migration_transaction_tests {
             CONTEXT_MOCK_KEYCHAIN.with(|m| *m.borrow_mut() = None);
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+    #[test]
+    fn unchanged_token_and_unrelated_hosted_renewal_preserve_provider_context() {
+        let f = SelectedHome::new();
+        let reference = refresh_profile_context("example").unwrap();
+        store::store_profile_token("example", "synthetic-transfer-token").unwrap();
+        assert!(
+            resolve_profile_context(&reference.profile_uuid, &reference.connection_generation)
+                .is_ok()
+        );
+        store::store_account_tokens("synthetic-hosted-renewal", Some("synthetic-hosted-refresh"))
+            .unwrap();
+        store::clear_account_tokens().unwrap();
+        assert_eq!(refresh_profile_context("example").unwrap(), reference);
+        assert!(std::fs::read_to_string(f.root.join("credentials.toml"))
+            .unwrap()
+            .contains("synthetic-transfer-token"));
     }
     #[test]
     fn actual_migration_round_trip_never_reuses_source_identity() {

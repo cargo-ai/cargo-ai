@@ -141,6 +141,7 @@ dependencies = [
  "keyring",
  "mockito",
  "reqwest",
+ "ring",
  "rusqlite",
  "schemars",
  "semver",

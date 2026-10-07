@@ -9,6 +9,13 @@ pub fn command() -> Command {
         .subcommand(Command::new("refresh-context")
             .about("Explicitly refresh private profile identity and connection context")
             .arg(Arg::new("name").required(true).value_name("NAME")))
+        .subcommand(Command::new("validate-context")
+            .about("Validate remembered connection context without granting execution permission")
+            .arg(Arg::new("name").required(true).value_name("NAME"))
+            .arg(Arg::new("profile_uuid").long("profile-uuid").required(true).value_name("UUID"))
+            .arg(Arg::new("connection_generation").long("connection-generation").required(true).value_name("GENERATION"))
+            .arg(Arg::new("renew").long("renew").action(ArgAction::SetTrue)
+                .help("Refresh public verification evidence and proven context metadata; never renew provider credentials")))
         .subcommand(
             Command::new("show")
                 .about("Show detailed information for a specific profile")

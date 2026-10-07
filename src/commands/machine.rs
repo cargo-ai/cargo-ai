@@ -548,6 +548,7 @@ fn contracts() -> Vec<Value> {
         "profile list",
         "profile show",
         "profile refresh-context",
+        "profile validate-context",
         "profile add",
         "profile set",
         "profile remove",
@@ -585,7 +586,8 @@ fn contracts() -> Vec<Value> {
             "capabilities"|"version"=>vec!["none"],
             "actions list"|"actions validate"|"actions resource"|"actions artifact"=>vec!["explicit_project_or_installed_package_read"],
             "actions resolve"=>vec!["explicit_project_or_installed_package_read","protected_connection_context_read"],
-            "profile refresh-context"=>vec!["protected_context_metadata_mutation","selected_credential_read","no_provider_invocation"],
+            "profile refresh-context"=>vec!["protected_context_metadata_mutation","selected_credential_read","public_verification_keys_read_for_account_profiles","no_provider_invocation"],
+            "profile validate-context"=>vec!["protected_connection_context_read","selected_credential_read","explicit_renew_public_keys_and_proven_context_metadata","no_provider_invocation","no_provider_credential_mutation"],
             "profile list"=>vec!["configuration_read"],
             "profile show"=>vec!["configuration_read","credential_presence_lookup"],
             "models list"|"models thinking"=>vec!["connection_read","provider_catalog_read"],
@@ -605,14 +607,28 @@ fn contracts() -> Vec<Value> {
             "models list"|"models thinking"=>json!([{"selector":"saved_profile","api_key_store":"explicit_file_only","auth_modes":["none","api_key","openai_account"]},{"selector":"draft_server_auth","api_key_input":"stdin","auth_modes":["none","api_key","openai_account"],"account_provider":"openai"}]),
             "usage summary"|"usage runs"|"usage show"=>json!([{"domain_schema_version":1},{"domain_schema_version":2}]),
             "account deactivate"=>json!([{"deletion_request":false},{"deletion_request":true,"requires":"matching_confirm_email"}]),
+            "profile validate-context"=>json!([{"selector":"without_renew","effects":"read_only"},{"selector":"--renew","effects":"public_key_fetch_and_proven_context_metadata_update"}]),
             _=>json!([]),
         };
-        json!({"command":name,"payload_schema":payload_schema(name),"formats":["json"],"schema_versions":[1],"effects":effects,"variants":variants,"interaction":if *name=="auth login openai"{"existing_terminal_protocol_exception"}else{"noninteractive_explicit_consent_required_when_applicable"}})
+        let mut contract = json!({"command":name,"payload_schema":payload_schema(name),"formats":["json"],"schema_versions":[1],"effects":effects,"variants":variants,"interaction":if *name=="auth login openai"{"existing_terminal_protocol_exception"}else{"noninteractive_explicit_consent_required_when_applicable"}});
+        if matches!(*name, "actions list" | "actions validate") {
+            let selector = if *name == "actions list" { "catalog_version" } else { "request_version" };
+            contract["payload_schemas"] = json!([
+                {"payload_schema":payload_schema(name),"condition":{(selector):2}},
+                {"payload_schema":format!("cargo-ai.{}.v3",name.replace(' ',".")),"condition":{(selector):3}}
+            ]);
+        }
+        if *name == "profile validate-context" {
+            contract["continuity_contract_version"] = json!(1);
+            contract["validation_does_not_authorize_execution"] = json!(true);
+        }
+        contract
     }).collect();
     values.push(json!({"command":"run","formats":["json","ndjson"],"schema_versions":[1],"private_content":"explicit_opt_in","opaque_children":"exit_status_only","thinking":{"selection":"tagged_provider_default_or_exact_choice","settings":["choice","provider_default","on","off"],"flags":["--thinking","--thinking-provider-default","--thinking-choice"],"terminal_outcomes":true,"action_definition_revision":"2026-10-01.r1"}}));
     let run = values.last_mut().expect("run contract was appended");
     run["client_actions"] = json!({"schema_version":2,"catalog_versions":[2,3],"request_versions":[2,3],"selector":"--action","request_input":"--action-request-stdin","execution_policy":"required","definition_binding":"required","client_action_correlation":true,"idempotency":false,"limits":super::client_actions::limits()});
     run["native_roles"] = json!({"definition_revision":"2026-10-06.r1","role_contract_version":1,"catalog_version":3,"request_version":3,"resolver":"actions resolve","profile_context_refresh":"profile refresh-context","binding_authorizes_execution":false,"operation_access":"unverified_until_invocation","session":{"version":1,"selector":"--role-session","input":"bounded_json_lines","output":"ndjson","first_frame":"start","controls":["revoke","cancel"],"revision_specific":true,"eof":"closes_admission_and_cancels_invocation","revocation":"admitted_work_may_settle","control_acknowledgements":"reliable_separate_from_progress_budget","frame_bytes":crate::role_session::MAX_FRAME_BYTES,"control_ack_deadline_ms":crate::role_transport::CONTROL_ACK_DEADLINE_MS,"max_control_frames":crate::role_transport::MAX_CONTROL_FRAMES,"control_frames_exclude_start":true,"control_output_failure":"closes_admission_cancels_and_requests_owned_cleanup"},"tool_protocol":2,"generated_runtime":"verified_capability_and_source_identity_required","private_records":"host_owned_outside_package_payload_and_data"});
+    run["native_roles"]["continuity"] = json!({"version":1,"command":"profile validate-context","renew_selector":"--renew","approval_expires":false,"unavailable":"pause_and_retain_choices","changed":"affected_review","revoked":"no_reuse","credential_renewal_owner":"existing_credential_owner","validation_does_not_authorize_execution":true});
     run["structured_results"] = json!({"definition_revision":"2026-10-03.r1","source":"selected_root_tool","business_types":["object","array","string","integer","number","boolean","null"],"nullable_union":"T_or_null","private_content":"--include-result-content","descendants":"no_root_publication","artifact_access":{"permission_version":1,"descriptor_version":1,"read_grant_version":1,"read_command":"actions artifact","request_version":1,"native_confinement":cfg!(any(target_os="linux",target_os="macos",windows)),"limits":super::client_actions::limits()["artifact"]}});
     if cfg!(feature = "developer-tools") {
         values.push(json!({"command":"package","formats":["json"],"schema_versions":[1]}));

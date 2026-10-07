@@ -179,9 +179,9 @@ impl Fixture {
             prior["profile_uuid"], fixture.contexts[0]["profile_uuid"],
             "fresh process preserves profile UUID"
         );
-        assert_ne!(
-            prior["connection_generation"],
-            fixture.contexts[0]["connection_generation"]
+        assert_eq!(
+            prior["connection_generation"], fixture.contexts[0]["connection_generation"],
+            "unchanged explicit refresh preserves reviewed connection generation"
         );
         fixture
     }
@@ -618,6 +618,17 @@ fn assert_success(run: &Run) {
 }
 fn exercise(executable: &Path, fixture: &Fixture, provider: &Provider) {
     let config_before = fs::read(fixture.home.join("config.toml")).unwrap();
+    let credential_path = fixture.home.join("credentials.toml");
+    let mut credentials: toml::Value =
+        toml::from_str(&fs::read_to_string(&credential_path).unwrap()).unwrap();
+    let mut records: Value =
+        serde_json::from_str(credentials["role_contexts"].as_str().unwrap()).unwrap();
+    for (name, reference) in ["a", "b"].into_iter().zip(&fixture.contexts) {
+        assert_eq!(&records["profiles"][name]["reference"], reference);
+        records["profiles"][name]["refreshed_at"] = json!(0);
+    }
+    credentials["role_contexts"] = toml::Value::String(serde_json::to_string(&records).unwrap());
+    fs::write(&credential_path, toml::to_string(&credentials).unwrap()).unwrap();
     for mapping in 0..2 {
         let run = invoke(
             fixture,
@@ -848,7 +859,31 @@ fn exercise(executable: &Path, fixture: &Fixture, provider: &Provider) {
         "native invocation never initializes or rewrites private config"
     );
     let old = fixture.bootstrap(0);
-    fixture.refresh("a");
+    assert_eq!(fixture.refresh("a"), fixture.contexts[0]);
+    let unchanged = invoke(fixture, executable, old.clone(), Control::Allow);
+    assert_success(&unchanged);
+    assert_eq!(provider.take().len(), if cfg!(unix) { 5 } else { 4 });
+    fs::write(
+        fixture.home.join("credentials.toml"),
+        fs::read_to_string(fixture.home.join("credentials.toml"))
+            .unwrap()
+            .replace(
+                "synthetic-private-token-a",
+                "synthetic-private-token-a-rotated",
+            ),
+    )
+    .unwrap();
+    assert!(!invoke(fixture, executable, old.clone(), Control::Allow).success);
+    assert!(
+        provider.take().is_empty(),
+        "unreviewed changed credentials never dispatch"
+    );
+    let changed = fixture.refresh("a");
+    assert_eq!(changed["profile_uuid"], fixture.contexts[0]["profile_uuid"]);
+    assert_ne!(
+        changed["connection_generation"],
+        fixture.contexts[0]["connection_generation"]
+    );
     assert!(!invoke(fixture, executable, old, Control::Allow).success);
     assert!(
         provider.take().is_empty(),
@@ -1098,7 +1133,11 @@ fn exercise_child_lineage(emitted: bool) {
             assert_eq!(outcome["boundary"]["binding_revision"], "revision-a");
         }
     }
-    assert!(fixture.build_warnings.lock().unwrap().is_empty());
+    let warnings = fixture.build_warnings.lock().unwrap();
+    assert!(
+        warnings.is_empty(),
+        "generated builds must be warning-free: {warnings:?}"
+    );
 }
 
 #[test]

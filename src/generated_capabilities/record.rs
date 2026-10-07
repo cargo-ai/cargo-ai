@@ -8,10 +8,10 @@ pub const CLOSE: [u8; 16] = [
 ];
 pub const IDENTITY: &[u8; 26] = b"cargo-ai.generated-runtime";
 pub const CLI_IDENTITY: &[u8; 26] = b"cargo-ai.cli-run-runtime\0\0";
-pub const REVISION: u32 = 5;
+pub const REVISION: u32 = 6;
 // Thinking controls and versioned root/media/descendant policy enforcement
 // are required together for this declaration revision.
-pub const THINKING_CAPABILITIES: u32 = 0b11_1111_1111;
+pub const THINKING_CAPABILITIES: u32 = 0b111_1111_1111;
 pub const DEFINITION_OPEN: [u8; 16] = [
     17, 209, 42, 66, 171, 99, 187, 13, 214, 3, 168, 194, 51, 17, 222, 31,
 ];

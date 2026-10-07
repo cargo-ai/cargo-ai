@@ -29,10 +29,28 @@ pub(crate) fn connection_context_identity(
 
 /// Snapshot explicitly selected fixed profiles through existing protected context records.
 /// Empty structural scopes identify no connections and never open configuration or credentials.
+#[cfg(any(cargo_ai_cli, test))]
 pub(crate) fn fixed_context_identity(
     home: &std::path::Path,
     selections: &[(String, Option<String>)],
 ) -> Result<String, String> {
+    fixed_context_snapshot(home, selections).map(|(identity, _)| identity)
+}
+
+/// Return the exact validated credentials contributing to the fixed context identity.
+pub(crate) fn fixed_context_snapshot(
+    home: &std::path::Path,
+    selections: &[(String, Option<String>)],
+) -> Result<
+    (
+        String,
+        std::collections::BTreeMap<
+            String,
+            crate::credentials::role_context::ValidatedProfileContext,
+        >,
+    ),
+    String,
+> {
     use sha2::{Digest, Sha256};
     const UNAVAILABLE: &str = "role.fixed_context_unavailable";
     let mut selections = selections.to_vec();
@@ -50,6 +68,7 @@ pub(crate) fn fixed_context_identity(
         return Err(UNAVAILABLE.into());
     }
     let mut references = Vec::new();
+    let mut snapshots = std::collections::BTreeMap::new();
     if !selections.is_empty() {
         let (config, _) = crate::credentials::role_context::config_at(home)
             .map_err(|_| UNAVAILABLE.to_owned())?;
@@ -60,6 +79,7 @@ pub(crate) fn fixed_context_identity(
                 .map_err(|_| UNAVAILABLE.to_owned())?;
             references.push(json!({"call_site":site,"requested_profile":requested,
                 "selected_profile":validated.profile_name,"context":validated.context}));
+            snapshots.insert(site.clone(), validated);
         }
         // Repeat native lookup so a changed default, generation or secret invalidates this snapshot.
         let (after, _) = crate::credentials::role_context::config_at(home)
@@ -71,14 +91,20 @@ pub(crate) fn fixed_context_identity(
                 .map_err(|_| UNAVAILABLE.to_owned())?;
             let actual = json!({"call_site":site,"requested_profile":requested,
                 "selected_profile":validated.profile_name,"context":validated.context});
-            if actual != *expected {
+            let snapshot = snapshots.get(site).ok_or(UNAVAILABLE)?;
+            if actual != *expected
+                || !snapshot.matches(
+                    validated.credential.token().unwrap_or(""),
+                    validated.credential.account_id(),
+                )
+            {
                 return Err(UNAVAILABLE.into());
             }
         }
     }
     let bytes = serde_json::to_vec(&json!({"version":1,"fixed_connections":references}))
         .map_err(|_| UNAVAILABLE.to_owned())?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok((format!("{:x}", Sha256::digest(bytes)), snapshots))
 }
 
 #[cfg(any(cargo_ai_cli, test))]

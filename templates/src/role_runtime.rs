@@ -113,6 +113,17 @@ impl Context {
         }
     }
     pub fn validate_context(&self) -> Result<(), String> {
+        self.validated_fixed_connections().map(|_| ())
+    }
+    fn validated_fixed_connections(
+        &self,
+    ) -> Result<
+        std::collections::BTreeMap<
+            String,
+            crate::credentials::role_context::ValidatedProfileContext,
+        >,
+        String,
+    > {
         CURRENT.sync_scope(Some(self.clone()), || {
             if self.session.is_closed() {
                 return Err(failure("role.revoked"));
@@ -152,8 +163,8 @@ impl Context {
                 .collect();
             let home = crate::credentials::role_context::root()
                 .map_err(|_| failure("role.stale_connection"))?;
-            let fixed_identity =
-                crate::providers::operation_metadata::fixed_context_identity(&home, &fixed)
+            let (fixed_identity, snapshots) =
+                crate::providers::operation_metadata::fixed_context_snapshot(&home, &fixed)
                     .map_err(|_| failure("role.stale_connection"))?;
             let identity = crate::providers::operation_metadata::connection_context_identity(
                 &self.bootstrap.bindings,
@@ -169,7 +180,7 @@ impl Context {
             {
                 return Err(failure("role.stale_connection"));
             }
-            Ok(())
+            Ok(snapshots)
         })
     }
     pub fn selected(&self) -> Result<ResolvedCall, String> {
@@ -522,19 +533,11 @@ pub fn apply_step(step: &crate::RunStep) -> Result<crate::RunStep, String> {
         .map(|s| crate::RunArg::Literal(s.to_owned()));
     Ok(step)
 }
-pub async fn admit(kind: &str) -> Result<Option<Permit>, String> {
-    match current() {
-        Some(context) => context
-            .session
-            .admit(context.boundary(kind)?)
-            .await
-            .map(Some)
-            .map_err(|_| failure("role.revoked")),
-        None => Ok(None),
-    }
-}
 pub async fn admit_provider(
     provider: crate::providers::ProviderKind,
+    url: &str,
+    token: &str,
+    account_id: Option<&str>,
     model: &str,
     kind: RequestKind,
     modalities: &[&str],
@@ -568,10 +571,7 @@ pub async fn admit_provider(
             .iter()
             .find(|b| &b.role == role)
             .ok_or_else(|| failure("role.unresolved"))?;
-        if !binding
-            .provider
-            .eq_ignore_ascii_case(provider.display_name())
-        {
+        if crate::providers::ProviderKind::from_server_value(&binding.provider) != Some(provider) {
             return Err(failure("role.request_conflict"));
         }
     }
@@ -606,7 +606,65 @@ pub async fn admit_provider(
             return Err(failure("role.capability_unavailable"));
         }
     }
-    admit("provider").await
+    // Match the bytes actually held by the request to the same validated snapshot
+    // whose reference participates in this invocation's reviewed connection identity.
+    let private = if let Some(role) = &call.call_site.role {
+        let binding = context
+            .bootstrap
+            .bindings
+            .bindings
+            .iter()
+            .find(|binding| &binding.role == role)
+            .ok_or_else(|| failure("role.unresolved"))?;
+        let private = crate::credentials::role_context::resolve_profile_context(
+            &binding.profile_uuid,
+            &binding.connection_generation,
+        )
+        .map_err(|_| failure("role.stale_connection"))?;
+        if private.profile_name != binding.profile {
+            return Err(failure("role.stale_connection"));
+        }
+        private
+    } else {
+        context
+            .validated_fixed_connections()?
+            .remove(&call.call_site.id)
+            .ok_or_else(|| failure("role.unresolved"))?
+    };
+    let default_url = if private.profile.auth_mode
+        == crate::config::schema::ProfileAuthMode::OpenaiAccount
+        && provider == crate::providers::ProviderKind::OpenAi
+    {
+        "https://chatgpt.com/backend-api/codex/responses"
+    } else {
+        provider.default_url()
+    };
+    let expected_url = private
+        .profile
+        .url
+        .as_deref()
+        .filter(|url| !url.is_empty())
+        .unwrap_or(default_url);
+    if crate::providers::ProviderKind::from_server_value(&private.profile.server) != Some(provider)
+        || url != expected_url
+        || !private.matches(token, account_id)
+    {
+        return Err(failure("role.stale_connection"));
+    }
+    context
+        .session
+        .admit(Boundary {
+            invocation_id: context.session.invocation_id.clone(),
+            binding_revision: context.session.binding_revision.clone(),
+            parent_permit_id: context.parent_permit_id.clone(),
+            call_site: call.call_site.id,
+            agent: context.locator.definition.clone(),
+            target_agent: call.call_site.target,
+            kind: "provider".into(),
+        })
+        .await
+        .map(Some)
+        .map_err(|_| failure("role.revoked"))
 }
 pub fn provider_settings(thinking: Option<&str>, temperature: Option<f64>) -> serde_json::Value {
     let mut settings = serde_json::json!({"thinking":match thinking {Some(value)=>serde_json::json!({"mode":"choice","value":value}),None=>serde_json::json!({"mode":"provider_default"})}});
@@ -666,6 +724,9 @@ mod tests {
         }
     }
     fn fixture() -> (Context, std::path::PathBuf, HomeGuard) {
+        fixture_at("http://127.0.0.1:1")
+    }
+    fn fixture_at(url: &str) -> (Context, std::path::PathBuf, HomeGuard) {
         let root =
             std::env::temp_dir().join(format!("cargo-ai-role-runtime-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
@@ -674,7 +735,7 @@ mod tests {
         std::fs::create_dir(&home).unwrap();
         let guard = HomeGuard(std::env::var_os("CARGO_AI_HOME"));
         std::env::set_var("CARGO_AI_HOME", &home);
-        std::fs::write(home.join("config.toml"), "secret_store='file'\ndefault_profile='fixture'\n[[profile]]\nname='fixture'\nserver='openai'\nmodel='fixture'\nauth_mode='api_key'\n").unwrap();
+        std::fs::write(home.join("config.toml"), format!("secret_store='file'\ndefault_profile='fixture'\n[[profile]]\nname='fixture'\nserver='openai'\nmodel='fixture'\nauth_mode='api_key'\nurl='{url}'\n")).unwrap();
         std::fs::write(
             home.join("credentials.toml"),
             "[profile_tokens]\nfixture='isolated-fixture'\n",
@@ -809,8 +870,17 @@ mod tests {
         model: &str,
     ) -> Result<crate::providers::runtime::ProviderTextResponse, crate::providers::ProviderError>
     {
+        request_with_credential(url, model, "isolated-fixture", None).await
+    }
+    async fn request_with_credential(
+        url: &str,
+        model: &str,
+        token: &str,
+        account_id: Option<&str>,
+    ) -> Result<crate::providers::runtime::ProviderTextResponse, crate::providers::ProviderError>
+    {
         crate::providers::send_text_request_with_account_context(crate::providers::ProviderKind::OpenAi,url,
-            crate::providers::ProviderTextRequest{rubric_enabled:false,model,content_parts:&[crate::providers::runtime::ContentPart::Text("business input".into())],timeout_in_sec:5,token:"isolated-fixture",response_schema:&json!({"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}),max_output_tokens:Some(128),temperature:None,thinking:None},None).await
+            crate::providers::ProviderTextRequest{rubric_enabled:false,model,content_parts:&[crate::providers::runtime::ContentPart::Text("business input".into())],timeout_in_sec:5,token,response_schema:&json!({"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}),max_output_tokens:Some(128),temperature:None,thinking:None},account_id).await
     }
     #[tokio::test]
     async fn native_role_initial_denial_keeps_root_context_before_async_scope() {
@@ -837,12 +907,12 @@ mod tests {
     #[tokio::test]
     async fn revoked_runtime_preserves_admitted_result_and_blocks_later_http() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let (context, root, _home_guard) = fixture();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!(
             "http://{}/v1/chat/completions",
             listener.local_addr().unwrap()
         );
+        let (context, root, _home_guard) = fixture_at(&url);
         let running_context = context.clone();
         let first_url = url.clone();
         let running =
@@ -882,6 +952,377 @@ mod tests {
             .any(|o| o["cause"] == "role.revoked"));
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[tokio::test]
+    async fn native_signed_account_renewal_dispatches_only_the_validated_snapshot() {
+        use crate::credentials::access_continuity::test_support;
+        const ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
+        const ACCOUNT: &str = "synthetic-account";
+        struct AccountGuard(Option<std::ffi::OsString>);
+        impl Drop for AccountGuard {
+            fn drop(&mut self) {
+                test_support::set_keys(None);
+                if let Some(value) = &self.0 {
+                    std::env::set_var("CODEX_HOME", value);
+                } else {
+                    std::env::remove_var("CODEX_HOME");
+                }
+            }
+        }
+        let (initial, root, _home_guard) = fixture();
+        let _account_guard = AccountGuard(std::env::var_os("CODEX_HOME"));
+        let codex_home = root.join("codex");
+        std::env::set_var("CODEX_HOME", &codex_home);
+        let now = crate::credentials::role_context::now();
+        let mut claims = test_support::claims(now);
+        let original_token = test_support::write_session(&codex_home, &claims);
+        test_support::set_keys(Some(Ok(test_support::keys(now))));
+        let home = root.join("home");
+        std::fs::write(home.join("config.toml"),
+            "secret_store='file'\ndefault_profile='fixture'\n[[profile]]\nname='fixture'\nserver='openai'\nmodel='fixture'\nauth_mode='openai_account'\n").unwrap();
+        let reference = crate::credentials::role_context::refresh_at(&home, "fixture").unwrap();
+        let mut bootstrap = (*initial.bootstrap).clone();
+        let fixed = crate::providers::operation_metadata::fixed_context_identity(
+            &home,
+            &[("root".into(), None)],
+        )
+        .unwrap();
+        bootstrap.resolution.context.connection_context_identity =
+            crate::providers::operation_metadata::connection_context_identity(
+                &bootstrap.bindings,
+                &fixed,
+            )
+            .unwrap();
+        let context = Context::new(bootstrap, initial.session.clone()).unwrap();
+        let role_context = bound_role_context(&context);
+        let second_root = root.join("second-package");
+        std::fs::create_dir(&second_root).unwrap();
+        let second_source = second_root.join("agent.json");
+        std::fs::write(&second_source, b"second-package-source").unwrap();
+        let mut second_bootstrap = (*role_context.bootstrap).clone();
+        second_bootstrap.package_root = second_root;
+        use sha2::{Digest, Sha256};
+        second_bootstrap.content_identities = BTreeMap::from([(
+            second_source.to_string_lossy().into_owned(),
+            format!("{:x}", Sha256::digest(b"second-package-source")),
+        )]);
+        second_bootstrap.resolution.context.package_identity = "second-package".into();
+        second_bootstrap.resolution.context.project_identity = "second-project".into();
+        second_bootstrap.resolution.context.consent_identity = "second-consent".into();
+        second_bootstrap.resolution.scope.key.action = "second-action".into();
+        second_bootstrap.bindings.revision = "revision-b".into();
+        second_bootstrap.resolution.binding_revision = "revision-b".into();
+        second_bootstrap.resolution.binding_identity =
+            canonical_identity(&second_bootstrap.bindings).unwrap();
+        let second_session = Session::new("revision-b".into());
+        second_bootstrap.invocation_id = second_session.invocation_id.clone();
+        second_bootstrap.binding_revision = second_session.binding_revision.clone();
+        let second_context = Context::new(second_bootstrap, second_session).unwrap();
+        assert_eq!(
+            role_context.bootstrap.bindings.bindings[0].profile_uuid,
+            second_context.bootstrap.bindings.bindings[0].profile_uuid
+        );
+        assert_eq!(
+            role_context.bootstrap.bindings.bindings[0].connection_generation,
+            second_context.bootstrap.bindings.bindings[0].connection_generation
+        );
+        let second_validation = second_context
+            .scope(async {
+                crate::credentials::role_context::validate_profile_context(
+                    "fixture", &reference, false,
+                )
+                .unwrap()
+            })
+            .await;
+        assert_eq!(second_validation.status, "unchanged");
+        assert!(second_validation.execution_ready);
+        role_context.validate_context().unwrap();
+        let mut server = mockito::Server::new_async().await;
+        let _transport =
+            crate::providers::native_account_test_endpoint(format!("{}/native", server.url()));
+        let reply =
+            "data: {\"type\":\"response.output_text.done\",\"text\":\"{\\\"ok\\\":true}\"}\n\n";
+        let original = server
+            .mock("POST", "/native")
+            .match_header("authorization", format!("Bearer {original_token}").as_str())
+            .match_header("chatgpt-account-id", ACCOUNT)
+            .with_header("content-type", "text/event-stream")
+            .with_status(200)
+            .with_body(reply)
+            .expect(1)
+            .create_async()
+            .await;
+        assert!(context
+            .scope(request_with_credential(
+                ENDPOINT,
+                "fixture",
+                &original_token,
+                Some(ACCOUNT)
+            ))
+            .await
+            .is_ok());
+        original.assert_async().await;
+        claims["exp"] = json!(now + 7200);
+        claims["iat"] = json!(now - 30);
+        claims["jti"] = json!("renewed-session-token");
+        let renewed_token = test_support::write_session(&codex_home, &claims);
+        assert_ne!(original_token, renewed_token);
+        assert_eq!(
+            second_context
+                .scope(async {
+                    crate::credentials::role_context::refresh_at(&home, "fixture").unwrap()
+                })
+                .await,
+            reference
+        );
+        context.validate_context().unwrap();
+        role_context.validate_context().unwrap();
+        second_context.validate_context().unwrap();
+        assert!(context
+            .scope(request_with_credential(
+                ENDPOINT,
+                "fixture",
+                &original_token,
+                Some(ACCOUNT)
+            ))
+            .await
+            .is_err());
+        assert!(role_context
+            .scope(request_with_credential(
+                ENDPOINT,
+                "fixture",
+                &renewed_token,
+                Some("different-account")
+            ))
+            .await
+            .is_err());
+        let renewed = server
+            .mock("POST", "/native")
+            .match_header("authorization", format!("Bearer {renewed_token}").as_str())
+            .match_header("chatgpt-account-id", ACCOUNT)
+            .with_header("content-type", "text/event-stream")
+            .with_status(200)
+            .with_body(reply)
+            .expect(2)
+            .create_async()
+            .await;
+        assert!(role_context
+            .scope(request_with_credential(
+                ENDPOINT,
+                "fixture",
+                &renewed_token,
+                Some(ACCOUNT)
+            ))
+            .await
+            .is_ok());
+        assert!(second_context
+            .scope(request_with_credential(
+                ENDPOINT,
+                "fixture",
+                &renewed_token,
+                Some(ACCOUNT)
+            ))
+            .await
+            .is_ok());
+        renewed.assert_async().await;
+        original.assert_async().await;
+        let snapshot = context.session.snapshot();
+        let outcomes = snapshot["outcomes"].as_array().unwrap();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| outcome["state"] == "completed")
+                .count(),
+            2
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| outcome["cause"] == "role.stale_connection"
+                    && outcome["state"] == "not_dispatched")
+                .count(),
+            2
+        );
+        assert!(snapshot["outstanding"].as_object().unwrap().is_empty());
+        let second_snapshot = second_context.session.snapshot();
+        let second_outcomes = second_snapshot["outcomes"].as_array().unwrap();
+        assert_eq!(second_outcomes.len(), 1);
+        assert_eq!(second_outcomes[0]["state"], "completed");
+        assert_eq!(
+            second_outcomes[0]["boundary"]["binding_revision"],
+            "revision-b"
+        );
+        assert!(second_snapshot["outstanding"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_provider_rejects_mismatched_credentials_account_and_endpoint() {
+        let (context, root, _home_guard) = fixture();
+        let role_context = bound_role_context(&context);
+        for selected_context in [&context, &role_context] {
+            for (url, token, account) in [
+                ("http://127.0.0.1:1", "other-token", None),
+                (
+                    "http://127.0.0.1:1",
+                    "isolated-fixture",
+                    Some("other-account"),
+                ),
+                ("http://127.0.0.1:2", "isolated-fixture", None),
+            ] {
+                let error = selected_context
+                    .scope(request_with_credential(url, "fixture", token, account))
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.kind(),
+                    crate::providers::ProviderErrorKind::InvalidRequest
+                );
+            }
+        }
+        let snapshot = context.session.snapshot();
+        let outcomes = snapshot["outcomes"].as_array().unwrap();
+        assert_eq!(outcomes.len(), 6);
+        assert!(outcomes
+            .iter()
+            .all(|outcome| outcome["cause"] == "role.stale_connection"
+                && outcome["state"] == "not_dispatched"));
+        assert!(snapshot["outstanding"].as_object().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn bound_role_context(context: &Context) -> Context {
+        let private = crate::credentials::role_context::resolve_named_at(
+            &context.bootstrap.package_root.join("home"),
+            "fixture",
+        )
+        .unwrap();
+        let mut bootstrap = (*context.bootstrap).clone();
+        bootstrap.bindings.bindings.push(RoleBinding {
+            role: "answer".into(),
+            profile: "fixture".into(),
+            profile_uuid: private.context.profile_uuid.clone(),
+            connection_generation: private.context.connection_generation.clone(),
+            provider: "openai".into(),
+            model: "fixture".into(),
+            settings: BTreeMap::new(),
+        });
+        let call = &mut bootstrap.resolution.calls[0];
+        call.call_site.role = Some("answer".into());
+        call.call_site.fixed = None;
+        call.selection.as_mut().unwrap().profile = Some("fixture".into());
+        call.evidence.push(CapabilityEvidence {
+            profile_uuid: private.context.profile_uuid,
+            connection_generation: private.context.connection_generation,
+            provider: "openai".into(),
+            model: "fixture".into(),
+            operation: "text_generation".into(),
+            input_modalities: vec!["text".into()],
+            structured_output: true,
+            settings: BTreeMap::new(),
+            status: Compatibility::Compatible,
+            evidence_revision: "fixture".into(),
+            provenance: vec!["isolated fixture".into()],
+            valid_until_unix_secs: u64::MAX,
+            operation_evidence: None,
+        });
+        bootstrap.policy.allowed = vec![call.selection.clone().unwrap()];
+        bootstrap.resolution.required_selections = bootstrap.policy.allowed.clone();
+        bootstrap.resolution.binding_identity = canonical_identity(&bootstrap.bindings).unwrap();
+        let fixed = crate::providers::operation_metadata::fixed_context_identity(
+            &context.bootstrap.package_root.join("home"),
+            &[],
+        )
+        .unwrap();
+        bootstrap.resolution.context.connection_context_identity =
+            crate::providers::operation_metadata::connection_context_identity(
+                &bootstrap.bindings,
+                &fixed,
+            )
+            .unwrap();
+        Context::new(bootstrap, context.session.clone()).unwrap()
+    }
+
+    fn media_context(context: &Context, kind: RequestKind, settings: Value) -> Context {
+        let mut bootstrap = (*context.bootstrap).clone();
+        let call = &mut bootstrap.resolution.calls[0];
+        call.selection.as_mut().unwrap().request_kind = kind;
+        call.settings = serde_json::from_value(settings).unwrap();
+        bootstrap.policy.allowed = vec![call.selection.clone().unwrap()];
+        bootstrap.resolution.required_selections = bootstrap.policy.allowed.clone();
+        Context::new(bootstrap, context.session.clone()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_media_rejects_mismatched_credential_before_admission() {
+        use crate::providers::{ProviderKind, ProviderSpeechRequest, ProviderTranscriptionRequest};
+        let (context, root, _home_guard) = fixture();
+        let image_context = media_context(&context, RequestKind::Image, json!({"format":"png"}));
+        assert!(image_context
+            .scope(crate::providers::send_image_request_with_account_context(
+                ProviderKind::OpenAi,
+                "http://127.0.0.1:1",
+                "fixture",
+                "image",
+                5,
+                "other-token",
+                "png",
+                &[],
+                None,
+                None,
+                None,
+            ))
+            .await
+            .is_err());
+        let audio_context = media_context(
+            &context,
+            RequestKind::Audio,
+            json!({"voice":"alloy","format":"wav"}),
+        );
+        assert!(audio_context
+            .scope(crate::providers::send_speech_request(
+                ProviderKind::OpenAi,
+                "http://127.0.0.1:1",
+                ProviderSpeechRequest {
+                    model: Some("fixture"),
+                    text: "speech",
+                    voice: "alloy",
+                    format: "wav",
+                    timeout_in_sec: 5,
+                    token: "other-token",
+                },
+            ))
+            .await
+            .is_err());
+        let transcription_context = media_context(&context, RequestKind::Transcription, json!({}));
+        assert!(transcription_context
+            .scope(crate::providers::send_transcription_request(
+                ProviderKind::OpenAi,
+                "http://127.0.0.1:1",
+                ProviderTranscriptionRequest {
+                    model: "fixture",
+                    filename: "recording.wav",
+                    audio_bytes: b"audio",
+                    media_type: "audio/wav",
+                    timeout_in_sec: 5,
+                    token: "other-token",
+                },
+            ))
+            .await
+            .is_err());
+        let snapshot = context.session.snapshot();
+        let outcomes = snapshot["outcomes"].as_array().unwrap();
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes
+            .iter()
+            .all(|outcome| outcome["cause"] == "role.stale_connection"
+                && outcome["state"] == "not_dispatched"));
+        assert!(snapshot["outstanding"].as_object().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn native_conflict_and_source_drift_fail_before_network() {
         let (context, root, _home_guard) = fixture();

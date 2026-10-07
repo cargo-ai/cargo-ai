@@ -245,15 +245,3 @@ pub(crate) fn context_profile_token(
         SecretStoreMode::Keychain => context_keychain_get(&keychain_account_for_profile(name)),
     }
 }
-
-pub(crate) fn context_account_comparison() -> Result<String, String> {
-    let session = crate::load_codex_session()
-        .map_err(|_| "Selected session is unavailable.".to_owned())?
-        .ok_or("Selected session is unavailable.")?;
-    if session.access_token_expires_at_unix.is_none()
-        || crate::codex_access_token_expired_or_near(session.access_token_expires_at_unix)
-    {
-        return Err("Selected session freshness is unavailable.".to_owned());
-    }
-    super::role_context::session_file_comparison(&crate::codex_auth_path()?)
-}

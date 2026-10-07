@@ -54,5 +54,5 @@
     "effects"
   ],
   "additionalProperties": true,
-  "$comment": "Successful profile refresh-context data only. Private protected metadata mutation; no provider call. UUID and generation are opaque selectors, not credential fingerprints or permission. Passive lookup expires after 24 hours and never repairs state."
+  "$comment": "Successful profile refresh-context data only. Explicit enrollment/recovery is idempotent for demonstrably unchanged context. UUID and generation are opaque selectors, not credential fingerprints or permission. Consent does not expire with elapsed time. Account public-key evidence may require explicit renewal before execution; credential expiry and capability readiness remain separate. Use profile validate-context with the expected reference for routine continuity checks."
 }

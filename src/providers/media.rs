@@ -406,6 +406,9 @@ pub(crate) async fn send_speech_request(
 ) -> Result<ProviderAudioResponse, ProviderError> {
     let permit = crate::role_runtime::admit_provider(
         provider,
+        url,
+        request.token,
+        None,
         request.model.unwrap_or(""),
         crate::execution_policy::RequestKind::Audio,
         &["text"],
@@ -600,6 +603,9 @@ pub(crate) async fn send_transcription_request(
 ) -> Result<ProviderTranscriptResponse, ProviderError> {
     let permit = crate::role_runtime::admit_provider(
         provider,
+        url,
+        request.token,
+        None,
         request.model,
         crate::execution_policy::RequestKind::Transcription,
         &["audio"],

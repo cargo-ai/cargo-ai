@@ -25,6 +25,14 @@ pub struct RuntimeCapabilities {
     execution_policy: Option<ExecutionPolicyCapabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
     native_roles: Option<NativeRoleCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connection_continuity: Option<ConnectionContinuityCapabilities>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+struct ConnectionContinuityCapabilities {
+    version: u32,
+    approval_expiration: &'static str,
+    credential_validation: &'static str,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 struct NativeRoleCapabilities {
@@ -58,6 +66,9 @@ impl RuntimeCapabilities {
     pub fn supports_native_roles(self) -> bool {
         self.native_roles.is_some()
     }
+    pub fn supports_connection_continuity(self) -> bool {
+        self.connection_continuity.is_some()
+    }
     pub fn supports_execution_policy(self) -> bool {
         self.execution_policy.is_some()
     }
@@ -66,15 +77,15 @@ impl RuntimeCapabilities {
     }
 
     pub fn supports_thinking(self) -> bool {
-        matches!(self.revision, 1 | 2 | 3 | 4 | REVISION)
+        matches!(self.revision, 1 | 2 | 3 | 4 | 5 | REVISION)
     }
 
     pub fn supports_toggle(self) -> bool {
-        matches!(self.revision, 2 | 3 | 4 | REVISION)
+        matches!(self.revision, 2 | 3 | 4 | 5 | REVISION)
     }
 
     pub fn supports_exact_choice_flag(self) -> bool {
-        matches!(self.revision, 2 | 3 | 4 | REVISION)
+        matches!(self.revision, 2 | 3 | 4 | 5 | REVISION)
     }
 }
 
@@ -115,11 +126,15 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
     let mut result = encoded_record(cli_run);
     result[payload..payload + 4].copy_from_slice(&4u32.to_le_bytes());
     result[payload + 4..payload + 8].copy_from_slice(&0b1_1111_1111u32.to_le_bytes());
+    let mut roles = encoded_record(cli_run);
+    roles[payload..payload + 4].copy_from_slice(&5u32.to_le_bytes());
+    roles[payload + 4..payload + 8].copy_from_slice(&0b11_1111_1111u32.to_le_bytes());
     if record != encoded_record(cli_run)
         && record != legacy
         && record != prior
         && record != policy
         && record != result
+        && record != roles
     {
         return Err(CapabilityReadError::Unsupported);
     }
@@ -130,12 +145,17 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
             "cargo-ai.generated-runtime"
         },
         revision,
-        native_roles: (revision == REVISION).then_some(NativeRoleCapabilities {
+        native_roles: matches!(revision, 5 | REVISION).then_some(NativeRoleCapabilities {
             version: 1,
             control: "framed_native_session.v1",
             boundaries: &["root", "media", "descendants", "declared_tool_children"],
         }),
-        structured_results: matches!(revision, 4 | REVISION).then_some(
+        connection_continuity: (revision == REVISION).then_some(ConnectionContinuityCapabilities {
+            version: 1,
+            approval_expiration: "none",
+            credential_validation: "native_before_dispatch",
+        }),
+        structured_results: matches!(revision, 4 | 5 | REVISION).then_some(
             StructuredResultCapabilities {
                 definition_revision: "2026-10-03.r1",
                 validation: true,
@@ -144,7 +164,7 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
                 artifact_read: cli_run,
             },
         ),
-        execution_policy: matches!(revision, 3 | 4 | REVISION).then_some(
+        execution_policy: matches!(revision, 3 | 4 | 5 | REVISION).then_some(
             ExecutionPolicyCapabilities {
                 version: 1,
                 boundaries: &["root", "media", "descendants"],
@@ -295,6 +315,7 @@ pub(crate) fn test_record(revision: u32) -> Vec<u8> {
         2 => 0b111_1111,
         3 => 0b1111_1111,
         4 => 0b1_1111_1111,
+        5 => 0b11_1111_1111,
         _ => record::THINKING_CAPABILITIES,
     };
     record[payload + 4..payload + 8].copy_from_slice(&bits.to_le_bytes());
@@ -307,6 +328,12 @@ mod tests {
 
     #[test]
     fn native_roles_require_new_revision_and_exact_embedded_definition() {
+        let previous = decode_record(&test_record(5)).unwrap();
+        assert!(previous.supports_native_roles());
+        assert!(!previous.supports_connection_continuity());
+        assert!(decode_record(&encoded_record(false))
+            .unwrap()
+            .supports_connection_continuity());
         assert!(!decode_record(&test_record(4))
             .unwrap()
             .supports_native_roles());
@@ -425,7 +452,8 @@ mod tests {
             serde_json::to_value(caps).unwrap(),
             serde_json::json!({
                 "runtime": "cargo-ai.generated-runtime",
-                "revision": 5,
+                "revision": 6,
+                "connection_continuity":{"version":1,"approval_expiration":"none","credential_validation":"native_before_dispatch"},
                 "native_roles":{"version":1,"control":"framed_native_session.v1","boundaries":["root","media","descendants","declared_tool_children"]},
                 "structured_results":{"definition_revision":"2026-10-03.r1","validation":true,"execution_checking":true,"terminal_delivery":false,"artifact_read":false},
                 "execution_policy": {"version":1,"boundaries":["root","media","descendants"]},

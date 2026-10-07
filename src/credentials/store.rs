@@ -1370,6 +1370,15 @@ pub(crate) fn load_scoped_file_profile_token(
 }
 
 pub fn store_profile_token(profile_name: &str, token: &str) -> Result<(), String> {
+    let root = super::role_context::root()?;
+    let _context_lock = super::role_context::lock_at(&root)?;
+    if let Some(mode) = configured_secret_store_mode() {
+        if context_profile_token(&root, mode, profile_name)?.as_deref() == Some(token)
+            && !token.trim().is_empty()
+        {
+            return Ok(());
+        }
+    }
     let _context_mutation = super::role_context::before_mutation(Some(profile_name), false)?;
     if token.trim().is_empty() {
         return clear_profile_token(profile_name);
@@ -1398,6 +1407,13 @@ pub fn store_profile_token(profile_name: &str, token: &str) -> Result<(), String
 }
 
 pub fn clear_profile_token(profile_name: &str) -> Result<(), String> {
+    let root = super::role_context::root()?;
+    let _context_lock = super::role_context::lock_at(&root)?;
+    if let Some(mode) = configured_secret_store_mode() {
+        if context_profile_token(&root, mode, profile_name)?.is_none() {
+            return Ok(());
+        }
+    }
     let _context_mutation = super::role_context::before_mutation(Some(profile_name), false)?;
     let keychain_account = keychain_account_for_profile(profile_name);
     let _ = keychain_delete(&keychain_account);
@@ -1428,7 +1444,7 @@ pub fn load_account_tokens() -> Result<Option<AccountTokens>, String> {
 }
 
 pub fn store_account_tokens(access_token: &str, refresh_token: Option<&str>) -> Result<(), String> {
-    let _context_mutation = super::role_context::before_mutation(None, false)?;
+    let _context_lock = super::role_context::lock_at(&super::role_context::root()?)?;
     if access_token.trim().is_empty() {
         return clear_account_tokens();
     }
@@ -1468,7 +1484,7 @@ pub fn store_account_tokens(access_token: &str, refresh_token: Option<&str>) -> 
 }
 
 pub fn clear_account_tokens() -> Result<(), String> {
-    let _context_mutation = super::role_context::before_mutation(None, false)?;
+    let _context_lock = super::role_context::lock_at(&super::role_context::root()?)?;
     let _ = keychain_delete(ACCOUNT_ACCESS_KEY);
     let _ = keychain_delete(ACCOUNT_REFRESH_KEY);
     clear_account_tokens_in_file_with_path(&credentials_path())
@@ -1505,7 +1521,7 @@ pub fn store_openai_oauth_tokens(
     access_token: &str,
     refresh_token: Option<&str>,
 ) -> Result<(), String> {
-    let _context_mutation = super::role_context::before_mutation(None, false)?;
+    let _context_mutation = super::role_context::lock_at(&super::role_context::root()?)?;
     if access_token.trim().is_empty() {
         return clear_openai_oauth_tokens();
     }
@@ -1553,7 +1569,7 @@ pub fn store_openai_oauth_tokens(
 }
 
 pub fn clear_openai_oauth_tokens() -> Result<(), String> {
-    let _context_mutation = super::role_context::before_mutation(None, false)?;
+    let _context_mutation = super::role_context::lock_at(&super::role_context::root()?)?;
     let _ = keychain_delete(OPENAI_OAUTH_ACCESS_KEY);
     let _ = keychain_delete(OPENAI_OAUTH_REFRESH_KEY);
     clear_openai_oauth_tokens_in_file_with_path(&credentials_path())

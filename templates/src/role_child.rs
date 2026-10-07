@@ -108,7 +108,10 @@ pub fn verify_command(
     let program = std::path::Path::new(command.as_std().get_program());
     let capabilities = crate::generated_capabilities::capabilities_for_artifact(program)
         .map_err(|_| crate::role_runtime::failure("role.child_rebuild_required"))?;
-    if !capabilities.supports_native_roles() || capabilities.is_cli_run() != cli_run {
+    if !capabilities.supports_native_roles()
+        || !capabilities.supports_connection_continuity()
+        || capabilities.is_cli_run() != cli_run
+    {
         return Err(crate::role_runtime::failure("role.child_rebuild_required"));
     }
     if !cli_run {

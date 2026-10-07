@@ -35,6 +35,168 @@ fn configure(f: &Fixture) {
 }
 
 #[test]
+fn profile_continuity_command_preserves_reference_and_reports_readiness_separately() {
+    let f = Fixture::new("machine-profile-continuity");
+    fs::write(f.cargo_ai_home.join("config.toml"), "secret_store='file'\n[[profile]]\nname='fixture'\nserver='ollama'\nmodel='fixture-model'\nauth_mode='none'\n").unwrap();
+    let enrolled = response(&run(&f, &["profile", "refresh-context", "fixture"]));
+    assert_eq!(enrolled["outcome"], "succeeded", "{enrolled}");
+    let context = &enrolled["data"]["context"];
+    let config_before = fs::read(f.cargo_ai_home.join("config.toml")).unwrap();
+    let arguments = [
+        "profile",
+        "validate-context",
+        "fixture",
+        "--profile-uuid",
+        context["profile_uuid"].as_str().unwrap(),
+        "--connection-generation",
+        context["connection_generation"].as_str().unwrap(),
+    ];
+    let validated = response(&run(&f, &arguments));
+    assert_eq!(validated["outcome"], "succeeded", "{validated}");
+    assert_eq!(
+        validated["payload_schema"],
+        "cargo-ai.profile.validate-context.v1"
+    );
+    assert_eq!(validated["data"]["schema_version"], 1);
+    assert_eq!(validated["data"]["status"], "unchanged");
+    assert_eq!(validated["data"]["context"], *context);
+    assert_eq!(validated["data"]["execution_ready"], true);
+    assert_eq!(validated["data"]["review_required"], false);
+    for effect in ["local", "remote", "context_metadata", "public_key_cache"] {
+        assert_eq!(validated["data"]["effects"][effect], "unapplied");
+    }
+    let mut renewal = arguments.to_vec();
+    renewal.push("--renew");
+    let renewed = response(&run(&f, &renewal));
+    assert_eq!(renewed["data"]["context"], *context);
+    assert_eq!(renewed["data"]["execution_ready"], true);
+    let reenrolled = response(&run(&f, &["profile", "refresh-context", "fixture"]));
+    assert_eq!(reenrolled["data"]["context"], *context);
+    assert_eq!(
+        fs::read(f.cargo_ai_home.join("config.toml")).unwrap(),
+        config_before
+    );
+
+    let mut wrong = arguments;
+    wrong[6] = "another-generation";
+    let rejected = response(&run(&f, &wrong));
+    assert_eq!(rejected["outcome"], "succeeded", "{rejected}");
+    assert_eq!(rejected["data"]["execution_ready"], false);
+    assert_ne!(rejected["data"]["status"], "unchanged");
+    assert_ne!(rejected["data"]["status"], "renewed");
+
+    let capabilities = response(&run(&f, &["capabilities"]));
+    let contract = capabilities["data"]["contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["command"] == "profile validate-context")
+        .unwrap();
+    assert_eq!(contract["payload_schema"], validated["payload_schema"]);
+    assert_eq!(contract["continuity_contract_version"], 1);
+    assert_eq!(contract["schema_versions"], json!([1]));
+    let schema: Value = serde_json::from_str(include_str!(
+        "../docs/schemas/profile-context-validation-v1.json"
+    ))
+    .unwrap();
+    assert_eq!(schema["properties"]["schema_version"]["const"], 1);
+    for payload in [&validated, &renewed, &rejected] {
+        assert!(schema["properties"]["status"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&payload["data"]["status"]));
+        for required in schema["required"].as_array().unwrap() {
+            assert!(payload["data"].get(required.as_str().unwrap()).is_some());
+        }
+    }
+}
+
+#[test]
+fn action_payload_advertisements_match_legacy_and_role_catalog_responses() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let f = Fixture::new("machine-action-payload-versions");
+    configure(&f);
+    fs::create_dir_all(f.root.join(".cargo-ai")).unwrap();
+    fs::write(
+        f.root.join(".cargo-ai/project.toml"),
+        "[project]\nname='payload-fixture'\n",
+    )
+    .unwrap();
+    fs::write(f.root.join("agent.json"), json!({"agent_definition_schema_version":"2026-10-06.r1","agent_schema":{"type":"object","properties":{"answer":{"type":"string"}}},"actions":[]}).to_string()).unwrap();
+    let capabilities = response(&run(&f, &["capabilities"]));
+    let contracts = capabilities["data"]["contracts"].as_array().unwrap();
+    for version in [2, 3] {
+        let mut catalog = json!({"schema_version":version,"actions":[{"id":"work","target":"agent.json","input_schema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"mappings":{}}],"interfaces":[{"id":"fixture","actions":["work"]}]});
+        let limits = json!({"max_runtime_secs":60,"max_output_tokens":512,"max_agent_depth":4});
+        if version == 3 {
+            let requirements = json!({"operation":"text_generation","input_modalities":["text"],"structured_output":false,"settings":{}});
+            catalog["role_registry"] = json!({"version":1,"roles":[{"id":"writer","label":"Writer","purpose":"Write fixture content","requirements":requirements}],"call_sites":[{"id":"root","locator":{"definition":"agent.json","site":"root"},"kind":"root","role":"writer","requirements":requirements}],"contexts":[{"key":{"action":"work","interface":"fixture","mode":"default"},"call_sites":["root"],"resources":[],"limits":limits}]});
+        }
+        fs::write(f.root.join("cargo-ai-actions.json"), catalog.to_string()).unwrap();
+        let listed = response(&run(&f, &["actions", "list", "--project", "."]));
+        assert_eq!(listed["outcome"], "succeeded", "{listed}");
+        let mut request = json!({"schema_version":version,"interface":"fixture","action":"work","inputs":{},"expected_binding":listed["data"]["binding"],"execution_policy":{"version":1,"allowed":[],"limits":limits}});
+        if version == 3 {
+            request["role_execution"] = json!({"mode":"default","binding_revision":{"version":1,"revision":"fixture","bindings":[]},"resolution_id":"0".repeat(64)});
+        }
+        let mut child = f
+            .cargo_ai_command(&f.root)
+            .env("CODEX_HOME", f.root.join("synthetic-codex"))
+            .args([
+                "actions",
+                "validate",
+                "--project",
+                ".",
+                "--interface",
+                "fixture",
+                "--action",
+                "work",
+                "--request-stdin",
+                "--output-format",
+                "json",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(request.to_string().as_bytes())
+            .unwrap();
+        let validated = response(&child.wait_with_output().unwrap());
+        assert_eq!(validated["outcome"], "succeeded", "{validated}");
+        assert_eq!(validated["data"]["execution_authorized"], false);
+        for (name, value, selector) in [
+            ("actions list", &listed, "catalog_version"),
+            ("actions validate", &validated, "request_version"),
+        ] {
+            let contract = contracts
+                .iter()
+                .find(|entry| entry["command"] == name)
+                .unwrap();
+            assert_eq!(contract["schema_versions"], json!([1]));
+            assert_eq!(
+                contract["payload_schema"],
+                format!("cargo-ai.{}.v2", name.replace(' ', "."))
+            );
+            let advertised = contract["payload_schemas"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["condition"][selector] == version)
+                .unwrap();
+            assert_eq!(advertised["payload_schema"], value["payload_schema"]);
+            assert_eq!(value["data"]["schema_version"], version);
+            assert_eq!(value["schema_version"], 1);
+        }
+    }
+}
+
+#[test]
 fn thinking_choices_and_default_fallback_survive_json_and_ndjson_terminals() {
     for format in ["json", "ndjson"] {
         for (choice, applied, boolean_model) in [

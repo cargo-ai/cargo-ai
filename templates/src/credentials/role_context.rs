@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 const UNAVAILABLE: &str =
     "Profile context is unavailable; explicitly refresh the selected profile context.";
 const STALE: &str = "Profile context changed; refresh and review the new connection generation.";
-const MAX_CONTEXT_AGE_SECONDS: u64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -22,10 +21,42 @@ pub struct ValidatedProfileContext {
     pub context: ProfileContextRef,
     pub profile_name: String,
     pub profile: Profile,
+    pub credential: ValidatedCredential,
+}
+
+#[derive(PartialEq, Eq)]
+pub enum ValidatedCredential {
+    None,
+    ApiKey(String),
+    OpenaiAccount { token: String, account_id: String },
+}
+impl ValidatedCredential {
+    pub fn token(&self) -> Option<&str> {
+        match self {
+            Self::None => None,
+            Self::ApiKey(token) | Self::OpenaiAccount { token, .. } => Some(token),
+        }
+    }
+    pub fn account_id(&self) -> Option<&str> {
+        match self {
+            Self::OpenaiAccount { account_id, .. } => Some(account_id),
+            _ => None,
+        }
+    }
+    pub fn matches(&self, token: &str, account_id: Option<&str>) -> bool {
+        self.token().unwrap_or_default() == token && self.account_id() == account_id
+    }
+}
+impl ValidatedProfileContext {
+    pub fn matches(&self, token: &str, account_id: Option<&str>) -> bool {
+        self.credential.matches(token, account_id)
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ContextRecord {
+    #[serde(default)]
+    pub(crate) version: u32,
     pub(crate) reference: ProfileContextRef,
     pub(crate) transaction: String,
     pub(crate) state: String,
@@ -35,6 +66,8 @@ pub(crate) struct ContextRecord {
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ContextRecords {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) keys: Option<super::access_continuity::KeyCache>,
     #[serde(default)]
     pub(crate) profiles: BTreeMap<String, ContextRecord>,
 }
@@ -107,7 +140,12 @@ fn selected_profile(config: &toml::Value, name: &str) -> Result<toml::Value, Str
     Ok(selected)
 }
 
-pub(crate) fn comparison(root: &Path, name: &str, salt: &str) -> Result<(String, Profile), String> {
+#[cfg(cargo_ai_cli)]
+pub(crate) fn legacy_comparison(
+    root: &Path,
+    name: &str,
+    salt: &str,
+) -> Result<(String, Profile), String> {
     let (config, mode) = config_at(root)?;
     let selected = selected_profile(&config, name)?;
     let profile: Profile = selected
@@ -191,41 +229,188 @@ pub fn revalidate_profile_context(context: &ProfileContextRef) -> Result<(), Str
     resolve_profile_context(&context.profile_uuid, &context.connection_generation).map(|_| ())
 }
 
+fn semantic_profile(value: &toml::Value) -> toml::Value {
+    // Serialization may materialize defaults during an otherwise benign profile edit.
+    // Canonicalize supported fields, while retaining unknown fields conservatively.
+    let profile: Result<Profile, _> = value.clone().try_into();
+    let mut canonical = profile
+        .ok()
+        .and_then(|profile| toml::Value::try_from(profile).ok())
+        .unwrap_or_else(|| value.clone());
+    if let Some(table) = canonical.as_table_mut() {
+        table.remove("description");
+        if let Some(original) = value.as_table() {
+            const KNOWN: &[&str] = &[
+                "name",
+                "server",
+                "model",
+                "url",
+                "token",
+                "timeout_in_sec",
+                "max_output_tokens",
+                "temperature",
+                "thinking",
+                "description",
+                "auth_mode",
+            ];
+            for (name, value) in original {
+                if !KNOWN.contains(&name.as_str()) {
+                    table.insert(name.clone(), value.clone());
+                }
+            }
+        }
+    }
+    canonical
+}
+
+fn comparison_with_snapshot(
+    root: &Path,
+    name: &str,
+    salt: &str,
+    keys: Option<&super::access_continuity::KeyCache>,
+) -> Result<(String, Profile, ValidatedCredential), String> {
+    use crate::config::schema::ProfileAuthMode;
+    let (config, mode) = config_at(root)?;
+    let selected = selected_profile(&config, name)?;
+    let profile: Profile = selected.clone().try_into().map_err(|_| UNAVAILABLE)?;
+    let mut hash = Sha256::new();
+    let semantic = semantic_profile(&selected).to_string();
+    for bytes in [
+        salt.as_bytes(),
+        root.to_string_lossy().as_bytes(),
+        mode.as_str().as_bytes(),
+        semantic.as_bytes(),
+    ] {
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    let credential = match profile.auth_mode {
+        ProfileAuthMode::ApiKey => {
+            let token = super::store::context_profile_token(root, mode, name)?
+                .filter(|s| !s.trim().is_empty())
+                .ok_or("credential_unavailable")?;
+            hash.update(token.as_bytes());
+            ValidatedCredential::ApiKey(token)
+        }
+        ProfileAuthMode::OpenaiAccount => {
+            if config
+                .get("openai_auth")
+                .and_then(|v| v.get("locally_disabled"))
+                .and_then(toml::Value::as_bool)
+                == Some(true)
+            {
+                return Err("credential_disabled".into());
+            }
+            let snapshot = super::access_continuity::account_snapshot(keys, now())?;
+            hash.update(snapshot.identity.as_bytes());
+            ValidatedCredential::OpenaiAccount {
+                token: snapshot.token,
+                account_id: snapshot.account,
+            }
+        }
+        ProfileAuthMode::None => ValidatedCredential::None,
+    };
+    Ok((format!("{:x}", hash.finalize()), profile, credential))
+}
+
+fn require_selected_authority(
+    records: &ContextRecords,
+    name: &str,
+    expected: &ContextRecord,
+) -> Result<(), String> {
+    let mut matches = records
+        .profiles
+        .iter()
+        .filter(|(_, record)| record.reference.profile_uuid == expected.reference.profile_uuid);
+    let (current_name, current) = matches.next().ok_or(UNAVAILABLE)?;
+    if matches.next().is_some() || current_name != name {
+        return Err(UNAVAILABLE.into());
+    }
+    // Refresh timestamps and other profiles do not change this connection's authority.
+    if current.version != expected.version
+        || current.state != expected.state
+        || current.reference != expected.reference
+        || current.transaction != expected.transaction
+        || current.comparison != expected.comparison
+    {
+        return Err(STALE.into());
+    }
+    Ok(())
+}
+
+#[cfg(all(test, cargo_ai_cli))]
+thread_local! {
+    static RESOLUTION_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> = const { std::cell::RefCell::new(None) };
+}
+
 pub(crate) fn resolve_at(
     root: &Path,
     uuid: &str,
     generation: &str,
 ) -> Result<ValidatedProfileContext, String> {
+    const UNSTABLE: &str = "context_verification_unstable";
     let (_, mode) = config_at(root)?;
     let records = super::store::read_context_records(root, mode)?.ok_or(UNAVAILABLE)?;
     let mut matches = records
         .profiles
         .iter()
-        .filter(|(_, record)| record.reference.profile_uuid == uuid);
+        .filter(|(_, r)| r.reference.profile_uuid == uuid);
     let (name, record) = matches.next().ok_or(UNAVAILABLE)?;
     if matches.next().is_some() || record.state != "active" {
-        return Err(UNAVAILABLE.to_owned());
+        return Err(UNAVAILABLE.into());
     }
-    if record.reference.connection_generation != generation
-        || now() < record.refreshed_at
-        || now() - record.refreshed_at > MAX_CONTEXT_AGE_SECONDS
-    {
-        return Err(STALE.to_owned());
+    if record.reference.connection_generation != generation {
+        return Err(STALE.into());
     }
-    let (current, profile) = comparison(root, name, &record.transaction)?;
+    if record.version != 2 {
+        return Err("legacy_context_requires_renewal".into());
+    }
+    let (current, profile, credential) =
+        comparison_with_snapshot(root, name, &record.transaction, records.keys.as_ref())?;
     if current != record.comparison {
-        return Err(STALE.to_owned());
+        return Err(STALE.into());
     }
-    // Catch a cooperating writer between credential inspection and admission.
-    if super::store::read_context_records(root, mode)?.as_ref() != Some(&records)
-        || comparison(root, name, &record.transaction)?.0 != current
+    let (after, _, after_credential) =
+        comparison_with_snapshot(root, name, &record.transaction, records.keys.as_ref())?;
+    if after != current || credential != after_credential {
+        return Err(UNSTABLE.into());
+    }
+    #[cfg(all(test, cargo_ai_cli))]
     {
-        return Err(STALE.to_owned());
+        let hook = RESOLUTION_READ_HOOK.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook(root);
+        }
+    }
+    if config_at(root)?.1 != mode {
+        return Err(UNSTABLE.into());
+    }
+    let latest = super::store::read_context_records(root, mode)?.ok_or(UNAVAILABLE)?;
+    require_selected_authority(&latest, name, record)?;
+    if matches!(&credential, ValidatedCredential::OpenaiAccount { .. })
+        && latest.keys != records.keys
+    {
+        // Evidence renewal is not revocation. Admit only the same credential after
+        // verification with the replacement keys, never merely the old cached keys.
+        let (latest_comparison, _, latest_credential) =
+            comparison_with_snapshot(root, name, &record.transaction, latest.keys.as_ref())?;
+        if latest_comparison != current || latest_credential != credential {
+            return Err(UNSTABLE.into());
+        }
+        if config_at(root)?.1 != mode {
+            return Err(UNSTABLE.into());
+        }
+        let final_records = super::store::read_context_records(root, mode)?.ok_or(UNAVAILABLE)?;
+        require_selected_authority(&final_records, name, record)?;
+        if final_records.keys != latest.keys {
+            return Err(UNSTABLE.into());
+        }
     }
     Ok(ValidatedProfileContext {
         context: record.reference.clone(),
         profile_name: name.clone(),
         profile,
+        credential,
     })
 }
 
@@ -353,20 +538,4 @@ pub(crate) fn noninteractive_keychain_read<T>(
     }
 }
 
-/// Only a bounded digest is returned; session tokens remain in their existing source.
-pub(crate) fn session_file_comparison(path: &Path) -> Result<String, String> {
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .map_err(|_| UNAVAILABLE)?
-        .take(65537)
-        .read_to_end(&mut bytes)
-        .map_err(|_| UNAVAILABLE)?;
-    if bytes.len() > 65536 {
-        return Err(UNAVAILABLE.to_owned());
-    }
-    let modified = std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .map_err(|_| UNAVAILABLE)?;
-    Ok(format!("{}:{modified:?}", hex_hash(&bytes)))
-}
+// Generated runtimes validate context; enrollment and renewal remain CLI operations.

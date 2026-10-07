@@ -69,6 +69,9 @@ pub(crate) async fn send_text_request_with_account_context(
     }
     let permit = crate::role_runtime::admit_provider(
         provider,
+        url,
+        request.token,
+        account_id,
         request.model,
         crate::execution_policy::RequestKind::Text,
         &modalities,

@@ -23,6 +23,10 @@ const BUILD_RERUN_PATHS: &[&str] = &[
 
 const TEMPLATE_SOURCES: &[TemplateSource] = &[
     TemplateSource {
+        destination: "src/credentials/access_continuity.rs",
+        source: "../src/credentials/access_continuity.rs",
+    },
+    TemplateSource {
         destination: "src/role_transport.rs",
         source: "src/role_transport.rs",
     },

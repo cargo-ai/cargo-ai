@@ -28,6 +28,7 @@ default = ["developer-tools"]
 developer-tools = []
 
 [dependencies]
+ring = { version = "0.17.14", default-features = false, features = ["alloc"] }
 rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
 base64 = { version = "0.22.1", default-features = false, features = ["std"] }
 clap = "4.5.35"
