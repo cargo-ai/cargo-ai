@@ -1,6 +1,13 @@
 //! CLI parser definition for `cargo ai profile`.
 use clap::{Arg, ArgAction, ArgGroup, Command};
 
+fn context_reference(value: &str) -> Result<String, String> {
+    if value.is_empty() || value.chars().take(1025).count() > 1024 {
+        return Err("A connection reference must contain between 1 and 1024 characters.".into());
+    }
+    Ok(value.to_owned())
+}
+
 /// Builds the `profile` command schema and nested subcommands.
 pub fn command() -> Command {
     Command::new("profile")
@@ -12,8 +19,8 @@ pub fn command() -> Command {
         .subcommand(Command::new("validate-context")
             .about("Validate remembered connection context without granting execution permission")
             .arg(Arg::new("name").required(true).value_name("NAME"))
-            .arg(Arg::new("profile_uuid").long("profile-uuid").required(true).value_name("UUID"))
-            .arg(Arg::new("connection_generation").long("connection-generation").required(true).value_name("GENERATION"))
+            .arg(Arg::new("profile_uuid").long("profile-uuid").required(true).value_name("UUID").value_parser(context_reference))
+            .arg(Arg::new("connection_generation").long("connection-generation").required(true).value_name("GENERATION").value_parser(context_reference))
             .arg(Arg::new("renew").long("renew").action(ArgAction::SetTrue)
                 .help("Refresh public verification evidence and proven context metadata; never renew provider credentials")))
         .subcommand(

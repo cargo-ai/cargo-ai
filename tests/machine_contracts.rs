@@ -112,6 +112,61 @@ fn profile_continuity_command_preserves_reference_and_reports_readiness_separate
 }
 
 #[test]
+fn profile_context_reference_bounds_keep_machine_payloads_valid_without_effects() {
+    let f = Fixture::new("machine-context-reference-bounds");
+    configure(&f);
+    let config = fs::read(f.cargo_ai_home.join("config.toml")).unwrap();
+    for flag in ["--profile-uuid", "--connection-generation"] {
+        for value in [String::new(), "x".repeat(1025), "é".repeat(1025)] {
+            let (uuid, generation) = if flag == "--profile-uuid" {
+                (value.as_str(), "known")
+            } else {
+                ("known", value.as_str())
+            };
+            let output = response(&run(
+                &f,
+                &[
+                    "profile",
+                    "validate-context",
+                    "fixture",
+                    "--profile-uuid",
+                    uuid,
+                    "--connection-generation",
+                    generation,
+                    "--renew",
+                ],
+            ));
+            assert_eq!(output["outcome"], "failed");
+            assert!(output["data"].is_null());
+            assert!(!f.cargo_ai_home.join("credentials.toml").exists());
+        }
+    }
+    for value in ["x".to_owned(), "x".repeat(1024), "é".repeat(1024)] {
+        let output = response(&run(
+            &f,
+            &[
+                "profile",
+                "validate-context",
+                "fixture",
+                "--profile-uuid",
+                &value,
+                "--connection-generation",
+                &value,
+            ],
+        ));
+        assert_eq!(output["outcome"], "succeeded", "{output}");
+        assert_eq!(output["data"]["status"], "unavailable");
+        assert_eq!(output["data"]["context"]["profile_uuid"], value);
+        assert_eq!(output["data"]["context"]["connection_generation"], value);
+    }
+    assert_eq!(
+        fs::read(f.cargo_ai_home.join("config.toml")).unwrap(),
+        config
+    );
+    assert!(!f.cargo_ai_home.join("credentials.toml").exists());
+}
+
+#[test]
 fn action_payload_advertisements_match_legacy_and_role_catalog_responses() {
     use std::io::Write;
     use std::process::Stdio;

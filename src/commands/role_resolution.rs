@@ -523,8 +523,8 @@ mod tests {
         assert_eq!(refreshed.calls[0].compatibility, Compatibility::Unknown);
 
         fs::write(fixture.home.join("config.toml"), "secret_store='file'\ndefault_profile='selected'\n[[profile]]\nname='selected'\nserver='openai'\nmodel='default-selected'\nauth_mode='api_key'\n[[profile]]\nname='other'\nserver='openai'\nmodel='default-other'\nauth_mode='api_key'\n").unwrap();
-        role_context::refresh_at(&fixture.home, "selected").unwrap();
-        role_context::refresh_at(&fixture.home, "other").unwrap();
+        let selected_reference = role_context::refresh_at(&fixture.home, "selected").unwrap();
+        let other_reference = role_context::refresh_at(&fixture.home, "other").unwrap();
         catalog["role_registry"]["call_sites"][0]["fixed"]["profile"] = Value::Null;
         fs::write(
             fixture.root.join(client_actions::CATALOG_FILE),
@@ -539,13 +539,23 @@ mod tests {
             config.replace("default_profile='selected'", "default_profile='other'"),
         )
         .unwrap();
-        assert_eq!(
-            fixture.resolve().unwrap_err().code,
-            "role.context_unavailable"
-        );
-        role_context::refresh_at(&fixture.home, "other").unwrap();
-        let after_refresh = fixture.snapshot();
+        let after_default_change = fixture.snapshot();
         let default_other = fixture.resolve().unwrap();
+        assert!(default_other.ready);
+        assert!(!default_other.execution_authorized);
+        assert_ne!(default_selected.identity, default_other.identity);
+        assert_eq!(
+            role_context::resolve_named_at(&fixture.home, "selected")
+                .unwrap()
+                .context,
+            selected_reference
+        );
+        assert_eq!(
+            role_context::resolve_named_at(&fixture.home, "other")
+                .unwrap()
+                .context,
+            other_reference
+        );
         assert_ne!(
             default_selected.context.connection_context_identity,
             default_other.context.connection_context_identity
@@ -557,7 +567,7 @@ mod tests {
             .profile
             .is_none());
         assert!(default_other.calls[0].call_site.role.is_none());
-        assert_eq!(after_refresh, fixture.snapshot());
+        assert_eq!(after_default_change, fixture.snapshot());
         let public = serde_json::to_string(&default_other).unwrap();
         assert!(!public.contains("synthetic-secret"));
     }
