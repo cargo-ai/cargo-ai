@@ -718,19 +718,20 @@ pub(crate) fn build_source_tool(
         )
     })?;
 
+    let artifact_relative_text = artifact_relative_path.to_string_lossy().replace('\\', "/");
     let manifest_json = match scope {
         ToolScope::Project => render_project_built_tool_manifest_json(
             tool_name,
             source.manifest_path.as_str(),
             binary_name.as_str(),
             build_target.cache_key_target(),
-            artifact_relative_path.to_string_lossy().as_ref(),
+            artifact_relative_text.as_str(),
         ),
         ToolScope::Machine => render_binary_tool_manifest_json(
             tool_name,
             binary_name.as_str(),
             build_target.cache_key_target(),
-            artifact_relative_path.to_string_lossy().as_ref(),
+            artifact_relative_text.as_str(),
         ),
         ToolScope::Bundled => unreachable!(),
     };

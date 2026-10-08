@@ -17,6 +17,11 @@ on:
         required: false
         default: false
         type: boolean
+      focused_build_inventory:
+        description: Run only affected Windows tool-build inventory checks
+        required: false
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       cargo_ai_sha:
@@ -33,12 +38,17 @@ on:
         required: false
         default: false
         type: boolean
+      focused_build_inventory:
+        description: Run only affected Windows tool-build inventory checks
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: deterministic-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: deterministic-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ inputs.focused_build_inventory && '-build-inventory' || '' }}
   cancel-in-progress: false
 
 env:
@@ -53,8 +63,8 @@ jobs:
     strategy:
       fail-fast: ${{ ! inputs.collect_all }}
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        stage: [Deterministic tests, Generated provider parity, Installation qualification]
+        os: ${{ fromJSON(inputs.focused_build_inventory && '["windows-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
+        stage: ${{ fromJSON(inputs.focused_build_inventory && '["Deterministic tests"]' || '["Deterministic tests","Generated provider parity","Installation qualification"]') }}
     steps:
       - name: Validate exact Cargo AI candidate
         shell: bash
@@ -99,8 +109,16 @@ jobs:
         run: cargo check --locked --all-targets
 
       - name: Run deterministic test suite
-        if: ${{ matrix.stage == 'Deterministic tests' }}
+        if: ${{ matrix.stage == 'Deterministic tests' && ! inputs.focused_build_inventory }}
         run: cargo test --locked --all-targets
+
+      - name: Run affected tool-build inventory checks
+        if: ${{ inputs.focused_build_inventory }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --bin cargo-ai commands::tools::tests -- --nocapture
+          cargo test --locked --test native_role_runtime native_target_build_preserves_source_backed_role_tool_inventory -- --exact --nocapture
 
       - name: Run generated provider parity
         if: ${{ matrix.stage == 'Generated provider parity' }}
@@ -219,9 +237,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require every stage on every operating system
+      - name: Require every selected stage
         env:
           MATRIX_RESULT: ${{ needs.deterministic.result }}
+          FOCUSED_BUILD_INVENTORY: ${{ inputs.focused_build_inventory }}
         run: |
           test "$MATRIX_RESULT" = "success"
-          echo "Credential-free deterministic qualification passed on Ubuntu, macOS, and Windows." >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$FOCUSED_BUILD_INVENTORY" == "true" ]]; then
+            echo "Focused credential-free Windows tool-build inventory checks passed. This is affected proof, not a full Core CI matrix." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Credential-free deterministic qualification passed on Ubuntu, macOS, and Windows." >> "$GITHUB_STEP_SUMMARY"
+          fi

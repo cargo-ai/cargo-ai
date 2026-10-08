@@ -2332,6 +2332,23 @@ fn native_target_build_preserves_source_backed_role_tool_inventory() {
         manifest["source"]["manifest_path"], "tools/portable/Cargo.toml",
         "target-built tools must retain portable source metadata: {manifest}"
     );
+    let artifact = manifest["artifacts"][target]["path"].as_str().unwrap();
+    assert!(
+        !artifact.contains('\\'),
+        "portable artifact path: {artifact}"
+    );
+    let source_manifest: Value = serde_json::from_slice(
+        &fs::read(fixture.root.join(".cargo-ai/tools/portable/tool.json")).unwrap(),
+    )
+    .unwrap();
+    let source_artifact = source_manifest["artifacts"][target]["path"]
+        .as_str()
+        .unwrap();
+    assert!(
+        !source_artifact.contains('\\'),
+        "portable source-project artifact path: {source_artifact}"
+    );
+    machine(&fixture, &["actions", "list", "--project", "."], None);
     let binary = built
         .join(".cargo-ai/tools/portable")
         .join(manifest["artifacts"][target]["path"].as_str().unwrap());
@@ -2376,6 +2393,12 @@ fn native_target_build_preserves_source_backed_role_tool_inventory() {
     assert!(
         !rejected.status.success(),
         "catalog tool source omission must fail before output replacement"
+    );
+    let diagnostic = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        diagnostic.contains("Native role tool source")
+            && diagnostic.contains("not explicitly selected"),
+        "source-selection rejection must not be masked by invalid catalog: {diagnostic}"
     );
     assert_eq!(
         fs::read(built.join(".cargo-ai/tools/portable/tool.json")).unwrap(),

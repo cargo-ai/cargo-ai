@@ -703,7 +703,7 @@ fn materialize_build_tool(
         },
         "artifacts": {
             build_target.cache_key_target(): {
-                "path": artifact_relative_path.to_string_lossy()
+                "path": artifact_relative_path.to_string_lossy().replace('\\', "/")
             }
         }
     });
