@@ -1,7 +1,10 @@
 //! Native-only role selection. Private bootstrap state never enters business data.
 use crate::execution_policy::{ExecutionPolicy, ModelSelection, RequestKind};
 use crate::providers::thinking::ThinkingSetting;
-use crate::role_contract::{BindingRevision, CallLocator, Resolution, ResolvedCall};
+use crate::role_contract::{
+    BindingRevision, CallLocator, EffectiveRequest, RequestChoice, RequestChoicePatch, Resolution,
+    ResolvedCall,
+};
 use crate::role_session::{Boundary, Permit, Session};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,6 +26,12 @@ pub struct Bootstrap {
     pub binding_revision: String,
     #[serde(default)]
     pub parent_permit_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_root: Option<EffectiveRequest>,
+}
+struct EffectiveSnapshot {
+    call: ResolvedCall,
+    private: Arc<crate::credentials::role_context::ValidatedProfileContext>,
 }
 #[derive(Clone)]
 pub struct Context {
@@ -32,6 +41,7 @@ pub struct Context {
     pub parent_permit_id: Option<String>,
     result: Arc<Mutex<Option<Value>>>,
     first_error: Arc<Mutex<Option<String>>>,
+    effective: Option<Arc<EffectiveSnapshot>>,
 }
 impl std::fmt::Debug for Context {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -45,7 +55,18 @@ impl Context {
         if session.is_closed() {
             return Err(failure("role.revoked"));
         }
-        if bootstrap.version != 1
+        if !matches!(
+            (bootstrap.version, bootstrap.resolution.version),
+            (1, 1) | (2, 2)
+        ) || (bootstrap.version == 1
+            && (bootstrap.resolution.request_choices.is_some()
+                || bootstrap.effective_root.is_some()))
+            || (bootstrap.version == 2
+                && bootstrap
+                    .resolution
+                    .request_choices
+                    .as_ref()
+                    .is_none_or(|c| c.version != 1))
             || !bootstrap.resolution.ready
             || bootstrap.resolution.execution_authorized
             || bootstrap.bindings.revision != session.binding_revision
@@ -61,11 +82,20 @@ impl Context {
         {
             return Err(failure("role.invalid_bootstrap"));
         }
-        if bootstrap
-            .policy
-            .allowed
-            .iter()
-            .any(|grant| !bootstrap.resolution.required_selections.contains(grant))
+        if (bootstrap.version == 1
+            && bootstrap
+                .policy
+                .allowed
+                .iter()
+                .any(|grant| !bootstrap.resolution.required_selections.contains(grant)))
+            || (bootstrap.version == 2
+                && bootstrap.policy.allowed.iter().any(|grant| {
+                    !bootstrap.resolution.calls.iter().any(|c| {
+                        c.selection
+                            .as_ref()
+                            .is_some_and(|s| s.request_kind == grant.request_kind)
+                    })
+                }))
             || bootstrap.policy.limits.max_runtime_secs
                 > bootstrap.resolution.scope.limits.max_runtime_secs
             || bootstrap.policy.limits.max_output_tokens
@@ -85,14 +115,16 @@ impl Context {
             session,
             result: Arc::new(Mutex::new(None)),
             first_error: Arc::new(Mutex::new(None)),
+            effective: None,
         };
         context.validate_context()?;
-        if context
-            .bootstrap
-            .resolution
-            .calls
-            .iter()
-            .any(|call| call.call_site.locator == context.locator)
+        if context.bootstrap.version == 1
+            && context
+                .bootstrap
+                .resolution
+                .calls
+                .iter()
+                .any(|call| call.call_site.locator == context.locator)
         {
             context.selected()?;
         }
@@ -109,11 +141,341 @@ impl Context {
                 definition: self.locator.definition.clone(),
                 site,
             },
+            effective: None,
             ..self.clone()
         }
     }
     pub fn validate_context(&self) -> Result<(), String> {
         self.validated_fixed_connections().map(|_| ())
+    }
+    /// Pin one root request after host and CLI choices are known.
+    pub fn prepare_root(
+        &self,
+        profile: Option<&str>,
+        model: Option<&str>,
+        thinking: Option<&ThinkingSetting>,
+    ) -> Result<Self, String> {
+        if self.bootstrap.version == 1 {
+            return Ok(self.clone());
+        }
+        CURRENT.sync_scope(Some(self.clone()), || {
+            if !self
+                .bootstrap
+                .resolution
+                .calls
+                .iter()
+                .any(|call| call.call_site.locator == self.locator)
+            {
+                return Ok(self.clone());
+            }
+            let mut call = self.default_call()?;
+            if call.selection.is_none() {
+                return Ok(self.clone());
+            }
+            if let Some(root) = &self.bootstrap.effective_root {
+                if root.selection.request_kind
+                    != call
+                        .selection
+                        .as_ref()
+                        .expect("default selection")
+                        .request_kind
+                    || profile
+                        .is_some_and(|profile| root.selection.profile.as_deref() != Some(profile))
+                    || model.is_some_and(|model| {
+                        root.selection.model != ModelSelection::named_or_default(model)
+                    })
+                    || thinking.is_some_and(|thinking| &root.selection.thinking != thinking)
+                {
+                    return Err(failure("role.child_selection_conflict"));
+                }
+                call.selection = Some(root.selection.clone());
+                call.settings = root.settings.clone();
+            } else if let Some(patch) = self
+                .bootstrap
+                .resolution
+                .request_choices
+                .as_ref()
+                .and_then(|c| c.root_request.as_ref())
+            {
+                patch
+                    .validate_root()
+                    .map_err(|_| failure("role.invalid_request_choices"))?;
+                apply_patch(&mut call, patch, &Value::Null)?;
+            }
+            let selection = call
+                .selection
+                .as_mut()
+                .ok_or_else(|| failure("role.unresolved"))?;
+            if self.bootstrap.effective_root.is_none() {
+                if let Some(profile) = profile {
+                    selection.profile = Some(profile.to_owned());
+                }
+                if let Some(model) = model {
+                    selection.model = ModelSelection::named_or_default(model);
+                }
+                if let Some(thinking) = thinking {
+                    selection.thinking = thinking.clone();
+                }
+            }
+            self.freeze(call)
+        })
+    }
+    /// Each execution resolves variables against its own business data and freezes
+    /// a new snapshot. The returned context is scoped only around that execution.
+    pub fn prepare_step(
+        &self,
+        step: &crate::RunStep,
+        data: &Value,
+    ) -> Result<(crate::RunStep, Self), String> {
+        if self.bootstrap.version == 1 {
+            if step.request_choices.is_some() {
+                return Err(failure("role.request_choices_unsupported"));
+            }
+            return CURRENT
+                .sync_scope(Some(self.clone()), || apply_step(step))
+                .map(|step| (step, self.clone()));
+        }
+        if !matches!(
+            step.kind.as_str(),
+            "agent" | "generate_image" | "generate_audio" | "transcribe_audio"
+        ) {
+            if step.request_choices.is_some() {
+                return Err(failure("role.unsupported_request_setting"));
+            }
+            return Ok((step.clone(), self.clone()));
+        }
+        CURRENT.sync_scope(Some(self.clone()), || {
+            let mut call = self.default_call()?;
+            let Some(selection) = call.selection.as_mut() else {
+                if step.profile.is_some()
+                    || step.model.is_some()
+                    || step.thinking.is_some()
+                    || step.voice.is_some()
+                    || step.request_choices.is_some()
+                {
+                    return Err(failure("role.request_conflict"));
+                }
+                return Ok((step.clone(), self.clone()));
+            };
+            if let Some(profile) = &step.profile {
+                selection.profile = Some(run_arg(profile, data)?);
+            }
+            if let Some(model) = &step.model {
+                selection.model = ModelSelection::named_or_default(&run_arg(model, data)?);
+            }
+            if let Some(thinking) = &step.thinking {
+                selection.thinking = match thinking {
+                    ThinkingSetting::ProviderDefault => ThinkingSetting::ProviderDefault,
+                    ThinkingSetting::On => ThinkingSetting::On,
+                    ThinkingSetting::Off => ThinkingSetting::Off,
+                    ThinkingSetting::Choice { value } => ThinkingSetting::Choice {
+                        value: run_arg(value, data)?,
+                    },
+                };
+            }
+            if let Some(voice) = &step.voice {
+                call.settings
+                    .insert("voice".into(), Value::String(run_arg(voice, data)?));
+            }
+            let mut explicit_format = false;
+            if let Some(patch) = &step.request_choices {
+                let patch: RequestChoicePatch = serde_json::from_value(patch.clone())
+                    .map_err(|_| failure("role.invalid_request_choices"))?;
+                patch
+                    .validate()
+                    .map_err(|_| failure("role.invalid_request_choices"))?;
+                explicit_format = matches!(
+                    patch.settings.get("format"),
+                    Some(RequestChoice::Value { .. })
+                );
+                apply_patch(&mut call, &patch, data)?;
+            }
+            let resolved_path = if matches!(step.kind.as_str(), "generate_image" | "generate_audio")
+            {
+                let path = resolve_path(
+                    step.path
+                        .as_deref()
+                        .ok_or_else(|| failure("role.invalid_request_choices"))?,
+                    data,
+                )?;
+                let format = path_format(&path, step.kind.as_str())?;
+                if explicit_format
+                    && call.settings.get("format").and_then(Value::as_str) != Some(format)
+                {
+                    return Err(failure("role.request_conflict"));
+                }
+                call.settings
+                    .insert("format".into(), Value::String(format.to_owned()));
+                Some(path)
+            } else {
+                None
+            };
+            let context = self.freeze(call)?;
+            let call = &context.effective.as_ref().expect("frozen").call;
+            let selection = call.selection.as_ref().expect("frozen selection");
+            let mut bound = step.clone();
+            if let Some(path) = resolved_path {
+                bound.path = Some(vec![crate::RunArg::Literal(path)]);
+            }
+            bound.profile = selection.profile.clone().map(crate::RunArg::Literal);
+            bound.model = match &selection.model {
+                ModelSelection::Named { value } => Some(crate::RunArg::Literal(value.clone())),
+                _ => None,
+            };
+            bound.thinking = Some(match &selection.thinking {
+                ThinkingSetting::ProviderDefault => ThinkingSetting::ProviderDefault,
+                ThinkingSetting::On => ThinkingSetting::On,
+                ThinkingSetting::Off => ThinkingSetting::Off,
+                ThinkingSetting::Choice { value } => ThinkingSetting::Choice {
+                    value: crate::RunArg::Literal(value.clone()),
+                },
+            });
+            bound.voice = call
+                .settings
+                .get("voice")
+                .and_then(Value::as_str)
+                .map(|s| crate::RunArg::Literal(s.to_owned()));
+            Ok((bound, context))
+        })
+    }
+    fn default_call(&self) -> Result<ResolvedCall, String> {
+        self.bootstrap
+            .resolution
+            .calls
+            .iter()
+            .find(|c| c.call_site.locator == self.locator)
+            .cloned()
+            .ok_or_else(|| failure("role.undeclared_call_site"))
+    }
+    /// Tool inputs remain business data; a declared child uses its own reviewed
+    /// defaults rather than a host patch intended for a different root call.
+    pub fn prepare_declared_child(&self) -> Result<Self, String> {
+        if self.bootstrap.version == 1 {
+            return Ok(self.clone());
+        }
+        CURRENT.sync_scope(Some(self.clone()), || {
+            let call = self.default_call()?;
+            if !matches!(
+                call.call_site.kind,
+                crate::role_contract::CallKind::Child | crate::role_contract::CallKind::ToolChild
+            ) {
+                return Err(failure("role.child_target_conflict"));
+            }
+            if call.selection.is_none() {
+                self.validate_context()?;
+                return Ok(self.clone());
+            }
+            self.freeze(call)
+        })
+    }
+    /// Revalidate an admitted descendant's safe attribution against this exact
+    /// declared site, policy and protected connection, rather than its defaults.
+    pub fn validate_effective_request(&self, request: &EffectiveRequest) -> Result<Self, String> {
+        self.validate_effective_request_for(request, "provider")
+    }
+    pub fn effective_request(&self) -> Option<EffectiveRequest> {
+        self.effective
+            .as_ref()
+            .filter(|snapshot| snapshot.call.call_site.locator == self.locator)
+            .and_then(|snapshot| {
+                snapshot
+                    .call
+                    .selection
+                    .clone()
+                    .map(|selection| EffectiveRequest {
+                        selection,
+                        settings: snapshot.call.settings.clone(),
+                    })
+            })
+    }
+    pub fn validate_effective_request_for(
+        &self,
+        request: &EffectiveRequest,
+        boundary_kind: &str,
+    ) -> Result<Self, String> {
+        if self.bootstrap.version != 2 {
+            return Err(failure("role.request_choices_unsupported"));
+        }
+        CURRENT.sync_scope(Some(self.clone()), || {
+            let mut call = self.default_call()?;
+            if call
+                .selection
+                .as_ref()
+                .is_none_or(|selection| selection.request_kind != request.selection.request_kind)
+            {
+                return Err(failure("role.request_conflict"));
+            }
+            call.selection = Some(request.selection.clone());
+            call.settings = request.settings.clone();
+            let context = self.freeze(call)?;
+            let private = &context.effective.as_ref().expect("frozen").private;
+            let provider =
+                crate::providers::ProviderKind::from_server_value(&private.profile.server)
+                    .ok_or_else(|| failure("role.request_conflict"))?;
+            let expected = match boundary_kind {
+                "provider" => expected_thinking(
+                    &request.selection.thinking,
+                    provider,
+                    request.selection.request_kind,
+                )?,
+                "native_child" => serde_json::to_value(&request.selection.thinking)
+                    .map_err(|_| failure("role.request_conflict"))?,
+                _ => return Err(failure("role.invalid_admission")),
+            };
+            if request
+                .settings
+                .get("thinking")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({"mode":"provider_default"}))
+                != expected
+            {
+                return Err(failure("role.request_conflict"));
+            }
+            Ok(context)
+        })
+    }
+    fn freeze(&self, mut call: ResolvedCall) -> Result<Self, String> {
+        let selection = call
+            .selection
+            .as_ref()
+            .ok_or_else(|| failure("role.unresolved"))?;
+        if !self.bootstrap.policy.allowed.contains(selection) {
+            return Err(failure("action.execution_selection_denied"));
+        }
+        validate_request_settings(selection.request_kind, &call.settings)?;
+        let profiles = policy_profiles(&self.bootstrap.policy);
+        let id = profiles
+            .iter()
+            .find(|(_, profile)| *profile == selection.profile)
+            .map(|(id, _)| id)
+            .ok_or_else(|| failure("action.execution_selection_denied"))?;
+        let private = self
+            .validated_fixed_connections()?
+            .remove(id)
+            .ok_or_else(|| failure("role.stale_connection"))?;
+        if matches!(&selection.model, ModelSelection::ProviderDefault {})
+            && matches!(
+                selection.request_kind,
+                RequestKind::Image | RequestKind::Audio | RequestKind::Transcription
+            )
+            && !(selection.request_kind == RequestKind::Audio
+                && crate::providers::ProviderKind::from_server_value(&private.profile.server)
+                    == Some(crate::providers::ProviderKind::Xai))
+        {
+            return Err(failure("role.provider_default_model_unsupported"));
+        }
+        call.settings.insert(
+            "thinking".into(),
+            serde_json::to_value(&selection.thinking)
+                .map_err(|_| failure("role.request_conflict"))?,
+        );
+        Ok(Self {
+            effective: Some(Arc::new(EffectiveSnapshot {
+                call,
+                private: Arc::new(private),
+            })),
+            ..self.clone()
+        })
     }
     fn validated_fixed_connections(
         &self,
@@ -166,11 +528,49 @@ impl Context {
             let (fixed_identity, snapshots) =
                 crate::providers::operation_metadata::fixed_context_snapshot(&home, &fixed)
                     .map_err(|_| failure("role.stale_connection"))?;
-            let identity = crate::providers::operation_metadata::connection_context_identity(
-                &self.bootstrap.bindings,
-                &fixed_identity,
-            )
-            .map_err(|_| failure("role.stale_connection"))?;
+            let mut snapshots = snapshots;
+            let identity = if let Some(choices) = &self.bootstrap.resolution.request_choices {
+                let profiles = policy_profiles(&self.bootstrap.policy);
+                if choices.authorized_connections.len() != profiles.len() {
+                    return Err(failure("role.policy_scope_conflict"));
+                }
+                let (_, alternatives) =
+                    crate::providers::operation_metadata::fixed_context_snapshot(&home, &profiles)
+                        .map_err(|_| failure("role.stale_connection"))?;
+                for ((id, requested), reference) in
+                    profiles.iter().zip(&choices.authorized_connections)
+                {
+                    let private = alternatives
+                        .get(id)
+                        .ok_or_else(|| failure("role.stale_connection"))?;
+                    if &reference.profile != requested
+                        || reference.profile_name != private.profile_name
+                        || reference.profile_uuid != private.context.profile_uuid
+                        || reference.connection_generation != private.context.connection_generation
+                        || crate::providers::ProviderKind::from_server_value(&reference.provider)
+                            .is_none()
+                        || crate::providers::ProviderKind::from_server_value(&reference.provider)
+                            != crate::providers::ProviderKind::from_server_value(
+                                &private.profile.server,
+                            )
+                    {
+                        return Err(failure("role.stale_connection"));
+                    }
+                }
+                snapshots.extend(alternatives);
+                crate::role_contract::request_connection_identity(
+                    &self.bootstrap.bindings,
+                    &fixed_identity,
+                    choices,
+                )
+                .map_err(|_| failure("role.stale_connection"))?
+            } else {
+                crate::providers::operation_metadata::connection_context_identity(
+                    &self.bootstrap.bindings,
+                    &fixed_identity,
+                )
+                .map_err(|_| failure("role.stale_connection"))?
+            };
             if identity
                 != self
                     .bootstrap
@@ -186,14 +586,26 @@ impl Context {
     pub fn selected(&self) -> Result<ResolvedCall, String> {
         CURRENT.sync_scope(Some(self.clone()), || {
             self.validate_context()?;
+            if self
+                .effective
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.call.call_site.locator != self.locator)
+            {
+                return Err(failure("role.request_conflict"));
+            }
             let call = self
-                .bootstrap
-                .resolution
-                .calls
-                .iter()
-                .find(|c| c.call_site.locator == self.locator)
-                .ok_or_else(|| failure("role.undeclared_call_site"))?
-                .clone();
+                .effective
+                .as_ref()
+                .map(|snapshot| snapshot.call.clone())
+                .or_else(|| {
+                    self.bootstrap
+                        .resolution
+                        .calls
+                        .iter()
+                        .find(|c| c.call_site.locator == self.locator)
+                        .cloned()
+                })
+                .ok_or_else(|| failure("role.undeclared_call_site"))?;
             if call.selection.is_none() {
                 let structural = matches!(
                     call.call_site.kind,
@@ -212,27 +624,32 @@ impl Context {
                 }
                 return Err(failure("role.unresolved"));
             }
+            if self.bootstrap.version == 2 && self.effective.is_none() {
+                return Err(failure("role.unresolved"));
+            }
             let selection = call.selection.as_ref().expect("selection checked");
-            if let Some(role) = &call.call_site.role {
-                let binding = self
-                    .bootstrap
-                    .bindings
-                    .bindings
-                    .iter()
-                    .find(|b| &b.role == role)
-                    .ok_or_else(|| failure("role.unresolved"))?;
-                let private = crate::credentials::role_context::resolve_profile_context(
-                    &binding.profile_uuid,
-                    &binding.connection_generation,
-                )
-                .map_err(|_| failure("role.stale_connection"))?;
-                if private.profile_name != binding.profile
-                    || !private
-                        .profile
-                        .server
-                        .eq_ignore_ascii_case(&binding.provider)
-                {
-                    return Err(failure("role.stale_connection"));
+            if self.bootstrap.version == 1 {
+                if let Some(role) = &call.call_site.role {
+                    let binding = self
+                        .bootstrap
+                        .bindings
+                        .bindings
+                        .iter()
+                        .find(|b| &b.role == role)
+                        .ok_or_else(|| failure("role.unresolved"))?;
+                    let private = crate::credentials::role_context::resolve_profile_context(
+                        &binding.profile_uuid,
+                        &binding.connection_generation,
+                    )
+                    .map_err(|_| failure("role.stale_connection"))?;
+                    if private.profile_name != binding.profile
+                        || !private
+                            .profile
+                            .server
+                            .eq_ignore_ascii_case(&binding.provider)
+                    {
+                        return Err(failure("role.stale_connection"));
+                    }
                 }
             }
             if !self.bootstrap.policy.allowed.contains(selection) {
@@ -264,11 +681,252 @@ impl Context {
             let child = self.bootstrap.resolution.calls.iter().find(|c| {
                 c.call_site.locator.definition == target && c.call_site.locator.site == "root"
             });
-            if child.and_then(|c| c.selection.as_ref()) != call.selection.as_ref() {
+            if self.bootstrap.version == 2 {
+                if child.is_some() {
+                    bootstrap.effective_root =
+                        call.selection.clone().map(|selection| EffectiveRequest {
+                            selection,
+                            settings: call.settings.clone(),
+                        });
+                } else if call.selection.is_some() {
+                    return Err(failure("role.child_selection_conflict"));
+                } else {
+                    bootstrap.effective_root = None;
+                }
+            } else if child.and_then(|c| c.selection.as_ref()) != call.selection.as_ref() {
                 return Err(failure("role.child_selection_conflict"));
             }
             Ok(bootstrap)
         })
+    }
+}
+fn policy_profiles(policy: &ExecutionPolicy) -> Vec<(String, Option<String>)> {
+    policy
+        .allowed
+        .iter()
+        .map(|grant| grant.profile.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .enumerate()
+        .map(|(index, profile)| (format!("policy_{index}"), profile))
+        .collect()
+}
+fn lookup_choice(data: &Value, path: &str) -> Result<Value, String> {
+    if path.is_empty() || path.len() > 1024 {
+        return Err(failure("role.invalid_request_choices"));
+    }
+    let mut value = data;
+    for part in path.split('.') {
+        value = match value {
+            Value::Array(array) => part
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| array.get(index)),
+            Value::Object(object) => object.get(part),
+            _ => None,
+        }
+        .ok_or_else(|| failure("role.invalid_request_choices"))?;
+    }
+    Ok(value.clone())
+}
+fn run_arg(arg: &crate::RunArg, data: &Value) -> Result<String, String> {
+    let value = match arg {
+        crate::RunArg::Literal(value) => value.clone(),
+        crate::RunArg::Variable(path) => lookup_choice(data, path)?
+            .as_str()
+            .ok_or_else(|| failure("role.invalid_request_choices"))?
+            .to_owned(),
+    };
+    if value.is_empty() || value.len() > 1024 {
+        return Err(failure("role.invalid_request_choices"));
+    }
+    Ok(value)
+}
+fn resolve_path(parts: &[crate::RunArg], data: &Value) -> Result<String, String> {
+    let mut path = String::new();
+    for part in parts {
+        let value = match part {
+            crate::RunArg::Literal(value) => value.clone(),
+            crate::RunArg::Variable(variable) => match lookup_choice(data, variable)? {
+                Value::String(value) => value,
+                Value::Bool(value) => value.to_string(),
+                Value::Number(value) => value.to_string(),
+                _ => return Err(failure("role.invalid_request_choices")),
+            },
+        };
+        path.push_str(&value);
+        if path.len() > 8192 {
+            return Err(failure("role.invalid_request_choices"));
+        }
+    }
+    if path.trim().is_empty() {
+        return Err(failure("role.invalid_request_choices"));
+    }
+    Ok(path)
+}
+fn path_format(path: &str, kind: &str) -> Result<&'static str, String> {
+    match (
+        kind,
+        std::path::Path::new(path)
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+    ) {
+        ("generate_audio", Some("wav")) => Ok("wav"),
+        ("generate_audio", Some("mp3")) => Ok("mp3"),
+        ("generate_image", Some("png")) => Ok("png"),
+        ("generate_image", Some("jpg" | "jpeg")) => Ok("jpeg"),
+        ("generate_image", Some("webp")) => Ok("webp"),
+        _ => Err(failure("role.unsupported_request_setting")),
+    }
+}
+fn choice_value(value: &Value, data: &Value) -> Result<Value, String> {
+    if let Some(object) = value.as_object() {
+        if object.contains_key("var") {
+            if object.len() != 1 {
+                return Err(failure("role.invalid_request_choices"));
+            }
+            return lookup_choice(
+                data,
+                object["var"]
+                    .as_str()
+                    .ok_or_else(|| failure("role.invalid_request_choices"))?,
+            );
+        }
+    }
+    match value {
+        Value::Object(object) => object
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), choice_value(value, data)?)))
+            .collect::<Result<serde_json::Map<String, Value>, String>>()
+            .map(Value::Object),
+        Value::Array(array) => array
+            .iter()
+            .map(|value| choice_value(value, data))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        _ => Ok(value.clone()),
+    }
+}
+fn choice_string(value: &Value, data: &Value) -> Result<String, String> {
+    let value = choice_value(value, data)?;
+    let value = value
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= 1024)
+        .ok_or_else(|| failure("role.invalid_request_choices"))?;
+    Ok(value.to_owned())
+}
+fn apply_patch(
+    call: &mut ResolvedCall,
+    patch: &RequestChoicePatch,
+    data: &Value,
+) -> Result<(), String> {
+    let selection = call
+        .selection
+        .as_mut()
+        .ok_or_else(|| failure("role.unresolved"))?;
+    if let Some(profile) = &patch.profile {
+        selection.profile = match profile {
+            RequestChoice::ProviderDefault {} => None,
+            RequestChoice::Value { value } => Some(choice_string(value, data)?),
+        };
+    }
+    if let Some(model) = &patch.model {
+        selection.model = match model {
+            RequestChoice::ProviderDefault {} => ModelSelection::ProviderDefault {},
+            RequestChoice::Value { value } => ModelSelection::Named {
+                value: choice_string(value, data)?,
+            },
+        };
+    }
+    for (key, choice) in &patch.settings {
+        if key == "thinking" {
+            selection.thinking = match choice {
+                RequestChoice::ProviderDefault {} => ThinkingSetting::ProviderDefault,
+                RequestChoice::Value { value } => {
+                    let value = choice_value(value, data)?;
+                    if let Some(value) = value.as_str() {
+                        ThinkingSetting::from_cli(value)
+                    } else {
+                        serde_json::from_value(value)
+                            .map_err(|_| failure("role.invalid_request_choices"))?
+                    }
+                }
+            };
+        } else {
+            if !matches!(key.as_str(), "voice" | "format" | "temperature") {
+                return Err(failure("role.unsupported_request_setting"));
+            }
+            if (key == "voice" && selection.request_kind != RequestKind::Audio)
+                || (key == "format"
+                    && !matches!(
+                        selection.request_kind,
+                        RequestKind::Image | RequestKind::Audio
+                    ))
+                || (key == "temperature" && selection.request_kind != RequestKind::Text)
+            {
+                return Err(failure("role.unsupported_request_setting"));
+            }
+            match choice {
+                RequestChoice::ProviderDefault {} => {
+                    call.settings.remove(key);
+                }
+                RequestChoice::Value { value } => {
+                    call.settings
+                        .insert(key.clone(), choice_value(value, data)?);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+fn validate_request_settings(
+    kind: RequestKind,
+    settings: &std::collections::BTreeMap<String, Value>,
+) -> Result<(), String> {
+    for (key, value) in settings {
+        let supported = match key.as_str() {
+            "thinking" => serde_json::from_value::<ThinkingSetting>(value.clone()).is_ok(),
+            "voice" => {
+                kind == RequestKind::Audio
+                    && value
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty() && s.len() <= 1024)
+            }
+            "format" => {
+                matches!(kind, RequestKind::Image | RequestKind::Audio)
+                    && value
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty() && s.len() <= 128)
+            }
+            "temperature" => {
+                kind == RequestKind::Text
+                    && value
+                        .as_f64()
+                        .is_some_and(|number| number.is_finite() && number >= 0.0)
+            }
+            _ => false,
+        };
+        if !supported {
+            return Err(failure("role.unsupported_request_setting"));
+        }
+    }
+    Ok(())
+}
+fn expected_thinking(
+    thinking: &ThinkingSetting,
+    provider: crate::providers::ProviderKind,
+    kind: RequestKind,
+) -> Result<Value, String> {
+    match (thinking, provider, kind) {
+        (ThinkingSetting::On, crate::providers::ProviderKind::Ollama, RequestKind::Text) => {
+            Ok(serde_json::json!({"mode":"choice","value":"medium"}))
+        }
+        (ThinkingSetting::Off, crate::providers::ProviderKind::Ollama, RequestKind::Text) => {
+            Ok(serde_json::json!({"mode":"choice","value":"none"}))
+        }
+        _ => serde_json::to_value(thinking).map_err(|_| failure("role.request_conflict")),
     }
 }
 pub fn verify_contents(
@@ -357,6 +1015,38 @@ pub async fn scope_step<T>(site: String, future: impl Future<Output = T>) -> T {
         Some(context) => context.at(site).scope(future).await,
         None => future.await,
     }
+}
+pub fn prepare_step(
+    step: &crate::RunStep,
+    data: &Value,
+) -> Result<(crate::RunStep, Option<Context>), String> {
+    match current() {
+        Some(context) => {
+            let (step, context) = context.prepare_step(step, data)?;
+            Ok((step, Some(context)))
+        }
+        None if step.request_choices.is_some() => Err(failure("role.request_choices_unsupported")),
+        None => Ok((step.clone(), None)),
+    }
+}
+/// A default-profile grant names the native mapping, while adapters may carry
+/// that mapping's concrete profile name after credential resolution.
+pub fn normalize_policy_profile(profile: Option<&str>) -> Option<&str> {
+    if let Some(context) = current() {
+        if context.bootstrap.version == 2
+            && context.effective.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .call
+                    .selection
+                    .as_ref()
+                    .is_some_and(|selection| selection.profile.is_none())
+                    && profile == Some(snapshot.private.profile_name.as_str())
+            })
+        {
+            return None;
+        }
+    }
+    profile
 }
 pub fn selected() -> Result<Option<ResolvedCall>, String> {
     current().map(|c| c.selected()).transpose()
@@ -487,6 +1177,20 @@ pub fn apply_step(step: &crate::RunStep) -> Result<crate::RunStep, String> {
     if current().is_none() {
         return Ok(step.clone());
     }
+    if current().is_some_and(|context| context.bootstrap.version == 2) {
+        if step.request_choices.is_some()
+            && !matches!(
+                step.kind.as_str(),
+                "agent" | "generate_image" | "generate_audio" | "transcribe_audio"
+            )
+        {
+            return Err(failure("role.unsupported_request_setting"));
+        }
+        return Ok(step.clone());
+    }
+    if step.request_choices.is_some() {
+        return Err(failure("role.request_choices_unsupported"));
+    }
     if !matches!(
         step.kind.as_str(),
         "agent" | "generate_image" | "generate_audio" | "transcribe_audio"
@@ -555,6 +1259,8 @@ pub async fn admit_provider(
     let effective_model = if model.is_empty()
         && kind == RequestKind::Audio
         && provider == crate::providers::ProviderKind::Xai
+        && !(context.bootstrap.version == 2
+            && selection.model == ModelSelection::ProviderDefault {})
     {
         ModelSelection::FixedService {}
     } else {
@@ -563,28 +1269,29 @@ pub async fn admit_provider(
     if selection.request_kind != kind || selection.model != effective_model {
         return Err(failure("role.request_conflict"));
     }
-    if let Some(role) = &call.call_site.role {
-        let binding = context
-            .bootstrap
-            .bindings
-            .bindings
-            .iter()
-            .find(|b| &b.role == role)
-            .ok_or_else(|| failure("role.unresolved"))?;
-        if crate::providers::ProviderKind::from_server_value(&binding.provider) != Some(provider) {
-            return Err(failure("role.request_conflict"));
+    if context.bootstrap.version == 2 {
+        let actual: std::collections::BTreeMap<String, Value> =
+            serde_json::from_value(settings.clone())
+                .map_err(|_| failure("role.request_conflict"))?;
+        validate_request_settings(kind, &actual)?;
+    }
+    if context.bootstrap.version == 1 {
+        if let Some(role) = &call.call_site.role {
+            let binding = context
+                .bootstrap
+                .bindings
+                .bindings
+                .iter()
+                .find(|b| &b.role == role)
+                .ok_or_else(|| failure("role.unresolved"))?;
+            if crate::providers::ProviderKind::from_server_value(&binding.provider)
+                != Some(provider)
+            {
+                return Err(failure("role.request_conflict"));
+            }
         }
     }
-    let expected_thinking = match (&selection.thinking, provider, kind) {
-        (ThinkingSetting::On, crate::providers::ProviderKind::Ollama, RequestKind::Text) => {
-            serde_json::json!({"mode":"choice","value":"medium"})
-        }
-        (ThinkingSetting::Off, crate::providers::ProviderKind::Ollama, RequestKind::Text) => {
-            serde_json::json!({"mode":"choice","value":"none"})
-        }
-        _ => serde_json::to_value(&selection.thinking)
-            .map_err(|_| failure("role.request_conflict"))?,
-    };
+    let expected_thinking = expected_thinking(&selection.thinking, provider, kind)?;
     if settings
         .get("thinking")
         .cloned()
@@ -600,7 +1307,32 @@ pub async fn admit_provider(
     }
     // Match the bytes actually held by the request to the same validated snapshot
     // whose reference participates in this invocation's reviewed connection identity.
-    let private = if let Some(role) = &call.call_site.role {
+    let private = if context.bootstrap.version == 2 {
+        let snapshot = context
+            .effective
+            .as_ref()
+            .ok_or_else(|| failure("role.unresolved"))?;
+        let profiles = policy_profiles(&context.bootstrap.policy);
+        let id = profiles
+            .iter()
+            .find(|(_, profile)| profile == &selection.profile)
+            .map(|(id, _)| id)
+            .ok_or_else(|| failure("action.execution_selection_denied"))?;
+        let now = context
+            .validated_fixed_connections()?
+            .remove(id)
+            .ok_or_else(|| failure("role.stale_connection"))?;
+        if snapshot.private.context != now.context
+            || snapshot.private.profile_name != now.profile_name
+            || !snapshot.private.matches(
+                now.credential.token().unwrap_or_default(),
+                now.credential.account_id(),
+            )
+        {
+            return Err(failure("role.stale_connection"));
+        }
+        snapshot.private.clone()
+    } else if let Some(role) = &call.call_site.role {
         let binding = context
             .bootstrap
             .bindings
@@ -616,12 +1348,14 @@ pub async fn admit_provider(
         if private.profile_name != binding.profile {
             return Err(failure("role.stale_connection"));
         }
-        private
+        Arc::new(private)
     } else {
-        context
-            .validated_fixed_connections()?
-            .remove(&call.call_site.id)
-            .ok_or_else(|| failure("role.unresolved"))?
+        Arc::new(
+            context
+                .validated_fixed_connections()?
+                .remove(&call.call_site.id)
+                .ok_or_else(|| failure("role.unresolved"))?,
+        )
     };
     let default_url = if private.profile.auth_mode
         == crate::config::schema::ProfileAuthMode::OpenaiAccount
@@ -645,15 +1379,26 @@ pub async fn admit_provider(
     }
     context
         .session
-        .admit(Boundary {
-            invocation_id: context.session.invocation_id.clone(),
-            binding_revision: context.session.binding_revision.clone(),
-            parent_permit_id: context.parent_permit_id.clone(),
-            call_site: call.call_site.id,
-            agent: context.locator.definition.clone(),
-            target_agent: call.call_site.target,
-            kind: "provider".into(),
-        })
+        .admit_with_effective(
+            Boundary {
+                invocation_id: context.session.invocation_id.clone(),
+                binding_revision: context.session.binding_revision.clone(),
+                parent_permit_id: context.parent_permit_id.clone(),
+                call_site: call.call_site.id,
+                agent: context.locator.definition.clone(),
+                target_agent: call.call_site.target,
+                kind: "provider".into(),
+            },
+            if context.bootstrap.version == 2 {
+                Some(EffectiveRequest {
+                    selection: selection.clone(),
+                    settings: serde_json::from_value(settings)
+                        .map_err(|_| failure("role.request_conflict"))?,
+                })
+            } else {
+                None
+            },
+        )
         .await
         .map(Some)
         .map_err(|_| failure("role.revoked"))
@@ -837,6 +1582,7 @@ mod tests {
             ready: true,
             execution_authorized: false,
             invocation_access: "unverified".into(),
+            request_choices: None,
         };
         let session = Session::new(bindings.revision.clone());
         let bootstrap = Bootstrap {
@@ -857,8 +1603,480 @@ mod tests {
             invocation_id: session.invocation_id.clone(),
             binding_revision: session.binding_revision.clone(),
             parent_permit_id: None,
+            effective_root: None,
         };
         (Context::new(bootstrap, session).unwrap(), root, guard)
+    }
+    fn request_choices_fixture() -> (Context, std::path::PathBuf, HomeGuard) {
+        let (context, root, guard) = fixture();
+        let home = root.join("home");
+        let mut config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        let mut credentials = std::fs::read_to_string(home.join("credentials.toml")).unwrap();
+        for name in ["alpha", "beta"] {
+            config.push_str(&format!("\n[[profile]]\nname='{name}'\nserver='openai'\nmodel='fixture'\nauth_mode='api_key'\nurl='http://127.0.0.1:1'\n"));
+            credentials.push_str(&format!("{name}='isolated-{name}'\n"));
+        }
+        std::fs::write(home.join("config.toml"), config).unwrap();
+        std::fs::write(home.join("credentials.toml"), credentials).unwrap();
+        for name in ["fixture", "alpha", "beta"] {
+            crate::credentials::role_context::refresh_profile_context(name).unwrap();
+        }
+        let mut bootstrap = (*context.bootstrap).clone();
+        bootstrap.version = 2;
+        bootstrap.resolution.version = 2;
+        bootstrap.resolution.calls[0].call_site.kind = CallKind::Audio;
+        bootstrap.resolution.calls[0]
+            .selection
+            .as_mut()
+            .unwrap()
+            .request_kind = RequestKind::Audio;
+        bootstrap.resolution.calls[0].settings = BTreeMap::from([
+            ("voice".into(), json!("default-voice")),
+            ("format".into(), json!("wav")),
+        ]);
+        bootstrap.policy.allowed = [(Some("alpha"), "A"), (Some("beta"), "B"), (None, "C")]
+            .into_iter()
+            .map(|(profile, model)| AllowedSelection {
+                profile: profile.map(str::to_owned),
+                model: ModelSelection::Named {
+                    value: model.into(),
+                },
+                request_kind: RequestKind::Audio,
+                thinking: ThinkingSetting::ProviderDefault,
+            })
+            .collect();
+        let (_, snapshots) = crate::providers::operation_metadata::fixed_context_snapshot(
+            &home,
+            &policy_profiles(&bootstrap.policy),
+        )
+        .unwrap();
+        let choices = RequestChoicesContext {
+            version: 1,
+            root_request: None,
+            authorized_connections: policy_profiles(&bootstrap.policy)
+                .into_iter()
+                .map(|(id, profile)| {
+                    let private = &snapshots[&id];
+                    AuthorizedConnection {
+                        profile,
+                        profile_name: private.profile_name.clone(),
+                        profile_uuid: private.context.profile_uuid.clone(),
+                        connection_generation: private.context.connection_generation.clone(),
+                        provider: private.profile.server.clone(),
+                    }
+                })
+                .collect(),
+        };
+        let (fixed_identity, _) = crate::providers::operation_metadata::fixed_context_snapshot(
+            &home,
+            &[("root".into(), None)],
+        )
+        .unwrap();
+        bootstrap.resolution.context.connection_context_identity =
+            request_connection_identity(&bootstrap.bindings, &fixed_identity, &choices).unwrap();
+        bootstrap.resolution.request_choices = Some(choices);
+        (
+            Context::new(bootstrap, context.session).unwrap(),
+            root,
+            guard,
+        )
+    }
+    fn choice_step() -> crate::RunStep {
+        serde_json::from_value(json!({"kind":"generate_audio", "args":[], "path":[{"Literal":"out.wav"}], "tool_params":{}, "ignore_tools":false, "produces_result":false,
+            "profile":{"Variable":"runtime.profile"}, "model":{"Variable":"runtime.model"}, "voice":{"Variable":"runtime.voice"}})).unwrap()
+    }
+    #[test]
+    fn fixed_prepare_step_preserves_binding_injection_and_conflict_detection() {
+        let (context, root, _guard) = fixture();
+        let context = bound_role_context(&context);
+        let mut step = choice_step();
+        step.kind = "agent".into();
+        step.profile = None;
+        step.model = None;
+        step.voice = None;
+        let (bound, _) = context.prepare_step(&step, &Value::Null).unwrap();
+        assert!(
+            matches!(bound.profile, Some(crate::RunArg::Literal(ref value)) if value == "fixture")
+        );
+        assert!(
+            matches!(bound.model, Some(crate::RunArg::Literal(ref value)) if value == "fixture")
+        );
+        step.model = Some(crate::RunArg::Literal("conflicting".into()));
+        assert!(context.prepare_step(&step, &Value::Null).is_err());
+        step.model = None;
+        step.request_choices = Some(json!({}));
+        assert!(context.prepare_step(&step, &Value::Null).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn request_choices_root_precedence_clear_and_default_mapping_before_admission() {
+        let (context, root, _guard) = request_choices_fixture();
+        let mut bootstrap = (*context.bootstrap).clone();
+        for selection in &mut bootstrap.policy.allowed {
+            selection.request_kind = RequestKind::Text;
+            if selection.profile.as_deref() == Some("alpha") {
+                selection.thinking = ThinkingSetting::Choice {
+                    value: "High".into(),
+                };
+            }
+        }
+        let call = &mut bootstrap.resolution.calls[0];
+        call.call_site.kind = CallKind::Root;
+        call.selection.as_mut().unwrap().request_kind = RequestKind::Text;
+        call.selection.as_mut().unwrap().thinking = ThinkingSetting::Off;
+        call.settings = BTreeMap::from([
+            ("temperature".into(), json!(0.7)),
+            ("thinking".into(), json!({"mode":"off"})),
+        ]);
+        bootstrap
+            .resolution
+            .request_choices
+            .as_mut()
+            .unwrap()
+            .root_request = Some(
+            serde_json::from_value(json!({
+                "profile":{"mode":"value","value":"alpha"},
+                "model":{"mode":"value","value":"A"},
+                "settings":{
+                    "thinking":{"mode":"value","value":{"mode":"choice","value":"High"}},
+                    "temperature":{"mode":"value","value":12.0}
+                }
+            }))
+            .unwrap(),
+        );
+        let bindings = bootstrap.bindings.clone();
+        let original_default = bootstrap.resolution.calls[0].clone();
+        assert!(!bootstrap
+            .policy
+            .allowed
+            .contains(original_default.selection.as_ref().unwrap()));
+        let context = Context::new(bootstrap.clone(), context.session.clone()).unwrap();
+        assert!(context.effective_request().is_none());
+        assert!(context.session.snapshot()["outcomes"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        let selected = context.prepare_root(None, None, None).unwrap();
+        let effective = selected.effective_request().unwrap();
+        assert_eq!(effective.selection.profile.as_deref(), Some("alpha"));
+        assert_eq!(
+            effective.selection.model,
+            ModelSelection::Named { value: "A".into() }
+        );
+        assert_eq!(
+            effective.selection.thinking,
+            ThinkingSetting::Choice {
+                value: "High".into()
+            }
+        );
+        assert_eq!(effective.settings["temperature"], 12.0);
+        assert_eq!(selected.bootstrap.bindings, bindings);
+        assert_eq!(selected.bootstrap.resolution.calls[0], original_default);
+        let explicit = context
+            .prepare_root(
+                Some("beta"),
+                Some("B"),
+                Some(&ThinkingSetting::ProviderDefault),
+            )
+            .unwrap();
+        let explicit = explicit.effective_request().unwrap();
+        assert_eq!(explicit.selection.profile.as_deref(), Some("beta"));
+        assert_eq!(
+            explicit.selection.model,
+            ModelSelection::Named { value: "B".into() }
+        );
+        assert_eq!(
+            explicit.selection.thinking,
+            ThinkingSetting::ProviderDefault
+        );
+        assert_eq!(explicit.settings["temperature"], 12.0);
+        bootstrap
+            .resolution
+            .request_choices
+            .as_mut()
+            .unwrap()
+            .root_request = Some(
+            serde_json::from_value(json!({
+                "profile":{"mode":"provider_default"},
+                "model":{"mode":"value","value":"C"},
+                "settings":{
+                    "thinking":{"mode":"provider_default"},
+                    "temperature":{"mode":"provider_default"}
+                }
+            }))
+            .unwrap(),
+        );
+        let cleared = Context::new(bootstrap, context.session.clone())
+            .unwrap()
+            .prepare_root(None, None, None)
+            .unwrap();
+        let effective = cleared.effective_request().unwrap();
+        assert_eq!(effective.selection.profile, None);
+        assert_eq!(
+            effective.selection.model,
+            ModelSelection::Named { value: "C".into() }
+        );
+        assert_eq!(
+            effective.selection.thinking,
+            ThinkingSetting::ProviderDefault
+        );
+        assert!(!effective.settings.contains_key("temperature"));
+        assert_eq!(
+            effective.settings["thinking"],
+            json!({"mode":"provider_default"})
+        );
+        assert_eq!(
+            cleared.effective.as_ref().unwrap().private.profile_name,
+            "fixture"
+        );
+        assert_eq!(
+            CURRENT.sync_scope(Some(cleared), || normalize_policy_profile(Some("fixture"))),
+            None
+        );
+        assert!(context.session.snapshot()["outcomes"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(context.bootstrap.bindings, bindings);
+        assert_eq!(context.bootstrap.resolution.calls[0], original_default);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn declared_child_freezes_own_defaults_without_host_root_patch() {
+        let (context, root, _guard) = request_choices_fixture();
+        let mut bootstrap = (*context.bootstrap).clone();
+        for selection in &mut bootstrap.policy.allowed {
+            selection.request_kind = RequestKind::Text;
+        }
+        let selected = bootstrap.policy.allowed[0].clone();
+        let call = &mut bootstrap.resolution.calls[0];
+        call.call_site.kind = CallKind::ToolChild;
+        call.selection = Some(selected.clone());
+        call.settings.clear();
+        bootstrap
+            .resolution
+            .request_choices
+            .as_mut()
+            .unwrap()
+            .root_request = Some(RequestChoicePatch {
+            model: Some(RequestChoice::Value {
+                value: json!("unapproved-root-only"),
+            }),
+            ..Default::default()
+        });
+        let child = Context::new(bootstrap, context.session.clone()).unwrap();
+        assert!(child.selected().is_err());
+        let child = child.prepare_declared_child().unwrap();
+        assert_eq!(child.selected().unwrap().selection, Some(selected.clone()));
+        assert_eq!(child.effective_request().unwrap().selection, selected);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn request_choices_freeze_concurrent_same_site_and_record_each_permit() {
+        let (context, root, _guard) = request_choices_fixture();
+        assert!(context.bootstrap.policy.allowed.iter().all(|grant| grant
+            != context.bootstrap.resolution.calls[0]
+                .selection
+                .as_ref()
+                .unwrap()));
+        let step = choice_step();
+        let mut joins = Vec::new();
+        for (profile, model, voice, token) in [
+            ("alpha", "A", "Ash", "isolated-alpha"),
+            ("beta", "B", "Cedar", "isolated-beta"),
+            ("fixture", "C", "Coral", "isolated-fixture"),
+        ] {
+            let mut step = step.clone();
+            if profile == "fixture" {
+                step.request_choices = Some(json!({"profile":{"mode":"provider_default"}}));
+            }
+            let (bound, request) = context
+                .prepare_step(
+                    &step,
+                    &json!({"runtime":{"profile":profile,"model":model,"voice":voice}}),
+                )
+                .unwrap();
+            assert!(
+                matches!(bound.voice, Some(crate::RunArg::Literal(ref value)) if value == voice)
+            );
+            let request_again = request.clone();
+            joins.push(tokio::spawn(async move {
+                request.scope(async {
+                    let selected = selected().unwrap().unwrap();
+                    assert_eq!(selected.settings["voice"], voice);
+                    let permit = admit_provider(crate::providers::ProviderKind::OpenAi, "http://127.0.0.1:1", token, None, model, RequestKind::Audio, &[], false,
+                        json!({"voice":voice,"format":"wav","thinking":{"mode":"provider_default"}})).await.unwrap().unwrap();
+                    tokio::task::yield_now().await;
+                    assert_eq!(request_again.selected().unwrap().settings["voice"], voice);
+                    permit.finish("completed", None);
+                }).await;
+            }));
+        }
+        for join in joins {
+            join.await.unwrap();
+        }
+        let snapshot = context.session.snapshot();
+        let outcomes = snapshot["outcomes"].as_array().unwrap();
+        assert_eq!(outcomes.len(), 3);
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|outcome| outcome["permit_id"].as_str().unwrap())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|outcome| outcome["effective_request"]["settings"]["voice"]
+                    .as_str()
+                    .unwrap())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["Ash", "Cedar", "Coral"])
+        );
+        assert_eq!(
+            context.bootstrap.resolution.calls[0].settings["voice"],
+            "default-voice"
+        );
+        assert!(context.effective.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn request_choices_deny_unapproved_selection_and_preserve_private_context() {
+        let (context, root, _guard) = request_choices_fixture();
+        let step = choice_step();
+        assert!(context
+            .prepare_step(
+                &step,
+                &json!({"runtime":{"profile":"unapproved","model":"A","voice":"Ash"}})
+            )
+            .is_err());
+        let (_, request) = context
+            .prepare_step(
+                &step,
+                &json!({"runtime":{"profile":"alpha","model":"A","voice":"Ash"}}),
+            )
+            .unwrap();
+        let effective = request.effective_request().unwrap();
+        let validated = context.validate_effective_request(&effective).unwrap();
+        assert_eq!(validated.effective_request(), Some(effective.clone()));
+        let mut forged = effective;
+        forged.selection.model = ModelSelection::Named {
+            value: "unapproved".into(),
+        };
+        assert!(context.validate_effective_request(&forged).is_err());
+        let mut drifted_locator = request.clone();
+        drifted_locator.locator.site = "different-site".into();
+        assert!(drifted_locator.selected().is_err());
+        assert!(drifted_locator.effective_request().is_none());
+        let bad = request
+            .scope(admit_provider(
+                crate::providers::ProviderKind::OpenAi,
+                "http://127.0.0.1:1",
+                "isolated-beta",
+                None,
+                "A",
+                RequestKind::Audio,
+                &[],
+                false,
+                json!({"voice":"Ash","format":"wav","thinking":{"mode":"provider_default"}}),
+            ))
+            .await;
+        assert!(bad.is_err());
+        assert!(context.session.snapshot()["outstanding"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+        assert!(context.session.snapshot()["outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|outcome| outcome["state"] == "not_dispatched"));
+        context.session.cancel();
+        assert!(request.selected().is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn request_choices_container_format_clearing_and_required_model_are_explicit() {
+        let (context, root, _guard) = request_choices_fixture();
+        let mut step = choice_step();
+        step.path = Some(vec![crate::RunArg::Variable("runtime.paths.0".into())]);
+        step.request_choices = Some(json!({"settings":{"format":{"mode":"provider_default"}}}));
+        let data =
+            json!({"runtime":{"profile":"alpha","model":"A","voice":"Ash","paths":["out.mp3"]}});
+        let (bound, request) = context.prepare_step(&step, &data).unwrap();
+        assert_eq!(request.selected().unwrap().settings["format"], "mp3");
+        assert!(
+            matches!(&bound.path.as_ref().unwrap()[0], crate::RunArg::Literal(path) if path == "out.mp3")
+        );
+        step.request_choices = Some(json!({"settings":{"format":{"mode":"value","value":"wav"}}}));
+        assert_eq!(
+            context.prepare_step(&step, &data).unwrap_err(),
+            "role.request_conflict"
+        );
+        step.request_choices =
+            Some(json!({"settings":{"temperature":{"mode":"provider_default"}}}));
+        assert_eq!(
+            context.prepare_step(&step, &data).unwrap_err(),
+            "role.unsupported_request_setting"
+        );
+        let mut bootstrap = (*context.bootstrap).clone();
+        bootstrap
+            .policy
+            .allowed
+            .iter_mut()
+            .filter(|selection| selection.profile.as_deref() == Some("alpha"))
+            .for_each(|selection| selection.model = ModelSelection::ProviderDefault {});
+        let context = Context::new(bootstrap, context.session.clone()).unwrap();
+        step.request_choices = Some(json!({"model":{"mode":"provider_default"}}));
+        assert_eq!(
+            context.prepare_step(&step, &data).unwrap_err(),
+            "role.provider_default_model_unsupported"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn request_patch_clearing_and_nested_variables_are_exact() {
+        let temperature: RequestChoicePatch = serde_json::from_value(
+            json!({"settings":{"temperature":{"mode":"value","value":12.0}}}),
+        )
+        .unwrap();
+        temperature.validate_root().unwrap();
+        assert!(validate_request_settings(
+            RequestKind::Text,
+            &BTreeMap::from([("temperature".into(), json!(12.0))])
+        )
+        .is_ok());
+        assert!(validate_request_settings(
+            RequestKind::Text,
+            &BTreeMap::from([("temperature".into(), json!(-0.1))])
+        )
+        .is_err());
+        let patch: RequestChoicePatch = serde_json::from_value(json!({"profile":{"mode":"provider_default"}, "model":{"mode":"provider_default"}, "settings":{
+            "voice":{"mode":"provider_default"}, "thinking":{"mode":"value","value":{"mode":"choice","value":{"var":"runtime.thinking.0"}}}}})).unwrap();
+        patch.validate().unwrap();
+        assert!(patch.validate_root().is_err());
+        let mut call = ResolvedCall {
+            call_site: serde_json::from_value(json!({"id":"audio","locator":{"definition":"a.json","site":"root"},"kind":"audio","requirements":{"operation":"speech_generation"}})).unwrap(),
+            selection: Some(AllowedSelection { profile: Some("old".into()), request_kind: RequestKind::Audio, model: ModelSelection::Named { value:"old".into() }, thinking: ThinkingSetting::Off }),
+            settings: BTreeMap::from([("voice".into(), json!("old"))]), compatibility: Compatibility::Unknown, reason: "test".into(), evidence: vec![],
+        };
+        apply_patch(&mut call, &patch, &json!({"runtime":{"thinking":["High"]}})).unwrap();
+        let selection = call.selection.unwrap();
+        assert_eq!(selection.profile, None);
+        assert_eq!(selection.model, ModelSelection::ProviderDefault {});
+        assert_eq!(
+            selection.thinking,
+            ThinkingSetting::Choice {
+                value: "High".into()
+            }
+        );
+        assert!(!call.settings.contains_key("voice"));
+        assert!(serde_json::from_value::<RequestChoicePatch>(
+            json!({"profile":{"mode":"provider_default","value":"bad"}})
+        )
+        .is_err());
     }
     async fn request(
         url: &str,

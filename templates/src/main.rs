@@ -3221,7 +3221,14 @@ async fn main() {
     let cmd_args = args::build_cli();
     if cmd_args.get_flag("native_role_child") {
         match role_transport::native_child_start() {
-            Ok(context)=>{context.scope(async{run_with_matches(cmd_args).await;let _=role_runtime::finish_native(true);}).await;return;},
+            Ok(context)=>{
+                let context = match context.prepare_root(
+                    cmd_args.get_one::<String>("profile").map(String::as_str),
+                    cmd_args.get_one::<String>("model").map(String::as_str),
+                    runtime_thinking::invocation_setting(&cmd_args).as_ref(),
+                ) { Ok(context) => context, Err(error) => {eprintln!("{error}");context.scope(async {let _=role_runtime::finish_native(false);}).await;std::process::exit(1);} };
+                context.scope(async{run_with_matches(cmd_args).await;let _=role_runtime::finish_native(true);}).await;return;
+            },
             Err(error)=>{eprintln!("{error}");std::process::exit(1);},
         }
     }
@@ -4536,7 +4543,8 @@ async fn run_matching_action_steps(
         let original_step_index = action.run.iter().position(|candidate| std::ptr::eq(candidate, step)).expect("matched source step");
         // Keep the large branch future off the stack through nested task-local scopes.
         let step_result = crate::role_runtime::scope_step(format!("actions.{action_index}.run.{original_step_index}"), Box::pin(async {
-        let bound_step = crate::role_runtime::apply_step(step)?;
+        let (bound_step, effective_context) = crate::role_runtime::prepare_step(step, &action_data)?;
+        crate::role_runtime::scope(effective_context, Box::pin(async {
         let step = &bound_step;
         if step.kind.eq_ignore_ascii_case("exec") {
             run_exec_step(
@@ -4624,6 +4632,7 @@ async fn run_matching_action_steps(
             );
             Ok((StepExecutionOutcome::SoftFailureLogged, None))
         }
+        })).await
         })).await;
 
         match step_result {

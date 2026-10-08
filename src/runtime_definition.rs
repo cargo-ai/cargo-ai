@@ -869,12 +869,19 @@ fn parse_actions(
                 crate::definition_validation::THINKING_SCHEMA_VERSION
                     | crate::definition_validation::RESULT_SCHEMA_VERSION
                     | crate::definition_validation::NATIVE_ROLE_SCHEMA_VERSION
+                    | crate::definition_validation::REQUEST_CHOICES_SCHEMA_VERSION
             )
         });
     let native_roles_enabled = root_obj
         .get(crate::definition_validation::VERSION_KEY)
         .and_then(Value::as_str)
-        == Some(crate::definition_validation::NATIVE_ROLE_SCHEMA_VERSION);
+        .is_some_and(|version| {
+            matches!(
+                version,
+                crate::definition_validation::NATIVE_ROLE_SCHEMA_VERSION
+                    | crate::definition_validation::REQUEST_CHOICES_SCHEMA_VERSION
+            )
+        });
     let mut parsed = Vec::with_capacity(actions.len());
     for (action_index, raw_action) in actions.iter().enumerate() {
         let action_path = format!("$.actions[{action_index}]");
@@ -972,6 +979,7 @@ fn parse_run_step(
             reject_agent_only_field(run_obj, "usage_log", path)?;
             Ok(crate::RunStep {
                 kind,
+                request_choices: run_obj.get("request_choices").cloned(),
                 program: Some(required_non_empty_string(run_obj, "program", path)?),
                 model: None,
                 thinking: thinking.clone(),
@@ -1005,6 +1013,7 @@ fn parse_run_step(
             reject_agent_only_field(run_obj, "usage_log", path)?;
             Ok(crate::RunStep {
                 kind,
+                request_choices: run_obj.get("request_choices").cloned(),
                 program: None,
                 model: None,
                 thinking: thinking.clone(),
@@ -1044,6 +1053,7 @@ fn parse_run_step(
             }
             Ok(crate::RunStep {
                 kind,
+                request_choices: run_obj.get("request_choices").cloned(),
                 program: None,
                 model: None,
                 thinking: thinking.clone(),
@@ -1078,6 +1088,7 @@ fn parse_run_step(
             reject_agent_only_field(run_obj, "usage_log", path)?;
             Ok(crate::RunStep {
                 kind,
+                request_choices: run_obj.get("request_choices").cloned(),
                 program: None,
                 model: None,
                 thinking: thinking.clone(),
@@ -1124,6 +1135,7 @@ fn parse_run_step(
 
             Ok(crate::RunStep {
                 kind,
+                request_choices: run_obj.get("request_choices").cloned(),
                 program: None,
                 model: optional_string_run_arg(run_obj, "model", path)?,
                 thinking: thinking.clone(),
@@ -1166,7 +1178,7 @@ fn parse_run_step(
                 validate_audio_extension(&literal_path, format!("{path}.path").as_str(), "generated audio output")?;
             }
             Ok(crate::RunStep {
-                kind, program: None,
+                kind, request_choices: run_obj.get("request_choices").cloned(), program: None,
                 model: optional_string_run_arg(run_obj, "model", path)?,
                 thinking: thinking.clone(),
                 profile: optional_string_run_arg(run_obj, "profile", path)?,
@@ -1187,7 +1199,7 @@ fn parse_run_step(
             let output_variable = optional_capture_name(run_obj, "output_variable", path)?
                 .ok_or_else(|| format!("{path}.output_variable: required for `transcribe_audio` actions"))?;
             Ok(crate::RunStep {
-                kind, program: None,
+                kind, request_choices: run_obj.get("request_choices").cloned(), program: None,
                 model: optional_string_run_arg(run_obj, "model", path)?,
                 thinking: thinking.clone(),
                 profile: optional_string_run_arg(run_obj, "profile", path)?,
@@ -1389,6 +1401,7 @@ fn reject_media_step_fields(
         "failure_mode",
         "status_variable",
         "error_variable",
+        "request_choices",
     ];
     for field in run_obj.keys() {
         if !SHARED.contains(&field.as_str()) && !kind_fields.contains(&field.as_str()) {

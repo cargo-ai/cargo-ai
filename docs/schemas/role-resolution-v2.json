@@ -1,0 +1,776 @@
+{
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 2
+    },
+    "identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Authority identity of exact declared requirements, bindings, context, scope, selections and readiness. Runtime7 excludes advisory evidence/status/freshness."
+    },
+    "binding_revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "binding_identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "context": {
+      "type": "object",
+      "properties": {
+        "project_identity": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "environment_identity": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "package_identity": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "runtime_contract": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "connection_context_identity": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "consent_identity": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "project_identity",
+        "environment_identity",
+        "package_identity",
+        "runtime_contract",
+        "connection_context_identity",
+        "consent_identity"
+      ],
+      "additionalProperties": false
+    },
+    "scope": {
+      "$ref": "role-contract-v1.json#/$defs/role_context"
+    },
+    "calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "call_site": {
+            "$ref": "role-contract-v1.json#/$defs/call_site"
+          },
+          "selection": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "action-execution-policy-v1.json#/$defs/selection"
+              }
+            ]
+          },
+          "settings": {
+            "$ref": "role-contract-v1.json#/$defs/settings"
+          },
+          "compatibility": {
+            "enum": [
+              "compatible",
+              "incompatible",
+              "unknown",
+              "stale",
+              "unavailable"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "role-contract-v1.json#/$defs/capability_evidence"
+            }
+          }
+        },
+        "required": [
+          "call_site",
+          "selection",
+          "settings",
+          "compatibility",
+          "reason",
+          "evidence"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "required_selections": {
+      "type": "array",
+      "items": {
+        "$ref": "action-execution-policy-v1.json#/$defs/selection"
+      },
+      "description": "Resolved default selections; request version 4 may independently authorize alternatives through its execution policy and native protected connection snapshots."
+    },
+    "ready": {
+      "type": "boolean",
+      "description": "Structural default resolution readiness, not execution permission. Effective choices are validated independently for each generation."
+    },
+    "execution_authorized": {
+      "const": false
+    },
+    "invocation_access": {
+      "const": "unverified"
+    },
+    "request_choices": {
+      "$ref": "#/$defs/request_choices_context"
+    }
+  },
+  "required": [
+    "version",
+    "identity",
+    "binding_revision",
+    "binding_identity",
+    "context",
+    "scope",
+    "calls",
+    "required_selections",
+    "ready",
+    "execution_authorized",
+    "invocation_access",
+    "request_choices"
+  ],
+  "additionalProperties": true,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/role-resolution-v2.json",
+  "title": "Cargo AI per-generation native role resolution v2",
+  "$comment": "Native-derived resolution for action request 4. Protected connection references contain no credentials and cannot be supplied as authority by business inputs. Runtime additionally enforces UTF-8 byte bounds, validated connection snapshots and exact execution policy. Advisory evidence does not change the authority identity.",
+  "$defs": {
+    "request_choice_patch": {
+      "type": "object",
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/string_choice"
+        },
+        "model": {
+          "$ref": "#/$defs/string_choice"
+        },
+        "settings": {
+          "type": "object",
+          "properties": {
+            "thinking": {
+              "$ref": "#/$defs/thinking_choice"
+            },
+            "voice": {
+              "$ref": "#/$defs/string_choice"
+            },
+            "format": {
+              "$ref": "#/$defs/string_choice"
+            },
+            "temperature": {
+              "$ref": "#/$defs/temperature_choice"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "description": "Omitted fields inherit saved role defaults; provider_default explicitly clears a saved choice. Variable references resolve from each execution\u2019s business data. These choices never grant execution permission."
+    },
+    "request_choices_context": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "authorized_connections": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "object",
+            "properties": {
+              "profile": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "profile_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "profile_uuid": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "connection_generation": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "provider": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            },
+            "required": [
+              "profile",
+              "profile_name",
+              "profile_uuid",
+              "connection_generation",
+              "provider"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "root_request": {
+          "$ref": "#/$defs/root_request_choice_patch"
+        }
+      },
+      "required": [
+        "version",
+        "authorized_connections"
+      ],
+      "additionalProperties": false
+    },
+    "effective_request": {
+      "type": "object",
+      "properties": {
+        "selection": {
+          "$ref": "action-execution-policy-v1.json#/$defs/selection"
+        },
+        "settings": {
+          "type": "object",
+          "properties": {
+            "thinking": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "const": "provider_default"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "const": "choice"
+                    },
+                    "value": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "mode",
+                    "value"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "const": "on"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "const": "off"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "voice": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "format": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "temperature": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "selection",
+        "settings"
+      ],
+      "additionalProperties": false
+    },
+    "string_choice": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "value"
+            },
+            "value": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "var": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
+                    }
+                  },
+                  "required": [
+                    "var"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "provider_default"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "thinking_choice": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "value"
+            },
+            "value": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "var": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
+                    }
+                  },
+                  "required": [
+                    "var"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "provider_default"
+                        }
+                      },
+                      "required": [
+                        "mode"
+                      ],
+                      "additionalProperties": true
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "choice"
+                        },
+                        "value": {
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 1024
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "var": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 1024
+                                }
+                              },
+                              "required": [
+                                "var"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "mode",
+                        "value"
+                      ],
+                      "additionalProperties": true
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "on"
+                        }
+                      },
+                      "required": [
+                        "mode"
+                      ],
+                      "additionalProperties": true
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "off"
+                        }
+                      },
+                      "required": [
+                        "mode"
+                      ],
+                      "additionalProperties": true
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "provider_default"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "temperature_choice": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "value"
+            },
+            "value": {
+              "oneOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "var": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
+                    }
+                  },
+                  "required": [
+                    "var"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "provider_default"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "literal_string_choice": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "value"
+            },
+            "value": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                }
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "provider_default"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "literal_thinking_choice": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "value"
+            },
+            "value": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                },
+                {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "provider_default"
+                        }
+                      },
+                      "required": [
+                        "mode"
+                      ],
+                      "additionalProperties": true
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "choice"
+                        },
+                        "value": {
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 1024
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "mode",
+                        "value"
+                      ],
+                      "additionalProperties": true
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "on"
+                        }
+                      },
+                      "required": [
+                        "mode"
+                      ],
+                      "additionalProperties": true
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "const": "off"
+                        }
+                      },
+                      "required": [
+                        "mode"
+                      ],
+                      "additionalProperties": true
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "provider_default"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "literal_temperature_choice": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "value"
+            },
+            "value": {
+              "oneOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                }
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "provider_default"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "root_request_choice_patch": {
+      "type": "object",
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/literal_string_choice"
+        },
+        "model": {
+          "$ref": "#/$defs/literal_string_choice"
+        },
+        "settings": {
+          "type": "object",
+          "properties": {
+            "thinking": {
+              "$ref": "#/$defs/literal_thinking_choice"
+            },
+            "voice": {
+              "$ref": "#/$defs/literal_string_choice"
+            },
+            "format": {
+              "$ref": "#/$defs/literal_string_choice"
+            },
+            "temperature": {
+              "$ref": "#/$defs/literal_temperature_choice"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "description": "Host root choices use literal values. Omission inherits; provider_default clears the saved choice. Native policy independently authorizes each effective selection."
+    }
+  }
+}

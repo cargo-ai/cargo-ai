@@ -1022,7 +1022,8 @@
         "supported_request_versions": {
           "const": [
             2,
-            3
+            3,
+            4
           ]
         },
         "role_registry": {

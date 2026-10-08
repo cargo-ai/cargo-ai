@@ -21,6 +21,7 @@ const WAV: &[u8] = b"RIFF\x26\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x0
 struct Provider {
     url: String,
     requests: Arc<Mutex<Vec<(String, Value)>>>,
+    rejected_voice: Arc<Mutex<Option<String>>>,
     stop: mpsc::Sender<()>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -34,6 +35,8 @@ impl Provider {
         );
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
+        let rejected_voice: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let rejection = rejected_voice.clone();
         let (stop, stopped) = mpsc::channel();
         let worker = thread::spawn(move || {
             while stopped.try_recv().is_err() {
@@ -73,10 +76,19 @@ impl Provider {
                 };
                 let speech = headers.starts_with("POST /v1/audio/speech ");
                 let image = headers.starts_with("POST /v1/images/generations ");
-                captured
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                let rejected = rejection
                     .lock()
                     .unwrap()
-                    .push((headers, serde_json::from_slice(&body).unwrap()));
+                    .as_deref()
+                    .is_some_and(|voice| body["voice"].as_str() == Some(voice));
+                captured.lock().unwrap().push((headers, body));
+                if rejected {
+                    let response = br#"{"error":{"message":"synthetic voice rejection","type":"invalid_request_error","code":"invalid_voice"}}"#;
+                    write!(socket, "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response.len()).unwrap();
+                    socket.write_all(response).unwrap();
+                    continue;
+                }
                 let (kind, response) = if speech {
                     ("audio/wav", WAV.to_vec())
                 } else if image {
@@ -98,9 +110,13 @@ impl Provider {
         Self {
             url,
             requests,
+            rejected_voice,
             stop,
             worker: Some(worker),
         }
+    }
+    fn reject_voice(&self, voice: Option<&str>) {
+        *self.rejected_voice.lock().unwrap() = voice.map(str::to_owned);
     }
     fn take(&self) -> Vec<(String, Value)> {
         std::mem::take(&mut *self.requests.lock().unwrap())
@@ -478,6 +494,7 @@ enum Control {
     DenyAfter(usize),
     EofAfter(usize),
     OverlapChildren,
+    OverlapAudio,
 }
 struct Run {
     success: bool,
@@ -563,6 +580,20 @@ fn invoke_reference_in_dir(
                 if let Some(value) = value.filter(|v| v["protocol"] == "cargo_ai_native_role") {
                     if value["type"] == "admit" {
                         let permit_id = format!("permit-{admitted}");
+                        if matches!(control, Control::OverlapAudio)
+                            && value["boundary"]["call_site"] == "dynamic-speech"
+                        {
+                            pending_siblings.push(json!({"protocol":"cargo_ai_native_role","version":1,"type":"admission","request_id":value["request_id"],"allowed":true,"permit_id":permit_id}));
+                            admitted += 1;
+                            frames.push(value);
+                            if pending_siblings.len() == 3 {
+                                overlapped = true;
+                                for reply in pending_siblings.drain(..) {
+                                    writeln!(stdin.as_mut().unwrap(), "{reply}").unwrap();
+                                }
+                            }
+                            continue;
+                        }
                         if matches!(control, Control::OverlapChildren) {
                             launch_sites.insert(
                                 permit_id.clone(),
@@ -589,7 +620,9 @@ fn invoke_reference_in_dir(
                             }
                         }
                         let allowed = match control {
-                            Control::Allow | Control::OverlapChildren => true,
+                            Control::Allow | Control::OverlapChildren | Control::OverlapAudio => {
+                                true
+                            }
                             Control::DenyAfter(n) | Control::EofAfter(n) => admitted < n,
                         };
                         if !allowed && matches!(control, Control::EofAfter(_)) {
@@ -615,6 +648,9 @@ fn invoke_reference_in_dir(
     diagnostics.push_str(&errors.join().unwrap());
     if matches!(control, Control::OverlapChildren) {
         assert!(overlapped, "both identical child sources must be live before either provider admission completes: {frames:?}");
+    }
+    if matches!(control, Control::OverlapAudio) {
+        assert!(overlapped, "three audio occurrences at the same source site must await admission together: {frames:?}");
     }
     Run {
         success: status.success(),
@@ -2591,4 +2627,496 @@ fn native_target_build_preserves_source_backed_role_tool_inventory() {
         provider.take().is_empty(),
         "target build/discovery/resolution must issue zero provider HTTP requests"
     );
+}
+
+#[cfg(unix)]
+fn request_choice_definitions(
+    fixture: &Fixture,
+    child_artifact: Option<&Path>,
+    inference_artifact: Option<&Path>,
+) {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = fixture.root.join(".cargo-ai/tools/prepare");
+    fs::create_dir_all(directory.join("bin")).unwrap();
+    let source = fixture.root.join("tools/prepare");
+    fs::create_dir_all(source.join("src")).unwrap();
+    fs::write(
+        source.join("Cargo.toml"),
+        "[package]\nname='prepare'\nversion='0.1.0'\nedition='2021'\n[workspace]\n",
+    )
+    .unwrap();
+    fs::write(
+        source.join("Cargo.lock"),
+        "version = 3\n\n[[package]]\nname = \"prepare\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    fs::write(
+        fixture.root.join(".cargo-ai/project.toml"),
+        "[project]\nname='request-choice-fixture'\n",
+    )
+    .unwrap();
+    let rustc = Command::new("rustc").arg("-vV").output().unwrap();
+    let rustc = String::from_utf8(rustc.stdout).unwrap();
+    let target = rustc
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .unwrap();
+    let describe = json!({"protocol_version":1,"supported_protocol_versions":[1,2],"name":"prepare","description":"Compute and forward narration business choices","params":{"choice":{"type":"string","required":true}},"result":{"type":"string","nullable":true},"resource_profile":{"network":"none","filesystem_read":"none","filesystem_write":"required","subprocess":"none","env_read":"none","credential_access":"none"},"self_test":{"supported":false,"safe":false},"examples":{"minimal_invoke":{"protocol_version":1,"params":{"choice":"Ash"}},"full_invoke":{"protocol_version":1,"params":{"choice":"Coral"}}}});
+    fs::write(
+        directory.join("tool.json"),
+        json!({"schema_version":1,"tool_id":"prepare","source":{"manifest_path":"tools/prepare/Cargo.toml"},"binary":{"default_name":"prepare"},"artifacts":{target:{"path":"bin/prepare"}}})
+            .to_string(),
+    )
+    .unwrap();
+    // The tool computes public business values; native code alone resolves credentials/policy.
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = describe ]; then printf '%s\n' '{}'; exit 0; fi
+IFS= read -r invocation || exit 2
+case "$invocation" in
+  *Ash*) voice=ash; profile=a; model=speech-a;;
+  *Cedar*) voice=cedar; profile=b; model=speech-b;;
+  *Coral*) voice=coral; profile=a; model=speech-a;;
+  *) exit 3;;
+esac
+printf '%s\n' "$invocation" > "prepare-$voice.json"
+printf '{{"protocol_version":2,"type":"child_request","request_id":"narrate","call_site":"voice-child","inputs":{{"voice":"%s","selected_profile":"%s","selected_model":"%s"}}}}\n' "$voice" "$profile" "$model"
+IFS= read -r reply || exit 4
+printf '%s\n' "$reply" > "prepare-$voice-result.json"
+printf '%s\n' '{{"protocol_version":2,"type":"result","result":"prepared"}}'
+"#,
+        describe
+    );
+    fs::write(source.join("src/main.rs"), format!(r##"use std::io::{{self, BufRead, Write}};
+fn main() {{
+    if std::env::args().nth(1).as_deref() == Some("describe") {{ println!("{{}}", r#"{describe}"#); return; }}
+    let mut input = io::stdin().lock();
+    let mut invocation = String::new(); input.read_line(&mut invocation).unwrap();
+    let (voice, profile, model) = if invocation.contains("Cedar") {{ ("cedar", "b", "speech-b") }} else if invocation.contains("Coral") {{ ("coral", "a", "speech-a") }} else {{ ("ash", "a", "speech-a") }};
+    println!("{{}}", format!(r#"{{{{"protocol_version":2,"type":"child_request","request_id":"narrate","call_site":"voice-child","inputs":{{{{"voice":"{{}}","selected_profile":"{{}}","selected_model":"{{}}"}}}}}}}}"#, voice, profile, model));
+    io::stdout().flush().unwrap();
+    let mut reply = String::new(); input.read_line(&mut reply).unwrap();
+    println!("{{}}", r#"{{"protocol_version":2,"type":"result","result":"prepared"}}"#);
+}}
+"##)).unwrap();
+    fs::write(directory.join("bin/prepare"), script).unwrap();
+    fs::set_permissions(
+        directory.join("bin/prepare"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let child = json!({"agent_definition_schema_version":"2026-10-08.r1","agent_schema":{"type":"object","properties":{}},"runtime_vars":{"voice":{"type":"string","default":"alloy"},"selected_profile":{"type":"string","default":"a"},"selected_model":{"type":"string","default":"unapproved-default"}},"actions":[{"name":"narrate","logic":{"==":[1,1]},"run":[{"kind":"generate_audio","text":["Computed narration: ",{"var":"runtime.voice"}],"path":["./",{"var":"runtime.voice"},".wav"],"voice":{"var":"runtime.voice"},"profile":{"var":"runtime.selected_profile"},"model":{"var":"runtime.selected_model"},"request_choices":{"settings":{"thinking":{"mode":"provider_default"}}}}]}]});
+    fs::write(fixture.root.join("choice-child.json"), child.to_string()).unwrap();
+    fs::write(fixture.root.join("inference-child.json"), json!({"agent_definition_schema_version":"2026-10-08.r1","inputs":[{"type":"text","text":"An explicitly selected child request"}],"agent_schema":{"type":"object","properties":{"status":{"type":"string"}}},"actions":[]}).to_string()).unwrap();
+    let inference_target = inference_artifact
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("inference-child.json");
+    let mut actions: Vec<_> = ["Ash", "Cedar", "Coral"].iter().map(|voice| json!({"name":voice,"logic":{"==":[1,1]},"run":[{"kind":"tool","name":"prepare","params":{"choice":voice}}]})).collect();
+    actions.push(json!({"name":"explicit-child","logic":{"==":[1,1]},"run":[{"kind":"agent","artifact":format!("./{inference_target}"),"profile":"b","request_choices":{"model":{"mode":"value","value":"text-child-b"}},"thinking":{"mode":"choice","value":"Custom-Child"}}]}));
+    fs::write(fixture.root.join("root.json"), json!({"agent_definition_schema_version":"2026-10-08.r1","agent_schema":{"type":"object","properties":{}},"action_execution":"parallel","actions":actions}).to_string()).unwrap();
+    let mut launch = json!({"id":"voice-child","locator":{"definition":"root.json","site":"tools.prepare.voice-child"},"kind":"tool_child","target":"choice-child.json","requirements":{"operation":"text_generation"},"input_schema":{"type":"object","properties":{"voice":{"type":"string"},"selected_profile":{"type":"string"},"selected_model":{"type":"string"}},"required":["voice","selected_profile","selected_model"],"additionalProperties":false}});
+    if let Some(artifact) = child_artifact {
+        launch["artifact"] = json!(artifact.file_name().unwrap().to_str().unwrap());
+    }
+    let speech = json!({"operation":"speech_generation","input_modalities":["text"],"settings":{"voice":["alloy"],"format":["wav"],"thinking":[{"mode":"choice","value":"saved-default"}]}});
+    let mut tool_files = vec![
+        "tools/prepare/Cargo.toml",
+        "tools/prepare/Cargo.lock",
+        "tools/prepare/src/main.rs",
+    ];
+    tool_files.sort();
+    let text =
+        json!({"operation":"text_generation","input_modalities":["text"],"structured_output":true});
+    let mut inference_launch = json!({"id":"inference-launch","locator":{"definition":"root.json","site":"actions.3.run.0"},"kind":"child","role":"writer","target":"inference-child.json","requirements":text});
+    if inference_artifact.is_some() {
+        inference_launch["artifact"] = json!(inference_target);
+    }
+    fs::write(fixture.root.join("cargo-ai-actions.json"), json!({"schema_version":3,"actions":[{"id":"narrate","target":"root.json","input_schema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"mappings":{}}],"interfaces":[{"id":"fixture","actions":["narrate"]}],"role_registry":{"version":1,"roles":[{"id":"narrator","label":"Narrator","purpose":"Per-generation narration defaults","requirements":speech},{"id":"writer","label":"Writer","purpose":"Child defaults","requirements":text}],"call_sites":[launch,{"id":"dynamic-speech","locator":{"definition":"choice-child.json","site":"actions.0.run.0"},"kind":"audio","role":"narrator","requirements":speech},inference_launch,{"id":"inference-root","locator":{"definition":"inference-child.json","site":"root"},"kind":"root","role":"writer","requirements":text}],"contexts":[{"key":{"action":"narrate","interface":"fixture","mode":"default"},"call_sites":["voice-child","dynamic-speech","inference-launch","inference-root"],"resources":[],"data_scopes":[],"limits":{"max_runtime_secs":30,"max_output_tokens":256,"max_agent_depth":4}}],"tool_content":{"prepare":tool_files}}}).to_string()).unwrap();
+}
+
+#[cfg(unix)]
+fn request_choice_bootstrap(fixture: &Fixture, allow_b: bool) -> Value {
+    let discovered = machine(fixture, &["actions", "list", "--project", "."], None);
+    let selection = |profile: &str, model: &str| json!({"profile":profile,"request_kind":"audio","model":{"kind":"named","value":model},"thinking":{"mode":"provider_default"}});
+    let mut allowed = vec![selection("a", "speech-a")];
+    if allow_b {
+        allowed.push(selection("b", "speech-b"));
+        allowed.push(json!({"profile":"b","request_kind":"text","model":{"kind":"named","value":"text-child-b"},"thinking":{"mode":"choice","value":"Custom-Child"}}));
+    }
+    let limits = json!({"max_runtime_secs":30,"max_output_tokens":256,"max_agent_depth":4});
+    let bindings = json!({"version":1,"revision":"request-choices","bindings":[{"role":"narrator","profile":"a","profile_uuid":fixture.contexts[0]["profile_uuid"],"connection_generation":fixture.contexts[0]["connection_generation"],"provider":"openai","model":"unapproved-default","settings":{"voice":"alloy","format":"wav","thinking":{"mode":"choice","value":"saved-default"}}},{"role":"writer","profile":"a","profile_uuid":fixture.contexts[0]["profile_uuid"],"connection_generation":fixture.contexts[0]["connection_generation"],"provider":"openai","model":"unapproved-text-default","settings":{"thinking":{"mode":"choice","value":"saved-default"}}}]});
+    let request = json!({"schema_version":4,"interface":"fixture","action":"narrate","inputs":{},"expected_binding":discovered["binding"],"execution_policy":{"version":1,"allowed":allowed,"limits":limits},"attachment_grants":{},"role_execution":{"mode":"default","binding_revision":bindings}});
+    let resolution = machine(
+        fixture,
+        &[
+            "actions",
+            "resolve",
+            "--project",
+            ".",
+            "--interface",
+            "fixture",
+            "--action",
+            "narrate",
+            "--request-stdin",
+        ],
+        Some(&request),
+    );
+    assert_eq!(resolution["version"], 2);
+    assert_eq!(
+        resolution["ready"], true,
+        "native request4 resolution: {resolution}"
+    );
+    assert_eq!(resolution["execution_authorized"], false);
+    assert_eq!(
+        resolution["request_choices"]["authorized_connections"]
+            .as_array()
+            .unwrap()
+            .len(),
+        if allow_b { 2 } else { 1 }
+    );
+    let mut contents = serde_json::Map::new();
+    let mut names = vec![
+        "root.json".to_owned(),
+        "choice-child.json".to_owned(),
+        "inference-child.json".to_owned(),
+        "tools/prepare/Cargo.toml".to_owned(),
+        "tools/prepare/Cargo.lock".to_owned(),
+        "tools/prepare/src/main.rs".to_owned(),
+        "cargo-ai-actions.json".to_owned(),
+        ".cargo-ai/tools/prepare/tool.json".to_owned(),
+        ".cargo-ai/tools/prepare/bin/prepare".to_owned(),
+    ];
+    for call in resolution["calls"].as_array().unwrap() {
+        if let Some(artifact) = call["call_site"]["artifact"].as_str() {
+            names.push(artifact.into());
+        }
+    }
+    for name in names {
+        let path = fixture.root.join(name);
+        contents.insert(
+            path.to_str().unwrap().into(),
+            json!(format!("{:x}", Sha256::digest(fs::read(path).unwrap()))),
+        );
+    }
+    json!({"version":2,"resolution":resolution,"bindings":bindings,"policy":request["execution_policy"],"definition":"root.json","package_root":fixture.root,"content_identities":contents,"invocation_id":"isolated-request-choices","binding_revision":"request-choices","parent_permit_id":"fixture-parent"})
+}
+
+#[cfg(unix)]
+fn exercise_request_choices(emitted: bool) {
+    let provider = Provider::new();
+    let mut fixture = Fixture::new(&provider);
+    request_choice_definitions(&fixture, None, None);
+    let executable = if emitted {
+        let child = fixture.hatch("request-child", "choice-child.json");
+        fs::copy(&child, fixture.root.join(child.file_name().unwrap())).unwrap();
+        let inference = fixture.hatch("request-inference", "inference-child.json");
+        fs::copy(
+            &inference,
+            fixture.root.join(inference.file_name().unwrap()),
+        )
+        .unwrap();
+        request_choice_definitions(&fixture, Some(&child), Some(&inference));
+        fixture.hatch("request-root", "root.json")
+    } else {
+        PathBuf::from(CLI)
+    };
+    fixture.contexts = [fixture.refresh("a"), fixture.refresh("b")];
+    let bootstrap = request_choice_bootstrap(&fixture, true);
+    let unchanged = bootstrap.clone();
+    let run = invoke(&fixture, &executable, bootstrap, Control::OverlapAudio);
+    assert_success(&run);
+    let requests = provider.take();
+    assert_eq!(
+        requests.len(),
+        4,
+        "three authorized audio requests and the explicitly selected inference child dispatch"
+    );
+    let mut voices = Vec::new();
+    let child_requests: Vec<_> = requests
+        .iter()
+        .filter(|(headers, _)| headers.starts_with("POST /v1/chat/completions "))
+        .collect();
+    assert_eq!(child_requests.len(), 1);
+    assert_eq!(child_requests[0].1["model"], "text-child-b");
+    assert_eq!(child_requests[0].1["reasoning_effort"], "Custom-Child");
+    assert!(child_requests[0]
+        .0
+        .to_ascii_lowercase()
+        .contains("authorization: bearer synthetic-private-token-b"));
+    assert!(child_requests[0].1.get("temperature").is_none());
+    for (headers, body) in requests
+        .iter()
+        .filter(|(headers, _)| headers.starts_with("POST /v1/audio/speech "))
+    {
+        let voice = body["voice"].as_str().unwrap();
+        voices.push(voice.to_owned());
+        let (profile, model) = if voice == "cedar" {
+            ("b", "speech-b")
+        } else {
+            ("a", "speech-a")
+        };
+        assert_eq!(body["model"], model);
+        assert!(headers.to_ascii_lowercase().contains(&format!(
+            "authorization: bearer synthetic-private-token-{profile}"
+        )));
+        assert_eq!(body["response_format"], "wav");
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "explicit provider default clears saved thinking"
+        );
+        assert_eq!(body["input"], format!("Computed narration: {voice}"));
+        assert_eq!(
+            fs::read(fixture.root.join(format!("{voice}.wav"))).unwrap(),
+            WAV
+        );
+    }
+    voices.sort();
+    assert_eq!(voices, ["ash", "cedar", "coral"]);
+    let admissions: Vec<_> = run
+        .frames
+        .iter()
+        .filter(|frame| {
+            frame["type"] == "admit" && frame["boundary"]["call_site"] == "dynamic-speech"
+        })
+        .collect();
+    assert_eq!(admissions.len(), 3);
+    let mut snapshots = Vec::new();
+    for admission in admissions {
+        let effective = &admission["effective_request"];
+        let voice = effective["settings"]["voice"].as_str().unwrap();
+        let (profile, model) = if voice == "cedar" {
+            ("b", "speech-b")
+        } else {
+            ("a", "speech-a")
+        };
+        assert_eq!(effective["selection"]["profile"], profile);
+        assert_eq!(effective["selection"]["model"]["value"], model);
+        assert_eq!(
+            effective["selection"]["thinking"],
+            json!({"mode":"provider_default"})
+        );
+        snapshots.push(voice.to_owned());
+    }
+    snapshots.sort();
+    assert_eq!(snapshots, voices);
+    assert_eq!(
+        unchanged["bindings"]["bindings"][0]["settings"]["voice"],
+        "alloy"
+    );
+    assert_eq!(
+        unchanged["bindings"]["bindings"][0]["model"],
+        "unapproved-default"
+    );
+    let terminal = run
+        .frames
+        .iter()
+        .find(|frame| frame["type"] == "result")
+        .unwrap();
+    let outcomes: Vec<_> = terminal["native_outcomes"]["outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|outcome| outcome["boundary"]["call_site"] == "dynamic-speech")
+        .collect();
+    assert_eq!(outcomes.len(), 3);
+    let permit_ids: std::collections::BTreeSet<_> = outcomes
+        .iter()
+        .map(|outcome| outcome["permit_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(permit_ids.len(), 3);
+    for outcome in outcomes {
+        assert_eq!(outcome["state"], "completed");
+        assert!(!outcome["boundary"]["parent_permit_id"].is_null());
+        assert!(voices.contains(
+            &outcome["effective_request"]["settings"]["voice"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        ));
+    }
+    for site in ["inference-launch", "inference-root"] {
+        let outcome = terminal["native_outcomes"]["outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|outcome| outcome["boundary"]["call_site"] == site)
+            .expect("inference child preserves launch and provider evidence");
+        assert_eq!(outcome["state"], "completed");
+        assert_eq!(outcome["effective_request"]["selection"]["profile"], "b");
+        assert_eq!(
+            outcome["effective_request"]["selection"]["model"]["value"],
+            "text-child-b"
+        );
+        assert_eq!(
+            outcome["effective_request"]["selection"]["thinking"],
+            json!({"mode":"choice","value":"Custom-Child"})
+        );
+    }
+    for voice in &voices {
+        let invocation: Value = serde_json::from_slice(
+            &fs::read(fixture.root.join(format!("prepare-{voice}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            invocation.as_object().unwrap().len(),
+            3,
+            "tool sees only protocol/type/business params"
+        );
+        assert!(invocation.get("bootstrap").is_none());
+    }
+    // A provider rejection retains the exact admitted request without substitution or replay.
+    provider.reject_voice(Some("coral"));
+    let rejected = invoke(
+        &fixture,
+        &executable,
+        unchanged.clone(),
+        Control::OverlapAudio,
+    );
+    let rejected_terminal = rejected
+        .frames
+        .iter()
+        .find(|frame| frame["type"] == "result")
+        .expect("provider rejection has an authoritative native terminal");
+    assert!(!rejected_terminal["error"].is_null(), "{rejected_terminal}");
+    let failures: Vec<_> = rejected_terminal["native_outcomes"]["outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|outcome| {
+            outcome["boundary"]["call_site"] == "dynamic-speech"
+                && outcome["effective_request"]["settings"]["voice"] == "coral"
+        })
+        .collect();
+    assert_eq!(
+        failures.len(),
+        1,
+        "one admitted Coral outcome: {rejected_terminal}"
+    );
+    let failed = failures[0];
+    assert_eq!(failed["state"], "failed");
+    assert_eq!(failed["cause"], "provider.invalid_request");
+    assert_eq!(failed["effective_request"]["selection"]["profile"], "a");
+    assert_eq!(
+        failed["effective_request"]["selection"]["model"]["value"],
+        "speech-a"
+    );
+    assert_eq!(
+        failed["effective_request"]["selection"]["thinking"],
+        json!({"mode":"provider_default"})
+    );
+    assert_eq!(failed["effective_request"]["settings"]["format"], "wav");
+    let admitted = rejected
+        .frames
+        .iter()
+        .find(|frame| {
+            frame["type"] == "admit" && frame["effective_request"]["settings"]["voice"] == "coral"
+        })
+        .unwrap();
+    assert_eq!(failed["effective_request"], admitted["effective_request"]);
+    assert!(!failed["permit_id"].is_null());
+    assert!(!failed["boundary"]["parent_permit_id"].is_null());
+    let rejected_requests = provider.take();
+    assert_eq!(
+        rejected_requests.len(),
+        4,
+        "exactly four intended requests, no replay"
+    );
+    let coral: Vec<_> = rejected_requests
+        .iter()
+        .filter(|(_, body)| body["voice"] == "coral")
+        .collect();
+    assert_eq!(coral.len(), 1, "rejected request is never retried");
+    assert_eq!(coral[0].1["model"], "speech-a");
+    assert_eq!(coral[0].1["response_format"], "wav");
+    assert!(coral[0].1.get("reasoning_effort").is_none());
+    assert!(coral[0]
+        .0
+        .to_ascii_lowercase()
+        .contains("authorization: bearer synthetic-private-token-a"));
+    let mut rejected_voices: Vec<_> = rejected_requests
+        .iter()
+        .filter_map(|(_, body)| body["voice"].as_str())
+        .collect();
+    rejected_voices.sort();
+    assert_eq!(
+        rejected_voices,
+        ["ash", "cedar", "coral"],
+        "no fallback voice request"
+    );
+    assert_eq!(
+        fs::read(fixture.root.join("coral.wav")).unwrap(),
+        WAV,
+        "a rejected replacement preserves previously completed audio"
+    );
+    provider.reject_voice(None);
+    let denied = invoke(
+        &fixture,
+        &executable,
+        request_choice_bootstrap(&fixture, false),
+        Control::Allow,
+    );
+    let denied_terminal = denied
+        .frames
+        .iter()
+        .find(|frame| frame["type"] == "result")
+        .expect("native terminal after concealed child denial");
+    assert_eq!(denied_terminal["error"]["code"], "action.execution_selection_denied", "private native terminal remains authoritative when an outer tool exits successfully: {:?}\n{}", denied.frames, denied.diagnostics);
+    assert!(
+        denied_terminal["native_outcomes"]["outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|outcome| outcome["state"] == "not_dispatched"
+                && outcome["cause"] == "action.execution_selection_denied"),
+        "denial evidence survives tool success: {:?}",
+        denied.frames
+    );
+    let dispatched = provider.take();
+    assert!(dispatched
+        .iter()
+        .all(|(_, body)| body["voice"] != "cedar" && body["model"] == "speech-a"));
+    assert!(
+        !invoke(
+            &fixture,
+            &executable,
+            unchanged.clone(),
+            Control::DenyAfter(0)
+        )
+        .success
+    );
+    assert!(
+        provider.take().is_empty(),
+        "revocation before admission dispatches no provider request"
+    );
+    let credentials = fs::read(fixture.home.join("credentials.toml")).unwrap();
+    fs::write(
+        fixture.home.join("credentials.toml"),
+        "[profile_tokens]\na='changed-private-a'\nb='synthetic-private-token-b'\n",
+    )
+    .unwrap();
+    assert!(!invoke(&fixture, &executable, unchanged, Control::Allow).success);
+    assert!(
+        provider.take().is_empty(),
+        "meaningful connection drift invalidates immutable snapshots before dispatch"
+    );
+    fs::write(fixture.home.join("credentials.toml"), credentials).unwrap();
+    assert!(
+        fixture.build_warnings.lock().unwrap().is_empty(),
+        "fresh generated artifacts are warning-free"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_native_request_choices_compute_and_pin_concurrent_narration() {
+    exercise_request_choices(false);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "builds and executes fresh native parent/child request-choice artifacts"]
+fn emitted_native_request_choices_compute_and_pin_concurrent_narration() {
+    exercise_request_choices(true);
 }

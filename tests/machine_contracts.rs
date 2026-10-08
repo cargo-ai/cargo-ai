@@ -650,12 +650,12 @@ fn capabilities_distinguish_replacement_actions_and_selected_result_delivery() {
         .find(|item| item["command"] == "run")
         .unwrap();
     assert_eq!(run["client_actions"]["catalog_versions"], json!([2, 3]));
-    assert_eq!(run["client_actions"]["request_versions"], json!([2, 3]));
+    assert_eq!(run["client_actions"]["request_versions"], json!([2, 3, 4]));
     let roles = &run["native_roles"];
     assert_eq!(roles["role_contract_version"], 1);
     assert_eq!(roles["binding_authorizes_execution"], false);
     assert_eq!(roles["operation_access"], "unverified_until_invocation");
-    assert_eq!(roles["selection_policy"]["version"], 1);
+    assert_eq!(roles["selection_policy"]["version"], 2);
     assert_eq!(
         roles["selection_policy"]["capability_evidence"],
         "informational"

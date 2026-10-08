@@ -111,6 +111,7 @@ pub fn verify_command(
     if !capabilities.supports_native_roles()
         || !capabilities.supports_connection_continuity()
         || !capabilities.supports_native_selection_policy()
+        || (bootstrap.version == 2 && !capabilities.supports_request_choices())
         || capabilities.is_cli_run() != cli_run
     {
         return Err(crate::role_runtime::failure("role.child_rebuild_required"));
@@ -318,7 +319,9 @@ async fn invoke_tool_child(
         })
         .ok_or_else(|| crate::role_runtime::failure("role.undeclared_call_site"))?
         .clone();
-    let at = context.at(call.call_site.locator.site.clone());
+    let at = context
+        .at(call.call_site.locator.site.clone())
+        .prepare_declared_child()?;
     at.scope(async {
         at.selected()?;
         let schema = call.call_site.input_schema.as_ref().ok_or_else(invalid)?;
@@ -511,6 +514,8 @@ struct Admission {
     kind: String,
     request_id: String,
     boundary: Boundary,
+    #[serde(default)]
+    effective_request: Option<crate::role_contract::EffectiveRequest>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -522,6 +527,8 @@ struct Settlement {
     permit_id: String,
     state: String,
     cause: Option<String>,
+    #[serde(default)]
+    effective_request: Option<crate::role_contract::EffectiveRequest>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -588,7 +595,10 @@ pub async fn native(
 ) -> Result<ChildResult, String> {
     let launch = context
         .session
-        .admit(context.boundary("native_child")?)
+        .admit_with_effective(
+            context.boundary("native_child")?,
+            context.effective_request(),
+        )
         .await?;
     bootstrap.parent_permit_id = Some(launch.id().to_owned());
     prepare(&mut command).map_err(|_| invalid())?;
@@ -641,6 +651,9 @@ pub async fn native(
                             return Err(invalid());
                         }
                         validate_lineage(&request.boundary, &bootstrap, &launch, &permits)?;
+                        if request.boundary.kind == "tool" && request.effective_request.is_some() {
+                            return Err(invalid());
+                        }
                         let permission = if request.boundary.kind == "tool" {
                             let name = request
                                 .boundary
@@ -682,9 +695,25 @@ pub async fn native(
                                         && c.call_site.id == request.boundary.call_site
                                 })
                                 .ok_or_else(invalid)?;
-                            let mut at = context.clone();
-                            at.locator = call.call_site.locator.clone();
+                            let mut at = context.at(call.call_site.locator.site.clone());
+                            at.locator.definition = call.call_site.locator.definition.clone();
                             at.parent_permit_id = request.boundary.parent_permit_id.clone();
+                            let at = if bootstrap.version == 2 && call.selection.is_some() {
+                                let choices =
+                                    request.effective_request.as_ref().ok_or_else(invalid)?;
+                                if request.boundary.kind == "provider" {
+                                    at.validate_effective_request(choices)?
+                                } else if request.boundary.kind == "native_child" {
+                                    at.validate_effective_request_for(choices, "native_child")?
+                                } else {
+                                    return Err(invalid());
+                                }
+                            } else {
+                                if request.effective_request.is_some() {
+                                    return Err(invalid());
+                                }
+                                at
+                            };
                             at.scope(async {
                                 at.selected().and_then(|selected| {
                                     if request.boundary.kind == "provider"
@@ -700,7 +729,15 @@ pub async fn native(
                             .await
                         };
                         let admission = match permission {
-                            Ok(boundary) => context.session.admit(boundary).await,
+                            Ok(boundary) => {
+                                context
+                                    .session
+                                    .admit_with_effective(
+                                        boundary,
+                                        request.effective_request.clone(),
+                                    )
+                                    .await
+                            }
                             Err(error) => Err(error),
                         };
                         let reply = match admission {
@@ -738,6 +775,10 @@ pub async fn native(
                         if permits.values().any(|permit| {
                             permit.boundary().parent_permit_id.as_deref() == Some(&value.permit_id)
                         }) {
+                            return Err(invalid());
+                        }
+                        let admitted = permits.get(&value.permit_id).ok_or_else(invalid)?;
+                        if admitted.effective_request() != value.effective_request.as_ref() {
                             return Err(invalid());
                         }
                         permits

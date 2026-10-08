@@ -25,7 +25,14 @@
           "const": "start"
         },
         "request": {
-          "$ref": "action-request-v3.json#/$defs/execution"
+          "oneOf": [
+            {
+              "$ref": "action-request-v3.json#/$defs/execution"
+            },
+            {
+              "$ref": "action-request-v4.json#/$defs/execution"
+            }
+          ]
         }
       },
       "required": [
@@ -343,6 +350,10 @@
                   "string",
                   "null"
                 ]
+              },
+              "effective_request": {
+                "$ref": "role-resolution-v2.json#/$defs/effective_request",
+                "description": "Exact frozen public choices for this permit, when available; contains no credential material. Correlate by permit_id, not completion order."
               }
             },
             "required": [

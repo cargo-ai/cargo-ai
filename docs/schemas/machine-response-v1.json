@@ -10,7 +10,7 @@
     },
     "payload_schema": {
       "type": "string",
-      "pattern": "^cargo-ai\\.(?:actions\\.(?:list|validate)\\.v[23]|[a-z][a-z0-9_.-]*\\.v1)$"
+      "pattern": "^cargo-ai\\.(?:actions\\.(?:list|validate)\\.v[23]|actions\\.resolve\\.v2|[a-z][a-z0-9_.-]*\\.v1)$"
     },
     "command": {
       "type": "string",
@@ -402,6 +402,46 @@
             "$ref": "action-artifact-v1.json"
           }
         }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "actions resolve"
+          },
+          "outcome": {
+            "const": "succeeded"
+          }
+        },
+        "required": [
+          "command",
+          "outcome"
+        ]
+      },
+      "then": {
+        "oneOf": [
+          {
+            "properties": {
+              "payload_schema": {
+                "const": "cargo-ai.actions.resolve.v1"
+              },
+              "data": {
+                "$ref": "role-contract-v1.json#/$defs/resolution"
+              }
+            }
+          },
+          {
+            "properties": {
+              "payload_schema": {
+                "const": "cargo-ai.actions.resolve.v2"
+              },
+              "data": {
+                "$ref": "role-resolution-v2.json"
+              }
+            }
+          }
+        ]
       }
     }
   ],

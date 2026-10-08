@@ -258,6 +258,191 @@ pub struct Resolution {
     pub ready: bool,
     pub execution_authorized: bool,
     pub invocation_access: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_choices: Option<RequestChoicesContext>,
+}
+
+/// Native-derived protected alternatives for one scoped execution policy.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RequestChoicesContext {
+    pub version: u32,
+    pub authorized_connections: Vec<AuthorizedConnection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_request: Option<RequestChoicePatch>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizedConnection {
+    pub profile: Option<String>,
+    pub profile_name: String,
+    pub profile_uuid: String,
+    pub connection_generation: String,
+    pub provider: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RequestChoice {
+    Value { value: Value },
+    ProviderDefault {},
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RequestChoicePatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<RequestChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<RequestChoice>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settings: BTreeMap<String, RequestChoice>,
+}
+impl RequestChoicePatch {
+    /// Host root requests carry concrete values; only source steps resolve variables.
+    pub fn validate_root(&self) -> Result<(), RoleError> {
+        self.validate()?;
+        fn has_variable(value: &Value) -> bool {
+            match value {
+                Value::Object(object) => {
+                    object.contains_key("var") || object.values().any(has_variable)
+                }
+                Value::Array(values) => values.iter().any(has_variable),
+                _ => false,
+            }
+        }
+        for choice in self
+            .profile
+            .iter()
+            .chain(self.model.iter())
+            .chain(self.settings.values())
+        {
+            if let RequestChoice::Value { value } = choice {
+                if has_variable(value) {
+                    return Err(invalid());
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Validate the bounded portable form without resolving business variables.
+    pub fn validate(&self) -> Result<(), RoleError> {
+        let variable = |value: &Value| {
+            value.as_object().is_some_and(|object| {
+                object.len() == 1
+                    && object
+                        .get("var")
+                        .and_then(Value::as_str)
+                        .is_some_and(|path| !path.is_empty() && path.len() <= 1024)
+            })
+        };
+        let string = |value: &Value| {
+            variable(value)
+                || value
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty() && s.len() <= 1024)
+        };
+        for selector in [&self.profile, &self.model].into_iter().flatten() {
+            if let RequestChoice::Value { value } = selector {
+                if !string(value) {
+                    return Err(invalid());
+                }
+            }
+        }
+        for (key, choice) in &self.settings {
+            if !matches!(
+                key.as_str(),
+                "thinking" | "voice" | "format" | "temperature"
+            ) {
+                return Err(invalid());
+            }
+            if let RequestChoice::Value { value } = choice {
+                let valid = match key.as_str() {
+                    "voice" | "format" => string(value),
+                    "temperature" => {
+                        variable(value)
+                            || value
+                                .as_f64()
+                                .is_some_and(|number| number.is_finite() && number >= 0.0)
+                    }
+                    "thinking" => {
+                        string(value)
+                            || match serde_json::from_value::<
+                                crate::providers::thinking::ThinkingSetting<Value>,
+                            >(value.clone())
+                            {
+                                Ok(crate::providers::thinking::ThinkingSetting::Choice {
+                                    value,
+                                }) => string(&value),
+                                Ok(_) => true,
+                                Err(_) => false,
+                            }
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    return Err(invalid());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Safe request attribution; it intentionally contains no connection secrets.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveRequest {
+    pub selection: AllowedSelection,
+    pub settings: BTreeMap<String, Value>,
+}
+
+pub fn request_connection_identity(
+    bindings: &BindingRevision,
+    fixed_identity: &str,
+    choices: &RequestChoicesContext,
+) -> Result<String, RoleError> {
+    canonical_identity(&(
+        bindings,
+        fixed_identity,
+        choices.version,
+        &choices.authorized_connections,
+    ))
+}
+
+/// Discover defaults without treating capability metadata as dispatch authority.
+#[cfg(any(cargo_ai_cli, test))]
+pub fn resolve_request_choices(
+    registry: &RoleRegistry,
+    key: &ContextKey,
+    revision: &BindingRevision,
+    context: &ResolutionContext,
+    evidence: &[CapabilityEvidence],
+    now_unix_secs: u64,
+    choices: RequestChoicesContext,
+) -> Result<Resolution, RoleError> {
+    if choices.version != 1 || choices.authorized_connections.len() > 128 {
+        return Err(invalid());
+    }
+    if let Some(patch) = &choices.root_request {
+        patch.validate_root()?;
+    }
+    let mut resolution = resolve(registry, key, revision, context, evidence, now_unix_secs)?;
+    resolution.version = 2;
+    resolution.ready = resolution.calls.iter().all(|call| {
+        call.selection.is_some()
+            || (call.call_site.role.is_none() && call.call_site.fixed.is_none())
+    });
+    for call in &mut resolution.calls {
+        if call.selection.is_some() {
+            call.reason = "default_selection_metadata_informational".into();
+        }
+    }
+    resolution.request_choices = Some(choices);
+    resolution.identity =
+        canonical_identity(&(&resolution.identity, &resolution.request_choices, 2))?;
+    Ok(resolution)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -815,6 +1000,7 @@ pub fn resolve(
         required_selections: selections,
         execution_authorized: false,
         invocation_access: "unverified".into(),
+        request_choices: None,
     };
     // Support information can change without changing the reviewed authority.
     let exact_calls: Vec<_> = resolution

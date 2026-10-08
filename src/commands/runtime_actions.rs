@@ -1416,94 +1416,106 @@ async fn run_matching_action_steps(
         let step_result = crate::role_runtime::scope_step(
             format!("actions.{action_index}.run.{original_step_index}"),
             Box::pin(async {
-                let bound_step = crate::role_runtime::apply_step(step)?;
-                let step = &bound_step;
-                if step.kind.eq_ignore_ascii_case("exec") {
-                    run_exec_step(
-                        step,
-                        &action_data,
-                        action_index,
-                        &action.name,
-                        provider_context.package_context.as_ref(),
-                        runtime_budget,
-                    )
-                    .await
-                    .map(|captured_output| (StepExecutionOutcome::Completed, captured_output))
-                } else if step.kind.eq_ignore_ascii_case("email_me") {
-                    run_email_me_step(
-                        step,
-                        &action_data,
-                        action_index,
-                        &action.name,
-                        runtime_budget,
-                        single_step_action,
-                    )
-                    .await
-                    .map(|outcome| (outcome, None))
-                } else if step.kind.eq_ignore_ascii_case("agent") {
-                    run_agent_step_with_provider_context(
-                        step,
-                        &action_data,
-                        named_inputs,
-                        action_index,
-                        &action.name,
-                        step_index + 1,
-                        provider_context,
-                        action_execution_override,
-                        max_agent_depth,
-                        runtime_budget,
-                    )
-                    .await
-                    .map(|outcome| (outcome, None))
-                } else if step.kind.eq_ignore_ascii_case("tool") {
-                    run_tool_step(
-                        step,
-                        &action_data,
-                        action_index,
-                        &action.name,
-                        step_index + 1,
-                        provider_context,
-                        action_execution_override,
-                        max_agent_depth,
-                        runtime_budget,
-                    )
-                    .await
-                    .map(|captured_output| (StepExecutionOutcome::Completed, captured_output))
-                } else if step.kind.eq_ignore_ascii_case("generate_audio")
-                    || step.kind.eq_ignore_ascii_case("transcribe_audio")
-                {
-                    runtime_media::run_audio_step(
-                        step,
-                        &action_data,
-                        action_index,
-                        &action.name,
-                        step_index + 1,
-                        provider_context,
-                        runtime_budget,
-                    )
-                    .await
-                    .map(|capture| (StepExecutionOutcome::Completed, capture))
-                } else if step.kind.eq_ignore_ascii_case("generate_image") {
-                    run_generate_image_step(
-                        step,
-                        &action_data,
-                        named_inputs,
-                        action_index,
-                        &action.name,
-                        step_index + 1,
-                        provider_context,
-                        runtime_budget,
-                    )
-                    .await
-                    .map(|outcome| (outcome, None))
-                } else {
-                    print_action_line(
-                        action_index,
-                        action.name.as_str(),
-                        format!("unsupported step kind '{}'; skipping step.", step.kind).as_str(),
-                    );
-                    Ok((StepExecutionOutcome::SoftFailureLogged, None))
-                }
+                let (bound_step, effective_context) =
+                    crate::role_runtime::prepare_step(step, &action_data)?;
+                crate::role_runtime::scope(
+                    effective_context,
+                    Box::pin(async {
+                        let step = &bound_step;
+                        if step.kind.eq_ignore_ascii_case("exec") {
+                            run_exec_step(
+                                step,
+                                &action_data,
+                                action_index,
+                                &action.name,
+                                provider_context.package_context.as_ref(),
+                                runtime_budget,
+                            )
+                            .await
+                            .map(|captured_output| {
+                                (StepExecutionOutcome::Completed, captured_output)
+                            })
+                        } else if step.kind.eq_ignore_ascii_case("email_me") {
+                            run_email_me_step(
+                                step,
+                                &action_data,
+                                action_index,
+                                &action.name,
+                                runtime_budget,
+                                single_step_action,
+                            )
+                            .await
+                            .map(|outcome| (outcome, None))
+                        } else if step.kind.eq_ignore_ascii_case("agent") {
+                            run_agent_step_with_provider_context(
+                                step,
+                                &action_data,
+                                named_inputs,
+                                action_index,
+                                &action.name,
+                                step_index + 1,
+                                provider_context,
+                                action_execution_override,
+                                max_agent_depth,
+                                runtime_budget,
+                            )
+                            .await
+                            .map(|outcome| (outcome, None))
+                        } else if step.kind.eq_ignore_ascii_case("tool") {
+                            run_tool_step(
+                                step,
+                                &action_data,
+                                action_index,
+                                &action.name,
+                                step_index + 1,
+                                provider_context,
+                                action_execution_override,
+                                max_agent_depth,
+                                runtime_budget,
+                            )
+                            .await
+                            .map(|captured_output| {
+                                (StepExecutionOutcome::Completed, captured_output)
+                            })
+                        } else if step.kind.eq_ignore_ascii_case("generate_audio")
+                            || step.kind.eq_ignore_ascii_case("transcribe_audio")
+                        {
+                            runtime_media::run_audio_step(
+                                step,
+                                &action_data,
+                                action_index,
+                                &action.name,
+                                step_index + 1,
+                                provider_context,
+                                runtime_budget,
+                            )
+                            .await
+                            .map(|capture| (StepExecutionOutcome::Completed, capture))
+                        } else if step.kind.eq_ignore_ascii_case("generate_image") {
+                            run_generate_image_step(
+                                step,
+                                &action_data,
+                                named_inputs,
+                                action_index,
+                                &action.name,
+                                step_index + 1,
+                                provider_context,
+                                runtime_budget,
+                            )
+                            .await
+                            .map(|outcome| (outcome, None))
+                        } else {
+                            print_action_line(
+                                action_index,
+                                action.name.as_str(),
+                                format!("unsupported step kind '{}'; skipping step.", step.kind)
+                                    .as_str(),
+                            );
+                            Ok((StepExecutionOutcome::SoftFailureLogged, None))
+                        }
+                    }),
+                )
+                .await
             }),
         )
         .await;
@@ -5665,6 +5677,7 @@ mod tests {
         crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -6937,6 +6950,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -6987,6 +7001,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -7070,6 +7085,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -7205,6 +7221,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -7295,6 +7312,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -7376,6 +7394,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -7480,6 +7499,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -7557,6 +7577,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -7660,6 +7681,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -8042,6 +8064,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -8108,6 +8131,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -8162,6 +8186,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -8244,6 +8269,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -8335,6 +8361,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -8395,6 +8422,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -8734,6 +8762,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9008,6 +9037,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9094,6 +9124,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9215,6 +9246,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9332,6 +9364,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9426,6 +9459,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9522,6 +9556,7 @@ timeout_in_sec = 60
         let exec_step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9556,6 +9591,7 @@ timeout_in_sec = 60
         let agent_step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9661,6 +9697,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9778,6 +9815,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: Some("bridge_tool".to_string()),
             tool_params: std::collections::BTreeMap::new(),
@@ -9879,6 +9917,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9969,6 +10008,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -10046,6 +10086,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -10100,6 +10141,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -10151,6 +10193,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -10202,6 +10245,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -10270,6 +10314,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -10342,6 +10387,7 @@ timeout_in_sec = 60
         let failing_step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -10376,6 +10422,7 @@ timeout_in_sec = 60
         let second_step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -10457,6 +10504,7 @@ timeout_in_sec = 60
             run: vec![crate::RunStep {
                 thinking: None,
                 voice: None,
+                request_choices: None,
                 audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
@@ -10495,6 +10543,7 @@ timeout_in_sec = 60
             run: vec![crate::RunStep {
                 thinking: None,
                 voice: None,
+                request_choices: None,
                 audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
@@ -10570,6 +10619,7 @@ timeout_in_sec = 60
             run: vec![crate::RunStep {
                 thinking: None,
                 voice: None,
+                request_choices: None,
                 audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
@@ -10611,6 +10661,7 @@ timeout_in_sec = 60
             run: vec![crate::RunStep {
                 thinking: None,
                 voice: None,
+                request_choices: None,
                 audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
@@ -10705,6 +10756,7 @@ timeout_in_sec = 60
             run: vec![crate::RunStep {
                 thinking: None,
                 voice: None,
+                request_choices: None,
                 audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
@@ -10743,6 +10795,7 @@ timeout_in_sec = 60
             run: vec![crate::RunStep {
                 thinking: None,
                 voice: None,
+                request_choices: None,
                 audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
@@ -10833,6 +10886,7 @@ timeout_in_sec = 60
                 crate::RunStep {
                     thinking: None,
                     voice: None,
+                    request_choices: None,
                     audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
@@ -10867,6 +10921,7 @@ timeout_in_sec = 60
                 crate::RunStep {
                     thinking: None,
                     voice: None,
+                    request_choices: None,
                     audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
@@ -10903,6 +10958,7 @@ timeout_in_sec = 60
             run: vec![crate::RunStep {
                 thinking: None,
                 voice: None,
+                request_choices: None,
                 audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
@@ -10978,6 +11034,7 @@ timeout_in_sec = 60
                 crate::RunStep {
                     thinking: None,
                     voice: None,
+                    request_choices: None,
                     audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
@@ -11012,6 +11069,7 @@ timeout_in_sec = 60
                 crate::RunStep {
                     thinking: None,
                     voice: None,
+                    request_choices: None,
                     audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
@@ -11052,6 +11110,7 @@ timeout_in_sec = 60
                 crate::RunStep {
                     thinking: None,
                     voice: None,
+                    request_choices: None,
                     audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
@@ -11086,6 +11145,7 @@ timeout_in_sec = 60
                 crate::RunStep {
                     thinking: None,
                     voice: None,
+                    request_choices: None,
                     audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
@@ -11175,6 +11235,7 @@ timeout_in_sec = 60
         let failing_step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -11209,6 +11270,7 @@ timeout_in_sec = 60
         let second_step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -11290,6 +11352,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -11374,6 +11437,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),

@@ -32,6 +32,8 @@ pub struct Outcome {
     pub permit_id: String,
     pub state: String,
     pub cause: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_request: Option<crate::role_contract::EffectiveRequest>,
 }
 #[derive(Default)]
 struct Gate {
@@ -65,6 +67,7 @@ pub struct Permit {
     id: String,
     boundary: Boundary,
     settled: bool,
+    effective_request: Option<crate::role_contract::EffectiveRequest>,
 }
 impl Session {
     #[cfg(any(cargo_ai_cli, test))]
@@ -148,6 +151,7 @@ impl Session {
                 permit_id: String::new(),
                 state: "not_dispatched".into(),
                 cause: Some(code.into()),
+                effective_request: None,
             });
         } else {
             gate.omitted += 1;
@@ -164,6 +168,13 @@ impl Session {
             "omitted_outcomes":gate.omitted,"complete":gate.outstanding.is_empty()})
     }
     pub async fn admit(&self, boundary: Boundary) -> Result<Permit, String> {
+        self.admit_with_effective(boundary, None).await
+    }
+    pub async fn admit_with_effective(
+        &self,
+        boundary: Boundary,
+        effective_request: Option<crate::role_contract::EffectiveRequest>,
+    ) -> Result<Permit, String> {
         if boundary.invocation_id != self.invocation_id
             || boundary.binding_revision != self.binding_revision
             || boundary.call_site.is_empty()
@@ -194,8 +205,14 @@ impl Session {
                 }
                 waiting.insert(request_id.clone(), sender);
             }
-            if self.send(&json!({"protocol":"cargo_ai_native_role","version":1,"type":"admit","request_id":request_id,"boundary":boundary})).is_err() {
-                self.close("control_lost"); return Err("role.control_lost".into());
+            let mut frame = json!({"protocol":"cargo_ai_native_role","version":1,"type":"admit","request_id":request_id,"boundary":boundary});
+            if let Some(request) = &effective_request {
+                frame["effective_request"] =
+                    serde_json::to_value(request).map_err(|_| "role.invalid_admission")?;
+            }
+            if self.send(&frame).is_err() {
+                self.close("control_lost");
+                return Err("role.control_lost".into());
             }
             match tokio::time::timeout(std::time::Duration::from_secs(30), receiver).await {
                 Ok(Ok(result)) => result?,
@@ -224,6 +241,7 @@ impl Session {
             id,
             boundary,
             settled: false,
+            effective_request,
         })
     }
     fn send(&self, value: &Value) -> io::Result<()> {
@@ -271,6 +289,9 @@ impl Permit {
     pub fn id(&self) -> &str {
         &self.id
     }
+    pub fn effective_request(&self) -> Option<&crate::role_contract::EffectiveRequest> {
+        self.effective_request.as_ref()
+    }
     pub fn finish(mut self, state: &str, cause: Option<&str>) {
         self.settle(state, cause);
     }
@@ -284,6 +305,7 @@ impl Permit {
             permit_id: self.id.clone(),
             state: state.to_owned(),
             cause: cause.map(str::to_owned),
+            effective_request: self.effective_request.clone(),
         };
         {
             let mut gate = self.session.gate.lock().unwrap_or_else(|e| e.into_inner());
@@ -295,7 +317,13 @@ impl Permit {
             }
         }
         if self.session.remote.is_some() {
-            if self.session.send(&json!({"protocol":"cargo_ai_native_role","version":1,"type":"settled","permit_id":self.id,"state":state,"cause":cause})).is_err() { self.session.close("control_lost"); }
+            let mut frame = json!({"protocol":"cargo_ai_native_role","version":1,"type":"settled","permit_id":self.id,"state":state,"cause":cause});
+            if let Some(request) = &self.effective_request {
+                frame["effective_request"] = serde_json::to_value(request).unwrap_or(Value::Null);
+            }
+            if self.session.send(&frame).is_err() {
+                self.session.close("control_lost");
+            }
         }
     }
 }

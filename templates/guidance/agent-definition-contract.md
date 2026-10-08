@@ -3,7 +3,7 @@
 Use this file as the complete offline contract when you need to author or review a Cargo AI agent definition without looking at repository code.
 That JSON definition is the source for a generated CLI executable: it defines the inputs, structured output, and follow-up actions the hatched tool will use.
 
-The supported strict contracts are `2026-09-09.r1`, opt-in rubric revision `2026-09-19.r1`, opt-in thinking revision `2026-10-01.r1`, selected tool result revision `2026-10-03.r1`, and native role revision `2026-10-06.r1`. The thinking revision retains rubric behavior and adds only the action fields described below. Unless a section says otherwise, the supported field lists below are exhaustive for all five revisions. Stable objects reject additional fields; user-named maps allow names whose values satisfy the stated contract.
+The supported strict contracts are `2026-09-09.r1`, opt-in rubric revision `2026-09-19.r1`, opt-in thinking revision `2026-10-01.r1`, selected tool result revision `2026-10-03.r1`, native role revision `2026-10-06.r1`, and per-generation request-choice revision `2026-10-08.r1`. The thinking revision retains rubric behavior and adds only the action fields described below. Unless a section says otherwise, the supported field lists below are exhaustive for all six revisions. Stable objects reject additional fields; user-named maps allow names whose values satisfy the stated contract.
 
 ## Required Top-Level Shape
 
@@ -741,3 +741,5 @@ Discovery's optional `thinking.toggle` contains qualified Boolean `values` and a
 For Ollama Boolean metadata, the existing compatible Chat request uses `reasoning_effort: "medium"` to request true and `"none"` to request false, only if that value is advertised. These wire values are not named levels on a Boolean model. `[false]` identifies a non-thinking model; missing metadata is Unknown. A named-only model still requires its exact supported name. No native route migration or hidden reasoning access is implied.
 
 Passive runtime declaration revision2 adds On/Off and `--thinking-choice`. Revision1 children still accept exact named/default forwarding using their original flags; they receive no Boolean override. Revision2 children use the exact-choice flag for literal names. Opaque children remain unverified. Rebuild generated applications to obtain the new behavior.
+
+Revision `2026-10-08.r1` retains native voice omission and adds `request_choices` to agent/image/audio/transcription steps. Literal/variable ordinary selectors remain supported; a typed patch represents explicit provider-default clearing and supported additional settings. Use only in negotiated native request 4; ordinary/fixed-mode execution rejects it. See [per-generation choices](client-actions.md#per-generation-choices-and-editable-role-defaults) for exact syntax, variable forwarding, precedence and independent policy.

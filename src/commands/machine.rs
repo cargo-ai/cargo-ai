@@ -198,6 +198,20 @@ fn payload_schema(command: &str) -> String {
     };
     format!("cargo-ai.{}.v{revision}", command.replace(' ', "."))
 }
+fn payload_schema_for_data(command: &str, data: &Value) -> String {
+    if matches!(command, "actions list" | "actions validate")
+        && matches!(
+            data.get("schema_version").and_then(Value::as_u64),
+            Some(3 | 4)
+        )
+    {
+        format!("cargo-ai.{}.v3", command.replace(' ', "."))
+    } else if command == "actions resolve" && data.get("version") == Some(&json!(2)) {
+        "cargo-ai.actions.resolve.v2".into()
+    } else {
+        payload_schema(command)
+    }
+}
 fn envelope(
     command: &str,
     id: &str,
@@ -205,7 +219,7 @@ fn envelope(
     error: Option<&Failure>,
     warnings: Vec<Value>,
 ) -> Value {
-    json!({"schema_version":1,"payload_schema":if matches!(command,"actions list"|"actions validate") && data.get("schema_version")==Some(&json!(3)){format!("cargo-ai.{}.v3",command.replace(' ',"."))}else{payload_schema(command)},"command":command,"build":build(),"request_id":id,"context":context(),"outcome":outcome(error),"data":data,"warnings":warnings,"error":error.map(|e|json!({"code":e.code,"message":e.message,"retryable":e.retryable})),"completion":{"terminal":true,"complete":true}})
+    json!({"schema_version":1,"payload_schema":payload_schema_for_data(command, &data),"command":command,"build":build(),"request_id":id,"context":context(),"outcome":outcome(error),"data":data,"warnings":warnings,"error":error.map(|e|json!({"code":e.code,"message":e.message,"retryable":e.retryable})),"completion":{"terminal":true,"complete":true}})
 }
 fn write_value(value: &Value, limit: usize) -> io::Result<()> {
     let bytes = serde_json::to_vec(value)?;
@@ -617,6 +631,18 @@ fn contracts() -> Vec<Value> {
                 {"payload_schema":payload_schema(name),"condition":{(selector):2}},
                 {"payload_schema":format!("cargo-ai.{}.v3",name.replace(' ',".")),"condition":{(selector):3}}
             ]);
+            if *name == "actions validate" {
+                contract["payload_schemas"].as_array_mut().unwrap().push(json!({
+                    "payload_schema":"cargo-ai.actions.validate.v3",
+                    "condition":{"request_version":4}
+                }));
+            }
+        }
+        if *name == "actions resolve" {
+            contract["payload_schemas"] = json!([
+                {"payload_schema":"cargo-ai.actions.resolve.v1","condition":{"request_version":3}},
+                {"payload_schema":"cargo-ai.actions.resolve.v2","condition":{"request_version":4}}
+            ]);
         }
         if *name == "profile validate-context" {
             contract["continuity_contract_version"] = json!(1);
@@ -626,9 +652,9 @@ fn contracts() -> Vec<Value> {
     }).collect();
     values.push(json!({"command":"run","formats":["json","ndjson"],"schema_versions":[1],"private_content":"explicit_opt_in","opaque_children":"exit_status_only","thinking":{"selection":"tagged_provider_default_or_exact_choice","settings":["choice","provider_default","on","off"],"flags":["--thinking","--thinking-provider-default","--thinking-choice"],"terminal_outcomes":true,"action_definition_revision":"2026-10-01.r1"}}));
     let run = values.last_mut().expect("run contract was appended");
-    run["client_actions"] = json!({"schema_version":2,"catalog_versions":[2,3],"request_versions":[2,3],"selector":"--action","request_input":"--action-request-stdin","execution_policy":"required","definition_binding":"required","client_action_correlation":true,"idempotency":false,"limits":super::client_actions::limits()});
-    run["native_roles"] = json!({"definition_revision":"2026-10-06.r1","role_contract_version":1,"catalog_version":3,"request_version":3,"resolver":"actions resolve","profile_context_refresh":"profile refresh-context","binding_authorizes_execution":false,"operation_access":"unverified_until_invocation","session":{"version":1,"selector":"--role-session","input":"bounded_json_lines","output":"ndjson","first_frame":"start","controls":["revoke","cancel"],"revision_specific":true,"eof":"closes_admission_and_cancels_invocation","revocation":"admitted_work_may_settle","control_acknowledgements":"reliable_separate_from_progress_budget","frame_bytes":crate::role_session::MAX_FRAME_BYTES,"control_ack_deadline_ms":crate::role_transport::CONTROL_ACK_DEADLINE_MS,"max_control_frames":crate::role_transport::MAX_CONTROL_FRAMES,"control_frames_exclude_start":true,"control_output_failure":"closes_admission_cancels_and_requests_owned_cleanup"},"tool_protocol":2,"generated_runtime":"verified_capability_and_source_identity_required","private_records":"host_owned_outside_package_payload_and_data"});
-    run["native_roles"]["selection_policy"] = json!({"version":1,"capability_evidence":"informational","reasoning_choices":"exact_native_attempt","readiness":"structural_not_permission","metadata_in_authority_identity":false,"execution_time_thinking_discovery":false});
+    run["client_actions"] = json!({"schema_version":2,"catalog_versions":[2,3],"request_versions":[2,3,4],"selector":"--action","request_input":"--action-request-stdin","execution_policy":"required","definition_binding":"required","client_action_correlation":true,"idempotency":false,"limits":super::client_actions::limits()});
+    run["native_roles"] = json!({"definition_revision":"2026-10-08.r1","role_contract_version":1,"catalog_version":3,"request_version":4,"request_versions":[3,4],"resolution_versions":[1,2],"resolver":"actions resolve","profile_context_refresh":"profile refresh-context","binding_authorizes_execution":false,"operation_access":"unverified_until_invocation","session":{"version":1,"selector":"--role-session","input":"bounded_json_lines","output":"ndjson","first_frame":"start","controls":["revoke","cancel"],"revision_specific":true,"eof":"closes_admission_and_cancels_invocation","revocation":"admitted_work_may_settle","control_acknowledgements":"reliable_separate_from_progress_budget","frame_bytes":crate::role_session::MAX_FRAME_BYTES,"control_ack_deadline_ms":crate::role_transport::CONTROL_ACK_DEADLINE_MS,"max_control_frames":crate::role_transport::MAX_CONTROL_FRAMES,"control_frames_exclude_start":true,"control_output_failure":"closes_admission_cancels_and_requests_owned_cleanup"},"tool_protocol":2,"generated_runtime":"verified_capability_and_source_identity_required","private_records":"host_owned_outside_package_payload_and_data"});
+    run["native_roles"]["selection_policy"] = json!({"version":2,"request_choices":"per_generation","role_configuration":"editable_defaults","precedence":["explicit_request","saved_role_default","provider_default"],"request_choice_patch":"role_execution.request_choices","capability_evidence":"informational","reasoning_choices":"exact_native_attempt","readiness":"structural_not_permission","metadata_in_authority_identity":false,"execution_time_thinking_discovery":false});
     run["native_roles"]["continuity"] = json!({"version":1,"command":"profile validate-context","renew_selector":"--renew","approval_expires":false,"unavailable":"pause_and_retain_choices","changed":"affected_review","revoked":"no_reuse","credential_renewal_owner":"existing_credential_owner","validation_does_not_authorize_execution":true});
     run["structured_results"] = json!({"definition_revision":"2026-10-03.r1","source":"selected_root_tool","business_types":["object","array","string","integer","number","boolean","null"],"nullable_union":"T_or_null","private_content":"--include-result-content","descendants":"no_root_publication","artifact_access":{"permission_version":1,"descriptor_version":1,"read_grant_version":1,"read_command":"actions artifact","request_version":1,"native_confinement":cfg!(any(target_os="linux",target_os="macos",windows)),"limits":super::client_actions::limits()["artifact"]}});
     if cfg!(feature = "developer-tools") {
@@ -918,6 +944,74 @@ pub(crate) fn runtime_outcome(succeeded: bool) -> Result<Value, Failure> {
 #[cfg(test)]
 mod thinking_tests {
     use super::*;
+
+    #[test]
+    fn action_payload_versions_follow_the_selected_contract() {
+        for (command, data, expected) in [
+            (
+                "actions resolve",
+                json!({"version":1}),
+                "cargo-ai.actions.resolve.v1",
+            ),
+            (
+                "actions resolve",
+                json!({"version":2}),
+                "cargo-ai.actions.resolve.v2",
+            ),
+            (
+                "actions validate",
+                json!({"schema_version":2}),
+                "cargo-ai.actions.validate.v2",
+            ),
+            (
+                "actions validate",
+                json!({"schema_version":3}),
+                "cargo-ai.actions.validate.v3",
+            ),
+            (
+                "actions validate",
+                json!({"schema_version":4}),
+                "cargo-ai.actions.validate.v3",
+            ),
+            (
+                "actions list",
+                json!({"schema_version":3}),
+                "cargo-ai.actions.list.v3",
+            ),
+        ] {
+            assert_eq!(
+                envelope(command, "fixture", data, None, vec![])["payload_schema"],
+                expected
+            );
+        }
+        let contracts = contracts();
+        let contract = |name| {
+            contracts
+                .iter()
+                .find(|value| value["command"] == name)
+                .unwrap()
+        };
+        assert_eq!(
+            contract("run")["client_actions"]["request_versions"],
+            json!([2, 3, 4])
+        );
+        assert_eq!(
+            contract("run")["native_roles"]["selection_policy"]["version"],
+            2
+        );
+        assert_eq!(
+            contract("actions validate")["payload_schemas"][2],
+            json!({
+                "payload_schema":"cargo-ai.actions.validate.v3", "condition":{"request_version":4}
+            })
+        );
+        assert_eq!(
+            contract("actions resolve")["payload_schemas"][1],
+            json!({
+                "payload_schema":"cargo-ai.actions.resolve.v2", "condition":{"request_version":4}
+            })
+        );
+    }
 
     fn observer() -> Observer {
         let (sender, _) = mpsc::sync_channel(64);

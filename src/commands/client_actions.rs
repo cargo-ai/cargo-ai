@@ -176,6 +176,8 @@ pub(crate) struct ActionCatalog {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RoleExecution {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) request_choices: Option<crate::role_contract::RequestChoicePatch>,
     pub(crate) binding_revision: crate::role_contract::BindingRevision,
     #[serde(default)]
     pub(crate) resolution_id: Option<String>,
@@ -489,7 +491,7 @@ pub(crate) fn machine_run(matches: &clap::ArgMatches) -> Result<Value, super::ma
             }
             let prepared = prepare(&target.root, &request).map_err(action_failure)?;
             Ok(
-                json!({"schema_version":request.schema_version,"valid":true,"execution_authorized":false,"interface":prepared.interface,"action":prepared.action,"binding":prepared.binding,
+                json!({"schema_version":if request.schema_version == 4 {3} else {request.schema_version},"valid":true,"execution_authorized":false,"interface":prepared.interface,"action":prepared.action,"binding":prepared.binding,
                 "mappings":{"runtime_vars":prepared.run_vars.iter().filter_map(|value|value.split_once('=').map(|(name,_)|name)).collect::<Vec<_>>(),"inputs":prepared.input_overrides.iter().filter_map(|value|value.split_once('=').map(|(name,_)|name)).collect::<Vec<_>>()}}),
             )
         }
@@ -624,6 +626,13 @@ pub(crate) fn discover(root: &Path) -> Result<ActionCatalog, ActionError> {
                 .is_some()
                 .then_some("native_roles.v1"),
         )
+        .chain(
+            loaded
+                .document
+                .role_registry
+                .is_some()
+                .then_some("native_request_choices.v1"),
+        )
         .collect(),
         binding: loaded.binding,
         actions,
@@ -631,7 +640,7 @@ pub(crate) fn discover(root: &Path) -> Result<ActionCatalog, ActionError> {
         interfaces: loaded.document.interfaces,
         artifact_scopes: loaded.document.artifact_scopes,
         supported_catalog_versions: vec![2, 3],
-        supported_request_versions: vec![2, 3],
+        supported_request_versions: vec![2, 3, 4],
         role_registry: loaded.document.role_registry,
     })
 }
@@ -642,7 +651,7 @@ pub(crate) fn parse_request(raw: &str) -> Result<ActionRequest, ActionError> {
     let value = strict_json(raw.as_bytes()).map_err(ActionError::inputs)?;
     validate_envelope_bounds(&value, 0).map_err(ActionError::inputs)?;
     if let Some(version) = value.get("schema_version").and_then(Value::as_u64) {
-        if ![2, 3].contains(&version) {
+        if ![2, 3, 4].contains(&version) {
             return Err(ActionError::new(
                 "action.unsupported_contract",
                 "Unsupported action request contract version.",
@@ -650,13 +659,24 @@ pub(crate) fn parse_request(raw: &str) -> Result<ActionRequest, ActionError> {
         }
     }
     let request: ActionRequest = serde_json::from_value(value).map_err(ActionError::inputs)?;
-    if (request.schema_version == 3) != request.role_execution.is_some() {
+    if matches!(request.schema_version, 3 | 4) != request.role_execution.is_some() {
         return Err(ActionError::new(
             "role.unsupported_contract",
-            "Private role execution requires action request version 3.",
+            "Private role execution requires action request version 3 or 4.",
         ));
     }
     if let Some(role) = &request.role_execution {
+        if request.schema_version != 4 && role.request_choices.is_some() {
+            return Err(ActionError::new(
+                "role.unsupported_contract",
+                "Per-generation request choices require action request version 4.",
+            ));
+        }
+        if let Some(choices) = &role.request_choices {
+            choices
+                .validate_root()
+                .map_err(|error| ActionError::inputs(error.to_string()))?;
+        }
         identifier(&role.mode, "Feature mode").map_err(ActionError::inputs)?;
         if let Some(identity) = &role.resolution_id {
             validate_digest(identity).map_err(ActionError::inputs)?;
@@ -676,11 +696,24 @@ pub(crate) fn parse_request(raw: &str) -> Result<ActionRequest, ActionError> {
     Ok(request)
 }
 pub(crate) fn prepare(root: &Path, request: &ActionRequest) -> Result<PreparedAction, ActionError> {
-    if ![2, 3].contains(&request.schema_version) {
+    if ![2, 3, 4].contains(&request.schema_version) {
         return Err(ActionError::new(
             "action.unsupported_contract",
             "Unsupported action request contract version.",
         ));
+    }
+    if let Some(role) = &request.role_execution {
+        if request.schema_version != 4 && role.request_choices.is_some() {
+            return Err(ActionError::new(
+                "role.unsupported_contract",
+                "Per-generation request choices require action request version 4.",
+            ));
+        }
+        if let Some(choices) = &role.request_choices {
+            choices
+                .validate_root()
+                .map_err(|error| ActionError::inputs(error.to_string()))?;
+        }
     }
     validate_value_bounds(&Value::Object(request.inputs.clone()), 0)
         .map_err(ActionError::inputs)?;
@@ -691,7 +724,7 @@ pub(crate) fn prepare(root: &Path, request: &ActionRequest) -> Result<PreparedAc
         )
     })?;
     let mut loaded = load_catalog(root)?;
-    if (request.schema_version == 3) != request.role_execution.is_some()
+    if matches!(request.schema_version, 3 | 4) != request.role_execution.is_some()
         || loaded.document.role_registry.is_some() != request.role_execution.is_some()
     {
         return Err(ActionError::new(
@@ -1058,7 +1091,7 @@ fn load_catalog(root: &Path) -> Result<LoadedCatalog, ActionError> {
     validate_envelope_bounds(&value, 0)?;
     let document: CatalogDocument =
         serde_json::from_value(value).map_err(|e| format!("Invalid action catalog: {e}"))?;
-    if ![2, 3].contains(&document.schema_version) {
+    if ![2, 3, 4].contains(&document.schema_version) {
         return Err(ActionError::new(
             "action.unsupported_contract",
             "Unsupported action catalog contract version.",
@@ -1118,6 +1151,7 @@ fn load_catalog(root: &Path) -> Result<LoadedCatalog, ActionError> {
                 "structured_results.v1",
                 "artifact_access.v1",
                 "native_roles.v1",
+                "native_request_choices.v1",
             ]
             .contains(&capability.as_str())
             {
@@ -1318,7 +1352,7 @@ pub(crate) fn verified_role_inventory(
 
 /// Resolve one declared action context against native, already validated context evidence.
 /// The returned selections are policy inputs; they do not authorize an invocation.
-pub(crate) fn resolve_roles_from_context(
+pub(crate) fn resolve_roles_with_choices_from_context(
     root: &Path,
     expected: &ActionBinding,
     key: &crate::role_contract::ContextKey,
@@ -1326,6 +1360,7 @@ pub(crate) fn resolve_roles_from_context(
     context: &crate::role_contract::ResolutionContext,
     evidence: &[crate::role_contract::CapabilityEvidence],
     now_unix_secs: u64,
+    choices: Option<crate::role_contract::RequestChoicesContext>,
 ) -> Result<crate::role_contract::Resolution, ActionError> {
     let loaded = load_catalog(root)?;
     if &loaded.binding != expected {
@@ -1348,8 +1383,21 @@ pub(crate) fn resolve_roles_from_context(
             "This catalog does not declare native roles.",
         )
     })?;
-    crate::role_contract::resolve(registry, key, revision, context, evidence, now_unix_secs)
-        .map_err(role_error)
+    match choices {
+        Some(choices) => crate::role_contract::resolve_request_choices(
+            registry,
+            key,
+            revision,
+            context,
+            evidence,
+            now_unix_secs,
+            choices,
+        ),
+        None => {
+            crate::role_contract::resolve(registry, key, revision, context, evidence, now_unix_secs)
+        }
+    }
+    .map_err(role_error)
 }
 
 fn validate_role_inventory(
@@ -1590,6 +1638,19 @@ fn validate_role_inventory(
         for selector in ["profile", "model", "thinking"] {
             if let Some(value) = selectors.get(selector) {
                 if site.role.is_some() {
+                    let definition: Value = strict_json(
+                        files
+                            .get(&site.locator.definition)
+                            .ok_or_else(|| ActionError::catalog("Missing source declaration"))?,
+                    )
+                    .map_err(ActionError::catalog)?;
+                    if definition
+                        .get(crate::definition_validation::VERSION_KEY)
+                        .and_then(Value::as_str)
+                        == Some(crate::definition_validation::REQUEST_CHOICES_SCHEMA_VERSION)
+                    {
+                        continue;
+                    }
                     return Err(ActionError::catalog(
                         "Mapped call sites cannot silently replace explicit native selectors",
                     ));
@@ -2372,6 +2433,7 @@ mod tests {
         );
         request.schema_version = 3;
         request.role_execution = Some(RoleExecution {
+            request_choices: None,
             binding_revision: crate::role_contract::BindingRevision {
                 version: 1,
                 revision: "draft".into(),
@@ -2384,6 +2446,28 @@ mod tests {
             prepare(&fixture.root, &request).unwrap_err().code,
             "role.resolution_required"
         );
+    }
+
+    #[test]
+    fn per_generation_request_choices_require_v4_and_literal_host_values() {
+        let (fixture, _) = role_fixture();
+        let discovery = discover(&fixture.root).unwrap();
+        assert_eq!(discovery.supported_request_versions, vec![2, 3, 4]);
+        assert!(discovery
+            .capabilities
+            .contains(&"native_request_choices.v1"));
+        let request = json!({"schema_version":4,"interface":"native","action":"generate","inputs":{},"expected_binding":discovery.binding,"execution_policy":fixture.request().execution_policy,"role_execution":{"binding_revision":{"version":1,"revision":"draft","bindings":[]},"mode":"default","request_choices":{"model":{"mode":"provider_default"},"settings":{"thinking":{"mode":"value","value":{"mode":"choice","value":"custom"}}}}}});
+        assert!(parse_request(&request.to_string()).is_ok());
+        let mut legacy = request.clone();
+        legacy["schema_version"] = json!(3);
+        assert_eq!(
+            parse_request(&legacy.to_string()).unwrap_err().code,
+            "role.unsupported_contract"
+        );
+        let mut dynamic = request;
+        dynamic["role_execution"]["request_choices"]["model"] =
+            json!({"mode":"value","value":{"var":"runtime.model"}});
+        assert!(parse_request(&dynamic.to_string()).is_err());
     }
 
     #[test]

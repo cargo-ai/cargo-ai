@@ -364,6 +364,23 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
     if sub_m.get_flag("native_role_child") {
         return match crate::role_transport::native_child_start() {
             Ok(context) => {
+                let prepared = context.prepare_root(
+                    sub_m.get_one::<String>("profile").map(String::as_str),
+                    sub_m.get_one::<String>("model").map(String::as_str),
+                    crate::commands::runtime_actions::runtime_thinking::invocation_setting(sub_m)
+                        .as_ref(),
+                );
+                let context = match prepared {
+                    Ok(prepared) => prepared,
+                    Err(_) => {
+                        return context
+                            .scope(async {
+                                let _ = crate::role_runtime::finish_native(false);
+                                false
+                            })
+                            .await;
+                    }
+                };
                 context
                     .scope(async {
                         let succeeded = run_scoped(sub_m).await;
@@ -804,7 +821,8 @@ fn prepare_client_action(
             ));
         }
         let bootstrap = crate::role_runtime::Bootstrap {
-            version: 1,
+            version: if request.schema_version == 4 { 2 } else { 1 },
+            effective_root: None,
             resolution,
             bindings: execution.binding_revision.clone(),
             policy: policy.clone(),
@@ -816,12 +834,23 @@ fn prepare_client_action(
             binding_revision: session.binding_revision.clone(),
         };
         Some(
-            crate::role_runtime::Context::new(bootstrap, session).map_err(|_| {
-                super::machine::Failure::new(
-                    "role.invalid_context",
-                    "The native role execution context is unavailable or unauthorized.",
-                )
-            })?,
+            crate::role_runtime::Context::new(bootstrap, session)
+                .and_then(|context| {
+                    context.prepare_root(
+                        settings.get_one::<String>("profile").map(String::as_str),
+                        settings.get_one::<String>("model").map(String::as_str),
+                        crate::commands::runtime_actions::runtime_thinking::invocation_setting(
+                            &settings,
+                        )
+                        .as_ref(),
+                    )
+                })
+                .map_err(|_| {
+                    super::machine::Failure::new(
+                        "role.invalid_context",
+                        "The native role execution context is unavailable or unauthorized.",
+                    )
+                })?,
         )
     } else {
         None

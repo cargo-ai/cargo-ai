@@ -92,18 +92,19 @@ fn resolve_with_home(
     home: &Path,
     now: u64,
 ) -> Result<Resolution, Failure> {
-    if request.schema_version != 3 {
+    if !matches!(request.schema_version, 3 | 4) {
         return Err(Failure::new(
             "role.unsupported_contract",
-            "Native role resolution requires action request version 3.",
+            "Native role resolution requires action request version 3 or 4.",
         ));
     }
-    crate::execution_policy::ExecutionPolicy::parse(&request.execution_policy).map_err(|_| {
-        Failure::new(
-            "action.execution_policy_invalid",
-            "The host execution policy is invalid or unsupported.",
-        )
-    })?;
+    let policy = crate::execution_policy::ExecutionPolicy::parse(&request.execution_policy)
+        .map_err(|_| {
+            Failure::new(
+                "action.execution_policy_invalid",
+                "The host execution policy is invalid or unsupported.",
+            )
+        })?;
     let execution = request.role_execution.as_ref().ok_or_else(|| {
         Failure::new(
             "role.unsupported_contract",
@@ -149,6 +150,49 @@ fn resolve_with_home(
             )
         })?;
 
+    if request.schema_version == 4 {
+        if let Some(choices) = &execution.request_choices {
+            choices.validate_root().map_err(role_failure)?;
+        }
+        if policy.limits.max_runtime_secs > scope.limits.max_runtime_secs
+            || policy.limits.max_output_tokens > scope.limits.max_output_tokens
+            || policy.limits.max_agent_depth > scope.limits.max_agent_depth
+            || policy.allowed.iter().any(|grant| {
+                !registry.call_sites.iter().any(|site| {
+                    scope.call_sites.contains(&site.id)
+                        && (site.role.is_some() || site.fixed.is_some())
+                        && site.kind.request_kind() == grant.request_kind
+                })
+            })
+        {
+            return Err(Failure::new(
+                "role.policy_scope_conflict",
+                "The execution policy exceeds this declared action scope.",
+            ));
+        }
+        for site in registry
+            .call_sites
+            .iter()
+            .filter(|site| scope.call_sites.contains(&site.id))
+        {
+            if let Some(artifact) = &site.artifact {
+                let capability =
+                    crate::generated_capabilities::capabilities_for_artifact(&root.join(artifact))
+                        .map_err(|_| {
+                            Failure::new(
+                                "role.child_rebuild_required",
+                                "Per-generation choices require rebuilding generated descendants.",
+                            )
+                        })?;
+                if !capability.supports_request_choices() {
+                    return Err(Failure::new(
+                        "role.child_rebuild_required",
+                        "Per-generation choices require rebuilding generated descendants.",
+                    ));
+                }
+            }
+        }
+    }
     // Every supplied binding must name the exact active private generation, including shared roles.
     let profiles = validated_profiles(home, &execution.binding_revision)?;
     let fixed_selections: Vec<_> = registry
@@ -163,6 +207,50 @@ fn resolve_with_home(
         .collect();
     let fixed_identity = operation_metadata::fixed_context_identity(home, &fixed_selections)
         .map_err(|_| context_unavailable())?;
+    let policy_profiles: Vec<_> = if request.schema_version == 4 {
+        let profiles: std::collections::BTreeSet<_> = policy
+            .allowed
+            .iter()
+            .map(|grant| grant.profile.clone())
+            .collect();
+        profiles
+            .into_iter()
+            .enumerate()
+            .map(|(index, profile)| (format!("policy_{index}"), profile))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let (policy_identity, approved_profiles) =
+        operation_metadata::fixed_context_snapshot(home, &policy_profiles)
+            .map_err(|_| context_unavailable())?;
+    let request_choices = if request.schema_version == 4 {
+        Some(role_contract::RequestChoicesContext {
+            version: 1,
+            authorized_connections: policy_profiles
+                .iter()
+                .map(|(id, profile)| {
+                    let snapshot = &approved_profiles[id];
+                    Ok(role_contract::AuthorizedConnection {
+                        profile: profile.clone(),
+                        profile_name: snapshot.profile_name.clone(),
+                        profile_uuid: snapshot.context.profile_uuid.clone(),
+                        connection_generation: snapshot.context.connection_generation.clone(),
+                        provider: crate::providers::discovery::provider_name(
+                            crate::providers::ProviderKind::from_server_value(
+                                &snapshot.profile.server,
+                            )
+                            .ok_or_else(context_unavailable)?,
+                        )
+                        .into(),
+                    })
+                })
+                .collect::<Result<Vec<_>, Failure>>()?,
+            root_request: execution.request_choices.clone(),
+        })
+    } else {
+        None
+    };
     let evidence = native_evidence(
         registry,
         &scope.call_sites,
@@ -194,11 +282,20 @@ fn resolve_with_home(
         environment_identity: identity(&environment)?,
         package_identity: identity(&catalog.binding)?,
         runtime_contract: identity(&(runtime, role_contract::ROLE_CONTRACT_VERSION))?,
-        connection_context_identity: operation_metadata::connection_context_identity(
-            &execution.binding_revision,
-            &fixed_identity,
-        )
-        .map_err(|_| context_unavailable())?,
+        connection_context_identity: if let Some(choices) = &request_choices {
+            role_contract::request_connection_identity(
+                &execution.binding_revision,
+                &fixed_identity,
+                choices,
+            )
+            .map_err(role_failure)?
+        } else {
+            operation_metadata::connection_context_identity(
+                &execution.binding_revision,
+                &fixed_identity,
+            )
+            .map_err(|_| context_unavailable())?
+        },
         consent_identity: identity(
             &json!({"execution_policy":request.execution_policy,"attachment_grants":grants,"artifact_access":request.artifact_access,"inputs":request.inputs}),
         )?,
@@ -211,7 +308,13 @@ fn resolve_with_home(
     {
         return Err(context_unavailable());
     }
-    client_actions::resolve_roles_from_context(
+    if operation_metadata::fixed_context_identity(home, &policy_profiles)
+        .map_err(|_| context_unavailable())?
+        != policy_identity
+    {
+        return Err(context_unavailable());
+    }
+    client_actions::resolve_roles_with_choices_from_context(
         root,
         &request.expected_binding,
         &key,
@@ -219,6 +322,7 @@ fn resolve_with_home(
         &context,
         &evidence,
         now,
+        request_choices,
     )
     .map_err(client_actions::action_failure)
 }
@@ -421,6 +525,7 @@ mod tests {
                 attachment_grants: BTreeMap::new(),
                 artifact_access: None,
                 role_execution: Some(client_actions::RoleExecution {
+                    request_choices: None,
                     binding_revision: BindingRevision {
                         version: ROLE_CONTRACT_VERSION,
                         revision: "reviewed-draft".into(),
