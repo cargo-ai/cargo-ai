@@ -110,6 +110,7 @@ pub fn verify_command(
         .map_err(|_| crate::role_runtime::failure("role.child_rebuild_required"))?;
     if !capabilities.supports_native_roles()
         || !capabilities.supports_connection_continuity()
+        || !capabilities.supports_native_selection_policy()
         || capabilities.is_cli_run() != cli_run
     {
         return Err(crate::role_runtime::failure("role.child_rebuild_required"));
@@ -837,6 +838,30 @@ pub async fn native(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn native_children_require_informational_selection_policy_not_only_continuity() {
+        let fixture = ProcessFixture::new();
+        let artifact = fixture.root.join("passive-child");
+        let mut command = tokio::process::Command::new(&artifact);
+        command.arg("--native-role-child");
+        std::fs::write(&artifact, crate::generated_capabilities::test_record(6)).unwrap();
+        assert!(verify_command(&command, &fixture.context.bootstrap, false)
+            .unwrap_err()
+            .contains("role.child_rebuild_required"));
+        let mut bytes = crate::generated_capabilities::test_record(7);
+        let digest = crate::role_contract::canonical_identity(&json!({})).unwrap();
+        bytes.extend_from_slice(&[
+            17, 209, 42, 66, 171, 99, 187, 13, 214, 3, 168, 194, 51, 17, 222, 31,
+        ]);
+        bytes.extend_from_slice(digest.as_bytes());
+        bytes.extend_from_slice(&[
+            32, 221, 18, 52, 193, 169, 4, 215, 14, 188, 100, 172, 67, 43, 210, 18,
+        ]);
+        std::fs::write(&artifact, bytes).unwrap();
+        verify_command(&command, &fixture.context.bootstrap, false).unwrap();
+    }
+
     #[cfg(unix)]
     struct ProcessFixture {
         context: Context,

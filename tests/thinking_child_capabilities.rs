@@ -78,7 +78,7 @@ fn actual_cli_and_copied_cli_declare_exactly_one_matching_run_capability() {
         assert!(passive.is_cli_run());
         assert!(passive.supports_thinking());
         let declaration = serde_json::to_value(passive).unwrap();
-        assert_eq!(declaration["revision"], 6);
+        assert_eq!(declaration["revision"], 7);
         assert!(passive.supports_native_roles());
         assert_eq!(
             declaration["structured_results"]["execution_checking"],
@@ -125,7 +125,7 @@ fn actual_generated_and_copied_binary_inspect_agree_with_passive_capabilities() 
         assert!(!passive.is_cli_run());
         assert!(passive.supports_thinking());
         let declaration = serde_json::to_value(passive).unwrap();
-        assert_eq!(declaration["revision"], 6);
+        assert_eq!(declaration["revision"], 7);
         assert!(passive.supports_native_roles());
         assert_eq!(
             declaration["structured_results"]["execution_checking"],

@@ -97,6 +97,12 @@ async fn send_text_request_admitted(
     account_id: Option<&str>,
 ) -> Result<runtime::ProviderTextResponse, ProviderError> {
     if provider == ProviderKind::TypeSafe {
+        if crate::role_runtime::current().is_some() && request.thinking.is_some() {
+            return Err(ProviderError::invalid_request(
+                provider,
+                "The TypeSafe text adapter cannot serialize an exact native reasoning choice; use provider default or an implemented transport.",
+            ));
+        }
         return typesafe::send_request(url, request).await;
     }
     let wire_schema = if request.rubric_enabled {

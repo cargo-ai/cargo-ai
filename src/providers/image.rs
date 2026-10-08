@@ -123,6 +123,18 @@ async fn send_image_request_admitted(
             "An image model and prompt are required.",
         ));
     }
+    if crate::role_runtime::current().is_some()
+        && thinking.is_some()
+        && matches!(
+            provider,
+            ProviderKind::Ollama | ProviderKind::Xai | ProviderKind::Mistral
+        )
+    {
+        return Err(ProviderError::invalid_request(
+            provider,
+            "This image adapter cannot serialize an exact native reasoning choice; use provider default or an implemented transport.",
+        ));
+    }
     let deadline = Instant::now() + Duration::from_secs(timeout_in_sec);
     match provider {
         ProviderKind::OpenAi => {

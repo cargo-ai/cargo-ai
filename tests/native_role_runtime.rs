@@ -858,13 +858,104 @@ fn exercise(executable: &Path, fixture: &Fixture, provider: &Provider) {
         canceled_child.frames
     );
     assert_eq!(fs::read(fixture.root.join("completed.wav")).unwrap(), WAV);
-    let mut unknown = fixture.bootstrap(0);
-    unknown["resolution"]["calls"][0]["evidence"][0]["status"] = json!("unknown");
-    assert!(!invoke(fixture, executable, unknown, Control::Allow).success);
+    for status in [
+        "compatible",
+        "unknown",
+        "stale",
+        "unavailable",
+        "incompatible",
+        "missing",
+    ] {
+        let mut informational = fixture.bootstrap(0);
+        for call in informational["resolution"]["calls"].as_array_mut().unwrap() {
+            call["compatibility"] = json!(if status == "missing" {
+                "unknown"
+            } else {
+                status
+            });
+            if status == "missing" {
+                call["evidence"] = json!([]);
+            } else {
+                call["evidence"][0]["status"] = json!(status);
+                call["evidence"][0]["valid_until_unix_secs"] = json!(0);
+            }
+        }
+        assert_success(&invoke(fixture, executable, informational, Control::Allow));
+        let observed = provider.take();
+        assert_eq!(observed.len(), if cfg!(unix) { 5 } else { 4 });
+        assert!(observed
+            .iter()
+            .all(|(_, body)| body.get("reasoning_effort").is_none()));
+    }
+    for value in ["high", "Custom-Attempt"] {
+        let mut exact = fixture.bootstrap(0);
+        let choice = json!({"mode":"choice","value":value});
+        exact["bindings"]["bindings"][0]["settings"]["thinking"] = choice.clone();
+        exact["resolution"]["binding_identity"] = json!(format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&exact["bindings"]).unwrap())
+        ));
+        for call in exact["resolution"]["calls"].as_array_mut().unwrap() {
+            call["evidence"] = json!([]);
+            if call["call_site"]["role"] == "writer" {
+                call["selection"]["thinking"] = choice.clone();
+                call["settings"]["thinking"] = choice.clone();
+            }
+        }
+        exact["resolution"]["required_selections"][0]["thinking"] = choice.clone();
+        exact["policy"]["allowed"][0]["thinking"] = choice;
+        assert_success(&invoke(fixture, executable, exact.clone(), Control::Allow));
+        let observed = provider.take();
+        assert_eq!(observed.len(), if cfg!(unix) { 5 } else { 4 });
+        for index in [0, 3] {
+            assert_eq!(observed[index].1["reasoning_effort"], value);
+        }
+        if cfg!(unix) {
+            assert_eq!(observed[4].1["reasoning_effort"], value);
+        }
+        assert!(observed[1].1.get("reasoning_effort").is_none());
+        exact["policy"]["allowed"][0]["thinking"] = json!({"mode":"provider_default"});
+        assert!(!invoke(fixture, executable, exact, Control::Allow).success);
+        assert!(
+            provider.take().is_empty(),
+            "exact reasoning policy mismatch denies before dispatch"
+        );
+    }
+    let mut unsupported = fixture.bootstrap(0);
+    let custom = json!({"mode":"choice","value":"Custom-Image-Attempt"});
+    unsupported["bindings"]["bindings"][1]["settings"]["thinking"] = custom.clone();
+    unsupported["resolution"]["binding_identity"] = json!(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&unsupported["bindings"]).unwrap())
+    ));
+    unsupported["resolution"]["calls"][1]["selection"]["thinking"] = custom.clone();
+    unsupported["resolution"]["calls"][1]["settings"]["thinking"] = custom.clone();
+    unsupported["resolution"]["required_selections"][1]["thinking"] = custom.clone();
+    unsupported["policy"]["allowed"][1]["thinking"] = custom;
+    let failed = invoke(fixture, executable, unsupported, Control::Allow);
     assert!(
-        provider.take().is_empty(),
-        "unknown evidence must never dispatch"
+        !failed.success,
+        "unimplemented reasoning cannot silently become default"
     );
+    assert_eq!(
+        provider.take().len(),
+        1,
+        "completed root retained; unsupported image dispatches zero requests"
+    );
+    let terminal = failed
+        .frames
+        .iter()
+        .find(|f| f["type"] == "result")
+        .unwrap();
+    assert!(
+        terminal["native_outcomes"]["outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["boundary"]["call_site"] == "image"
+                && o["cause"] == "provider.invalid_request")
+    );
+
     let mut policy = fixture.bootstrap(0);
     policy["policy"]["allowed"] = json!([]);
     assert!(!invoke(fixture, executable, policy, Control::Allow).success);
@@ -1755,8 +1846,8 @@ fn installed_native_roles_preserve_private_mapping_and_public_structural_executi
             Some(&request),
         );
         assert_eq!(
-            resolved["ready"], false,
-            "custom endpoint must not invent production compatibility"
+            resolved["ready"], true,
+            "custom endpoint support information does not deny structural readiness"
         );
         assert_eq!(
             resolved["calls"][0]["selection"]["profile"],

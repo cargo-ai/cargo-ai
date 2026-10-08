@@ -540,8 +540,8 @@ pub async fn admit_provider(
     account_id: Option<&str>,
     model: &str,
     kind: RequestKind,
-    modalities: &[&str],
-    structured: bool,
+    _modalities: &[&str],
+    _structured: bool,
     settings: serde_json::Value,
 ) -> Result<Option<Permit>, String> {
     let Some(context) = current() else {
@@ -575,8 +575,16 @@ pub async fn admit_provider(
             return Err(failure("role.request_conflict"));
         }
     }
-    let expected_thinking =
-        serde_json::to_value(&selection.thinking).map_err(|_| failure("role.request_conflict"))?;
+    let expected_thinking = match (&selection.thinking, provider, kind) {
+        (ThinkingSetting::On, crate::providers::ProviderKind::Ollama, RequestKind::Text) => {
+            serde_json::json!({"mode":"choice","value":"medium"})
+        }
+        (ThinkingSetting::Off, crate::providers::ProviderKind::Ollama, RequestKind::Text) => {
+            serde_json::json!({"mode":"choice","value":"none"})
+        }
+        _ => serde_json::to_value(&selection.thinking)
+            .map_err(|_| failure("role.request_conflict"))?,
+    };
     if settings
         .get("thinking")
         .cloned()
@@ -588,22 +596,6 @@ pub async fn admit_provider(
     for key in ["voice", "format", "temperature"] {
         if call.settings.get(key) != settings.get(key) {
             return Err(failure("role.request_conflict"));
-        }
-    }
-    if call.call_site.role.is_some() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(u64::MAX);
-        if !call.evidence.iter().any(|e| {
-            e.status == crate::role_contract::Compatibility::Compatible
-                && now < e.valid_until_unix_secs
-                && (!structured || e.structured_output)
-                && modalities
-                    .iter()
-                    .all(|m| e.input_modalities.iter().any(|v| v == m))
-        }) {
-            return Err(failure("role.capability_unavailable"));
         }
     }
     // Match the bytes actually held by the request to the same validated snapshot
@@ -727,6 +719,9 @@ mod tests {
         fixture_at("http://127.0.0.1:1")
     }
     fn fixture_at(url: &str) -> (Context, std::path::PathBuf, HomeGuard) {
+        fixture_at_provider(url, "openai")
+    }
+    fn fixture_at_provider(url: &str, provider: &str) -> (Context, std::path::PathBuf, HomeGuard) {
         let root =
             std::env::temp_dir().join(format!("cargo-ai-role-runtime-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
@@ -735,7 +730,7 @@ mod tests {
         std::fs::create_dir(&home).unwrap();
         let guard = HomeGuard(std::env::var_os("CARGO_AI_HOME"));
         std::env::set_var("CARGO_AI_HOME", &home);
-        std::fs::write(home.join("config.toml"), format!("secret_store='file'\ndefault_profile='fixture'\n[[profile]]\nname='fixture'\nserver='openai'\nmodel='fixture'\nauth_mode='api_key'\nurl='{url}'\n")).unwrap();
+        std::fs::write(home.join("config.toml"), format!("secret_store='file'\ndefault_profile='fixture'\n[[profile]]\nname='fixture'\nserver='{provider}'\nmodel='fixture'\nauth_mode='api_key'\nurl='{url}'\n")).unwrap();
         std::fs::write(
             home.join("credentials.toml"),
             "[profile_tokens]\nfixture='isolated-fixture'\n",
@@ -1205,7 +1200,7 @@ mod tests {
             profile: "fixture".into(),
             profile_uuid: private.context.profile_uuid.clone(),
             connection_generation: private.context.connection_generation.clone(),
-            provider: "openai".into(),
+            provider: private.profile.server.clone(),
             model: "fixture".into(),
             settings: BTreeMap::new(),
         });
@@ -1216,7 +1211,7 @@ mod tests {
         call.evidence.push(CapabilityEvidence {
             profile_uuid: private.context.profile_uuid,
             connection_generation: private.context.connection_generation,
-            provider: "openai".into(),
+            provider: private.profile.server.clone(),
             model: "fixture".into(),
             operation: "text_generation".into(),
             input_modalities: vec!["text".into()],
@@ -1253,6 +1248,214 @@ mod tests {
         bootstrap.policy.allowed = vec![call.selection.clone().unwrap()];
         bootstrap.resolution.required_selections = bootstrap.policy.allowed.clone();
         Context::new(bootstrap, context.session.clone()).unwrap()
+    }
+
+    fn exact_thinking_context(context: &Context, value: &str) -> Context {
+        selected_thinking_context(
+            context,
+            ThinkingSetting::Choice {
+                value: value.into(),
+            },
+        )
+    }
+
+    fn selected_thinking_context(context: &Context, setting: ThinkingSetting) -> Context {
+        let mut bootstrap = (*context.bootstrap).clone();
+        let wire = serde_json::to_value(&setting).unwrap();
+        bootstrap.bindings.bindings[0]
+            .settings
+            .insert("thinking".into(), wire.clone());
+        let call = &mut bootstrap.resolution.calls[0];
+        call.selection.as_mut().unwrap().thinking = setting;
+        call.settings.insert("thinking".into(), wire);
+        call.evidence.clear();
+        call.compatibility = Compatibility::Unknown;
+        bootstrap.policy.allowed = vec![call.selection.clone().unwrap()];
+        bootstrap.resolution.required_selections = bootstrap.policy.allowed.clone();
+        bootstrap.resolution.binding_identity = canonical_identity(&bootstrap.bindings).unwrap();
+        Context::new(bootstrap, context.session.clone()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_ollama_boolean_controls_match_only_their_exact_wire_mapping() {
+        for (setting, wire) in [
+            (ThinkingSetting::On, "medium"),
+            (ThinkingSetting::Off, "none"),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let mock = server
+                .mock("POST", mockito::Matcher::Any)
+                .match_request(move |request| {
+                    let body: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+                    body["reasoning_effort"] == wire && body.get("think").is_none()
+                })
+                .with_status(400)
+                .with_body(r#"{"error":{"message":"synthetic provider rejection"}}"#)
+                .expect(1)
+                .create_async()
+                .await;
+            let (context, root, _home_guard) = fixture_at_provider(&server.url(), "ollama");
+            let context = selected_thinking_context(&bound_role_context(&context), setting);
+            for actual in ["unexpected", wire] {
+                let result = context
+                    .scope(crate::providers::send_text_request_with_account_context(
+                        crate::providers::ProviderKind::Ollama,
+                        &server.url(),
+                        crate::providers::ProviderTextRequest {
+                            rubric_enabled: false,
+                            model: "fixture",
+                            content_parts: &[crate::providers::runtime::ContentPart::Text(
+                                "input".into(),
+                            )],
+                            timeout_in_sec: 5,
+                            token: "isolated-fixture",
+                            response_schema: &json!({"type":"object","properties":{}}),
+                            max_output_tokens: None,
+                            temperature: None,
+                            thinking: Some(actual),
+                        },
+                        None,
+                    ))
+                    .await;
+                assert!(result.is_err());
+                if actual != wire {
+                    assert!(result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("authorization rejected"));
+                }
+            }
+            mock.assert_async().await;
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn native_unimplemented_reasoning_fails_without_dispatch_or_defaulting() {
+        use crate::providers::{ProviderErrorKind, ProviderKind};
+        for (provider, server_name) in [
+            (ProviderKind::OpenAi, "openai"),
+            (ProviderKind::Ollama, "ollama"),
+            (ProviderKind::Xai, "xai"),
+            (ProviderKind::Mistral, "mistral"),
+            (ProviderKind::TypeSafe, "typesafe"),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let untouched = server
+                .mock("POST", mockito::Matcher::Any)
+                .expect(0)
+                .create_async()
+                .await;
+            let (context, root, _home_guard) = fixture_at_provider(&server.url(), server_name);
+            let context = exact_thinking_context(&bound_role_context(&context), "Custom-Attempt");
+            let result = if provider == ProviderKind::TypeSafe {
+                context
+                    .scope(crate::providers::send_text_request_with_account_context(
+                        provider,
+                        &server.url(),
+                        crate::providers::ProviderTextRequest {
+                            rubric_enabled: false,
+                            model: "fixture",
+                            content_parts: &[crate::providers::runtime::ContentPart::Text(
+                                "input".into(),
+                            )],
+                            timeout_in_sec: 5,
+                            token: "isolated-fixture",
+                            response_schema: &json!({"type":"object","properties":{}}),
+                            max_output_tokens: None,
+                            temperature: None,
+                            thinking: Some("Custom-Attempt"),
+                        },
+                        None,
+                    ))
+                    .await
+                    .map(|_| ())
+            } else {
+                let context = media_context(
+                    &context,
+                    RequestKind::Image,
+                    json!({"format":"png","thinking":{"mode":"choice","value":"Custom-Attempt"}}),
+                );
+                context
+                    .scope(crate::providers::send_image_request_with_account_context(
+                        provider,
+                        &server.url(),
+                        "fixture",
+                        "image",
+                        5,
+                        "isolated-fixture",
+                        "png",
+                        &[],
+                        None,
+                        Some("Custom-Attempt"),
+                        None,
+                    ))
+                    .await
+                    .map(|_| ())
+            };
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), ProviderErrorKind::InvalidRequest);
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot serialize an exact native reasoning choice"),
+                "{error}"
+            );
+            untouched.assert_async().await;
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn native_gemini_image_preserves_custom_reasoning_despite_unknown_evidence() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1beta/interactions")
+            .match_request(|request| {
+                let body: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+                body["generation_config"]["thinking_level"] == "Custom-Attempt"
+                    && body["model"] == "fixture"
+            })
+            .with_status(400)
+            .with_body(r#"{"error":{"message":"synthetic provider rejection"}}"#)
+            .create_async()
+            .await;
+        let (context, root, _home_guard) = fixture_at_provider(&server.url(), "gemini");
+        let context = exact_thinking_context(&bound_role_context(&context), "Custom-Attempt");
+        let context = media_context(
+            &context,
+            RequestKind::Image,
+            json!({"format":"jpeg","thinking":{"mode":"choice","value":"Custom-Attempt"}}),
+        );
+        let error = context
+            .scope(crate::providers::send_image_request_with_account_context(
+                crate::providers::ProviderKind::Gemini,
+                &server.url(),
+                "fixture",
+                "image",
+                5,
+                "isolated-fixture",
+                "jpeg",
+                &[],
+                None,
+                Some("Custom-Attempt"),
+                None,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            crate::providers::ProviderErrorKind::InvalidRequest
+        );
+        mock.assert_async().await;
+        let snapshot = context.session.snapshot();
+        assert_eq!(snapshot["outcomes"].as_array().unwrap().len(), 1);
+        assert_eq!(snapshot["outcomes"][0]["boundary"]["call_site"], "root");
+        assert!(snapshot["outcomes"][0]["cause"]
+            .as_str()
+            .unwrap()
+            .starts_with("provider."));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

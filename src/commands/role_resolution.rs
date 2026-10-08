@@ -863,7 +863,7 @@ mod tests {
             1_800_000_000,
         )
         .unwrap();
-        assert!(!expired.ready);
+        assert!(expired.ready);
         assert_eq!(expired.calls[0].compatibility, Compatibility::Stale);
         let second = Fixture::new();
         let other = second.resolve().unwrap();
@@ -889,7 +889,7 @@ mod tests {
             .bindings[0]
             .model = "catalog-only-unqualified".into();
         let result = fixture.resolve().unwrap();
-        assert!(!result.ready);
+        assert!(result.ready);
         assert_eq!(result.calls[0].compatibility, Compatibility::Unknown);
         assert_eq!(result.identity, fixture.resolve().unwrap().identity);
         assert!(!result.execution_authorized);

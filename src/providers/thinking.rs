@@ -206,6 +206,32 @@ pub fn resolve(
     }
 }
 
+/// Native authority selects an exact wire value; advisory metadata grants nothing.
+pub fn resolve_native(
+    selection: Option<&ThinkingSetting>,
+    source: &str,
+    support: ThinkingSupport,
+) -> ThinkingOutcome {
+    let effective = selection
+        .cloned()
+        .unwrap_or(ThinkingSetting::ProviderDefault);
+    let applied = match &effective {
+        ThinkingSetting::ProviderDefault => None,
+        ThinkingSetting::Choice { value } => Some(value.clone()),
+        ThinkingSetting::On => Some("on".into()),
+        ThinkingSetting::Off => Some("off".into()),
+    };
+    ThinkingOutcome {
+        requested: selection.cloned(),
+        source: source.to_owned(),
+        support,
+        applied,
+        effective,
+        fallback: None,
+        reason: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,6 +304,40 @@ mod tests {
                 "named choices do not prove a toggle"
             );
             assert!(result.notice().is_some());
+        }
+    }
+
+    #[test]
+    fn native_choices_are_exact_attempts_independent_of_advisory_support() {
+        for metadata in [
+            support(),
+            ThinkingSupport::Unknown {
+                reason: "missing".into(),
+                evidence: None,
+            },
+            ThinkingSupport::Unsupported {
+                reason: "not listed".into(),
+                evidence: Some("advisory".into()),
+            },
+        ] {
+            for value in ["high", "Custom-Attempt", "default", "on"] {
+                let selection = ThinkingSetting::Choice {
+                    value: value.into(),
+                };
+                let outcome = resolve_native(Some(&selection), "native_role", metadata.clone());
+                assert_eq!(outcome.effective, selection);
+                assert_eq!(outcome.applied_choice(), Some(value));
+                assert_eq!(outcome.support, metadata);
+                assert!(outcome.fallback.is_none());
+                assert!(outcome.notice().is_none());
+            }
+            let default = resolve_native(
+                Some(&ThinkingSetting::ProviderDefault),
+                "native_role",
+                metadata,
+            );
+            assert_eq!(default.provider_value(false), None);
+            assert!(default.fallback.is_none());
         }
     }
 

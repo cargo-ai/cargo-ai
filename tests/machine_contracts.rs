@@ -655,6 +655,23 @@ fn capabilities_distinguish_replacement_actions_and_selected_result_delivery() {
     assert_eq!(roles["role_contract_version"], 1);
     assert_eq!(roles["binding_authorizes_execution"], false);
     assert_eq!(roles["operation_access"], "unverified_until_invocation");
+    assert_eq!(roles["selection_policy"]["version"], 1);
+    assert_eq!(
+        roles["selection_policy"]["capability_evidence"],
+        "informational"
+    );
+    assert_eq!(
+        roles["selection_policy"]["reasoning_choices"],
+        "exact_native_attempt"
+    );
+    assert_eq!(
+        roles["selection_policy"]["metadata_in_authority_identity"],
+        false
+    );
+    assert_eq!(
+        roles["selection_policy"]["execution_time_thinking_discovery"],
+        false
+    );
     assert_eq!(roles["session"]["version"], 1);
     assert_eq!(roles["session"]["control_ack_deadline_ms"], 2_000);
     assert_eq!(roles["session"]["max_control_frames"], 256);

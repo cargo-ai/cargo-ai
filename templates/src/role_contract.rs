@@ -670,6 +670,7 @@ pub fn resolve(
         .clone();
     let mut calls = Vec::new();
     let mut selections = Vec::new();
+    let mut ready = true;
     for id in &scope.call_sites {
         let site = registry.call_sites.iter().find(|s| &s.id == id).unwrap();
         let mut call = ResolvedCall {
@@ -680,8 +681,10 @@ pub fn resolve(
             reason: "missing_binding".into(),
             evidence: Vec::new(),
         };
+        let mut call_ready = site.role.is_none();
         if let Some(role_id) = &site.role {
             if let Some(binding) = revision.bindings.iter().find(|b| &b.role == role_id) {
+                call_ready = true;
                 let role = registry.roles.iter().find(|r| &r.id == role_id).unwrap();
                 call.selection = Some(AllowedSelection {
                     profile: Some(binding.profile.clone()),
@@ -707,9 +710,11 @@ pub fn resolve(
                     || !satisfies(&site.requirements, &binding.settings)
                     || comparison_conflict
                 {
+                    call_ready = false;
                     call.compatibility = Compatibility::Incompatible;
                     call.reason = "declared_constraints_conflict".into();
                 } else if comparison_missing {
+                    call_ready = false;
                     call.compatibility = Compatibility::Unknown;
                     call.reason = "missing_comparison_binding".into();
                 } else {
@@ -782,6 +787,7 @@ pub fn resolve(
             // Fixed calls are disclosed but cannot borrow compatibility from a mapped role.
             call.compatibility = Compatibility::Unknown;
             if !satisfies(&site.requirements, &fixed.settings) {
+                call_ready = false;
                 call.compatibility = Compatibility::Incompatible;
                 call.reason = "declared_constraints_conflict".into();
             }
@@ -794,6 +800,7 @@ pub fn resolve(
                 selections.push(selection.clone());
             }
         }
+        ready &= call_ready;
         calls.push(call);
     }
     let mut resolution = Resolution {
@@ -803,18 +810,28 @@ pub fn resolve(
         binding_identity: canonical_identity(revision)?,
         context: context.clone(),
         scope,
-        ready: calls.iter().all(|c| {
-            c.compatibility == Compatibility::Compatible
-                || (c.call_site.fixed.is_some()
-                    && c.selection.is_some()
-                    && c.compatibility == Compatibility::Unknown)
-        }),
+        ready,
         calls,
         required_selections: selections,
         execution_authorized: false,
         invocation_access: "unverified".into(),
     };
-    resolution.identity = canonical_identity(&(registry, &resolution))?;
+    // Support information can change without changing the reviewed authority.
+    let exact_calls: Vec<_> = resolution
+        .calls
+        .iter()
+        .map(|call| (&call.call_site, &call.selection, &call.settings))
+        .collect();
+    resolution.identity = canonical_identity(&(
+        ROLE_CONTRACT_VERSION,
+        registry,
+        revision,
+        context,
+        &resolution.scope,
+        exact_calls,
+        &resolution.required_selections,
+        resolution.ready,
+    ))?;
     Ok(resolution)
 }
 
@@ -1008,7 +1025,7 @@ mod tests {
         assert!(unresolved.calls[0].selection.is_none());
         assert!(unresolved.required_selections.is_empty());
         let unreviewed = resolve(&registry, &key, &bindings, &context, &[], 1).unwrap();
-        assert!(!unreviewed.ready);
+        assert!(unreviewed.ready);
         assert_eq!(unreviewed.calls[0].compatibility, Compatibility::Unknown);
         for field in [
             "profile",
@@ -1027,6 +1044,38 @@ mod tests {
         }
         registry.roles[0].recommendations = vec![serde_json::from_value(suggestion).unwrap(); 9];
         assert!(validate_registry(&registry).is_err());
+    }
+
+    #[test]
+    fn role_contract_support_information_preserves_readiness_and_authority_identity() {
+        let (registry, bindings, context, mut evidence) = fixture();
+        let key = &registry.contexts[0].key;
+        let original = resolve(&registry, key, &bindings, &context, &evidence, 1).unwrap();
+        for status in [
+            Compatibility::Compatible,
+            Compatibility::Unknown,
+            Compatibility::Stale,
+            Compatibility::Unavailable,
+            Compatibility::Incompatible,
+        ] {
+            evidence[0].status = status;
+            let current = resolve(&registry, key, &bindings, &context, &evidence, 1).unwrap();
+            assert!(current.ready);
+            assert_eq!(current.calls[0].compatibility, status);
+            assert_eq!(current.identity, original.identity);
+            assert_eq!(current.required_selections, original.required_selections);
+            assert!(!current.execution_authorized);
+            assert_eq!(current.invocation_access, "unverified");
+        }
+        evidence[0].status = Compatibility::Compatible;
+        let expired = resolve(&registry, key, &bindings, &context, &evidence, 1000).unwrap();
+        assert!(expired.ready);
+        assert_eq!(expired.calls[0].compatibility, Compatibility::Stale);
+        assert_eq!(expired.identity, original.identity);
+        let absent = resolve(&registry, key, &bindings, &context, &[], 1).unwrap();
+        assert!(absent.ready);
+        assert_eq!(absent.calls[0].compatibility, Compatibility::Unknown);
+        assert_eq!(absent.identity, original.identity);
     }
 
     #[test]

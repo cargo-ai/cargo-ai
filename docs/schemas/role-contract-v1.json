@@ -420,7 +420,8 @@
         },
         "identity": {
           "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Authority identity of exact declared requirements, bindings, context, scope, selections and readiness. Runtime7 excludes advisory evidence/status/freshness."
         },
         "binding_revision": {
           "type": "string",
@@ -530,7 +531,8 @@
           }
         },
         "ready": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Structural completeness and declared-constraint readiness, not permission or operation compatibility. Runtime7 capability evidence is informational."
         },
         "execution_authorized": {
           "const": false

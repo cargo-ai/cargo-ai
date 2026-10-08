@@ -163,6 +163,10 @@ operator-controlled.
 - [Public README](../../README.md)
 
 
+### Native role exact choices
+
+Native role runtime7 uses provider reasoning metadata as suggestions, not an allowlist. Retain selected High or a custom case-sensitive `{mode:"choice",value:"Custom-Attempt"}` even when metadata is missing. Exact policy must permit it; native execution attempts that same value on an implemented wire control, or fails explicitly if the adapter cannot serialize it. Provider default omits reasoning. Operation support remains honest informational evidence, separate from native permission and invocation access. No native metadata-driven default fallback or execution-time catalog lookup occurs. Earlier non-native fallback and Boolean guidance below describes legacy execution; native Boolean attempts require the implemented Ollama text mapping. See [native selection policy](../machine-payloads.md#informational-native-selection-policy) for negotiated runtime semantics.
+
 ### Boolean thinking controls
 
 The shared `--thinking on` / `--thinking off` selection recognizes only these Boolean aliases case-insensitively. Other values remain exact provider names. Use `--thinking-choice on` to request a literal named choice instead; tagged action/profile values `{"mode":"choice","value":"on"}` also remain literal. Actions use `{"mode":"on"}` or `{"mode":"off"}` in revision `2026-10-01.r1`. All forms use the same inheritance, explicit Provider default reset and fallback rules.

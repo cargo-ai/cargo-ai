@@ -27,6 +27,15 @@ pub struct RuntimeCapabilities {
     native_roles: Option<NativeRoleCapabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
     connection_continuity: Option<ConnectionContinuityCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_selection_policy: Option<NativeSelectionPolicy>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+struct NativeSelectionPolicy {
+    version: u32,
+    capability_evidence: &'static str,
+    reasoning_choices: &'static str,
+    readiness: &'static str,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 struct ConnectionContinuityCapabilities {
@@ -69,6 +78,9 @@ impl RuntimeCapabilities {
     pub fn supports_connection_continuity(self) -> bool {
         self.connection_continuity.is_some()
     }
+    pub fn supports_native_selection_policy(self) -> bool {
+        self.native_selection_policy.is_some()
+    }
     pub fn supports_execution_policy(self) -> bool {
         self.execution_policy.is_some()
     }
@@ -77,15 +89,15 @@ impl RuntimeCapabilities {
     }
 
     pub fn supports_thinking(self) -> bool {
-        matches!(self.revision, 1 | 2 | 3 | 4 | 5 | REVISION)
+        matches!(self.revision, 1 | 2 | 3 | 4 | 5 | 6 | REVISION)
     }
 
     pub fn supports_toggle(self) -> bool {
-        matches!(self.revision, 2 | 3 | 4 | 5 | REVISION)
+        matches!(self.revision, 2 | 3 | 4 | 5 | 6 | REVISION)
     }
 
     pub fn supports_exact_choice_flag(self) -> bool {
-        matches!(self.revision, 2 | 3 | 4 | 5 | REVISION)
+        matches!(self.revision, 2 | 3 | 4 | 5 | 6 | REVISION)
     }
 }
 
@@ -129,12 +141,16 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
     let mut roles = encoded_record(cli_run);
     roles[payload..payload + 4].copy_from_slice(&5u32.to_le_bytes());
     roles[payload + 4..payload + 8].copy_from_slice(&0b11_1111_1111u32.to_le_bytes());
+    let mut continuity = encoded_record(cli_run);
+    continuity[payload..payload + 4].copy_from_slice(&6u32.to_le_bytes());
+    continuity[payload + 4..payload + 8].copy_from_slice(&0b111_1111_1111u32.to_le_bytes());
     if record != encoded_record(cli_run)
         && record != legacy
         && record != prior
         && record != policy
         && record != result
         && record != roles
+        && record != continuity
     {
         return Err(CapabilityReadError::Unsupported);
     }
@@ -145,17 +161,25 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
             "cargo-ai.generated-runtime"
         },
         revision,
-        native_roles: matches!(revision, 5 | REVISION).then_some(NativeRoleCapabilities {
+        native_roles: matches!(revision, 5 | 6 | REVISION).then_some(NativeRoleCapabilities {
             version: 1,
             control: "framed_native_session.v1",
             boundaries: &["root", "media", "descendants", "declared_tool_children"],
         }),
-        connection_continuity: (revision == REVISION).then_some(ConnectionContinuityCapabilities {
+        connection_continuity: matches!(revision, 6 | REVISION).then_some(
+            ConnectionContinuityCapabilities {
+                version: 1,
+                approval_expiration: "none",
+                credential_validation: "native_before_dispatch",
+            },
+        ),
+        native_selection_policy: (revision == REVISION).then_some(NativeSelectionPolicy {
             version: 1,
-            approval_expiration: "none",
-            credential_validation: "native_before_dispatch",
+            capability_evidence: "informational",
+            reasoning_choices: "exact_native_attempt",
+            readiness: "structural_not_permission",
         }),
-        structured_results: matches!(revision, 4 | 5 | REVISION).then_some(
+        structured_results: matches!(revision, 4 | 5 | 6 | REVISION).then_some(
             StructuredResultCapabilities {
                 definition_revision: "2026-10-03.r1",
                 validation: true,
@@ -164,7 +188,7 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
                 artifact_read: cli_run,
             },
         ),
-        execution_policy: matches!(revision, 3 | 4 | 5 | REVISION).then_some(
+        execution_policy: matches!(revision, 3 | 4 | 5 | 6 | REVISION).then_some(
             ExecutionPolicyCapabilities {
                 version: 1,
                 boundaries: &["root", "media", "descendants"],
@@ -316,6 +340,7 @@ pub(crate) fn test_record(revision: u32) -> Vec<u8> {
         3 => 0b1111_1111,
         4 => 0b1_1111_1111,
         5 => 0b11_1111_1111,
+        6 => 0b111_1111_1111,
         _ => record::THINKING_CAPABILITIES,
     };
     record[payload + 4..payload + 8].copy_from_slice(&bits.to_le_bytes());
@@ -325,6 +350,21 @@ pub(crate) fn test_record(revision: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_selection_policy_is_distinct_from_legacy_continuity_and_choices() {
+        for revision in 1..=6 {
+            let legacy = decode_record(&test_record(revision)).unwrap();
+            assert!(!legacy.supports_native_selection_policy());
+            assert!(legacy.supports_thinking());
+        }
+        let prior = decode_record(&test_record(6)).unwrap();
+        assert!(prior.supports_connection_continuity());
+        assert!(prior.supports_native_roles());
+        assert!(decode_record(&test_record(7))
+            .unwrap()
+            .supports_native_selection_policy());
+    }
 
     #[test]
     fn native_roles_require_new_revision_and_exact_embedded_definition() {
@@ -452,8 +492,9 @@ mod tests {
             serde_json::to_value(caps).unwrap(),
             serde_json::json!({
                 "runtime": "cargo-ai.generated-runtime",
-                "revision": 6,
+                "revision": 7,
                 "connection_continuity":{"version":1,"approval_expiration":"none","credential_validation":"native_before_dispatch"},
+                "native_selection_policy":{"version":1,"capability_evidence":"informational","reasoning_choices":"exact_native_attempt","readiness":"structural_not_permission"},
                 "native_roles":{"version":1,"control":"framed_native_session.v1","boundaries":["root","media","descendants","declared_tool_children"]},
                 "structured_results":{"definition_revision":"2026-10-03.r1","validation":true,"execution_checking":true,"terminal_delivery":false,"artifact_read":false},
                 "execution_policy": {"version":1,"boundaries":["root","media","descendants"]},
