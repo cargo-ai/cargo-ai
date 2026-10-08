@@ -110,6 +110,7 @@ jobs:
           cargo test --locked --test provider_smoke generated_provider_batch_isolated_and_deterministic -- --ignored --exact --nocapture
           cargo test --locked --test native_role_runtime emitted_native_role_root_media_and_child_dispatch_are_scoped -- --ignored --exact --nocapture
           cargo test --locked --test native_role_runtime emitted_native_role_overlapping_children_retain_nested_permit_lineage -- --ignored --exact --nocapture
+          cargo test --locked --test native_role_runtime emitted_native_nested_child_paths_are_portable -- --ignored --exact --nocapture
 
       - name: Build candidate CLI
         if: ${{ matrix.stage == 'Installation qualification' }}

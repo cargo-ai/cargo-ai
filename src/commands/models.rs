@@ -239,6 +239,38 @@ fn resolve_saved_for(
 mod tests {
     use super::*;
     #[test]
+    fn account_picker_exposes_reviewed_text_evidence_without_changing_provider_facts() {
+        let mut catalog = serde_json::json!({"models":[
+            {"id":"gpt-6-astra","metadata":{"opaque":"provider-fact"},"metadata_source":"provider","invocation_access":"unverified"},
+            {"id":"gpt-6.1-sol","metadata":{},"metadata_source":"provider","invocation_access":"unverified"},
+            {"id":"catalog-presence-only","metadata":{},"metadata_source":"provider","invocation_access":"unverified"}
+        ]});
+        let before = catalog.clone();
+        attach_operation_evidence(
+            &mut catalog,
+            "openai",
+            "openai_account",
+            "https://chatgpt.com/backend-api/codex/responses",
+            1_791_331_201,
+        );
+        for (index, model) in catalog["models"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(model["metadata"], before["models"][index]["metadata"]);
+            assert_eq!(model["metadata_source"], "provider");
+            assert_eq!(model["invocation_access"], "unverified");
+            let records = model["operation_evidence"]["records"].as_array().unwrap();
+            if index < 2 {
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0]["evidence"]["model"], model["id"]);
+                assert_eq!(records[0]["evidence"]["auth_transport"], "openai_account");
+                assert_eq!(records[0]["evidence"]["operation"], "text_generation");
+                assert_eq!(records[0]["constraints"]["structured_output"], true);
+            } else {
+                assert!(records.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn reviewed_operation_evidence_is_separate_from_provider_catalog_metadata() {
         let mut catalog = serde_json::json!({"models":[
             {"id":"gpt-image-2","metadata":{},"metadata_source":"provider","invocation_access":"unverified"},

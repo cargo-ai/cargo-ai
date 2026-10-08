@@ -49,6 +49,8 @@ Cargo AI does not infer agents or tools from JSON references. The same agent pat
 
 Only project-attached, source-backed tools named in the selected profile are eligible. A machine-only tool is never pulled into a build or package automatically. Attach it to the project first.
 
+A native-role target build that includes catalog 3 must explicitly select every declared tool and its complete portable source inventory in `assets`. The built tool manifest retains the selected relative `source.manifest_path` alongside the target binary, so native discovery can verify both. Incomplete native catalog selections fail before replacing an existing output. Build profiles that omit source assets and the native catalog retain binary-only tool manifests. Source-package assembly and target-build verification are separate checks.
+
 ## Choose a build root or a source package
 
 Create a target-specific runnable build root:

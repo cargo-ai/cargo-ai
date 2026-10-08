@@ -429,6 +429,7 @@ impl Fixture {
             .unwrap()
             .trim_start_matches("./");
         if !artifact.ends_with(".json") {
+            calls[3]["call_site"]["artifact"] = json!(artifact);
             tool_call["call_site"]["artifact"] = json!(artifact);
         }
         if cfg!(unix) {
@@ -493,7 +494,25 @@ fn invoke_reference(
     control: Control,
     reference: Option<&str>,
 ) -> Run {
+    invoke_reference_in_dir(
+        fixture,
+        executable,
+        bootstrap,
+        control,
+        reference,
+        &fixture.root,
+    )
+}
+fn invoke_reference_in_dir(
+    fixture: &Fixture,
+    executable: &Path,
+    bootstrap: Value,
+    control: Control,
+    reference: Option<&str>,
+    cwd: &Path,
+) -> Run {
     let mut command = fixture.command(executable);
+    command.current_dir(cwd);
     if executable == Path::new(CLI) {
         command.args(["--no-update-check", "run"]);
         if let Some(reference) = reference {
@@ -1011,6 +1030,9 @@ fn exercise_child_lineage(emitted: bool) {
     let mut first = original[3].clone();
     first["call_site"]["id"] = json!("first-launch");
     first["call_site"]["locator"]["site"] = json!("actions.0.run.0");
+    if emitted {
+        first["call_site"]["artifact"] = json!(child_artifact);
+    }
     let mut second = first.clone();
     second["call_site"]["id"] = json!("second-launch");
     second["call_site"]["locator"]["site"] = json!("actions.1.run.0");
@@ -1026,7 +1048,7 @@ fn exercise_child_lineage(emitted: bool) {
     });
     nested["call_site"]["locator"]["definition"] = json!("child.json");
     nested["call_site"]["target"] = json!("leaf.json");
-    if emitted && cfg!(unix) {
+    if emitted {
         nested["call_site"]["artifact"] = json!(leaf_artifact);
     }
     let mut leaf_call = original[4].clone();
@@ -1801,4 +1823,658 @@ fn installed_native_roles_preserve_private_mapping_and_public_structural_executi
             config_before
         );
     }
+}
+
+fn structural_request(fixture: &Fixture, project: &Path) -> (Value, Value) {
+    let project = project.to_str().unwrap();
+    let discovered = machine(fixture, &["actions", "list", "--project", project], None);
+    let limits = json!({"max_runtime_secs":30,"max_output_tokens":256,"max_agent_depth":4});
+    let mut request = json!({"schema_version":3,"interface":"fixture","action":"work","inputs":{},"expected_binding":discovered["binding"],
+        "execution_policy":{"version":1,"allowed":[],"limits":limits},"attachment_grants":{},
+        "role_execution":{"mode":"default","binding_revision":{"version":1,"revision":"structural-revision","bindings":[]}}});
+    let resolved = machine(
+        fixture,
+        &[
+            "actions",
+            "resolve",
+            "--project",
+            project,
+            "--interface",
+            "fixture",
+            "--action",
+            "work",
+            "--request-stdin",
+        ],
+        Some(&request),
+    );
+    assert_eq!(resolved["ready"], true, "{resolved}");
+    assert_eq!(resolved["required_selections"], json!([]));
+    assert_eq!(resolved["execution_authorized"], false);
+    request["role_execution"]["resolution_id"] = resolved["identity"].clone();
+    (request, resolved)
+}
+
+fn machine_failure(fixture: &Fixture, args: &[&str], request: Option<&Value>) -> Value {
+    let mut command = fixture.command(CLI);
+    command
+        .args(["--no-update-check"])
+        .args(args)
+        .args(["--output-format", "json"]);
+    let output = if let Some(request) = request {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(request.to_string().as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    } else {
+        command.output().unwrap()
+    };
+    assert!(
+        !output.status.success(),
+        "unexpected success: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+        panic!(
+            "invalid machine failure: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+fn public_structural_run(fixture: &Fixture, project: &Path, cwd: &Path, request: &Value) -> Run {
+    let mut child = fixture
+        .command(CLI)
+        .current_dir(cwd)
+        .args([
+            "--no-update-check",
+            "run",
+            "--project",
+            project.to_str().unwrap(),
+            "--interface",
+            "fixture",
+            "--action",
+            "work",
+            "--action-request-stdin",
+            "--role-session",
+            "--output-format",
+            "ndjson",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    writeln!(
+        input,
+        "{}",
+        json!({"protocol":"cargo_ai_role_session","version":1,"type":"start","request":request})
+    )
+    .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if tx.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let errors = thread::spawn(move || {
+        let mut text = String::new();
+        BufReader::new(stderr).read_to_string(&mut text).unwrap();
+        text
+    });
+    let start = Instant::now();
+    let mut frames = Vec::new();
+    loop {
+        if start.elapsed() > Duration::from_secs(45) {
+            let _ = child.kill();
+            panic!("structural session timeout: {frames:?}");
+        }
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(line) => frames.push(serde_json::from_str::<Value>(&line).unwrap()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let status = child.wait().unwrap();
+    drop(input);
+    reader.join().unwrap();
+    Run {
+        success: status.success(),
+        frames,
+        diagnostics: errors.join().unwrap(),
+    }
+}
+
+fn exercise_nested_child_paths(emitted: bool) {
+    let provider = Provider::new();
+    let fixture = Fixture::new(&provider);
+    fs::create_dir_all(fixture.root.join(".cargo-ai")).unwrap();
+    fs::create_dir(fixture.root.join("agents")).unwrap();
+    fs::create_dir(fixture.root.join("mutable-data")).unwrap();
+    fs::write(
+        fixture.root.join(".cargo-ai/project.toml"),
+        "[project]\nname='nested-child-fixture'\n",
+    )
+    .unwrap();
+    let child = json!({"agent_definition_schema_version":"2026-10-06.r1","agent_schema":{"type":"object","properties":{}},"actions":[]});
+    fs::write(
+        fixture.root.join("agents/child.json"),
+        serde_json::to_vec(&child).unwrap(),
+    )
+    .unwrap();
+    let emitted_child = if cfg!(windows) {
+        "nested-child.exe"
+    } else {
+        "nested-child"
+    };
+    let artifact = if emitted {
+        format!("./{emitted_child}")
+    } else {
+        "./child.json".into()
+    };
+    let parent = json!({"agent_definition_schema_version":"2026-10-06.r1","agent_schema":{"type":"object","properties":{}},"actions":[{"name":"work","logic":{"==":[1,1]},"run":[{"kind":"agent","artifact":artifact}]}]});
+    fs::write(
+        fixture.root.join("agents/parent.json"),
+        serde_json::to_vec(&parent).unwrap(),
+    )
+    .unwrap();
+    let limits = json!({"max_runtime_secs":30,"max_output_tokens":256,"max_agent_depth":4});
+    let mut call = json!({"id":"nested-child","locator":{"definition":"agents/parent.json","site":"actions.0.run.0"},"kind":"child","target":"agents/child.json","requirements":{"operation":"text_generation","input_modalities":[],"structured_output":false,"settings":{}}});
+    if emitted {
+        call["artifact"] = json!(format!("agents/{emitted_child}"));
+        let executable = fixture.hatch("nested-child", "agents/child.json");
+        fs::copy(executable, fixture.root.join("agents").join(emitted_child)).unwrap();
+    }
+    let catalog = json!({"schema_version":3,"actions":[{"id":"work","target":"agents/parent.json","input_schema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"mappings":{}}],"interfaces":[{"id":"fixture","actions":["work"]}],"role_registry":{"version":1,"roles":[],"call_sites":[call],"contexts":[{"key":{"action":"work","interface":"fixture","mode":"default"},"call_sites":["nested-child"],"resources":[],"data_scopes":[],"limits":limits}],"tool_content":{}}});
+    fs::write(
+        fixture.root.join("cargo-ai-actions.json"),
+        serde_json::to_vec(&catalog).unwrap(),
+    )
+    .unwrap();
+    let (request, resolution) = structural_request(&fixture, &fixture.root);
+    let data = fixture.root.join("mutable-data");
+    fs::write(data.join("child.json"), b"counterfeit-data-definition").unwrap();
+    let public = public_structural_run(&fixture, &fixture.root, &data, &request);
+    assert!(
+        public.success,
+        "nested public child failed: {}\n{:?}",
+        public.diagnostics, public.frames
+    );
+    let mut paths = vec![
+        "agents/parent.json".to_owned(),
+        "agents/child.json".to_owned(),
+        "cargo-ai-actions.json".to_owned(),
+    ];
+    if emitted {
+        paths.push(format!("agents/{emitted_child}"));
+    }
+    let originals: Vec<_> = paths
+        .iter()
+        .map(|path| (path.clone(), fs::read(fixture.root.join(path)).unwrap()))
+        .collect();
+    let content: serde_json::Map<_, _> = originals
+        .iter()
+        .map(|(path, bytes)| {
+            (
+                fixture.root.join(path).to_str().unwrap().to_owned(),
+                json!(format!("{:x}", Sha256::digest(bytes))),
+            )
+        })
+        .collect();
+    let bootstrap = json!({"version":1,"resolution":resolution,"bindings":request["role_execution"]["binding_revision"],"policy":request["execution_policy"],"definition":"agents/parent.json","package_root":fixture.root,"content_identities":content,"invocation_id":"nested-invocation","binding_revision":"structural-revision","parent_permit_id":"nested-parent"});
+    let executable = if emitted {
+        fixture.hatch("nested-parent", "agents/parent.json")
+    } else {
+        PathBuf::from(CLI)
+    };
+    let definition = fixture.root.join("agents/parent.json");
+    let run = invoke_reference_in_dir(
+        &fixture,
+        &executable,
+        bootstrap,
+        Control::Allow,
+        Some(definition.to_str().unwrap()),
+        &data,
+    );
+    assert_success(&run);
+    assert!(
+        run.frames.iter().any(|frame| frame["type"] == "admit"
+            && frame["boundary"]["target_agent"] == "agents/child.json"
+            && frame["boundary"]["parent_permit_id"] == "nested-parent"),
+        "portable nested child admission missing: {:?}",
+        run.frames
+    );
+    for (path, bytes) in originals {
+        assert_eq!(fs::read(fixture.root.join(path)).unwrap(), bytes);
+    }
+    assert_eq!(
+        fs::read(data.join("child.json")).unwrap(),
+        b"counterfeit-data-definition"
+    );
+    assert!(!data.join("agents").exists());
+    assert!(
+        provider.take().is_empty(),
+        "structural nested child must not invoke providers"
+    );
+}
+
+#[test]
+fn cli_native_nested_child_paths_are_portable() {
+    exercise_nested_child_paths(false);
+}
+
+#[test]
+#[ignore = "builds and executes actual nested generated parent and child"]
+fn emitted_native_nested_child_paths_are_portable() {
+    exercise_nested_child_paths(true);
+}
+
+#[cfg(unix)]
+fn structural_child_fixture(fixture: &Fixture) -> (Value, Value) {
+    fs::create_dir_all(fixture.root.join(".cargo-ai")).unwrap();
+    fs::write(
+        fixture.root.join(".cargo-ai/project.toml"),
+        "[project]\nname='structural-child-fixture'\n",
+    )
+    .unwrap();
+    let definition = |steps: Value| json!({"agent_definition_schema_version":"2026-10-06.r1","agent_schema":{"type":"object","properties":{}},"actions":[{"name":"work","logic":{"==":[1,1]},"run":steps}]});
+    fs::write(
+        fixture.root.join("root.json"),
+        serde_json::to_vec(&definition(
+            json!([{"kind":"agent","artifact":"./child.json"}]),
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(fixture.root.join("child.json"),serde_json::to_vec(&definition(json!([{"kind":"exec","program":"/bin/sh","args":["-c","printf declared > child-completed"]}]))).unwrap()).unwrap();
+    let limits = json!({"max_runtime_secs":30,"max_output_tokens":256,"max_agent_depth":4});
+    fs::write(fixture.root.join("cargo-ai-actions.json"),serde_json::to_vec(&json!({"schema_version":3,
+        "actions":[{"id":"work","target":"root.json","input_schema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"mappings":{}}],"interfaces":[{"id":"fixture","actions":["work"]}],
+        "role_registry":{"version":1,"roles":[],"call_sites":[{"id":"child-launch","locator":{"definition":"root.json","site":"actions.0.run.0"},"kind":"child","target":"child.json","requirements":{"operation":"text_generation","input_modalities":[],"structured_output":false,"settings":{}}}],
+        "contexts":[{"key":{"action":"work","interface":"fixture","mode":"default"},"call_sites":["child-launch"],"resources":[],"data_scopes":[],"limits":limits}],"tool_content":{}}})).unwrap()).unwrap();
+    structural_request(fixture, &fixture.root)
+}
+
+#[cfg(unix)]
+fn exercise_structural_child_from_data_cwd(emitted: bool) {
+    let provider = Provider::new();
+    let fixture = Fixture::new(&provider);
+    let (mut request, mut resolution) = structural_child_fixture(&fixture);
+    if emitted {
+        let child = fixture.hatch("structural-child", "child.json");
+        fs::copy(child, fixture.root.join("structural-child")).unwrap();
+        let mut definition: Value =
+            serde_json::from_slice(&fs::read(fixture.root.join("root.json")).unwrap()).unwrap();
+        definition["actions"][0]["run"][0]["artifact"] = json!("./structural-child");
+        fs::write(
+            fixture.root.join("root.json"),
+            serde_json::to_vec(&definition).unwrap(),
+        )
+        .unwrap();
+        let mut catalog: Value =
+            serde_json::from_slice(&fs::read(fixture.root.join("cargo-ai-actions.json")).unwrap())
+                .unwrap();
+        catalog["role_registry"]["call_sites"][0]["artifact"] = json!("structural-child");
+        fs::write(
+            fixture.root.join("cargo-ai-actions.json"),
+            serde_json::to_vec(&catalog).unwrap(),
+        )
+        .unwrap();
+        (request, resolution) = structural_request(&fixture, &fixture.root);
+    }
+    let data = fixture.root.join("mutable-data");
+    fs::create_dir(&data).unwrap();
+    let mut originals: Vec<_> = ["root.json", "child.json", "cargo-ai-actions.json"]
+        .into_iter()
+        .map(|name| (name, fs::read(fixture.root.join(name)).unwrap()))
+        .collect();
+    if emitted {
+        originals.push((
+            "structural-child",
+            fs::read(fixture.root.join("structural-child")).unwrap(),
+        ));
+    }
+    let executable = if emitted {
+        fixture.hatch("structural-parent", "root.json")
+    } else {
+        PathBuf::from(CLI)
+    };
+    for counterfeit in [false, true] {
+        if counterfeit {
+            fs::write(data.join("child.json"),br#"{"agent_schema":{"type":"object","properties":{}},"actions":[{"name":"counterfeit","logic":{"==":[1,1]},"run":[{"kind":"exec","program":"/bin/sh","args":["-c","printf counterfeit > counterfeit-completed"]}]}]}"#).unwrap();
+        }
+        let public = public_structural_run(&fixture, &fixture.root, &data, &request);
+        assert!(
+            public.success,
+            "public child from data cwd failed: {}\n{:?}",
+            public.diagnostics, public.frames
+        );
+        fs::remove_file(fixture.root.join("child-completed")).unwrap();
+        let content: serde_json::Map<_, _> = originals
+            .iter()
+            .map(|(name, bytes)| {
+                (
+                    fixture.root.join(name).to_str().unwrap().to_owned(),
+                    json!(format!("{:x}", Sha256::digest(bytes))),
+                )
+            })
+            .collect();
+        let bootstrap = json!({"version":1,"resolution":resolution,"bindings":request["role_execution"]["binding_revision"],"policy":request["execution_policy"],"definition":"root.json","package_root":fixture.root,"content_identities":content,"invocation_id":"structural-invocation","binding_revision":"structural-revision","parent_permit_id":"structural-parent"});
+        let root = fixture.root.join("root.json");
+        let run = invoke_reference_in_dir(
+            &fixture,
+            &executable,
+            bootstrap.clone(),
+            Control::Allow,
+            Some(root.to_str().unwrap()),
+            &data,
+        );
+        assert_success(&run);
+        assert_eq!(
+            fs::read(fixture.root.join("child-completed")).unwrap(),
+            b"declared"
+        );
+        assert!(!data.join("root.json").exists());
+        assert!(!data.join("child-completed").exists());
+        assert!(!data.join("counterfeit-completed").exists());
+        let admissions: Vec<_> = run
+            .frames
+            .iter()
+            .filter(|frame| frame["type"] == "admit")
+            .collect();
+        assert_eq!(admissions.len(), 1, "{admissions:?}");
+        assert_eq!(admissions[0]["boundary"]["call_site"], "child-launch");
+        assert_eq!(admissions[0]["boundary"]["target_agent"], "child.json");
+        assert_eq!(
+            admissions[0]["boundary"]["parent_permit_id"],
+            "structural-parent"
+        );
+        let denied = invoke_reference_in_dir(
+            &fixture,
+            &executable,
+            bootstrap.clone(),
+            Control::DenyAfter(0),
+            Some(root.to_str().unwrap()),
+            &data,
+        );
+        assert!(
+            !denied.success,
+            "independent child admission must be enforced"
+        );
+        let mut undeclared = bootstrap.clone();
+        undeclared["resolution"]["calls"] = json!([]);
+        let rejected = invoke_reference_in_dir(
+            &fixture,
+            &executable,
+            undeclared,
+            Control::Allow,
+            Some(root.to_str().unwrap()),
+            &data,
+        );
+        assert!(!rejected.success, "undeclared child must fail");
+        let mut escaped = bootstrap.clone();
+        escaped["resolution"]["calls"][0]["call_site"]["target"] = json!("../escape.json");
+        let rejected = invoke_reference_in_dir(
+            &fixture,
+            &executable,
+            escaped,
+            Control::Allow,
+            Some(root.to_str().unwrap()),
+            &data,
+        );
+        assert!(!rejected.success, "escaping child must fail");
+        fs::write(fixture.root.join("child.json"), b"{}").unwrap();
+        let stale = invoke_reference_in_dir(
+            &fixture,
+            &executable,
+            bootstrap,
+            Control::Allow,
+            Some(root.to_str().unwrap()),
+            &data,
+        );
+        assert!(!stale.success, "stale child must fail");
+        fs::write(fixture.root.join("child.json"), &originals[1].1).unwrap();
+        assert!(
+            provider.take().is_empty(),
+            "structural child must issue zero HTTP requests"
+        );
+        for (name, bytes) in &originals {
+            assert_eq!(&fs::read(fixture.root.join(name)).unwrap(), bytes);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_structural_child_uses_package_definition_from_mutable_data_cwd() {
+    exercise_structural_child_from_data_cwd(false);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "builds and executes a fresh generated parent; run explicitly in native qualification"]
+fn emitted_structural_child_uses_package_definition_from_mutable_data_cwd() {
+    exercise_structural_child_from_data_cwd(true);
+}
+
+#[test]
+fn native_target_build_preserves_source_backed_role_tool_inventory() {
+    let provider = Provider::new();
+    let fixture = Fixture::new(&provider);
+    let tools = fixture.root.join("tools/portable");
+    fs::create_dir_all(tools.join("src")).unwrap();
+    fs::create_dir_all(fixture.root.join(".cargo-ai/tools/portable")).unwrap();
+    fs::write(
+        tools.join("Cargo.toml"),
+        "[package]\nname='portable'\nversion='0.1.0'\nedition='2021'\n[workspace]\n",
+    )
+    .unwrap();
+    fs::write(
+        tools.join("Cargo.lock"),
+        "version = 3\n\n[[package]]\nname = \"portable\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let describe = json!({"protocol_version":1,"supported_protocol_versions":[1,2],"name":"portable","description":"Portable structural fixture","params":{},"result":{"type":"string","nullable":true},"resource_profile":{"network":"none","filesystem_read":"none","filesystem_write":"none","subprocess":"none","env_read":"none","credential_access":"none"},"self_test":{"supported":false,"safe":false},"examples":{"minimal_invoke":{"protocol_version":1,"params":{}},"full_invoke":{"protocol_version":1,"params":{}}}});
+    fs::write(tools.join("src/main.rs"),format!("use std::io::{{self, BufRead}};\nfn main() {{ if std::env::args().nth(1).as_deref() == Some(\"describe\") {{ println!(\"{{}}\",r#\"{describe}\"#); }} else {{ let mut line = String::new(); io::stdin().lock().read_line(&mut line).unwrap(); println!(\"{{}}\",r#\"{{\"protocol_version\":2,\"type\":\"result\",\"result\":\"portable\"}}\"#); }} }}\n")).unwrap();
+    fs::write(fixture.root.join(".cargo-ai/tools/portable/tool.json"),serde_json::to_vec(&json!({"schema_version":1,"tool_id":"portable","source":{"manifest_path":"tools/portable/Cargo.toml"},"binary":{"default_name":"portable"},"artifacts":{}})).unwrap()).unwrap();
+    fs::write(fixture.root.join("root.json"),serde_json::to_vec(&json!({"agent_definition_schema_version":"2026-10-06.r1","agent_schema":{"type":"object","properties":{}},"actions":[{"name":"work","logic":{"==":[1,1]},"run":[{"kind":"tool","name":"portable","params":{}}]}]})).unwrap()).unwrap();
+    let limits = json!({"max_runtime_secs":30,"max_output_tokens":256,"max_agent_depth":4});
+    let inventory = [
+        "tools/portable/Cargo.toml",
+        "tools/portable/Cargo.lock",
+        "tools/portable/src/main.rs",
+    ];
+    fs::write(fixture.root.join("cargo-ai-actions.json"),serde_json::to_vec(&json!({"schema_version":3,"actions":[{"id":"work","target":"root.json","input_schema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"mappings":{}}],"interfaces":[{"id":"fixture","actions":["work"]}],"role_registry":{"version":1,"roles":[],"call_sites":[],"contexts":[{"key":{"action":"work","interface":"fixture","mode":"default"},"call_sites":[],"resources":[],"data_scopes":[],"limits":limits}],"tool_content":{"portable":inventory}}})).unwrap()).unwrap();
+    fs::write(fixture.root.join(".cargo-ai/project.toml"),"format_version=1\n[project]\nname='portable-built-fixture'\nversion='0.1.0'\n[build.default]\nagent_definitions=['root.json']\nhatched_agents=[]\ntools=['portable']\nassets=['cargo-ai-actions.json','tools/portable/Cargo.toml','tools/portable/Cargo.lock','tools/portable/src/main.rs']\n").unwrap();
+    fs::write(
+        fixture.root.join("host-role-bindings.json"),
+        b"private-unselected-canary",
+    )
+    .unwrap();
+    let version = Command::new("rustc").arg("-vV").output().unwrap();
+    let version = String::from_utf8(version.stdout).unwrap();
+    let target = version
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .unwrap();
+    successful_command(
+        &fixture,
+        &[
+            "build",
+            "default",
+            "--target",
+            target,
+            "--output-dir",
+            "built",
+            "--force",
+        ],
+    );
+    let built = fixture.root.join("built");
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(built.join(".cargo-ai/tools/portable/tool.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["source"]["manifest_path"], "tools/portable/Cargo.toml",
+        "target-built tools must retain portable source metadata: {manifest}"
+    );
+    let binary = built
+        .join(".cargo-ai/tools/portable")
+        .join(manifest["artifacts"][target]["path"].as_str().unwrap());
+    assert!(binary.is_file());
+    for path in inventory {
+        assert_eq!(
+            fs::read(built.join(path)).unwrap(),
+            fs::read(fixture.root.join(path)).unwrap()
+        );
+    }
+    assert!(!built.join("host-role-bindings.json").exists());
+    assert!(!built.join("tools/portable/target").exists());
+    assert!(!built.join("h").exists());
+    assert!(
+        !manifest
+            .to_string()
+            .contains(fixture.root.to_str().unwrap()),
+        "no author-machine paths in portable tool manifest"
+    );
+    let project_metadata = fixture.root.join(".cargo-ai/project.toml");
+    let metadata = fs::read_to_string(&project_metadata).unwrap();
+    let preserved_manifest = fs::read(built.join(".cargo-ai/tools/portable/tool.json")).unwrap();
+    fs::write(
+        &project_metadata,
+        metadata.replace(",'tools/portable/src/main.rs'", ""),
+    )
+    .unwrap();
+    let rejected = fixture
+        .command(CLI)
+        .args([
+            "--no-update-check",
+            "build",
+            "default",
+            "--target",
+            target,
+            "--output-dir",
+            "built",
+            "--force",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !rejected.status.success(),
+        "catalog tool source omission must fail before output replacement"
+    );
+    assert_eq!(
+        fs::read(built.join(".cargo-ai/tools/portable/tool.json")).unwrap(),
+        preserved_manifest
+    );
+    fs::write(&project_metadata,format!("{metadata}\n[build.legacy]\nagent_definitions=['root.json']\nhatched_agents=[]\ntools=['portable']\nassets=[]\n")).unwrap();
+    successful_command(
+        &fixture,
+        &[
+            "build",
+            "legacy",
+            "--target",
+            target,
+            "--output-dir",
+            "legacy-built",
+            "--force",
+        ],
+    );
+    let legacy = fixture.root.join("legacy-built");
+    let legacy_manifest: Value = serde_json::from_slice(
+        &fs::read(legacy.join(".cargo-ai/tools/portable/tool.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        legacy_manifest.get("source").is_none(),
+        "unselected sources must not change legacy binary-only manifests"
+    );
+    assert!(!legacy.join("tools").exists());
+    fs::write(&project_metadata, metadata).unwrap();
+    fs::rename(&tools, fixture.root.join("detached-original-source")).unwrap();
+    let (request, _) = structural_request(&fixture, &built);
+    let discovered = machine(
+        &fixture,
+        &[
+            "actions",
+            "validate",
+            "--project",
+            built.to_str().unwrap(),
+            "--interface",
+            "fixture",
+            "--action",
+            "work",
+            "--request-stdin",
+        ],
+        Some(&request),
+    );
+    assert!(discovered.is_object());
+    let source = built.join("tools/portable/src/main.rs");
+    let original = fs::read(&source).unwrap();
+    fs::write(&source, b"fn main() {}\n").unwrap();
+    let changed = machine(
+        &fixture,
+        &["actions", "list", "--project", built.to_str().unwrap()],
+        None,
+    );
+    assert_ne!(
+        changed["binding"], request["expected_binding"],
+        "built source digest participates in native inventory"
+    );
+    machine_failure(
+        &fixture,
+        &[
+            "actions",
+            "resolve",
+            "--project",
+            built.to_str().unwrap(),
+            "--interface",
+            "fixture",
+            "--action",
+            "work",
+            "--request-stdin",
+        ],
+        Some(&request),
+    );
+    fs::write(&source, original).unwrap();
+    let native = fs::read(&binary).unwrap();
+    fs::write(&binary, b"changed-native-artifact").unwrap();
+    let changed = machine(
+        &fixture,
+        &["actions", "list", "--project", built.to_str().unwrap()],
+        None,
+    );
+    assert_ne!(
+        changed["binding"], request["expected_binding"],
+        "built binary digest participates in native inventory"
+    );
+    fs::write(&binary, native).unwrap();
+    fs::write(
+        built.join("tools/portable/src/unlisted.rs"),
+        b"unlisted source",
+    )
+    .unwrap();
+    machine_failure(
+        &fixture,
+        &["actions", "list", "--project", built.to_str().unwrap()],
+        None,
+    );
+    assert!(
+        provider.take().is_empty(),
+        "target build/discovery/resolution must issue zero provider HTTP requests"
+    );
 }

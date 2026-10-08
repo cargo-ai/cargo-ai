@@ -3027,16 +3027,6 @@ async fn run_agent_step_with_provider_context(
 
     let current_depth = current_agent_action_depth();
     validate_agent_action_depth(current_depth, max_agent_depth, action_name)?;
-    let invocation = resolve_child_artifact_invocation(
-        artifact,
-        action_name,
-        provider_context.package_context.as_ref(),
-    )?;
-    let mut command = child_artifact_command(&invocation);
-    crate::execution_policy::propagate_child(
-        &mut command,
-        !matches!(invocation, ChildArtifactInvocation::DirectExecutable(_)),
-    )?;
     if let Some(role_context) = crate::role_runtime::current() {
         let selected = role_context.selected()?;
         let target = selected
@@ -3044,12 +3034,56 @@ async fn run_agent_step_with_provider_context(
             .target
             .as_deref()
             .ok_or_else(|| crate::role_runtime::failure("role.child_target_conflict"))?;
+        validate_agent_step_target(artifact, action_name)?;
+        let definition = crate::commands::runtime_data::portable_relative_path(
+            Path::new(&role_context.locator.definition),
+            "Native child definition",
+        )
+        .map_err(|_| crate::role_runtime::failure("role.child_target_conflict"))?;
+        let relative = definition.parent().unwrap_or(Path::new("")).join(artifact);
+        let relative = crate::commands::runtime_data::portable_relative_path(
+            &relative,
+            "Native child artifact",
+        )
+        .map_err(|_| crate::role_runtime::failure("role.child_target_conflict"))?;
+        let cli_run = artifact_is_json_definition(artifact);
+        let declared = if cli_run {
+            Some(target)
+        } else {
+            selected.call_site.artifact.as_deref()
+        }
+        .map(|path| {
+            crate::commands::runtime_data::portable_relative_path(
+                Path::new(path),
+                "Native declared child",
+            )
+        })
+        .transpose()
+        .map_err(|_| crate::role_runtime::failure("role.child_target_conflict"))?;
+        if declared.as_ref() != Some(&relative)
+            || (cli_run && selected.call_site.artifact.is_some())
+        {
+            return Err(crate::role_runtime::failure("role.child_target_conflict"));
+        }
+        let path = crate::commands::runtime_data::confined_path(
+            &role_context.bootstrap.package_root,
+            &relative,
+            "Native child artifact",
+        )
+        .map_err(|_| crate::role_runtime::failure("role.child_target_conflict"))?;
+        if !path.is_file() {
+            return Err(crate::role_runtime::failure("role.child_target_conflict"));
+        }
+        let mut command = if cli_run {
+            let mut command = tokio::process::Command::new("cargo-ai");
+            command.arg("run").arg(path);
+            command
+        } else {
+            tokio::process::Command::new(path)
+        };
+        crate::execution_policy::propagate_child(&mut command, cli_run)?;
         let bootstrap = role_context.child_bootstrap(target)?;
-        crate::role_child::verify_command(
-            &command,
-            &bootstrap,
-            !matches!(invocation, ChildArtifactInvocation::DirectExecutable(_)),
-        )?;
+        crate::role_child::verify_command(&command, &bootstrap, cli_run)?;
         let (child_args, _) = child_input_args_in_context(
             step.run_vars.as_deref(),
             step.input_overrides.as_deref(),
@@ -3103,6 +3137,16 @@ async fn run_agent_step_with_provider_context(
         }
         return Ok(StepExecutionOutcome::Completed);
     }
+    let invocation = resolve_child_artifact_invocation(
+        artifact,
+        action_name,
+        provider_context.package_context.as_ref(),
+    )?;
+    let mut command = child_artifact_command(&invocation);
+    crate::execution_policy::propagate_child(
+        &mut command,
+        !matches!(invocation, ChildArtifactInvocation::DirectExecutable(_)),
+    )?;
     let child_profile =
         resolve_step_profile_name(step.profile.as_ref(), data, action_name, "agent")?.or_else(
             || {

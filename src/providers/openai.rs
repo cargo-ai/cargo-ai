@@ -1679,6 +1679,48 @@ mod temperature_tests {
 mod native_account_transport_tests {
     use super::*;
     #[tokio::test]
+    async fn exact_account_text_models_preserve_schema_images_and_reasoning() {
+        let schema = serde_json::json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false});
+        for model in ["gpt-6-astra", "gpt-6.1-sol"] {
+            for thinking in [None, Some("high")] {
+                let mut server = mockito::Server::new_async().await;
+                let _endpoint = native_account_test_endpoint(format!("{}/responses", server.url()));
+                let expected_schema = schema.clone();
+                let mock = server.mock("POST", "/responses")
+                    .match_header("authorization", "Bearer synthetic-token")
+                    .match_header("chatgpt-account-id", "synthetic-account")
+                    .match_request(move |request| {
+                        let value: serde_json::Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+                        value["model"] == model
+                            && value["text"]["format"]["type"] == "json_schema"
+                            && value["text"]["format"]["strict"] == true
+                            && value["text"]["format"]["schema"] == expected_schema
+                            && value["input"][0]["content"][0]["type"] == "input_text"
+                            && value["input"][0]["content"][1]["type"] == "input_image"
+                            && value["input"][0]["content"][1]["image_url"] == "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAAAXNSR0IArs4c6QAAAERlWElmTU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAAaADAAQAAAABAAAAAQAAAAD5Ip3+AAAADElEQVQIHWNISXcGAAJBAQ/t+dCDAAAAAElFTkSuQmCC"
+                            && value["store"] == false && value["stream"] == true
+                            && match thinking {
+                                Some(effort) => value["reasoning"]["effort"] == effort,
+                                None => value.get("reasoning").is_none(),
+                            }
+                    })
+                    .with_body("data: {\"type\":\"response.output_text.done\",\"text\":\"{\\\"answer\\\":\\\"safe\\\"}\"}\n\n")
+                    .create_async().await;
+                let response = send_request_with_account_context(
+                    &"https://chatgpt.com/backend-api/codex/responses".into(),
+                    &model.into(),
+                    &[ContentPart::Text("review".into()), ContentPart::Image { data_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAAAXNSR0IArs4c6QAAAERlWElmTU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAAaADAAQAAAABAAAAAQAAAAD5Ip3+AAAADElEQVQIHWNISXcGAAJBAQ/t+dCDAAAAAElFTkSuQmCC".into() }],
+                    5, &"synthetic-token".into(),
+                    serde_json::json!({"type":"json_schema","json_schema":{"name":"Output","schema":schema,"strict":true}}),
+                    None, Some("synthetic-account"), thinking, None,
+                ).await.expect("account text fixture response");
+                assert_eq!(response.text, "{\"answer\":\"safe\"}");
+                mock.assert_async().await;
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn named_account_thinking_is_exact_for_text_and_image_and_default_omits_it() {
         for image in [false, true] {
             for thinking in [None, Some("deliberate")] {

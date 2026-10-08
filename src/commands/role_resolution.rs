@@ -19,7 +19,7 @@ fn role_failure(error: role_contract::RoleError) -> Failure {
     Failure::new(error.code, error.message)
 }
 fn context_unavailable() -> Failure {
-    Failure::new("role.context_unavailable", "The selected private connection context is unavailable or changed; explicitly refresh and review it.")
+    Failure::new("role.context_unavailable", "The selected private connection context could not be validated. Validate the saved profile reference and renew verification evidence if needed. Preserve saved choices while paused; meaningful changes require affected review.")
 }
 fn identity<T: Serialize>(value: &T) -> Result<String, Failure> {
     role_contract::canonical_identity(value).map_err(role_failure)
@@ -471,6 +471,66 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.base);
         }
+    }
+
+    #[test]
+    fn native_account_evidence_composes_role_and_call_requirements_without_catalog_input() {
+        let mut fixture = Fixture::new();
+        let before = fixture.snapshot();
+        let catalog: Value = serde_json::from_slice(
+            &fs::read(fixture.root.join(client_actions::CATALOG_FILE)).unwrap(),
+        )
+        .unwrap();
+        let registry: RoleRegistry =
+            serde_json::from_value(catalog["role_registry"].clone()).unwrap();
+        // This evaluator seam receives an already validated private context; credential
+        // verification and authorization are covered independently at native admission.
+        let mut selected = role_context::resolve_named_at(&fixture.home, "selected").unwrap();
+        selected.profile.auth_mode = crate::config::schema::ProfileAuthMode::OpenaiAccount;
+        selected.profile.url = None;
+        let profiles = BTreeMap::from([("reviewer".into(), selected)]);
+        let now = 1_791_331_201;
+        for model in ["gpt-6-astra", "gpt-6.1-sol"] {
+            let revision = &mut fixture
+                .request
+                .role_execution
+                .as_mut()
+                .unwrap()
+                .binding_revision;
+            revision.bindings[0].model = model.into();
+            let evidence =
+                native_evidence(&registry, &["root".into()], revision, &profiles, now).unwrap();
+            assert_eq!(evidence.len(), 1);
+            assert_eq!(evidence[0].status, Compatibility::Compatible);
+            assert_eq!(evidence[0].model, model);
+            assert_eq!(evidence[0].input_modalities, ["image", "text"]);
+            assert!(evidence[0].structured_output);
+            let assessment = evidence[0].operation_evidence.as_ref().unwrap();
+            assert_eq!(assessment["catalog_presence"], "unknown");
+            assert_eq!(assessment["invocation_access"], "unverified");
+            assert_eq!(assessment["auth_transport"], "openai_account");
+            assert_eq!(
+                assessment["dimensions"]["settings"]["required"]["thinking"]["value"],
+                "high"
+            );
+            let later = native_evidence(
+                &registry,
+                &["root".into()],
+                revision,
+                &profiles,
+                now + 25 * 60 * 60,
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(&evidence).unwrap(),
+                serde_json::to_value(later).unwrap()
+            );
+        }
+        assert_eq!(
+            before,
+            fixture.snapshot(),
+            "passive evidence must not change package or private state"
+        );
     }
 
     #[test]

@@ -359,6 +359,7 @@ fn assemble_build_root(
             tool_name,
             build_target,
             output_root.path.as_path(),
+            &assets,
         )?;
     }
 
@@ -486,6 +487,37 @@ fn validate_build_input_boundaries(
         }
         sources.push(metadata);
     }
+    let selected_assets = profile
+        .assets
+        .iter()
+        .map(|asset| super::runtime_data::portable_relative_path(Path::new(asset), "Build asset"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if selected_assets
+        .iter()
+        .any(|selection| Path::new("cargo-ai-actions.json").starts_with(selection))
+    {
+        let catalog =
+            super::client_actions::discover(project_root).map_err(|error| error.to_string())?;
+        if let Some(registry) = catalog.role_registry {
+            for (name, content) in registry.tool_content {
+                if !profile.tools.contains(&name) {
+                    return Err(format!("Native role tool '{name}' is not explicitly selected by this build profile."));
+                }
+                for path in content {
+                    let path = super::runtime_data::portable_relative_path(
+                        Path::new(&path),
+                        "Native role tool source",
+                    )?;
+                    if !selected_assets
+                        .iter()
+                        .any(|selection| path.starts_with(selection))
+                    {
+                        return Err(format!("Native role tool source '{}' is not explicitly selected by this build profile.", path.display()));
+                    }
+                }
+            }
+        }
+    }
     let output = resolved_output;
     for relative in sources {
         let source = fs::canonicalize(project_root.join(relative))
@@ -608,7 +640,30 @@ fn materialize_build_tool(
     tool_name: &str,
     build_target: &crate::agent_builder::build_target::BuildTarget,
     build_root: &Path,
+    assets: &[String],
 ) -> Result<(), String> {
+    let source_manifest = project_root
+        .join(PROJECT_TOOLS_RELATIVE_PATH)
+        .join(tool_name)
+        .join("tool.json");
+    let source_metadata: serde_json::Value = serde_json::from_slice(
+        &fs::read(&source_manifest)
+            .map_err(|error| format!("Failed to read tool source metadata: {error}"))?,
+    )
+    .map_err(|error| format!("Failed to parse tool source metadata: {error}"))?;
+    let source_path = source_metadata
+        .pointer("/source/manifest_path")
+        .and_then(serde_json::Value::as_str)
+        .map(|path| {
+            super::runtime_data::portable_relative_path(Path::new(path), "Tool source manifest")
+        })
+        .transpose()?;
+    let selected_source = source_path.filter(|path| {
+        assets.iter().any(|asset| {
+            super::runtime_data::portable_relative_path(Path::new(asset), "Build asset")
+                .is_ok_and(|selection| path.starts_with(selection))
+        })
+    });
     let resolved = crate::commands::tools::build_source_tool(
         tool_name,
         build_target,
@@ -640,7 +695,7 @@ fn materialize_build_tool(
     })?;
 
     let manifest_path = output_tool_dir.join("tool.json");
-    let manifest = serde_json::json!({
+    let mut manifest = serde_json::json!({
         "schema_version": 1,
         "tool_id": tool_name,
         "binary": {
@@ -651,9 +706,12 @@ fn materialize_build_tool(
                 "path": artifact_relative_path.to_string_lossy()
             }
         }
-    })
-    .to_string();
-    fs::write(&manifest_path, manifest).map_err(|error| {
+    });
+    if let Some(path) = selected_source {
+        manifest["source"] =
+            serde_json::json!({"manifest_path":path.to_string_lossy().replace('\\', "/")});
+    }
+    fs::write(&manifest_path, manifest.to_string()).map_err(|error| {
         format!(
             "Failed to write build tool manifest '{}': {}",
             manifest_path.display(),
