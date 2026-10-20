@@ -184,7 +184,7 @@ async fn write_frame(
 ) -> Result<(), String> {
     let bytes = serde_json::to_vec(value).map_err(|_| invalid())?;
     if bytes.len() + 1 > crate::role_session::MAX_FRAME_BYTES {
-        return Err(invalid());
+        return Err(crate::role_runtime::failure("role.child_frame_too_large"));
     }
     writer.write_all(&bytes).await.map_err(|_| invalid())?;
     writer.write_all(b"\n").await.map_err(|_| invalid())?;
@@ -1198,6 +1198,48 @@ printf '%s\n' '{"protocol_version":2,"type":"result","result":"apparently succes
             .unwrap()
             .iter()
             .any(|o| o["state"] == "not_dispatched" && o["cause"] == "role.undeclared_call_site"));
+    }
+
+    #[tokio::test]
+    async fn native_role_pipe_writer_reports_size_without_partial_output() {
+        let mut output = Vec::new();
+        let exact = json!("x".repeat(crate::role_session::MAX_FRAME_BYTES - 3));
+        write_frame(&mut output, &exact).await.unwrap();
+        assert_eq!(output.len(), crate::role_session::MAX_FRAME_BYTES);
+        let before = output.clone();
+        let oversized = json!("x".repeat(crate::role_session::MAX_FRAME_BYTES - 2));
+        assert_eq!(
+            write_frame(&mut output, &oversized).await.unwrap_err(),
+            "role.child_frame_too_large"
+        );
+        assert_eq!(
+            output, before,
+            "oversize rejection must write no partial frame"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_role_outbound_bootstrap_size_error_is_safe_and_settles_child() {
+        let fixture = ProcessFixture::new();
+        let mut bootstrap = (*fixture.context.bootstrap).clone();
+        bootstrap.resolution.context.environment_identity =
+            "synthetic-private-payload".repeat(crate::role_session::MAX_FRAME_BYTES / 10);
+        let error = native(
+            fixture.command("cat > received\n"),
+            fixture.context.clone(),
+            bootstrap,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "role.child_frame_too_large");
+        assert!(std::fs::metadata(fixture.root.join("received"))
+            .map(|value| value.len() == 0)
+            .unwrap_or(true));
+        let snapshot = fixture.context.session.snapshot();
+        assert!(snapshot["outstanding"].as_object().unwrap().is_empty());
+        assert_eq!(snapshot["outcomes"][0]["state"], "completion_unknown");
     }
 
     #[tokio::test]

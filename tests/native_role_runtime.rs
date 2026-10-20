@@ -3120,3 +3120,7 @@ fn cli_native_request_choices_compute_and_pin_concurrent_narration() {
 fn emitted_native_request_choices_compute_and_pin_concurrent_narration() {
     exercise_request_choices(true);
 }
+
+#[cfg(unix)]
+#[path = "native_role_runtime/evidence_compaction.rs"]
+mod evidence_compaction;

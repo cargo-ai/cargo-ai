@@ -926,8 +926,14 @@ pub fn resolve(
                                     actual == modalities
                                 }
                         })
-                        .cloned()
-                        .collect();
+                        .fold(Vec::new(), |mut records, record| {
+                            // Only complete equal records are redundant; conflicting or stale
+                            // assessments and their provenance remain independently visible.
+                            if !records.contains(record) {
+                                records.push(record.clone());
+                            }
+                            records
+                        });
                     call.reason = "capability_evidence_missing".into();
                     if !call.evidence.is_empty() {
                         call.compatibility = if call
@@ -1262,6 +1268,97 @@ mod tests {
         assert!(absent.ready);
         assert_eq!(absent.calls[0].compatibility, Compatibility::Unknown);
         assert_eq!(absent.identity, original.identity);
+    }
+
+    #[test]
+    fn role_contract_deduplicates_only_complete_equal_evidence() {
+        let (registry, bindings, context, evidence) = fixture();
+        let key = &registry.contexts[0].key;
+        let baseline = resolve(&registry, key, &bindings, &context, &evidence, 1).unwrap();
+        let mut distinct = vec![evidence[0].clone(); 6];
+        distinct[1].status = Compatibility::Incompatible;
+        distinct[2].evidence_revision = "another-revision".into();
+        distinct[3].provenance.push("another-source".into());
+        distinct[4].valid_until_unix_secs = 0;
+        distinct[5].operation_evidence = Some(json!({"nested":["different","ordered"]}));
+        let duplicates: Vec<_> = distinct
+            .iter()
+            .flat_map(|record| vec![record.clone(); 19])
+            .collect();
+        let actual = resolve(&registry, key, &bindings, &context, &duplicates, 1).unwrap();
+        assert_eq!(actual.calls[0].evidence, distinct);
+        assert_eq!(actual.calls[0].compatibility, Compatibility::Incompatible);
+        assert_eq!(actual.identity, baseline.identity);
+        assert_eq!(actual.required_selections, baseline.required_selections);
+        assert_eq!(actual.scope, baseline.scope);
+        assert!(!actual.execution_authorized);
+        let mut reordered = evidence[0].clone();
+        reordered.input_modalities.push("text".into());
+        let actual = resolve(
+            &registry,
+            key,
+            &bindings,
+            &context,
+            &[evidence[0].clone(), reordered.clone()],
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            actual.calls[0].evidence,
+            vec![evidence[0].clone(), reordered]
+        );
+    }
+
+    #[test]
+    fn role_contract_duplicate_heavy_resolution_grows_with_sites_not_squared() {
+        let (mut registry, bindings, context, mut evidence) = fixture();
+        registry.roles.truncate(1);
+        evidence[0].operation_evidence = Some(json!({"description":"x".repeat(3000)}));
+        let original = registry.call_sites[0].clone();
+        let mut sizes = Vec::new();
+        for count in [29, 128, MAX_CALL_SITES] {
+            registry.call_sites = (0..count)
+                .map(|index| {
+                    let mut site = original.clone();
+                    site.id = format!("call-{index}");
+                    site.locator.definition = format!("source-{index}.json");
+                    site
+                })
+                .collect();
+            registry.contexts.truncate(1);
+            registry.contexts[0].call_sites = registry
+                .call_sites
+                .iter()
+                .map(|site| site.id.clone())
+                .collect();
+            let duplicated = vec![evidence[0].clone(); count];
+            let actual = resolve(
+                &registry,
+                &registry.contexts[0].key,
+                &bindings,
+                &context,
+                &duplicated,
+                1,
+            )
+            .unwrap();
+            let unique = resolve(
+                &registry,
+                &registry.contexts[0].key,
+                &bindings,
+                &context,
+                &evidence,
+                1,
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(unique).unwrap()
+            );
+            assert!(actual.calls.iter().all(|call| call.evidence.len() == 1));
+            sizes.push(serde_json::to_vec(&actual).unwrap().len());
+        }
+        assert!(sizes[1] < sizes[0] * 5);
+        assert!(sizes[2] < sizes[1] * 3);
     }
 
     #[test]

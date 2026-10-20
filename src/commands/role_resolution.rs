@@ -444,7 +444,7 @@ fn native_evidence(
             .min()
             // Unknown/unsupported evidence has no positive validity claim or clock-dependent ID.
             .unwrap_or(u64::MAX);
-        evidence.push(CapabilityEvidence {
+        let record = CapabilityEvidence {
             profile_uuid: binding.profile_uuid.clone(),
             connection_generation: binding.connection_generation.clone(),
             provider: binding.provider.clone(),
@@ -460,7 +460,10 @@ fn native_evidence(
             operation_evidence: Some(
                 serde_json::to_value(&assessed).map_err(|_| context_unavailable())?,
             ),
-        });
+        };
+        if !evidence.contains(&record) {
+            evidence.push(record);
+        }
     }
     Ok(evidence)
 }
@@ -636,6 +639,52 @@ mod tests {
             fixture.snapshot(),
             "passive evidence must not change package or private state"
         );
+    }
+
+    #[test]
+    fn native_evidence_repeated_sites_emit_only_complete_distinct_records() {
+        let fixture = Fixture::new();
+        let catalog: Value = serde_json::from_slice(
+            &fs::read(fixture.root.join(client_actions::CATALOG_FILE)).unwrap(),
+        )
+        .unwrap();
+        let mut registry: RoleRegistry =
+            serde_json::from_value(catalog["role_registry"].clone()).unwrap();
+        let selected = role_context::resolve_named_at(&fixture.home, "selected").unwrap();
+        let profiles = BTreeMap::from([("reviewer".into(), selected)]);
+        let revision = &fixture
+            .request
+            .role_execution
+            .as_ref()
+            .unwrap()
+            .binding_revision;
+        let original = registry.call_sites[0].clone();
+        registry.call_sites = (0..128)
+            .map(|index| {
+                let mut site = original.clone();
+                site.id = format!("repeated-{index}");
+                site.locator.definition = format!("definition-{index}.json");
+                if index >= 64 {
+                    site.requirements.input_modalities.push("audio".into());
+                }
+                site
+            })
+            .collect();
+        let sites: Vec<_> = registry
+            .call_sites
+            .iter()
+            .map(|site| site.id.clone())
+            .collect();
+        let single =
+            native_evidence(&registry, &sites[..1], revision, &profiles, 1_791_331_201).unwrap();
+        let repeated =
+            native_evidence(&registry, &sites[..64], revision, &profiles, 1_791_331_201).unwrap();
+        assert_eq!(single, repeated);
+        let distinct =
+            native_evidence(&registry, &sites, revision, &profiles, 1_791_331_201).unwrap();
+        assert_eq!(distinct.len(), 2);
+        assert_eq!(distinct[0], single[0]);
+        assert!(distinct[1].input_modalities.contains(&"audio".to_owned()));
     }
 
     #[test]

@@ -1128,7 +1128,11 @@ pub fn failure(code: &'static str) -> String {
     #[cfg(cargo_ai_cli)]
     crate::commands::machine::record_error(crate::commands::machine::Failure::new(
         code,
-        "Native role execution could not satisfy its declared context and authorization.",
+        if code == "role.child_frame_too_large" {
+            "Native child control exceeds the 1 MiB frame limit. Reduce the package control payload before retrying."
+        } else {
+            "Native role execution could not satisfy its declared context and authorization."
+        },
     ));
     code.to_owned()
 }
