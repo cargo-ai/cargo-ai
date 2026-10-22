@@ -23,6 +23,8 @@ These checks describe published source `fd48374` and bounded scenarios. Registry
 
 [Release notes](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.5) · [Documentation at v0.4.5](https://github.com/cargo-ai/cargo-ai/blob/v0.4.5/README.md) · [Release testing](./docs/testing-and-release-qualification.md#release-status)
 
+**Upcoming 0.5.0:** the [application-interface milestone](./releases/0.5.0.md) adds opt-in machine contracts, portable actions, structured results and native role execution. It is not yet published or release-qualified; the verified release links above remain 0.4.5.
+
 Development status: [![Development CI](https://github.com/cargo-ai/cargo-ai/actions/workflows/development-ci.yml/badge.svg?branch=develop&event=push)](https://github.com/cargo-ai/cargo-ai/actions/workflows/development-ci.yml?query=branch%3Adevelop)
 
 Build declarative AI agents. Ship them as local CLI apps.
