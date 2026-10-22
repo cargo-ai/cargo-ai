@@ -68,6 +68,10 @@ Artifacts retain compiler-reported dependency identities/features, installation 
 
 ## Release status
 
+### 0.5.0 in preparation
+
+[0.5.0](../releases/0.5.0.md) is the selected application-interface milestone. Its source metadata and guidance are being prepared; no fresh full Product Qualification, registry installation or publication is claimed yet. The 0.4.5 results below remain historical proof for that exact release and do not certify 0.5.0.
+
 ### 0.4.5 recorded results
 
 Verified: 2026-09-28. [0.4.5](../releases/0.4.5.md) adds usage attribution by selected environment, package, package location, agent and consuming workspace, with optional opaque backup metadata. The published, non-yanked crates.io archive embeds clean source `fd483745137260435d3027c7900c9f42c54c3036`, matching tag `v0.4.5`. Its SHA-256 is `2d8d7eed13f3aaaffe574f977a234d29554ba61de87aaef49a9c114c32810532`, byte-identical to the reviewed package. Later test diagnostics and documentation updates do not change this released source.

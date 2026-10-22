@@ -1,5 +1,7 @@
 # Application payload contracts
 
+The contracts below are included in the upcoming [0.5.0 milestone](../releases/0.5.0.md), not the published 0.4.5 CLI. Check [release status](testing-and-release-qualification.md#release-status) and negotiate the capabilities of the installed binary; these documents do not establish host adoption.
+
 Use the [machine interface](machine-interface.md) for output selection, error/exit rules, consent, redaction and compatibility. The application envelope revision is selected by `--output-schema-version 1`; usage's separate `--schema-version 1|2` selects only the payload nested inside it. Existing defaults remain available. Check the installed `capabilities` response before selecting a contract; these interfaces require a build containing them.
 
 The [response schema](schemas/machine-response-v1.json) validates finite frames. The [event schema](schemas/machine-event-v1.json) validates normal `run` NDJSON records. The [catalog schema](schemas/model-catalog-v1.json) validates a model catalog payload. They allow additional fields for compatible additions, reject unknown terminal outcomes, and do not replace command-specific validation below. Frame validity alone does not prove a mutation's postcondition or a complete inventory. Schema examples use illustrative fixture values; they are not live account/provider evidence.
