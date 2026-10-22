@@ -1,0 +1,60 @@
+{
+  "agent_definition_schema_version": "2026-10-08.r1",
+  "runtime_vars": {
+    "note": {
+      "type": "string"
+    }
+  },
+  "agent_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "result": {
+    "source": "tool",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "previewed"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "status",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "artifact_scopes": []
+  },
+  "actions": [
+    {
+      "name": "preview",
+      "logic": {
+        "==": [
+          1,
+          1
+        ]
+      },
+      "run": [
+        {
+          "kind": "tool",
+          "name": "desktop_preview",
+          "produces_result": true,
+          "params": {
+            "text": {
+              "var": "runtime.note"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

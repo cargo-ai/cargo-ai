@@ -8,6 +8,8 @@ Model selection works without a thinking setting. When a user requests one, insp
 
 ## Client Controls
 
+For a package page inside Cargo-AI Desktop, start with [desktop-interfaces.md](desktop-interfaces.md) and its complete [Preview note example](examples/desktop-interface/README.md). These ship the real bridge contract locally; the generic client-action controls example is only illustrative.
+
 When the user wants buttons, native controls or page-free calls to declared agents, use `client-actions.md`. Keep task behavior in agents/coordinators, declare bounded business inputs, and let the client supply authorized execution/settings and verified resources. A schedule is a client policy over the same serialized request. Capability-probe the selected binary before promising support.
 
 ## First-Run Goal

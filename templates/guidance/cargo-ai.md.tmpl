@@ -5,6 +5,8 @@ Each JSON definition is meant to hatch into a CLI tool, so keep the behavior exp
 
 ## Start Here
 
+For a package interface inside Cargo-AI Desktop, read [Desktop interface authoring](desktop-interfaces.md) and its complete [local example](examples/desktop-interface/README.md). It uses the actual `cargoAICompanion` bridge; Desktop supplies native model setup and authorization.
+
 First, calibrate how much help the user wants:
 - If unclear, ask whether they want step-by-step guidance or already know the schema they want.
 - If the request is vague, guide them by eliciting:
@@ -38,6 +40,7 @@ Read these files before inventing structure:
 - `.cargo-ai/guidance/start-here.md`
 - `.cargo-ai/guidance/package-workflow.md`
 - `.cargo-ai/guidance/client-actions.md`
+- `.cargo-ai/guidance/desktop-interfaces.md`
 - `.cargo-ai/guidance/tool-authoring.md`
 - `.cargo-ai/guidance/tool-contract.md`
 - `.cargo-ai/guidance/tool-child-agents.md`

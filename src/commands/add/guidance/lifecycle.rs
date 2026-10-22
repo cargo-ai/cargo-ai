@@ -831,6 +831,14 @@ mod tests {
         payload.remove("action-rules.md");
         for path in [
             "client-actions.md",
+            "desktop-interfaces.md",
+            "examples/desktop-interface/README.md",
+            "examples/desktop-interface/cargo-ai-actions.json",
+            "examples/desktop-interface/preview-note.json",
+            "examples/desktop-interface/tool.rs",
+            "examples/desktop-interface/ui/index.html",
+            "examples/desktop-interface/ui/style.css",
+            "examples/desktop-interface/ui/preview.js",
             "examples/client-actions.json",
             "examples/client-action-request.json",
             "examples/client-action-controls.js",
@@ -907,6 +915,14 @@ mod tests {
         assert!(project.0.join(BUNDLE).join("action-rules.md").exists());
         for path in [
             "client-actions.md",
+            "desktop-interfaces.md",
+            "examples/desktop-interface/README.md",
+            "examples/desktop-interface/cargo-ai-actions.json",
+            "examples/desktop-interface/preview-note.json",
+            "examples/desktop-interface/tool.rs",
+            "examples/desktop-interface/ui/index.html",
+            "examples/desktop-interface/ui/style.css",
+            "examples/desktop-interface/ui/preview.js",
             "examples/client-actions.json",
             "examples/client-action-request.json",
             "examples/client-action-controls.js",

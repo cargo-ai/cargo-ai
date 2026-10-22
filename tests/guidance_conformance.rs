@@ -91,6 +91,38 @@ fn installed_guidance_preserves_home_user_instructions_and_repeated_updates() {
     add(&fixture, &root);
     for (path, expected) in [
         (
+            "desktop-interfaces.md",
+            include_str!("../templates/guidance/desktop-interfaces.md"),
+        ),
+        (
+            "examples/desktop-interface/README.md",
+            include_str!("../templates/guidance/examples/desktop-interface/README.md"),
+        ),
+        (
+            "examples/desktop-interface/cargo-ai-actions.json",
+            include_str!("../templates/guidance/examples/desktop-interface/cargo-ai-actions.json"),
+        ),
+        (
+            "examples/desktop-interface/preview-note.json",
+            include_str!("../templates/guidance/examples/desktop-interface/preview-note.json"),
+        ),
+        (
+            "examples/desktop-interface/tool.rs",
+            include_str!("../templates/guidance/examples/desktop-interface/tool.rs"),
+        ),
+        (
+            "examples/desktop-interface/ui/index.html",
+            include_str!("../templates/guidance/examples/desktop-interface/ui/index.html"),
+        ),
+        (
+            "examples/desktop-interface/ui/style.css",
+            include_str!("../templates/guidance/examples/desktop-interface/ui/style.css"),
+        ),
+        (
+            "examples/desktop-interface/ui/preview.js",
+            include_str!("../templates/guidance/examples/desktop-interface/ui/preview.js"),
+        ),
+        (
             "client-actions.md",
             include_str!("../templates/guidance/client-actions.md"),
         ),
@@ -165,6 +197,8 @@ fn guidance_blocked_states_leave_all_existing_bytes_unchanged() {
     for (case, state) in [
         ("modified", "locally modified"),
         ("client-actions", "locally modified"),
+        ("desktop-guide", "locally modified"),
+        ("desktop-example", "locally modified"),
         ("missing", "incomplete"),
         ("manifest", "malformed"),
         ("legacy", "legacy/unmanaged"),
@@ -179,6 +213,16 @@ fn guidance_blocked_states_leave_all_existing_bytes_unchanged() {
             "client-actions" => {
                 fs::write(bundle.join("client-actions.md"), "user action guidance\n").unwrap()
             }
+            "desktop-guide" => fs::write(
+                bundle.join("desktop-interfaces.md"),
+                "user Desktop guidance\n",
+            )
+            .unwrap(),
+            "desktop-example" => fs::write(
+                bundle.join("examples/desktop-interface/ui/preview.js"),
+                "// user example edits\n",
+            )
+            .unwrap(),
             "missing" => fs::remove_file(bundle.join("start-here.md")).unwrap(),
             "manifest" => fs::write(bundle.join("manifest.json"), "{ broken").unwrap(),
             "legacy" => fs::remove_file(bundle.join("manifest.json")).unwrap(),
