@@ -412,7 +412,7 @@ pub fn request_connection_identity(
 }
 
 /// Discover defaults without treating capability metadata as dispatch authority.
-#[cfg(any(cargo_ai_cli, test))]
+#[cfg(cargo_ai_cli)]
 pub fn resolve_request_choices(
     registry: &RoleRegistry,
     key: &ContextKey,

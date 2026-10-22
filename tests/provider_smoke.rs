@@ -10,6 +10,10 @@ mod qualification_report;
 #[path = "support/typesafe_smoke.rs"]
 mod typesafe_smoke;
 
+#[path = "../src/generated_capabilities/record.rs"]
+#[allow(dead_code)]
+mod generated_capability_record;
+
 #[path = "../templates/definition_validation.rs"]
 mod definition_validation;
 
@@ -4377,15 +4381,14 @@ fn generated_execution_policy_case(fixture: &Fixture) {
     // Downgrade only the passive declaration in a copy of the real generated
     // executable. The parent must reject it before attempting execution.
     let mut bytes = fs::read(&executable).unwrap();
-    let identity = b"cargo-ai.generated-runtime";
+    let declaration = generated_capability_record::encoded_record(false);
+    let payload_offset =
+        generated_capability_record::OPEN.len() + generated_capability_record::IDENTITY.len();
     let records = bytes
-        .windows(identity.len())
+        .windows(declaration.len())
         .enumerate()
         .filter_map(|(offset, value)| {
-            (value == identity
-                && bytes.get(offset + identity.len()..offset + identity.len() + 8)
-                    == Some(&[6, 0, 0, 0, 255, 7, 0, 0][..]))
-            .then_some(offset + identity.len())
+            (value == declaration.as_slice()).then_some(offset + payload_offset)
         })
         .collect::<Vec<_>>();
     assert_eq!(
