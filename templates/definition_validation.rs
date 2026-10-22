@@ -16,11 +16,17 @@ pub const STRICT_SCHEMA_VERSION: &str = "2026-09-09.r1";
 pub const RUBRIC_SCHEMA_VERSION: &str = "2026-09-19.r1";
 pub const THINKING_SCHEMA_VERSION: &str = "2026-10-01.r1";
 pub const RESULT_SCHEMA_VERSION: &str = "2026-10-03.r1";
+pub const NATIVE_ROLE_SCHEMA_VERSION: &str = "2026-10-06.r1";
+pub const REQUEST_CHOICES_SCHEMA_VERSION: &str = "2026-10-08.r1";
 
 pub fn supports_rubric(version: &str) -> bool {
     matches!(
         version,
-        RUBRIC_SCHEMA_VERSION | THINKING_SCHEMA_VERSION | RESULT_SCHEMA_VERSION
+        RUBRIC_SCHEMA_VERSION
+            | THINKING_SCHEMA_VERSION
+            | RESULT_SCHEMA_VERSION
+            | NATIVE_ROLE_SCHEMA_VERSION
+            | REQUEST_CHOICES_SCHEMA_VERSION
     )
 }
 pub const VERSION_KEY: &str = "agent_definition_schema_version";
@@ -291,6 +297,8 @@ pub fn definition_revision(root: &Value) -> Result<DefinitionRevision> {
             | RUBRIC_SCHEMA_VERSION
             | THINKING_SCHEMA_VERSION
             | RESULT_SCHEMA_VERSION
+            | NATIVE_ROLE_SCHEMA_VERSION
+            | REQUEST_CHOICES_SCHEMA_VERSION
     ) {
         Ok(DefinitionRevision::Strict)
     } else {
@@ -815,7 +823,10 @@ pub fn validate_definition(value: &Value) -> Result<DefinitionRevision> {
     }
     let mut budget = data_budget(value, "$")?;
     let root = object(value, "$")?;
-    let selected_results = root[VERSION_KEY] == RESULT_SCHEMA_VERSION;
+    let selected_results = matches!(
+        root[VERSION_KEY].as_str(),
+        Some(RESULT_SCHEMA_VERSION | NATIVE_ROLE_SCHEMA_VERSION | REQUEST_CHOICES_SCHEMA_VERSION)
+    );
     let mut root_keys = vec![
         VERSION_KEY,
         "agent_schema",
@@ -963,8 +974,18 @@ pub fn validate_definition(value: &Value) -> Result<DefinitionRevision> {
                 &inputs,
                 matches!(
                     root[VERSION_KEY].as_str(),
-                    Some(THINKING_SCHEMA_VERSION | RESULT_SCHEMA_VERSION)
+                    Some(
+                        THINKING_SCHEMA_VERSION
+                            | RESULT_SCHEMA_VERSION
+                            | NATIVE_ROLE_SCHEMA_VERSION
+                            | REQUEST_CHOICES_SCHEMA_VERSION
+                    )
                 ),
+                matches!(
+                    root[VERSION_KEY].as_str(),
+                    Some(NATIVE_ROLE_SCHEMA_VERSION | REQUEST_CHOICES_SCHEMA_VERSION)
+                ),
+                root[VERSION_KEY] == REQUEST_CHOICES_SCHEMA_VERSION,
                 &mut budget,
             )?;
         }
@@ -1382,6 +1403,76 @@ fn thinking_setting(value: &Value, path: &str, available: &BTreeMap<String, Kind
     }
 }
 
+fn request_choices(value: &Value, path: &str, available: &BTreeMap<String, Kind>) -> Result<()> {
+    let patch = object(value, path)?;
+    keys(patch, &["profile", "model", "settings"], path, false)?;
+    let mut choices: Vec<(&str, &Value)> = patch
+        .iter()
+        .filter(|(key, _)| key.as_str() != "settings")
+        .map(|(key, value)| (key.as_str(), value))
+        .collect();
+    if let Some(settings) = patch.get("settings") {
+        let settings = object(settings, &field_path(path, "settings"))?;
+        keys(
+            settings,
+            &["thinking", "voice", "format", "temperature"],
+            &field_path(path, "settings"),
+            false,
+        )?;
+        choices.extend(settings.iter().map(|(key, value)| (key.as_str(), value)));
+    }
+    for (key, value) in choices {
+        let parent = if matches!(key, "profile" | "model") {
+            path.to_owned()
+        } else {
+            field_path(path, "settings")
+        };
+        let p = field_path(&parent, key);
+        let choice = object(value, &p)?;
+        let mode = string(required(choice, "mode", &p)?, &field_path(&p, "mode"))?;
+        if mode == "provider_default" {
+            keys(choice, &["mode"], &p, false)?;
+            continue;
+        }
+        if mode != "value" {
+            return Err(invalid(
+                &p,
+                "Request choices use value or provider_default.",
+            ));
+        }
+        keys(choice, &["mode", "value"], &p, false)?;
+        let v = required(choice, "value", &p)?;
+        let vp = field_path(&p, "value");
+        match key {
+            "thinking" => {
+                if v.is_string() || v.get("var").is_some() {
+                    scalar_or_reference(v, &vp, available, true)?;
+                } else {
+                    thinking_setting(v, &vp, available)?;
+                }
+            }
+            "temperature" => {
+                if let Some(reference_value) = v.get("var") {
+                    let map = object(v, &vp)?;
+                    keys(map, &["var"], &vp, false)?;
+                    let kind =
+                        reference(reference_value, &field_path(&vp, "var"), available, true)?;
+                    if !matches!(kind, Kind::Number | Kind::Integer) {
+                        return Err(wrong_type(&vp, "a numeric variable"));
+                    }
+                } else if !v
+                    .as_f64()
+                    .is_some_and(|number| number.is_finite() && number >= 0.0)
+                {
+                    return Err(wrong_type(&vp, "a finite nonnegative temperature"));
+                }
+            }
+            _ => scalar_or_reference(v, &vp, available, true)?,
+        }
+    }
+    Ok(())
+}
+
 fn run_step(
     value: &Value,
     path: &str,
@@ -1390,6 +1481,8 @@ fn run_step(
     captures: &mut BTreeSet<String>,
     inputs: &BTreeMap<String, String>,
     thinking_allowed: bool,
+    optional_voice: bool,
+    request_choices_allowed: bool,
     budget: &mut Budget,
 ) -> Result<()> {
     budget.charge(path, 1)?;
@@ -1440,7 +1533,18 @@ fn run_step(
     if k == "tool" && map.contains_key("produces_result") {
         allowed.push("produces_result");
     }
+    if request_choices_allowed
+        && matches!(
+            k,
+            "agent" | "generate_image" | "generate_audio" | "transcribe_audio"
+        )
+    {
+        allowed.push("request_choices");
+    }
     keys(map, &allowed, path, false)?;
+    if let Some(choices) = map.get("request_choices") {
+        request_choices(choices, &field_path(path, "request_choices"), available)?;
+    }
     if let Some(value) = map.get("thinking") {
         thinking_setting(value, &field_path(path, "thinking"), available)?;
     }
@@ -1667,12 +1771,14 @@ fn run_step(
                 available,
                 budget,
             )?;
-            scalar_or_reference(
-                required(map, "voice", path)?,
-                &field_path(path, "voice"),
-                fields,
-                true,
-            )?;
+            if !optional_voice || map.contains_key("voice") {
+                scalar_or_reference(
+                    required(map, "voice", path)?,
+                    &field_path(path, "voice"),
+                    fields,
+                    true,
+                )?;
+            }
             let p = field_path(path, "path");
             if let Some(s) = parts(required(map, "path", path)?, &p, available, budget)? {
                 owned_path(&s, &p, false)?;

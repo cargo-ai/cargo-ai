@@ -30,6 +30,16 @@ mod generated_capabilities;
 mod generated_capability_record;
 mod infra_api;
 mod providers;
+#[path = "../templates/src/role_child.rs"]
+mod role_child;
+#[path = "../templates/src/role_contract.rs"]
+mod role_contract;
+#[path = "../templates/src/role_runtime.rs"]
+mod role_runtime;
+#[path = "../templates/src/role_session.rs"]
+mod role_session;
+#[path = "../templates/src/role_transport.rs"]
+mod role_transport;
 mod runtime_definition;
 mod schema_version;
 mod ui;
@@ -81,7 +91,10 @@ async fn main() {
     }
     // Action-bound and inherited requests must precede legacy startup writers.
     if let Some(run) = cmd_args.subcommand_matches("run") {
-        if run.get_one::<String>("action").is_some() || execution_policy::inheritance_requested() {
+        if run.get_one::<String>("action").is_some()
+            || run.get_flag("native_role_child")
+            || execution_policy::inheritance_requested()
+        {
             if !commands::run::run(run).await {
                 process::exit(1);
             }
@@ -137,10 +150,10 @@ async fn main() {
         }
         return;
     }
-    if let Some(profile) = cmd_args
-        .subcommand_matches("profile")
-        .filter(|profile| profile.subcommand_matches("set").is_some())
-    {
+    if let Some(profile) = cmd_args.subcommand_matches("profile").filter(|profile| {
+        profile.subcommand_matches("set").is_some()
+            || profile.subcommand_matches("refresh-context").is_some()
+    }) {
         if !commands::profile::run(profile) {
             process::exit(1);
         }

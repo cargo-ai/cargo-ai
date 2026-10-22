@@ -89,6 +89,8 @@ fn generated_agent_definition_json_value() -> serde_json::Value {
 
 #[allow(dead_code)]
 fn generated_agent_inspect_value() -> serde_json::Value {
+    // A live reference retains the passive identity through linker section GC.
+    std::hint::black_box(&AGENT_DEFINITION_IDENTITY_RECORD);
     let runtime_capabilities = crate::generated_capabilities::decode_record(std::hint::black_box(
         &AGENT_RUNTIME_CAPABILITY_RECORD,
     ))

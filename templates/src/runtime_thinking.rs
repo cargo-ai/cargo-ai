@@ -128,6 +128,22 @@ pub(crate) async fn resolve_for_request(
         selection,
         crate::execution_policy::output_limit(context.max_output_tokens),
     )?;
+    if crate::role_runtime::current().is_some() {
+        if matches!(selection, Some(ThinkingSetting::On | ThinkingSetting::Off))
+            && !(context.provider == crate::providers::ProviderKind::Ollama
+                && kind == ThinkingRequestKind::Text)
+        {
+            return Err("Native Boolean thinking controls are not implemented by this adapter; select an exact named choice or provider default.".into());
+        }
+        return Ok(thinking::resolve_native(
+            selection,
+            source,
+            ThinkingSupport::Unknown {
+                reason: "Native execution does not query advisory thinking metadata.".into(),
+                evidence: None,
+            },
+        ));
+    }
     let support = if selection
         .is_some_and(|setting| !matches!(setting, ThinkingSetting::ProviderDefault))
     {

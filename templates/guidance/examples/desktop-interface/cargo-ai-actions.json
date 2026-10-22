@@ -1,0 +1,104 @@
+{
+  "schema_version": 3,
+  "actions": [
+    {
+      "id": "preview-note",
+      "label": "Preview note",
+      "target": "preview-note.json",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "mappings": {
+        "text": {
+          "runtime_var": "note"
+        }
+      },
+      "required_capabilities": [
+        "business_inputs.v1",
+        "structured_results.v1"
+      ],
+      "description": "Compute a local text preview without saving the note or calling a model."
+    }
+  ],
+  "interfaces": [
+    {
+      "id": "notes",
+      "label": "Preview note",
+      "actions": [
+        "preview-note"
+      ],
+      "resources": [
+        "page",
+        "styles",
+        "controls"
+      ],
+      "presentation": {
+        "entrypoint": "page"
+      }
+    }
+  ],
+  "resources": [
+    {
+      "id": "page",
+      "path": "ui/index.html",
+      "mime_type": "text/html"
+    },
+    {
+      "id": "styles",
+      "path": "ui/style.css",
+      "mime_type": "text/css"
+    },
+    {
+      "id": "controls",
+      "path": "ui/preview.js",
+      "mime_type": "text/javascript"
+    }
+  ],
+  "role_registry": {
+    "version": 1,
+    "roles": [],
+    "call_sites": [],
+    "contexts": [
+      {
+        "key": {
+          "action": "preview-note",
+          "interface": "notes",
+          "mode": "default"
+        },
+        "call_sites": [],
+        "resources": [
+          "page",
+          "styles",
+          "controls"
+        ],
+        "data_scopes": [],
+        "limits": {
+          "max_runtime_secs": 30,
+          "max_output_tokens": 256,
+          "max_agent_depth": 0
+        }
+      }
+    ],
+    "tool_content": {
+      "desktop_preview": [
+        "tools/desktop_preview/Cargo.toml",
+        "tools/desktop_preview/Cargo.lock",
+        "tools/desktop_preview/src/main.rs",
+        "tools/desktop_preview/src/lib.rs",
+        "tools/desktop_preview/src/agent_bridge.rs",
+        "tools/desktop_preview/src/tool.rs"
+      ]
+    }
+  }
+}

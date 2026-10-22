@@ -1166,17 +1166,17 @@ pub(crate) async fn run_with_definition_in_context_and_usage_agent(
         eprintln!("x {error}");
         return false;
     }
-    match crate::execution_policy::scope_inherited(Box::pin(super::structured_results::scope(
+    match crate::execution_policy::scope_inherited(super::structured_results::scope(
         Some(result_context),
-        run_with_definition_scoped(
+        Box::pin(run_with_definition_scoped(
             sub_m,
             definition,
             project_root,
             usage_agent_info,
             package_context,
             attribution_input,
-        ),
-    )))
+        )),
+    ))
     .await
     {
         Ok(result) => result,
@@ -1223,8 +1223,38 @@ async fn run_with_definition_scoped(
     let mut use_openai_account_transport = false;
     let mut openai_account_id = None;
 
-    let config = load_config();
-    let explicit_profile_name = sub_m.get_one::<String>("profile").map(String::as_str);
+    let native_action_only =
+        crate::role_runtime::current().is_some() && !definition.has_output_schema_properties();
+    let config = if native_action_only {
+        None
+    } else {
+        load_config()
+    };
+    let role_selection = match crate::role_runtime::root_selection(
+        sub_m.get_one::<String>("profile").map(String::as_str),
+        sub_m.get_one::<String>("model").map(String::as_str),
+        super::runtime_actions::runtime_thinking::invocation_setting(sub_m).as_ref(),
+        definition.has_output_schema_properties(),
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("{error}");
+            return false;
+        }
+    };
+    if role_selection.is_some()
+        && ["server", "url", "token"]
+            .iter()
+            .any(|id| sub_m.get_one::<String>(id).is_some())
+    {
+        eprintln!("{}", crate::role_runtime::failure("role.selector_conflict"));
+        return false;
+    }
+    let explicit_profile_name = role_selection
+        .as_ref()
+        .and_then(|c| c.selection.as_ref())
+        .and_then(|s| s.profile.as_deref())
+        .or_else(|| sub_m.get_one::<String>("profile").map(String::as_str));
     match resolve_loaded_profile(config.as_ref(), explicit_profile_name) {
         Ok(Some((profile, kind))) => {
             thinking = profile.thinking.clone();
@@ -1292,6 +1322,21 @@ async fn run_with_definition_scoped(
         inference_timeout_in_sec = timeout_arg;
     }
 
+    if let Some(call) = &role_selection {
+        if let Some(selection) = &call.selection {
+            model = match &selection.model {
+                crate::execution_policy::ModelSelection::Named { value } => value.clone(),
+                _ => String::new(),
+            };
+            thinking = Some(selection.thinking.clone());
+            thinking_source = "native_role".into();
+            temperature = call
+                .settings
+                .get("temperature")
+                .and_then(serde_json::Value::as_f64);
+        }
+    }
+
     if let Err(error) = crate::execution_policy::check_explicit_limits(
         sub_m.get_one::<u32>("max_output_tokens").copied(),
         sub_m.get_one::<u64>("max_runtime_in_sec").copied(),
@@ -1315,7 +1360,11 @@ async fn run_with_definition_scoped(
                 .and_then(|defaults| defaults.max_runtime_in_sec),
         );
 
-    let provider = match ProviderKind::from_server_value(&server) {
+    let provider = match if native_action_only {
+        Some(ProviderKind::OpenAi)
+    } else {
+        ProviderKind::from_server_value(&server)
+    } {
         Some(provider) => provider,
         None => {
             super::machine::record_error(super::machine::Failure::new(
@@ -1330,21 +1379,25 @@ async fn run_with_definition_scoped(
     };
 
     max_output_tokens = crate::execution_policy::output_limit(max_output_tokens);
-    if let Err(error) = crate::execution_policy::check(
-        selected_profile
-            .as_ref()
-            .map(|profile| profile.name.as_str()),
-        crate::execution_policy::RequestKind::Text,
-        crate::execution_policy::ModelSelection::named_or_default(&model),
-        thinking.as_ref(),
-        max_output_tokens,
-    ) {
-        eprintln!("x {error}");
-        return false;
+    if !native_action_only {
+        if let Err(error) = crate::execution_policy::check(
+            selected_profile
+                .as_ref()
+                .map(|profile| profile.name.as_str()),
+            crate::execution_policy::RequestKind::Text,
+            crate::execution_policy::ModelSelection::named_or_default(&model),
+            thinking.as_ref(),
+            max_output_tokens,
+        ) {
+            eprintln!("x {error}");
+            return false;
+        }
     }
 
     #[cfg(test)]
-    crate::execution_policy::note_boundary("credentials");
+    if !native_action_only {
+        crate::execution_policy::note_boundary("credentials");
+    }
     let has_explicit_token_override = explicit_token_override.is_some();
     if let Some((kind, profile_name)) = loaded_profile_message.as_ref() {
         for line in profile_selection_messages(
@@ -1356,7 +1409,9 @@ async fn run_with_definition_scoped(
         }
     }
 
-    if let Some(cmd_token) = explicit_token_override {
+    if native_action_only {
+        token = String::new();
+    } else if let Some(cmd_token) = explicit_token_override {
         println!("Using explicit --token override; bypassing profile auth-mode resolution.");
         token = cmd_token;
     } else if provider == ProviderKind::OpenAi {
@@ -1476,7 +1531,7 @@ async fn run_with_definition_scoped(
         None => (None, None),
     };
 
-    if !ignore_tools {
+    if !ignore_tools && crate::role_runtime::current().is_none() {
         if let Err(error) = audit_runtime_actions_for_tools(
             &actions,
             tool_resolver.as_ref(),
@@ -1971,10 +2026,13 @@ async fn run_with_definition_scoped(
         }
     };
 
-    if super::runtime_actions::current_agent_action_depth() == 0
-        && definition.result_declaration().is_none()
-    {
-        super::machine::record_result(&output);
+    if definition.result_declaration().is_none() {
+        // Native descendants return their validated business result to their
+        // owning parent without publishing it as the host action's root result.
+        crate::role_runtime::capture_business_result(&output);
+        if super::runtime_actions::current_agent_action_depth() == 0 {
+            super::machine::record_result(&output);
+        }
     }
     match super::runtime_actions::apply_actions_with_data(
         &output,

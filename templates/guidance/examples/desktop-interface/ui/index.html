@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Preview note</title><link rel="stylesheet" href="style.css"><script src="preview.js" defer></script></head>
+<body><main>
+<h1>Preview note</h1><p>Compute a local preview in Cargo-AI Desktop. No model, network or note storage is used.</p>
+<label for="draft">Your note (up to 4096 UTF-8 bytes)</label><textarea id="draft" rows="6" maxlength="4096"></textarea>
+<div class="controls"><button id="connect" type="button">Connect</button><button id="preview" type="button" disabled>Preview note</button><button id="cancel" type="button" disabled>Cancel</button></div>
+<p id="status" role="status" aria-live="polite">Review access in Cargo-AI Desktop, then Connect. Closing this page discards its draft.</p>
+<h2>Preview</h2><pre id="result"></pre>
+</main></body></html>

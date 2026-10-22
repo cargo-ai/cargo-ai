@@ -1,0 +1,65 @@
+{
+  "name": "request_choices_legacy_rejected",
+  "definition": {
+    "agent_definition_schema_version": "2026-10-06.r1",
+    "runtime_vars": {
+      "voice": {
+        "type": "string",
+        "default": "coral"
+      }
+    },
+    "agent_schema": {
+      "type": "object",
+      "properties": {}
+    },
+    "actions": [
+      {
+        "name": "speak",
+        "logic": {
+          "==": [
+            1,
+            1
+          ]
+        },
+        "run": [
+          {
+            "kind": "generate_audio",
+            "text": "Hello",
+            "path": "./speech.wav",
+            "voice": {
+              "var": "runtime.voice"
+            },
+            "request_choices": {
+              "model": {
+                "mode": "value",
+                "value": "speech-model"
+              },
+              "profile": {
+                "mode": "provider_default"
+              },
+              "settings": {
+                "voice": {
+                  "mode": "value",
+                  "value": {
+                    "var": "runtime.voice"
+                  }
+                },
+                "format": {
+                  "mode": "provider_default"
+                },
+                "thinking": {
+                  "mode": "provider_default"
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "accepted": false,
+    "code": "unknown_field",
+    "path": "$.actions[0].run[0].request_choices"
+  }
+}

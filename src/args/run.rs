@@ -17,6 +17,8 @@ pub fn command() -> Command {
                 .requires_all(["interface", "action_target", "action_request_stdin"])
                 .conflicts_with_all(["run_var", "input_override", "input_mode", "input_text", "input_url", "input_image", "input_file", "server", "url", "token"]),
         )
+        .arg(Arg::new("role_session").long("role-session").action(ArgAction::SetTrue).requires("action").help("Use the persistent native role session protocol on stdin and NDJSON stdout"))
+        .arg(Arg::new("native_role_child").long("native-role-child").action(ArgAction::SetTrue).hide(true).conflicts_with_all(["stdin","action"]))
         .arg(Arg::new("interface").long("interface").value_name("ID").requires("action"))
         .arg(Arg::new("project").long("project").value_name("DIRECTORY").requires("action"))
         .arg(Arg::new("package").long("package").value_name("ALIAS").requires("action"))

@@ -1,0 +1,261 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/action-request-v3.json",
+  "title": "Cargo AI native role action request v3",
+  "$comment": "The complete request is bounded to 65536 UTF-8 bytes. Native resolution permits resolution_id omitted; validate/run require the exact reviewed digest. Binding choices are host-private authority fields; inputs remain business data. Opaque IDs do not confer execution consent.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 3
+    },
+    "interface": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+      "not": {
+        "enum": [
+          "execution_policy",
+          "expected_binding",
+          "attachment_grants",
+          "constructor",
+          "prototype",
+          "__proto__"
+        ]
+      }
+    },
+    "action": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+      "not": {
+        "enum": [
+          "execution_policy",
+          "expected_binding",
+          "attachment_grants",
+          "constructor",
+          "prototype",
+          "__proto__"
+        ]
+      }
+    },
+    "inputs": {
+      "allOf": [
+        {
+          "$ref": "business-schema-v1.json#/$defs/value"
+        },
+        {
+          "type": "object"
+        }
+      ]
+    },
+    "expected_binding": {
+      "$ref": "action-binding-v1.json"
+    },
+    "execution_policy": {
+      "$ref": "action-execution-policy-v1.json"
+    },
+    "attachment_grants": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+        "not": {
+          "enum": [
+            "execution_policy",
+            "expected_binding",
+            "attachment_grants",
+            "constructor",
+            "prototype",
+            "__proto__"
+          ]
+        }
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Host-authorized absolute path, never a page-supplied grant."
+          },
+          "content_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "path",
+          "content_sha256"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "artifact_access": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "scopes": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "not": {
+              "enum": [
+                "constructor",
+                "prototype",
+                "__proto__"
+              ]
+            }
+          }
+        }
+      },
+      "required": [
+        "version",
+        "scopes"
+      ],
+      "additionalProperties": false
+    },
+    "role_execution": {
+      "type": "object",
+      "properties": {
+        "binding_revision": {
+          "$ref": "role-contract-v1.json#/$defs/binding_revision"
+        },
+        "resolution_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "mode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        }
+      },
+      "required": [
+        "binding_revision",
+        "mode"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "interface",
+    "action",
+    "inputs",
+    "expected_binding",
+    "execution_policy",
+    "role_execution"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "resource_request": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "interface": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+          "not": {
+            "enum": [
+              "execution_policy",
+              "expected_binding",
+              "attachment_grants",
+              "constructor",
+              "prototype",
+              "__proto__"
+            ]
+          }
+        },
+        "resource": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+          "not": {
+            "enum": [
+              "execution_policy",
+              "expected_binding",
+              "attachment_grants",
+              "constructor",
+              "prototype",
+              "__proto__"
+            ]
+          }
+        },
+        "expected_binding": {
+          "$ref": "action-binding-v1.json"
+        }
+      },
+      "required": [
+        "schema_version",
+        "interface",
+        "resource",
+        "expected_binding"
+      ],
+      "additionalProperties": false
+    },
+    "attachment_reference": {
+      "type": "object",
+      "properties": {
+        "grant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+          "not": {
+            "enum": [
+              "execution_policy",
+              "expected_binding",
+              "attachment_grants",
+              "constructor",
+              "prototype",
+              "__proto__"
+            ]
+          }
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "grant_id",
+        "content_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "execution": {
+      "allOf": [
+        {
+          "$ref": "#"
+        },
+        {
+          "properties": {
+            "role_execution": {
+              "required": [
+                "resolution_id"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

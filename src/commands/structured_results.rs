@@ -67,6 +67,7 @@ pub(crate) fn capture(raw: Option<&str>) -> Result<(), String> {
         .ok_or("Selected producer has no root result declaration.")?;
     let result = decode_producer_result(raw, &declaration["schema"])
         .map_err(|error| context.failure(error))?;
+    crate::role_runtime::capture_business_result(&result.data);
     if context.publish {
         super::machine::record_result(&result.data);
     }

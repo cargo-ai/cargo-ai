@@ -29,20 +29,76 @@ const USAGE_CALLER_WORKSPACE_ENV: &str = "CARGO_AI_USAGE_CALLER_WORKSPACE";
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub(crate) struct InvocationContext {
+    #[serde(skip)]
+    native_mediation: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_bridge: Option<AgentBridgeContext>,
 }
 
 #[allow(dead_code)]
 impl InvocationContext {
+    pub(crate) fn native() -> Self {
+        Self {
+            native_mediation: true,
+            agent_bridge: None,
+        }
+    }
+
+    /// Request a declared child through the native parent. The tool receives only
+    /// business results; the parent retains bindings, policy and credentials.
+    pub(crate) fn invoke_declared(
+        &self,
+        call_site: &str,
+        inputs: BTreeMap<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, ToolError> {
+        if !self.native_mediation {
+            return Err(ToolError::new(
+                "Declared child calls require native protocol 2.",
+            ));
+        }
+        if call_site.is_empty() || call_site.len() > 256 || call_site.chars().any(char::is_control)
+        {
+            return Err(ToolError::new("Invalid declared child call-site id."));
+        }
+        static CHANNEL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _channel = CHANNEL
+            .lock()
+            .map_err(|_| ToolError::new("Native child channel is unavailable."))?;
+        static NEXT_REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let request_id = NEXT_REQUEST
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .to_string();
+        crate::write_protocol_message(
+            &serde_json::json!({"protocol_version":2,"type":"child_request","request_id":request_id,"call_site":call_site,"inputs":inputs}),
+        )?;
+        let response: NativeChildResult = crate::read_protocol_message()?;
+        if response.protocol_version != 2
+            || response.kind != "child_result"
+            || response.request_id != request_id
+        {
+            return Err(ToolError::new(
+                "Native child response does not match the pending request.",
+            ));
+        }
+        if let Some(error) = response.error {
+            return Err(ToolError::new(error));
+        }
+        Ok(response.result)
+    }
+
     pub(crate) fn can_invoke_agents(&self) -> bool {
-        self.agent_bridge.is_some()
+        self.native_mediation || self.agent_bridge.is_some()
     }
 
     pub(crate) fn invoke_agent(
         &self,
         request: ChildAgentRequest,
     ) -> Result<ChildAgentOutcome, ToolError> {
+        if self.native_mediation {
+            return Err(ToolError::new(
+                "Native role execution requires invoke_declared with a declared call-site id.",
+            ));
+        }
         let bridge = self.agent_bridge.as_ref().ok_or_else(|| {
             ToolError::new(
                 "Child-agent helper is unavailable for this invocation. This tool must run from a Cargo AI agent `kind: \"tool\"` step to call another agent.",
@@ -120,8 +176,7 @@ impl AgentBridgeContext {
         if request.ignore_tools {
             command.arg("--ignore-tools");
         }
-        let inherited_profile = if request.profile.is_none()
-            && request.artifact.ends_with(".json")
+        let inherited_profile = if request.profile.is_none() && request.artifact.ends_with(".json")
         {
             self.profile_name.as_ref()
         } else {
@@ -161,7 +216,10 @@ impl AgentBridgeContext {
                 USAGE_PARENT_AGENT_RUN_ID_ENV,
                 usage_log.parent_agent_run_id.as_str(),
             );
-            command.env(USAGE_LAUNCHED_BY_TYPE_ENV, usage_log.launched_by.kind.as_str());
+            command.env(
+                USAGE_LAUNCHED_BY_TYPE_ENV,
+                usage_log.launched_by.kind.as_str(),
+            );
             if let Some(action) = usage_log.launched_by.action.as_deref() {
                 command.env(USAGE_LAUNCHED_BY_ACTION_ENV, action);
             }
@@ -177,11 +235,7 @@ impl AgentBridgeContext {
 
         remaining_runtime_duration(
             self.runtime_budget,
-            format!(
-                "before starting child agent '{}'",
-                request.artifact
-            )
-            .as_str(),
+            format!("before starting child agent '{}'", request.artifact).as_str(),
         )?;
         let child = command.spawn().map_err(|error| {
             ToolError::new(format!(
@@ -312,11 +366,7 @@ impl ChildAgentRequest {
         self
     }
 
-    pub(crate) fn add_run_var(
-        mut self,
-        name: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
+    pub(crate) fn add_run_var(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.run_vars.insert(name.into(), value.into());
         self
     }
@@ -408,7 +458,9 @@ fn validate_child_agent_target(artifact: &str) -> Result<(), ToolError> {
         )));
     }
 
-    if contains_explicit_path_separator(&artifact[2..]) && !is_single_normal_path_component(&artifact[2..]) {
+    if contains_explicit_path_separator(&artifact[2..])
+        && !is_single_normal_path_component(&artifact[2..])
+    {
         return Err(ToolError::new(format!(
             "Child-agent target '{}' must stay at the same level; nested paths such as './agents/child_agent' are not allowed.",
             artifact
@@ -476,9 +528,7 @@ fn artifact_is_json_definition(artifact: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn resolve_child_artifact_invocation(
-    artifact: &str,
-) -> Result<ChildArtifactInvocation, ToolError> {
+fn resolve_child_artifact_invocation(artifact: &str) -> Result<ChildArtifactInvocation, ToolError> {
     if !artifact_is_json_definition(artifact) {
         return Ok(ChildArtifactInvocation::DirectExecutable(
             Path::new(artifact).to_path_buf(),
@@ -694,4 +744,15 @@ fn emit_child_output(output: &ChildProcessOutput) -> Result<(), ToolError> {
     }
     stderr.flush()?;
     Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeChildResult {
+    protocol_version: u32,
+    #[serde(rename = "type")]
+    kind: String,
+    request_id: String,
+    result: serde_json::Value,
+    error: Option<String>,
 }

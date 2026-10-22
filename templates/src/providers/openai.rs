@@ -1189,6 +1189,13 @@ pub async fn send_image_request_with_account_context(
         .await;
     }
 
+    if crate::role_runtime::current().is_some() && thinking.is_some() {
+        return Err(ProviderError::invalid_request(
+            ProviderKind::OpenAi,
+            "The OpenAI API-key image adapter cannot serialize an exact native reasoning choice; use provider default or an implemented transport.",
+        ));
+    }
+
     if !reference_images.is_empty() {
         return send_image_edit_request(
             url,

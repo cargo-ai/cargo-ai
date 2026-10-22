@@ -18,7 +18,7 @@
     "content_sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$",
-      "description": "Digest of the complete declared target/resource inventory."
+      "description": "Digest of the complete declared target/resource inventory; native role catalog 3 additionally binds verified reachable definitions, generated artifacts and declared tool source content."
     },
     "package": {
       "type": "object",

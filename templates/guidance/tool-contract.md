@@ -225,3 +225,7 @@ Lookup stays local-execution-oriented in this phase:
   - `.cargo-ai/tools/<tool_name>/...`
 
 Project scope resolves before machine scope.
+
+## Native mediated protocol 2
+
+New scaffolds preserve protocol-1 `describe` and ordinary invocation, adding `supported_protocol_versions:[1,2]`. Native role sessions select LF-delimited `{protocol_version:2,type:"invoke",params:{...}}`; host/runtime context is rejected. A tool may exchange declared `child_request`/`child_result` frames through `InvocationContext::invoke_declared`, then emits `{protocol_version:2,type:"result",result:<existing string or null>}`. Child requests carry only request correlation, the declared call-site ID and closed business inputs; the native parent retains profile choices, credentials, policy and admission control. Unknown call sites, unverified artifacts and legacy dynamic child helpers fail. Keep author-owned logic in `src/tool.rs` and use `tool-child-agents.md` for the exact call shape; old scaffolds need a deliberate rebuild, not an unadvertised protocol fallback.

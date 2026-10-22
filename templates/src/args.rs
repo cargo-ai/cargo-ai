@@ -18,6 +18,7 @@ pub(crate) fn build_cli_from(mut args: Vec<String>) -> ArgMatches {
     }
 
     Command::new("cargo-ai")
+        .arg(Arg::new("native_role_child").long("native-role-child").action(ArgAction::SetTrue).hide(true))
         .bin_name(bin_name)
         .subcommand(
             Command::new("version").about("Print generated-agent provenance and sync status"),

@@ -50,6 +50,38 @@ const CLIENT_ACTIONS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/client-actions.md"
 ));
+const DESKTOP_INTERFACES: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/desktop-interfaces.md"
+));
+const DESKTOP_README: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/desktop-interface/README.md"
+));
+const DESKTOP_CATALOG: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/desktop-interface/cargo-ai-actions.json"
+));
+const DESKTOP_AGENT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/desktop-interface/preview-note.json"
+));
+const DESKTOP_TOOL: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/desktop-interface/tool.rs"
+));
+const DESKTOP_HTML: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/desktop-interface/ui/index.html"
+));
+const DESKTOP_CSS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/desktop-interface/ui/style.css"
+));
+const DESKTOP_JS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/guidance/examples/desktop-interface/ui/preview.js"
+));
 const EXAMPLE_CLIENT_ACTIONS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/guidance/examples/client-actions.json"
@@ -145,7 +177,7 @@ struct GuidanceArtifact {
     contents: &'static str,
 }
 
-const GUIDANCE_ARTIFACTS: [GuidanceArtifact; 29] = [
+const GUIDANCE_ARTIFACTS: [GuidanceArtifact; 37] = [
     GuidanceArtifact {
         relative_path: BUNDLE_ENTRY_PATH,
         contents: CANONICAL_GUIDANCE_TEMPLATE,
@@ -177,6 +209,38 @@ const GUIDANCE_ARTIFACTS: [GuidanceArtifact; 29] = [
     GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/client-actions.md",
         contents: CLIENT_ACTIONS_TEMPLATE,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/desktop-interfaces.md",
+        contents: DESKTOP_INTERFACES,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/desktop-interface/README.md",
+        contents: DESKTOP_README,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/desktop-interface/cargo-ai-actions.json",
+        contents: DESKTOP_CATALOG,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/desktop-interface/preview-note.json",
+        contents: DESKTOP_AGENT,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/desktop-interface/tool.rs",
+        contents: DESKTOP_TOOL,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/desktop-interface/ui/index.html",
+        contents: DESKTOP_HTML,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/desktop-interface/ui/style.css",
+        contents: DESKTOP_CSS,
+    },
+    GuidanceArtifact {
+        relative_path: ".cargo-ai/guidance/examples/desktop-interface/ui/preview.js",
+        contents: DESKTOP_JS,
     },
     GuidanceArtifact {
         relative_path: ".cargo-ai/guidance/examples/client-actions.json",
@@ -566,6 +630,14 @@ mod tests {
         assert!(dir.join(".cargo-ai/guidance/package-workflow.md").exists());
         for name in [
             "client-actions.md",
+            "desktop-interfaces.md",
+            "examples/desktop-interface/README.md",
+            "examples/desktop-interface/cargo-ai-actions.json",
+            "examples/desktop-interface/preview-note.json",
+            "examples/desktop-interface/tool.rs",
+            "examples/desktop-interface/ui/index.html",
+            "examples/desktop-interface/ui/style.css",
+            "examples/desktop-interface/ui/preview.js",
             "examples/client-actions.json",
             "examples/client-action-request.json",
             "examples/client-action-controls.js",

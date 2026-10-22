@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/native-tool-v2.json",
+  "title": "Cargo AI native mediated tool protocol v2",
+  "$comment": "Bounded LF-delimited native tool protocol; describe stays protocol 1 with supported_protocol_versions [1,2]. Native invokes accept no runtime_context, credentials, bindings or executable selectors. inputs are checked against the declared closed business schema by the native parent. These frames are not host session/control authority.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/invoke"
+    },
+    {
+      "$ref": "#/$defs/child_request"
+    },
+    {
+      "$ref": "#/$defs/child_result"
+    },
+    {
+      "$ref": "#/$defs/result"
+    }
+  ],
+  "$defs": {
+    "invoke": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 2
+        },
+        "type": {
+          "const": "invoke"
+        },
+        "params": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "child_request": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 2
+        },
+        "type": {
+          "const": "child_request"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "call_site": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "inputs": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "type",
+        "request_id",
+        "call_site",
+        "inputs"
+      ],
+      "additionalProperties": false
+    },
+    "child_result": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 2
+        },
+        "type": {
+          "const": "child_result"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "result": {},
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "protocol_version",
+        "type",
+        "request_id",
+        "result",
+        "error"
+      ],
+      "additionalProperties": true
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 2
+        },
+        "type": {
+          "const": "result"
+        },
+        "result": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "protocol_version",
+        "type",
+        "result"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

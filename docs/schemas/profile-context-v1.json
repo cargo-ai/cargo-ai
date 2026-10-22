@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/profile-context-v1.json",
+  "title": "Cargo AI explicit profile context refresh payload v1",
+  "type": "object",
+  "properties": {
+    "context": {
+      "type": "object",
+      "properties": {
+        "profile_uuid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "connection_generation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "profile_uuid",
+        "connection_generation"
+      ],
+      "additionalProperties": false
+    },
+    "postconditions_verified": {
+      "const": true
+    },
+    "effects": {
+      "type": "object",
+      "properties": {
+        "local": {
+          "const": "applied"
+        },
+        "remote": {
+          "const": "unapplied"
+        },
+        "context_metadata": {
+          "const": "applied"
+        }
+      },
+      "required": [
+        "local",
+        "remote",
+        "context_metadata"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "context",
+    "postconditions_verified",
+    "effects"
+  ],
+  "additionalProperties": true,
+  "$comment": "Successful profile refresh-context data only. Explicit enrollment/recovery is idempotent for demonstrably unchanged context. UUID and generation are opaque selectors, not credential fingerprints or permission. Consent does not expire with elapsed time. Account public-key evidence may require explicit renewal before execution; credential expiry and capability readiness remain separate. Use profile validate-context with the expected reference for routine continuity checks."
+}

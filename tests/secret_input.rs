@@ -316,19 +316,33 @@ fn profile_store_failures_exit_nonzero_without_claiming_success() {
             fs::write(path.join("sentinel"), b"preserve-directory").unwrap();
         }
         let config_before = fs::read(home.0.join("config.toml")).unwrap();
-        let output = home.run(&["profile", "set", "example", "--stdin"], SECRET.as_bytes());
-        assert_eq!(output.status.code(), Some(1));
-        let text = output_text(&output);
-        assert!(text.contains("Failed to store the profile token"), "{text}");
-        assert!(!text.contains("Profile updated"));
-        assert_eq!(fs::read(home.0.join("config.toml")).unwrap(), config_before);
-        if corrupt {
-            assert_eq!(fs::read_to_string(path).unwrap(), malformed);
-        } else {
-            assert_eq!(
-                fs::read(path.join("sentinel")).unwrap(),
-                b"preserve-directory"
-            );
+        for (flag, input, expected) in [
+            (
+                "--stdin",
+                SECRET.as_bytes(),
+                "Failed to store the profile token",
+            ),
+            (
+                "--clear-token",
+                &b""[..],
+                "Failed to clear the profile token",
+            ),
+        ] {
+            let output = home.run(&["profile", "set", "example", flag], input);
+            assert_eq!(output.status.code(), Some(1));
+            let text = output_text(&output);
+            assert!(text.contains(expected), "{text}");
+            assert!(text.contains("Profile context could not be invalidated safely"));
+            assert!(!text.contains("Profile updated"));
+            assert_eq!(fs::read(home.0.join("config.toml")).unwrap(), config_before);
+            if corrupt {
+                assert_eq!(fs::read_to_string(&path).unwrap(), malformed);
+            } else {
+                assert_eq!(
+                    fs::read(path.join("sentinel")).unwrap(),
+                    b"preserve-directory"
+                );
+            }
         }
     }
 }

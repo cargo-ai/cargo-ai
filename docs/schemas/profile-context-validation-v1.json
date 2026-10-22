@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/profile-context-validation-v1.json",
+  "title": "Cargo AI profile context validation payload v1",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "status": {
+      "enum": [
+        "unchanged",
+        "renewed",
+        "changed",
+        "unavailable",
+        "unsupported",
+        "revoked"
+      ]
+    },
+    "review_required": {
+      "type": "boolean"
+    },
+    "execution_ready": {
+      "type": "boolean"
+    },
+    "context": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "profile_uuid": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "connection_generation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          },
+          "required": [
+            "profile_uuid",
+            "connection_generation"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "effects": {
+      "type": "object",
+      "properties": {
+        "local": {
+          "enum": [
+            "unapplied",
+            "applied",
+            "unknown"
+          ]
+        },
+        "remote": {
+          "enum": [
+            "unapplied",
+            "applied",
+            "unknown"
+          ]
+        },
+        "context_metadata": {
+          "enum": [
+            "unapplied",
+            "applied",
+            "unknown"
+          ]
+        },
+        "public_key_cache": {
+          "enum": [
+            "unapplied",
+            "applied",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "local",
+        "remote",
+        "context_metadata",
+        "public_key_cache"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "status",
+    "review_required",
+    "execution_ready",
+    "context",
+    "reason",
+    "effects"
+  ],
+  "additionalProperties": false,
+  "$comment": "A completed validation is a successful command even when execution_ready is false. Unknown or unsupported evidence pauses execution and retains choices; it is not known identity change. No status grants execution permission. --renew refreshes public-key evidence and proven protected metadata, never provider credentials. Consent has no timer; credential validity and bounded public-key freshness are execution readiness requirements."
+}

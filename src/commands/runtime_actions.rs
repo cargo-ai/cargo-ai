@@ -1199,6 +1199,7 @@ async fn apply_actions_parallel(
         let abort_signal_clone = abort_signal.clone();
         let action_output_clone = action_output.clone();
         let execution_policy = crate::execution_policy::current();
+        let role_context = crate::role_runtime::current();
         let declaring_project_root_clone = declaring_project_root.clone();
 
         let result_context = super::structured_results::current();
@@ -1206,7 +1207,7 @@ async fn apply_actions_parallel(
         let completion = super::machine::lane_completion();
         lane_tasks.push(OwnedLane(tokio::spawn(async move {
             let _completion = completion;
-            let lane_future = async move {
+            let lane_future = Box::pin(async move {
                 run_matching_action_steps(
                     action_index,
                     &action_clone,
@@ -1220,7 +1221,7 @@ async fn apply_actions_parallel(
                     &abort_signal_clone,
                 )
                 .await
-            };
+            });
             let lane_future = super::structured_results::scope(result_context, lane_future);
             let lane_future =
                 super::client_actions::scope_result_artifacts(artifact_context, lane_future);
@@ -1228,7 +1229,8 @@ async fn apply_actions_parallel(
                 DECLARING_PROJECT_ROOT.scope(declaring_project_root_clone, lane_future);
 
             let lane_future =
-                crate::execution_policy::scope_optional(execution_policy, Box::pin(lane_future));
+                crate::execution_policy::scope_optional(execution_policy, lane_future);
+            let lane_future = crate::role_runtime::scope(role_context, lane_future);
 
             if let Some(output) = action_output_clone {
                 ACTION_OUTPUT.scope(output, lane_future).await
@@ -1405,93 +1407,118 @@ async fn run_matching_action_steps(
             matching_step_count,
         );
 
-        let step_result = if step.kind.eq_ignore_ascii_case("exec") {
-            run_exec_step(
-                step,
-                &action_data,
-                action_index,
-                &action.name,
-                provider_context.package_context.as_ref(),
-                runtime_budget,
-            )
-            .await
-            .map(|captured_output| (StepExecutionOutcome::Completed, captured_output))
-        } else if step.kind.eq_ignore_ascii_case("email_me") {
-            run_email_me_step(
-                step,
-                &action_data,
-                action_index,
-                &action.name,
-                runtime_budget,
-                single_step_action,
-            )
-            .await
-            .map(|outcome| (outcome, None))
-        } else if step.kind.eq_ignore_ascii_case("agent") {
-            run_agent_step_with_provider_context(
-                step,
-                &action_data,
-                named_inputs,
-                action_index,
-                &action.name,
-                step_index + 1,
-                provider_context,
-                action_execution_override,
-                max_agent_depth,
-                runtime_budget,
-            )
-            .await
-            .map(|outcome| (outcome, None))
-        } else if step.kind.eq_ignore_ascii_case("tool") {
-            run_tool_step(
-                step,
-                &action_data,
-                action_index,
-                &action.name,
-                step_index + 1,
-                provider_context,
-                action_execution_override,
-                max_agent_depth,
-                runtime_budget,
-            )
-            .await
-            .map(|captured_output| (StepExecutionOutcome::Completed, captured_output))
-        } else if step.kind.eq_ignore_ascii_case("generate_audio")
-            || step.kind.eq_ignore_ascii_case("transcribe_audio")
-        {
-            runtime_media::run_audio_step(
-                step,
-                &action_data,
-                action_index,
-                &action.name,
-                step_index + 1,
-                provider_context,
-                runtime_budget,
-            )
-            .await
-            .map(|capture| (StepExecutionOutcome::Completed, capture))
-        } else if step.kind.eq_ignore_ascii_case("generate_image") {
-            run_generate_image_step(
-                step,
-                &action_data,
-                named_inputs,
-                action_index,
-                &action.name,
-                step_index + 1,
-                provider_context,
-                runtime_budget,
-            )
-            .await
-            .map(|outcome| (outcome, None))
-        } else {
-            print_action_line(
-                action_index,
-                action.name.as_str(),
-                format!("unsupported step kind '{}'; skipping step.", step.kind).as_str(),
-            );
-            outcomes.push(StepExecutionOutcome::SoftFailureLogged);
-            continue;
-        };
+        let original_step_index = action
+            .run
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, step))
+            .expect("matched source step");
+        // Keep the large branch future off the stack through nested task-local scopes.
+        let step_result = crate::role_runtime::scope_step(
+            format!("actions.{action_index}.run.{original_step_index}"),
+            Box::pin(async {
+                let (bound_step, effective_context) =
+                    crate::role_runtime::prepare_step(step, &action_data)?;
+                crate::role_runtime::scope(
+                    effective_context,
+                    Box::pin(async {
+                        let step = &bound_step;
+                        if step.kind.eq_ignore_ascii_case("exec") {
+                            run_exec_step(
+                                step,
+                                &action_data,
+                                action_index,
+                                &action.name,
+                                provider_context.package_context.as_ref(),
+                                runtime_budget,
+                            )
+                            .await
+                            .map(|captured_output| {
+                                (StepExecutionOutcome::Completed, captured_output)
+                            })
+                        } else if step.kind.eq_ignore_ascii_case("email_me") {
+                            run_email_me_step(
+                                step,
+                                &action_data,
+                                action_index,
+                                &action.name,
+                                runtime_budget,
+                                single_step_action,
+                            )
+                            .await
+                            .map(|outcome| (outcome, None))
+                        } else if step.kind.eq_ignore_ascii_case("agent") {
+                            run_agent_step_with_provider_context(
+                                step,
+                                &action_data,
+                                named_inputs,
+                                action_index,
+                                &action.name,
+                                step_index + 1,
+                                provider_context,
+                                action_execution_override,
+                                max_agent_depth,
+                                runtime_budget,
+                            )
+                            .await
+                            .map(|outcome| (outcome, None))
+                        } else if step.kind.eq_ignore_ascii_case("tool") {
+                            run_tool_step(
+                                step,
+                                &action_data,
+                                action_index,
+                                &action.name,
+                                step_index + 1,
+                                provider_context,
+                                action_execution_override,
+                                max_agent_depth,
+                                runtime_budget,
+                            )
+                            .await
+                            .map(|captured_output| {
+                                (StepExecutionOutcome::Completed, captured_output)
+                            })
+                        } else if step.kind.eq_ignore_ascii_case("generate_audio")
+                            || step.kind.eq_ignore_ascii_case("transcribe_audio")
+                        {
+                            runtime_media::run_audio_step(
+                                step,
+                                &action_data,
+                                action_index,
+                                &action.name,
+                                step_index + 1,
+                                provider_context,
+                                runtime_budget,
+                            )
+                            .await
+                            .map(|capture| (StepExecutionOutcome::Completed, capture))
+                        } else if step.kind.eq_ignore_ascii_case("generate_image") {
+                            run_generate_image_step(
+                                step,
+                                &action_data,
+                                named_inputs,
+                                action_index,
+                                &action.name,
+                                step_index + 1,
+                                provider_context,
+                                runtime_budget,
+                            )
+                            .await
+                            .map(|outcome| (outcome, None))
+                        } else {
+                            print_action_line(
+                                action_index,
+                                action.name.as_str(),
+                                format!("unsupported step kind '{}'; skipping step.", step.kind)
+                                    .as_str(),
+                            );
+                            Ok((StepExecutionOutcome::SoftFailureLogged, None))
+                        }
+                    }),
+                )
+                .await
+            }),
+        )
+        .await;
 
         match step_result {
             Ok((outcome, captured_output)) => {
@@ -1755,7 +1782,27 @@ async fn run_tool_step(
             action_name, tool_name
         )
     })?;
-    let contract = resolver.resolve_contract(tool_name)?;
+    let contract = if let Some(context) = crate::role_runtime::current() {
+        let resolved = resolver.resolve_tool(tool_name)?;
+        let remaining =
+            remaining_runtime_duration(runtime_budget, "before native tool description")
+                .map_err(|_| crate::role_runtime::failure("role.timeout"))?;
+        let bytes = crate::role_child::describe(
+            tokio::process::Command::new(&resolved.binary_path),
+            context,
+            tool_name,
+            remaining,
+        )
+        .await?;
+        let value = crate::business_schema::strict_json_bounded(&bytes, 4 * 1024 * 1024, 32)
+            .map_err(|_| crate::role_runtime::failure("role.invalid_tool_description"))?;
+        let describe = serde_json::from_value(value)
+            .map_err(|_| crate::role_runtime::failure("role.invalid_tool_description"))?;
+        crate::commands::tools::validate_describe_document(&describe, &resolved)?;
+        crate::commands::tools::ToolContract { resolved, describe }
+    } else {
+        resolver.resolve_contract(tool_name)?
+    };
     let params = crate::commands::tools::resolve_tool_invoke_params(
         step,
         data,
@@ -1838,62 +1885,86 @@ async fn run_tool_step(
         super::machine_process::prepare(&mut command)
             .map_err(|_| "Could not prepare owned tool execution".to_string())?;
     }
-    let child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            format!(
-                "Action '{}' failed to start tool '{}': {}",
-                action_name, tool_name, error
-            )
-        })?;
-    let output = if super::machine::selected() || step.produces_result {
-        super::machine_process::wait_with_input(child, remaining, &request_bytes)
-            .await
-            .map_err(|error| {
-                if step.produces_result && error.kind() == std::io::ErrorKind::InvalidData {
-                    return super::structured_results::limit_failure();
-                }
-                super::machine::record_process_error(&error);
-                "Owned tool execution did not complete".to_string()
-            })?
+    let output = if let Some(role_context) = crate::role_runtime::current() {
+        if !contract.describe.supports_protocol(2) {
+            return Err(crate::role_runtime::failure("role.tool_rebuild_required"));
+        }
+        crate::role_child::tool(
+            command,
+            role_context,
+            tool_name,
+            serde_json::to_value(&params)
+                .map_err(|_| crate::role_runtime::failure("role.invalid_tool_inputs"))?,
+            crate::role_child::ChildOptions {
+                current_depth,
+                max_depth: max_agent_depth,
+                max_runtime_secs: runtime_budget.max_runtime_secs,
+                started_at_ms: runtime_budget.started_at_ms,
+                deadline_ms: runtime_budget.deadline_ms,
+            },
+            remaining,
+        )
+        .await?
     } else {
-        let mut child = child;
-        {
-            use tokio::io::AsyncWriteExt;
-            let mut stdin = child.stdin.take().ok_or_else(|| {
+        let child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| {
                 format!(
-                    "Action '{}' failed to open stdin for tool '{}'.",
-                    action_name, tool_name
-                )
-            })?;
-            stdin.write_all(&request_bytes).await.map_err(|error| {
-                format!(
-                    "Action '{}' failed to write invoke request for tool '{}': {}",
+                    "Action '{}' failed to start tool '{}': {}",
                     action_name, tool_name, error
                 )
             })?;
-        }
-
-        let output =
-            match tokio::time::timeout(remaining, wait_child_output(child, remaining)).await {
-                Ok(Ok(output)) => output,
-                Ok(Err(error)) => {
-                    return Err(format!(
-                        "Action '{}' failed while waiting for tool '{}': {}",
+        let output = if super::machine::selected() || step.produces_result {
+            super::machine_process::wait_with_input(child, remaining, &request_bytes)
+                .await
+                .map_err(|error| {
+                    if step.produces_result && error.kind() == std::io::ErrorKind::InvalidData {
+                        return super::structured_results::limit_failure();
+                    }
+                    super::machine::record_process_error(&error);
+                    "Owned tool execution did not complete".to_string()
+                })?
+        } else {
+            let mut child = child;
+            {
+                use tokio::io::AsyncWriteExt;
+                let mut stdin = child.stdin.take().ok_or_else(|| {
+                    format!(
+                        "Action '{}' failed to open stdin for tool '{}'.",
+                        action_name, tool_name
+                    )
+                })?;
+                stdin.write_all(&request_bytes).await.map_err(|error| {
+                    format!(
+                        "Action '{}' failed to write invoke request for tool '{}': {}",
                         action_name, tool_name, error
-                    ));
-                }
-                Err(_) => {
-                    return Err(action_runtime_timeout_message(
-                        action_name,
-                        runtime_budget,
-                        &format!("while waiting for tool '{}'", tool_name),
-                    ));
-                }
-            };
+                    )
+                })?;
+            }
+
+            let output =
+                match tokio::time::timeout(remaining, wait_child_output(child, remaining)).await {
+                    Ok(Ok(output)) => output,
+                    Ok(Err(error)) => {
+                        return Err(format!(
+                            "Action '{}' failed while waiting for tool '{}': {}",
+                            action_name, tool_name, error
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(action_runtime_timeout_message(
+                            action_name,
+                            runtime_budget,
+                            &format!("while waiting for tool '{}'", tool_name),
+                        ));
+                    }
+                };
+
+            output
+        };
 
         output
     };
@@ -2968,6 +3039,116 @@ async fn run_agent_step_with_provider_context(
 
     let current_depth = current_agent_action_depth();
     validate_agent_action_depth(current_depth, max_agent_depth, action_name)?;
+    if let Some(role_context) = crate::role_runtime::current() {
+        let selected = role_context.selected()?;
+        let target = selected
+            .call_site
+            .target
+            .as_deref()
+            .ok_or_else(|| crate::role_runtime::failure("role.child_target_conflict"))?;
+        validate_agent_step_target(artifact, action_name)?;
+        let definition = crate::commands::runtime_data::portable_relative_path(
+            Path::new(&role_context.locator.definition),
+            "Native child definition",
+        )
+        .map_err(|_| crate::role_runtime::failure("role.child_target_conflict"))?;
+        let relative = definition.parent().unwrap_or(Path::new("")).join(artifact);
+        let relative = crate::commands::runtime_data::portable_relative_path(
+            &relative,
+            "Native child artifact",
+        )
+        .map_err(|_| crate::role_runtime::failure("role.child_target_conflict"))?;
+        let cli_run = artifact_is_json_definition(artifact);
+        let declared = if cli_run {
+            Some(target)
+        } else {
+            selected.call_site.artifact.as_deref()
+        }
+        .map(|path| {
+            crate::commands::runtime_data::portable_relative_path(
+                Path::new(path),
+                "Native declared child",
+            )
+        })
+        .transpose()
+        .map_err(|_| crate::role_runtime::failure("role.child_target_conflict"))?;
+        if declared.as_ref() != Some(&relative)
+            || (cli_run && selected.call_site.artifact.is_some())
+        {
+            return Err(crate::role_runtime::failure("role.child_target_conflict"));
+        }
+        let path = crate::commands::runtime_data::confined_path(
+            &role_context.bootstrap.package_root,
+            &relative,
+            "Native child artifact",
+        )
+        .map_err(|_| crate::role_runtime::failure("role.child_target_conflict"))?;
+        if !path.is_file() {
+            return Err(crate::role_runtime::failure("role.child_target_conflict"));
+        }
+        let mut command = if cli_run {
+            let mut command = tokio::process::Command::new("cargo-ai");
+            command.arg("run").arg(path);
+            command
+        } else {
+            tokio::process::Command::new(path)
+        };
+        crate::execution_policy::propagate_child(&mut command, cli_run)?;
+        let bootstrap = role_context.child_bootstrap(target)?;
+        crate::role_child::verify_command(&command, &bootstrap, cli_run)?;
+        let (child_args, _) = child_input_args_in_context(
+            step.run_vars.as_deref(),
+            step.input_overrides.as_deref(),
+            step.input_mode,
+            step.inputs.as_deref(),
+            data,
+            action_name,
+            named_inputs,
+            provider_context.package_context.as_ref(),
+            provider_context.project_data.as_ref(),
+        )?;
+        command.args(child_args);
+        command.current_dir(
+            role_context.bootstrap.package_root.join(
+                Path::new(&role_context.locator.definition)
+                    .parent()
+                    .unwrap_or(Path::new("")),
+            ),
+        );
+        if let Some(mode) = action_execution_override {
+            command.args([
+                "--action-execution",
+                match mode {
+                    crate::ActionExecutionMode::Sequential => "sequential",
+                    crate::ActionExecutionMode::Parallel => "parallel",
+                },
+            ]);
+        }
+        if step.ignore_tools {
+            command.arg("--ignore-tools");
+        }
+        command.env(AGENT_ACTION_DEPTH_ENV, (current_depth + 1).to_string());
+        command.env(AGENT_ACTION_MAX_DEPTH_ENV, max_agent_depth.to_string());
+        command.env(
+            AGENT_ACTION_MAX_RUNTIME_SECS_ENV,
+            runtime_budget.max_runtime_secs.to_string(),
+        );
+        command.env(
+            AGENT_ACTION_RUNTIME_STARTED_AT_MS_ENV,
+            runtime_budget.started_at_ms.to_string(),
+        );
+        command.env(
+            AGENT_ACTION_RUNTIME_DEADLINE_MS_ENV,
+            runtime_budget.deadline_ms.to_string(),
+        );
+        let remaining = remaining_runtime_duration(runtime_budget, "before native role child")
+            .map_err(|_| crate::role_runtime::failure("role.timeout"))?;
+        let result = crate::role_child::native(command, role_context, bootstrap, remaining).await?;
+        if result.error.is_some() {
+            return Err(crate::role_runtime::failure("role.child_failed"));
+        }
+        return Ok(StepExecutionOutcome::Completed);
+    }
     let invocation = resolve_child_artifact_invocation(
         artifact,
         action_name,
@@ -5496,6 +5677,7 @@ mod tests {
         crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -6768,6 +6950,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -6818,6 +7001,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -6901,6 +7085,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -7036,6 +7221,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -7126,6 +7312,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -7207,6 +7394,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -7311,6 +7499,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -7388,6 +7577,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -7491,6 +7681,7 @@ auth_mode = "{auth_mode}"
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -7873,6 +8064,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -7939,6 +8131,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -7993,6 +8186,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -8075,6 +8269,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -8166,6 +8361,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -8226,6 +8422,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -8565,6 +8762,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -8839,6 +9037,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -8925,6 +9124,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9046,6 +9246,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9163,6 +9364,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9257,6 +9459,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9353,6 +9556,7 @@ timeout_in_sec = 60
         let exec_step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9387,6 +9591,7 @@ timeout_in_sec = 60
         let agent_step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9492,6 +9697,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9609,6 +9815,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: Some("bridge_tool".to_string()),
             tool_params: std::collections::BTreeMap::new(),
@@ -9710,6 +9917,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9800,6 +10008,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9877,6 +10086,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9931,6 +10141,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -9982,6 +10193,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -10033,6 +10245,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -10101,6 +10314,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -10173,6 +10387,7 @@ timeout_in_sec = 60
         let failing_step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -10207,6 +10422,7 @@ timeout_in_sec = 60
         let second_step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -10288,6 +10504,7 @@ timeout_in_sec = 60
             run: vec![crate::RunStep {
                 thinking: None,
                 voice: None,
+                request_choices: None,
                 audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
@@ -10326,6 +10543,7 @@ timeout_in_sec = 60
             run: vec![crate::RunStep {
                 thinking: None,
                 voice: None,
+                request_choices: None,
                 audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
@@ -10401,6 +10619,7 @@ timeout_in_sec = 60
             run: vec![crate::RunStep {
                 thinking: None,
                 voice: None,
+                request_choices: None,
                 audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
@@ -10442,6 +10661,7 @@ timeout_in_sec = 60
             run: vec![crate::RunStep {
                 thinking: None,
                 voice: None,
+                request_choices: None,
                 audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
@@ -10536,6 +10756,7 @@ timeout_in_sec = 60
             run: vec![crate::RunStep {
                 thinking: None,
                 voice: None,
+                request_choices: None,
                 audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
@@ -10574,6 +10795,7 @@ timeout_in_sec = 60
             run: vec![crate::RunStep {
                 thinking: None,
                 voice: None,
+                request_choices: None,
                 audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
@@ -10664,6 +10886,7 @@ timeout_in_sec = 60
                 crate::RunStep {
                     thinking: None,
                     voice: None,
+                    request_choices: None,
                     audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
@@ -10698,6 +10921,7 @@ timeout_in_sec = 60
                 crate::RunStep {
                     thinking: None,
                     voice: None,
+                    request_choices: None,
                     audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
@@ -10734,6 +10958,7 @@ timeout_in_sec = 60
             run: vec![crate::RunStep {
                 thinking: None,
                 voice: None,
+                request_choices: None,
                 audio_path: None,
                 tool_name: None,
                 tool_params: std::collections::BTreeMap::new(),
@@ -10809,6 +11034,7 @@ timeout_in_sec = 60
                 crate::RunStep {
                     thinking: None,
                     voice: None,
+                    request_choices: None,
                     audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
@@ -10843,6 +11069,7 @@ timeout_in_sec = 60
                 crate::RunStep {
                     thinking: None,
                     voice: None,
+                    request_choices: None,
                     audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
@@ -10883,6 +11110,7 @@ timeout_in_sec = 60
                 crate::RunStep {
                     thinking: None,
                     voice: None,
+                    request_choices: None,
                     audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
@@ -10917,6 +11145,7 @@ timeout_in_sec = 60
                 crate::RunStep {
                     thinking: None,
                     voice: None,
+                    request_choices: None,
                     audio_path: None,
                     tool_name: None,
                     tool_params: std::collections::BTreeMap::new(),
@@ -11006,6 +11235,7 @@ timeout_in_sec = 60
         let failing_step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -11040,6 +11270,7 @@ timeout_in_sec = 60
         let second_step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -11121,6 +11352,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),
@@ -11205,6 +11437,7 @@ timeout_in_sec = 60
         let step = crate::RunStep {
             thinking: None,
             voice: None,
+            request_choices: None,
             audio_path: None,
             tool_name: None,
             tool_params: std::collections::BTreeMap::new(),

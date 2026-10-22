@@ -14,7 +14,13 @@ pub(crate) fn remove_profile_noninteractive(
 }
 
 fn remove_profile_impl(name: &str, render: bool) -> Result<bool, Box<dyn std::error::Error>> {
-    let mut cleanup_succeeded = true;
+    let _context_lock =
+        crate::credentials::role_context::lock_at(&crate::credentials::role_context::root()?)?;
+    // Removal can make the profile unavailable even when protected metadata is
+    // unreadable. Report incomplete cleanup; addition still requires successful
+    // identity invalidation before a same-name profile can be recreated.
+    let mut cleanup_succeeded =
+        crate::credentials::role_context::before_mutation(Some(name), true).is_ok();
     if let Some(mut cfg) = load_config() {
         let before_count = cfg.profile.len();
 

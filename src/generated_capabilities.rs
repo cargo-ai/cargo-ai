@@ -23,6 +23,35 @@ pub struct RuntimeCapabilities {
     structured_results: Option<StructuredResultCapabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_policy: Option<ExecutionPolicyCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_roles: Option<NativeRoleCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connection_continuity: Option<ConnectionContinuityCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_selection_policy: Option<NativeSelectionPolicy>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+struct NativeSelectionPolicy {
+    version: u32,
+    capability_evidence: &'static str,
+    reasoning_choices: &'static str,
+    readiness: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_choices: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role_configuration: Option<&'static str>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+struct ConnectionContinuityCapabilities {
+    version: u32,
+    approval_expiration: &'static str,
+    credential_validation: &'static str,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+struct NativeRoleCapabilities {
+    version: u32,
+    control: &'static str,
+    boundaries: &'static [&'static str],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -47,6 +76,18 @@ struct ExecutionPolicyCapabilities {
 }
 
 impl RuntimeCapabilities {
+    pub fn supports_native_roles(self) -> bool {
+        self.native_roles.is_some()
+    }
+    pub fn supports_connection_continuity(self) -> bool {
+        self.connection_continuity.is_some()
+    }
+    pub fn supports_native_selection_policy(self) -> bool {
+        self.native_selection_policy.is_some()
+    }
+    pub fn supports_request_choices(self) -> bool {
+        self.revision == 8
+    }
     pub fn supports_execution_policy(self) -> bool {
         self.execution_policy.is_some()
     }
@@ -55,15 +96,15 @@ impl RuntimeCapabilities {
     }
 
     pub fn supports_thinking(self) -> bool {
-        matches!(self.revision, 1 | 2 | 3 | REVISION)
+        matches!(self.revision, 1 | 2 | 3 | 4 | 5 | 6 | 7 | REVISION)
     }
 
     pub fn supports_toggle(self) -> bool {
-        matches!(self.revision, 2 | 3 | REVISION)
+        matches!(self.revision, 2 | 3 | 4 | 5 | 6 | 7 | REVISION)
     }
 
     pub fn supports_exact_choice_flag(self) -> bool {
-        matches!(self.revision, 2 | 3 | REVISION)
+        matches!(self.revision, 2 | 3 | 4 | 5 | 6 | 7 | REVISION)
     }
 }
 
@@ -101,7 +142,26 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
     let mut policy = encoded_record(cli_run);
     policy[payload..payload + 4].copy_from_slice(&3u32.to_le_bytes());
     policy[payload + 4..payload + 8].copy_from_slice(&0b1111_1111u32.to_le_bytes());
-    if record != encoded_record(cli_run) && record != legacy && record != prior && record != policy
+    let mut result = encoded_record(cli_run);
+    result[payload..payload + 4].copy_from_slice(&4u32.to_le_bytes());
+    result[payload + 4..payload + 8].copy_from_slice(&0b1_1111_1111u32.to_le_bytes());
+    let mut roles = encoded_record(cli_run);
+    roles[payload..payload + 4].copy_from_slice(&5u32.to_le_bytes());
+    roles[payload + 4..payload + 8].copy_from_slice(&0b11_1111_1111u32.to_le_bytes());
+    let mut continuity = encoded_record(cli_run);
+    continuity[payload..payload + 4].copy_from_slice(&6u32.to_le_bytes());
+    continuity[payload + 4..payload + 8].copy_from_slice(&0b111_1111_1111u32.to_le_bytes());
+    let mut selection = encoded_record(cli_run);
+    selection[payload..payload + 4].copy_from_slice(&7u32.to_le_bytes());
+    selection[payload + 4..payload + 8].copy_from_slice(&0b1111_1111_1111u32.to_le_bytes());
+    if record != encoded_record(cli_run)
+        && record != legacy
+        && record != prior
+        && record != policy
+        && record != result
+        && record != roles
+        && record != continuity
+        && record != selection
     {
         return Err(CapabilityReadError::Unsupported);
     }
@@ -112,17 +172,43 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
             "cargo-ai.generated-runtime"
         },
         revision,
-        structured_results: (revision == REVISION).then_some(StructuredResultCapabilities {
-            definition_revision: "2026-10-03.r1",
-            validation: true,
-            execution_checking: true,
-            terminal_delivery: cli_run,
-            artifact_read: cli_run,
-        }),
-        execution_policy: matches!(revision, 3 | REVISION).then_some(ExecutionPolicyCapabilities {
+        native_roles: matches!(revision, 5 | 6 | 7 | REVISION).then_some(NativeRoleCapabilities {
             version: 1,
-            boundaries: &["root", "media", "descendants"],
+            control: "framed_native_session.v1",
+            boundaries: &["root", "media", "descendants", "declared_tool_children"],
         }),
+        connection_continuity: matches!(revision, 6 | 7 | REVISION).then_some(
+            ConnectionContinuityCapabilities {
+                version: 1,
+                approval_expiration: "none",
+                credential_validation: "native_before_dispatch",
+            },
+        ),
+        native_selection_policy: matches!(revision, 7 | REVISION).then_some(
+            NativeSelectionPolicy {
+                version: if revision == 7 { 1 } else { 2 },
+                capability_evidence: "informational",
+                reasoning_choices: "exact_native_attempt",
+                readiness: "structural_not_permission",
+                request_choices: (revision == 8).then_some("per_generation"),
+                role_configuration: (revision == 8).then_some("editable_defaults"),
+            },
+        ),
+        structured_results: matches!(revision, 4 | 5 | 6 | 7 | REVISION).then_some(
+            StructuredResultCapabilities {
+                definition_revision: "2026-10-03.r1",
+                validation: true,
+                execution_checking: true,
+                terminal_delivery: cli_run,
+                artifact_read: cli_run,
+            },
+        ),
+        execution_policy: matches!(revision, 3 | 4 | 5 | 6 | 7 | REVISION).then_some(
+            ExecutionPolicyCapabilities {
+                version: 1,
+                boundaries: &["root", "media", "descendants"],
+            },
+        ),
         thinking: ThinkingCapabilities {
             flags: if revision == 1 {
                 &["--thinking", "--thinking-provider-default"]
@@ -158,6 +244,61 @@ pub fn capabilities_for_artifact(
     let file =
         File::open(artifact).map_err(|error| CapabilityReadError::Unreadable(error.kind()))?;
     capabilities_from_reader(file, MAX_ARTIFACT_BYTES)
+}
+
+/// Passive bounded source identity lookup; never executes an artifact's inspect command.
+pub fn definition_for_artifact(artifact: &Path) -> Result<String, CapabilityReadError> {
+    let metadata =
+        std::fs::metadata(artifact).map_err(|e| CapabilityReadError::Unreadable(e.kind()))?;
+    if !metadata.is_file() {
+        return Err(CapabilityReadError::NotRegularFile);
+    }
+    if metadata.len() > MAX_ARTIFACT_BYTES {
+        return Err(CapabilityReadError::Oversized);
+    }
+    let mut file = File::open(artifact).map_err(|e| CapabilityReadError::Unreadable(e.kind()))?;
+    let mut window = Vec::new();
+    let mut block = [0u8; READ_BLOCK_SIZE];
+    let mut total = 0;
+    let mut found = None;
+    loop {
+        let count = file
+            .read(&mut block)
+            .map_err(|e| CapabilityReadError::Unreadable(e.kind()))?;
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        if total > MAX_ARTIFACT_BYTES {
+            return Err(CapabilityReadError::Oversized);
+        }
+        window.extend_from_slice(&block[..count]);
+        for frame in window.windows(96) {
+            // Child readers contain standalone framing constants too. Only a
+            // complete frame declares an identity, as with runtime capabilities.
+            if !frame.starts_with(&record::DEFINITION_OPEN)
+                || !frame.ends_with(&record::DEFINITION_CLOSE)
+            {
+                continue;
+            }
+            if found.is_some() {
+                return Err(CapabilityReadError::Conflicting);
+            }
+            if !frame[16..80]
+                .iter()
+                .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+            {
+                return Err(CapabilityReadError::Malformed);
+            }
+            found = Some(
+                String::from_utf8(frame[16..80].to_vec())
+                    .map_err(|_| CapabilityReadError::Malformed)?,
+            );
+        }
+        let keep = window.len().saturating_sub(95);
+        window.drain(..keep);
+    }
+    found.ok_or(CapabilityReadError::Missing)
 }
 
 fn capabilities_from_reader(
@@ -212,6 +353,10 @@ pub(crate) fn test_record(revision: u32) -> Vec<u8> {
         1 => 0b1111u32,
         2 => 0b111_1111,
         3 => 0b1111_1111,
+        4 => 0b1_1111_1111,
+        5 => 0b11_1111_1111,
+        6 => 0b111_1111_1111,
+        7 => 0b1111_1111_1111,
         _ => record::THINKING_CAPABILITIES,
     };
     record[payload + 4..payload + 8].copy_from_slice(&bits.to_le_bytes());
@@ -223,6 +368,194 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_selection_policy_is_distinct_from_legacy_continuity_and_choices() {
+        for revision in 1..=6 {
+            let legacy = decode_record(&test_record(revision)).unwrap();
+            assert!(!legacy.supports_native_selection_policy());
+            assert!(legacy.supports_thinking());
+        }
+        let prior = decode_record(&test_record(6)).unwrap();
+        assert!(prior.supports_connection_continuity());
+        assert!(prior.supports_native_roles());
+        assert!(decode_record(&test_record(7))
+            .unwrap()
+            .supports_native_selection_policy());
+    }
+
+    #[test]
+    fn per_generation_choices_require_exact_revision_eight_flags() {
+        let payload = OPEN.len() + IDENTITY.len();
+        for cli_run in [false, true] {
+            for (revision, flags) in [
+                (1u32, 15u32),
+                (2, 127),
+                (3, 255),
+                (4, 511),
+                (5, 1023),
+                (6, 2047),
+                (7, 4095),
+                (8, 8191),
+            ] {
+                let mut record = encoded_record(cli_run);
+                record[payload..payload + 4].copy_from_slice(&revision.to_le_bytes());
+                record[payload + 4..payload + 8].copy_from_slice(&flags.to_le_bytes());
+                let caps = decode_record(&record).unwrap();
+                assert_eq!(caps.is_cli_run(), cli_run);
+                assert_eq!(caps.supports_request_choices(), revision == 8);
+                assert!(caps.supports_thinking());
+                assert_eq!(caps.supports_toggle(), revision >= 2);
+                assert_eq!(caps.supports_exact_choice_flag(), revision >= 2);
+                assert_eq!(caps.supports_execution_policy(), revision >= 3);
+                assert_eq!(caps.structured_results.is_some(), revision >= 4);
+                assert_eq!(caps.supports_native_roles(), revision >= 5);
+                assert_eq!(caps.supports_connection_continuity(), revision >= 6);
+                assert_eq!(caps.supports_native_selection_policy(), revision >= 7);
+
+                // A revision number cannot inherit another revision's declaration.
+                let wrong_flags = if revision == 8 { 4095u32 } else { 8191u32 };
+                record[payload + 4..payload + 8].copy_from_slice(&wrong_flags.to_le_bytes());
+                assert_eq!(
+                    decode_record(&record),
+                    Err(CapabilityReadError::Unsupported)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn revision_seven_keeps_its_exact_fixed_selection_declaration() {
+        let previous = decode_record(&test_record(7)).unwrap();
+        assert!(!previous.supports_request_choices());
+        let mut expected =
+            serde_json::to_value(decode_record(&encoded_record(false)).unwrap()).unwrap();
+        expected["revision"] = serde_json::json!(7);
+        expected["native_selection_policy"] = serde_json::json!({
+            "version": 1,
+            "capability_evidence": "informational",
+            "reasoning_choices": "exact_native_attempt",
+            "readiness": "structural_not_permission"
+        });
+        assert_eq!(serde_json::to_value(previous).unwrap(), expected);
+    }
+
+    #[test]
+    fn native_roles_require_new_revision_and_exact_embedded_definition() {
+        let previous = decode_record(&test_record(5)).unwrap();
+        assert!(previous.supports_native_roles());
+        assert!(!previous.supports_connection_continuity());
+        assert!(decode_record(&encoded_record(false))
+            .unwrap()
+            .supports_connection_continuity());
+        assert!(!decode_record(&test_record(4))
+            .unwrap()
+            .supports_native_roles());
+        assert!(decode_record(&test_record(4))
+            .unwrap()
+            .structured_results
+            .is_some());
+        assert!(decode_record(&encoded_record(false))
+            .unwrap()
+            .supports_native_roles());
+        let path =
+            std::env::temp_dir().join(format!("cargo-ai-definition-{}", uuid::Uuid::new_v4()));
+        let digest = "a".repeat(64);
+        let mut bytes = vec![b'x'; READ_BLOCK_SIZE - 7];
+        bytes.extend(
+            [
+                record::DEFINITION_OPEN.as_slice(),
+                digest.as_bytes(),
+                record::DEFINITION_CLOSE.as_slice(),
+            ]
+            .concat(),
+        );
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(definition_for_artifact(&path).unwrap(), digest);
+        bytes.extend(
+            [
+                record::DEFINITION_OPEN.as_slice(),
+                "b".repeat(64).as_bytes(),
+                record::DEFINITION_CLOSE.as_slice(),
+            ]
+            .concat(),
+        );
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            definition_for_artifact(&path),
+            Err(CapabilityReadError::Conflicting)
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn definition_identity_ignores_standalone_constants_and_spans_read_boundaries() {
+        let path =
+            std::env::temp_dir().join(format!("cargo-ai-definition-{}", uuid::Uuid::new_v4()));
+        let digest = "a".repeat(64);
+        let frame = [
+            record::DEFINITION_OPEN.as_slice(),
+            digest.as_bytes(),
+            record::DEFINITION_CLOSE.as_slice(),
+        ]
+        .concat();
+        for split in 1..frame.len() {
+            let mut bytes = record::DEFINITION_OPEN.to_vec();
+            bytes.extend_from_slice(&record::DEFINITION_CLOSE);
+            bytes.resize(READ_BLOCK_SIZE - split, b'x');
+            bytes.extend_from_slice(&frame);
+            bytes.extend_from_slice(&record::DEFINITION_OPEN);
+            bytes.extend_from_slice(&[b'x'; 96]);
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(definition_for_artifact(&path).unwrap(), digest);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn definition_identity_requires_one_complete_well_formed_record() {
+        let path =
+            std::env::temp_dir().join(format!("cargo-ai-definition-{}", uuid::Uuid::new_v4()));
+        let frame = [
+            record::DEFINITION_OPEN.as_slice(),
+            "a".repeat(64).as_bytes(),
+            record::DEFINITION_CLOSE.as_slice(),
+        ]
+        .concat();
+        for len in 0..frame.len() {
+            std::fs::write(&path, &frame[..len]).unwrap();
+            assert_eq!(
+                definition_for_artifact(&path),
+                Err(CapabilityReadError::Missing)
+            );
+        }
+        let mut tampered = frame.clone();
+        tampered[16] = b'g';
+        std::fs::write(&path, &tampered).unwrap();
+        assert_eq!(
+            definition_for_artifact(&path),
+            Err(CapabilityReadError::Malformed)
+        );
+        tampered[16] = b'A';
+        std::fs::write(&path, &tampered).unwrap();
+        assert_eq!(
+            definition_for_artifact(&path),
+            Err(CapabilityReadError::Malformed)
+        );
+        tampered = frame.clone();
+        tampered[95] ^= 1;
+        std::fs::write(&path, &tampered).unwrap();
+        assert_eq!(
+            definition_for_artifact(&path),
+            Err(CapabilityReadError::Missing)
+        );
+        std::fs::write(&path, [frame.as_slice(), frame.as_slice()].concat()).unwrap();
+        assert_eq!(
+            definition_for_artifact(&path),
+            Err(CapabilityReadError::Conflicting)
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn declares_only_exact_thinking_flags_and_settings() {
         let caps = decode_record(&encoded_record(false)).unwrap();
         assert!(caps.supports_thinking());
@@ -231,7 +564,10 @@ mod tests {
             serde_json::to_value(caps).unwrap(),
             serde_json::json!({
                 "runtime": "cargo-ai.generated-runtime",
-                "revision": 4,
+                "revision": 8,
+                "connection_continuity":{"version":1,"approval_expiration":"none","credential_validation":"native_before_dispatch"},
+                "native_selection_policy":{"version":2,"capability_evidence":"informational","reasoning_choices":"exact_native_attempt","readiness":"structural_not_permission","request_choices":"per_generation","role_configuration":"editable_defaults"},
+                "native_roles":{"version":1,"control":"framed_native_session.v1","boundaries":["root","media","descendants","declared_tool_children"]},
                 "structured_results":{"definition_revision":"2026-10-03.r1","validation":true,"execution_checking":true,"terminal_delivery":false,"artifact_read":false},
                 "execution_policy": {"version":1,"boundaries":["root","media","descendants"]},
                 "thinking": {

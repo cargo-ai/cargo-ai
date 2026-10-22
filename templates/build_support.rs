@@ -175,6 +175,7 @@ struct RunStep {
     profile: Option<RunArg>,
     thinking: Option<ThinkingSpec>,
     voice: Option<RunArg>,
+    request_choices: Option<Value>,
     audio_path: Option<RunArg>,
     output_variable: Option<String>,
     status_variable: Option<String>,
@@ -411,6 +412,19 @@ pub fn generate_agent_build_provenance_source_with_values(
     generated.push_str(&format!(
         "static AGENT_RUNTIME_CAPABILITY_RECORD: [u8; {}] = [{bytes}];\n",
         capability_record.len()
+    ));
+    let mut definition_record = Vec::with_capacity(96);
+    definition_record.extend_from_slice(&crate::generated_capability_record::DEFINITION_OPEN);
+    definition_record.extend_from_slice(definition_sha256.as_bytes());
+    definition_record.extend_from_slice(&crate::generated_capability_record::DEFINITION_CLOSE);
+    let bytes = definition_record
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    generated.push_str(&format!(
+        "#[used]\nstatic AGENT_DEFINITION_IDENTITY_RECORD: [u8; {}] = [{bytes}];\n",
+        definition_record.len()
     ));
     Ok(generated)
 }
@@ -836,6 +850,8 @@ fn parse_actions(
                 v,
                 definition_validation::THINKING_SCHEMA_VERSION
                     | definition_validation::RESULT_SCHEMA_VERSION
+                    | definition_validation::NATIVE_ROLE_SCHEMA_VERSION
+                    | definition_validation::REQUEST_CHOICES_SCHEMA_VERSION
             )
         });
     let mut parsed = Vec::with_capacity(actions.len());
@@ -995,6 +1011,7 @@ fn parse_actions(
                     let args = parse_run_args(run_obj, &run_path, &available_field_types)?;
                     RunStep {
                         kind,
+                        request_choices: run_obj.get("request_choices").cloned(),
                         thinking: thinking.clone(),
                         program: Some(program),
                         model: None,
@@ -1132,6 +1149,7 @@ fn parse_actions(
 
                     RunStep {
                         kind,
+                        request_choices: run_obj.get("request_choices").cloned(),
                         thinking: thinking.clone(),
                         program: None,
                         model: None,
@@ -1276,6 +1294,7 @@ fn parse_actions(
 
                     RunStep {
                         kind,
+                        request_choices: run_obj.get("request_choices").cloned(),
                         thinking: thinking.clone(),
                         program: None,
                         model: None,
@@ -1423,6 +1442,7 @@ fn parse_actions(
 
                     RunStep {
                         kind,
+                        request_choices: run_obj.get("request_choices").cloned(),
                         thinking: thinking.clone(),
                         program: None,
                         model: None,
@@ -1586,6 +1606,7 @@ fn parse_actions(
 
                     RunStep {
                         kind,
+                        request_choices: run_obj.get("request_choices").cloned(),
                         thinking: thinking.clone(),
                         program: None,
                         model,
@@ -1635,12 +1656,31 @@ fn parse_actions(
                     )?;
                     let profile =
                         parse_optional_profile_field(run_obj, &run_path, action_field_types)?;
-                    let voice = parse_required_string_run_arg_field(
-                        run_obj,
-                        "voice",
-                        &run_path,
-                        action_field_types,
-                    )?;
+                    let voice = if root_obj
+                        .get(AGENT_DEFINITION_SCHEMA_VERSION_KEY)
+                        .and_then(Value::as_str)
+                        .is_some_and(|version| {
+                            matches!(
+                                version,
+                                definition_validation::NATIVE_ROLE_SCHEMA_VERSION
+                                    | definition_validation::REQUEST_CHOICES_SCHEMA_VERSION
+                            )
+                        }) {
+                        parse_optional_string_run_arg_field(
+                            run_obj,
+                            "voice",
+                            &run_path,
+                            action_field_types,
+                            "generate_audio `voice`",
+                        )?
+                    } else {
+                        Some(parse_required_string_run_arg_field(
+                            run_obj,
+                            "voice",
+                            &run_path,
+                            action_field_types,
+                        )?)
+                    };
                     let text = parse_string_parts_field(
                         run_obj,
                         "text",
@@ -1667,11 +1707,12 @@ fn parse_actions(
                     }
                     RunStep {
                         kind,
+                        request_choices: run_obj.get("request_choices").cloned(),
                         thinking: thinking.clone(),
                         program: None,
                         model,
                         profile,
-                        voice: Some(voice),
+                        voice,
                         audio_path: None,
                         output_variable: None,
                         status_variable,
@@ -1733,6 +1774,7 @@ fn parse_actions(
                     })?;
                     RunStep {
                         kind,
+                        request_choices: run_obj.get("request_choices").cloned(),
                         thinking: thinking.clone(),
                         program: None,
                         model,
@@ -2331,6 +2373,7 @@ fn reject_media_step_fields(
         "failure_mode",
         "status_variable",
         "error_variable",
+        "request_choices",
     ];
     for field in run_obj.keys() {
         if !SHARED.contains(&field.as_str()) && !kind_fields.contains(&field.as_str()) {
@@ -4670,6 +4713,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                         profile: {},
                         thinking: {},
                         voice: {},
+                        request_choices: {},
                         audio_path: {},
                         output_variable: {},
                         status_variable: {},
@@ -4706,6 +4750,7 @@ fn render_agent_model(config: &AgentConfig) -> String {
                     profile,
                     thinking,
                     voice,
+                    run_step.request_choices.as_ref().map(|value| format!("Some(serde_json::from_str({}).expect(\"validated request choices\"))", rust_string_literal(&value.to_string()))).unwrap_or_else(|| "None".into()),
                     audio_path,
                     output_variable,
                     status_variable,
@@ -5000,6 +5045,8 @@ pub struct RunStep {{
     profile: Option<RunArg>,
     thinking: Option<crate::providers::thinking::ThinkingSetting<RunArg>>,
     voice: Option<RunArg>,
+    #[serde(default)]
+    request_choices: Option<serde_json::Value>,
     audio_path: Option<RunArg>,
     output_variable: Option<String>,
     status_variable: Option<String>,

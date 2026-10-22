@@ -60,6 +60,17 @@ pub(crate) fn command() -> Command {
                     .required(true),
             ),
         )
+        .subcommand(
+            request(Command::new("resolve").about(
+                "Resolve one role action context without granting authority or executing agents",
+            ))
+            .arg(
+                Arg::new("action")
+                    .long("action")
+                    .value_name("ID")
+                    .required(true),
+            ),
+        )
         .subcommand(request(Command::new("artifact").about(
             "Read an authorized artifact under its exact content and context identity",
         )))

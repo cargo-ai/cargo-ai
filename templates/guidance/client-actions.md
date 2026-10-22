@@ -1,5 +1,7 @@
 # Portable Client Actions
 
+For a package page in Cargo-AI Desktop, use the installed [Desktop interface-authoring guide](desktop-interfaces.md) and [runnable local example](examples/desktop-interface/README.md). The host API is `window.cargoAICompanion`; the generic controls example below is illustrative, not that API.
+
 Use this topic when a project needs buttons, native controls or page-free calls that invoke declared Cargo AI agents. Check `cargo ai capabilities --output-format json` on the client's selected binary first. These interfaces require a build advertising the action commands and action-run selector; source documentation does not establish installed or released availability.
 
 A normal browser has no Cargo AI execution bridge. If the host lacks the action callback, or its selected binary lacks catalog/request 2 and the required capabilities, keep execution controls disabled and explain that execution is unavailable. The document may still show read-only content. The illustrative adapter disables its buttons when `host.submit` is absent and leaves them disabled after uncertain completion pending native reconciliation; a client exposes that callback only after negotiating the real CLI capabilities and grants. Do not fall back to arbitrary shell commands, legacy interface execution or guessed flags.
@@ -71,13 +73,13 @@ The browser sample expects buttons with `data-action="generate-one"`, `data-acti
 
 List `cargo-ai-actions.json` and optional presentation resources explicitly under the selected build profile's `assets`; list referenced agents under `agent_definitions` or `hatched_agents`. Build/package rejects references to excluded agents rather than copying them implicitly. A package without a sidecar remains an ordinary package. A malformed/unsupported present sidecar fails before installation replaces active state. Existing package permissions, `package/` ownership, disposable `runtime/`, preserved `data/` and supported leases remain in force. See `package-workflow.md`.
 
-Companion and other clients should consume the neutral catalog and machine request directly. Their separate integration needs capability negotiation, explicit consent, scoped attachment/settings grants, verified presentation resources, process supervision, incremental event decoding, result opt-in and cancellation. A Companion adoption replaces its affected legacy `companion.json`/`getInputs()` interface contract; Cargo AI does not ship a legacy bridge adapter. Client authors decide overlap/queue behavior, schedule persistence/timing, saved versus fresh inputs, attachment retention and handle/reload recovery. Tests of Cargo AI routing establish the upstream contract; actual controls and scheduled execution still need consumer integration tests. No universal host, scheduler, storage schema or second lifecycle is required.
+Cargo-AI Desktop and other clients consume the neutral catalog and machine request directly. Their separate integration needs capability negotiation, explicit consent, scoped attachment/settings grants, verified presentation resources, process supervision, incremental event decoding, result opt-in and cancellation. Cargo-AI Desktop uses the current action bridge described in [desktop-interfaces.md](desktop-interfaces.md); Cargo AI does not ship an adapter for the legacy `companion.json`/`getInputs()` contract. Client authors decide overlap/queue behavior, schedule persistence/timing, saved versus fresh inputs, attachment retention and handle/reload recovery. Tests of Cargo AI routing establish the upstream contract; actual controls and scheduled execution still need consumer integration tests. No universal host, scheduler, storage schema or second lifecycle is required.
 
 To install/update this offline topic, use `cargo ai add guidance --style codex` (or `claude`), then `cargo ai guidance status` and explicit `cargo ai guidance update`. Updates preserve user-owned entry instructions and refuse locally modified managed assets; keep custom project guidance outside the managed bundle.
 
 ## Business data and selected tool results
 
-The current package–host interface uses catalog **2** and action request **2**. Catalog/request 1 and unknown revisions are rejected before execution; there is no old/new validator switch or translation adapter. Outer machine envelopes/events, static-resource requests and execution policy retain revision 1. Discovery advertises `supported_catalog_versions:[2]`, `supported_request_versions:[2]`, `business_inputs.v1`, `structured_results.v1` and `artifact_access.v1`; the business rules apply to every current action.
+The package–host interface preserves catalog/action request **2** and adds opt-in native role catalog/action request **3**. Catalog/request 1 and unknown revisions are rejected before execution; there is no old/new validator switch or translation adapter. Outer machine envelopes/events, static-resource requests and execution policy retain revision 1. Discovery advertises `supported_catalog_versions:[2,3]`, `supported_request_versions:[2,3,4]`, `business_inputs.v1`, `structured_results.v1` and `artifact_access.v1`; the business rules apply to every current action.
 
 `inputs` is the bounded business namespace. Its schema and a selected tool result's schema share these types: object, array, string, integer, number, boolean, null and exactly `[T,"null"]`, with the non-null type first. Objects require `properties`, an explicit `required` array (possibly empty) and `additionalProperties:false`; arrays require `items`. Supported optional keywords are descriptions, enum, string/array length bounds and inclusive/exclusive numeric bounds. References, patterns, arbitrary unions, expressions and unknown keywords are rejected. This business schema is separate from the narrower model `agent_schema`.
 
@@ -148,4 +150,163 @@ Hosts own submission tokens, serialized/busy policy and finite handle retention;
 
 Missing terminal evidence leaves completion unknown. A native recovery path may explicitly authorize one declared inspection action with exact inputs/policy/binding; an action named load/read-only can still mutate or initialize state. Keep ordinary submissions locked, establish the previous process is quiescent, and retain the original unknown state while observing authoritative package state. A known recovery terminal does not prove the original run succeeded. Only separate deliberate native acknowledgment enables future submissions; a recovery's own unknown completion also needs reconciliation. A durable host-private uncertainty marker may preserve this guard across restart without storing business inputs/results/grants. Package-owned version/job state supplies authoritative evidence; no automatic mutation replay or upstream recovery database is introduced.
 
-Runtime capability revision 4 advertises structured-result definition validation and execution checking. Generated executables report `terminal_delivery:false` and `artifact_read:false`; only the CLI reports those delivery capabilities. Rebuild generated artifacts to gain checking. Neither generated checking, CLI conformance tests nor these examples prove native-host adoption, media playback or live consumer generation.
+Runtime capability revision4 advertises structured-result definition validation/execution checking;5 adds native role enforcement;6 adds verified continuity without approval expiration;7 adds informational support and exact native choice attempts;8 adds per-generation choices and editable defaults. Generated executables report `terminal_delivery:false` and `artifact_read:false`; only the CLI reports those delivery capabilities. Rebuild generated artifacts to gain checking. Neither generated checking, CLI conformance tests nor these examples prove native-host adoption, media playback or live consumer generation.
+
+## Native role authoring and host flow
+
+Use catalog/request **3** only when the selected binary advertises `run.native_roles` with role contract 1 and session 1. Preserve ordinary catalog/request 2 for existing fixed behavior. Roles are portable intent and constraints; the host's profile/model choices live outside the project, immutable package payload, disposable runtime, preserved data and export archives. Keep credential/context metadata in the selected native home, not in a catalog or browser business object. A saved role binding does not authorize a control, timer, resource read or provider request. Roles may include up to eight optional nonpersonal `recommendations`: `{provider,model,operation,settings,provenance,rationale}`. Omit `settings` for `{}`; provenance needs 1–8 sources. Provider/model are nonblank, at most 256 UTF-8 bytes; each source and rationale are nonblank, at most 2,048 bytes; these fields contain no control characters. Settings follow the exact role-binding syntax. Do not include profiles, accounts, UUIDs or connection state. Recommendations may differ from requirements and remain advisory: they never supply a binding, operation evidence, verified access or consent. Missing/empty recommendations are valid.
+
+This minimal `cargo-ai-actions.json` exposes one declared structured root call. The referenced `agent.json` must exist, use definition revision `2026-10-03.r1` or later supported revision, have a nonempty model `agent_schema`, and be explicitly included in the selected build/package. The empty action business schema accepts `{}`.
+
+```json
+{
+  "schema_version": 3,
+  "actions": [{"id":"review","target":"agent.json","input_schema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"mappings":{}}],
+  "interfaces": [{"id":"studio","actions":["review"]}],
+  "role_registry": {
+    "version":1,
+    "roles":[{"id":"reviewer","label":"Reviewer","purpose":"Review a structured response","requirements":{"operation":"text_generation","input_modalities":["text"],"structured_output":true,"settings":{"thinking":[{"mode":"choice","value":"high"}]}},"recommendations":[{"provider":"openai","model":"gpt-5.2","operation":"text_generation","settings":{"thinking":{"mode":"choice","value":"high"}},"provenance":["https://developers.openai.com/api/docs/models/gpt-5.2"],"rationale":"Consider this documented structured-output model for review; resolve the actual native connection and settings independently."}]}],
+    "call_sites":[{"id":"review-root","locator":{"definition":"agent.json","site":"root"},"kind":"root","role":"reviewer","requirements":{"operation":"text_generation","input_modalities":["text"],"structured_output":true,"settings":{"thinking":[{"mode":"choice","value":"high"}]}}}],
+    "contexts":[{"key":{"action":"review","interface":"studio","mode":"default"},"call_sites":["review-root"],"resources":[],"data_scopes":[],"limits":{"max_runtime_secs":60,"max_output_tokens":512,"max_agent_depth":4}}]
+  }
+}
+```
+
+A root locator is `root`. Direct steps use `actions.<action-index>.run.<step-index>` in the exact source definition, with kind `image`, `audio`, `transcription` or `child`. Child sites include verified source JSON `target` and optionally the exact generated executable `artifact`. Tool-child locators use `tools.<tool-name>.<site>` and a closed `input_schema`; add their entire actual source-file inventory under `role_registry.tool_content`. Declare every executable AI use, including fixed sites and reachable descendants, rather than assuming only the visible root needs resolution. An action-only child with verified empty model schema may omit role/fixed on its structural child site; it needs no fabricated root profile, while all actual descendant inference remains declared and authorized. Declare root sites only for real inference; selected child/root mappings must agree. Conditional modes may have separate call-site/context sets. Unsupported or undeclared dynamic launches fail in a native role session.
+
+An image role can require `operation:"image_generation"`, text input and `settings:{format:["png"],thinking:[{mode:"provider_default"}]}`. Speech can require `speech_generation`, text and `{voice:["coral"],format:["wav"],thinking:[{mode:"provider_default"}]}`. Image review uses `text_generation` with both text and image modalities. A text role's high reasoning is never inherited by media. Reuse a role across call sites only if one exact binding meets every active site's constraints; `different_model_from:["author"]` can require a reviewer to use another provider/model pair. The comparison role needs a private binding even when its calls are outside the selected action; a missing comparison leaves resolution unknown and not ready. Supplying that binding does not add its calls or grant permission to execute them. Declaration fragments require the corresponding actual agent steps and package assets; they do not create a media or child operation themselves.
+
+The host first refreshes a selected existing profile explicitly, discovers the complete action binding, and constructs a private request from actual returned identifiers:
+
+```sh
+cargo ai profile refresh-context example --output-format json
+cargo ai actions list --project ./project --output-format json
+cargo ai actions resolve --project ./project --interface studio --action review --request-stdin --output-format json < private-resolve-request.json
+```
+
+The request is action-request-3 with `role_execution:{mode:"default",binding_revision:{version:1,revision:"review-1",bindings:[...]}}`. Each binding has `role`, `profile`, `profile_uuid`, `connection_generation`, canonical `provider`, exact `model` and selected `settings`. Copy UUID/generation from the explicit refresh payload and the complete `expected_binding` from discovery. For this reviewer, the qualified native API-key candidate is `gpt-5.2` with tagged `high` thinking, provided the exact native transport/endpoint and all other constraints match. Do not synthesize UUIDs or a resolution digest. Initial resolution omits `resolution_id`. It returns calls, reasons, evidence provenance/expiry, exact required selections and `execution_authorized:false`; inspect structural `ready` and display every categorical compatibility as information; unknown/stale/negative metadata does not itself disable review. Update policy from deliberate authorization for this one context, resolve the final exact request again, then place that final returned `identity` in `role_execution.resolution_id` for execution. Policy, inputs, attachment/artifact grants and selected home affect the identity; adding consent after resolution invalidates the old digest.
+
+The native resolver checks all supplied private bindings, even shared roles inactive in this scope. Remembered approval has no elapsed-time expiry. Passive lookup validates the effective connection without login, home initialization, repair or writes. Use `profile validate-context NAME --profile-uuid UUID --connection-generation GENERATION --output-format json` with the reviewed reference; add `--renew` for explicit verification-evidence refresh. Unchanged or proven-renewed identity retains its generation and approval. Changed identity/settings requires affected review; unavailable or unsupported continuity pauses affected work while retaining choices. A stale public-key cache or expired credential is a readiness issue, not consent expiration. Codex continues to own credential renewal; native code verifies the actual access credential. Explicit enrollment remains `profile refresh-context`; never use enrollment to silently accept a changed identity. Profile deletion/recreation cannot revive an old UUID. Native execution uses exact role model/thinking/temperature settings instead of saved profile defaults. The policy grants only this scope's `required_selections`, with no larger limits or out-of-context attachment/artifact grants. Shared binding reuse does not combine two actions' permissions. Ordinary fixed executions retain their existing behavior.
+
+Reviewed operation evidence is separate from provider list metadata and invocation access. API-key documentation/adapter records expire 2026-11-05 UTC and qualify OpenAI `gpt-image-2` PNG text-to-image, `gpt-4o-mini-tts` coral/WAV text-to-speech, and `gpt-5.2` structured text/code or image-input review with exact supported reasoning. The exact TTS ID is officially **Deprecated**; its lifecycle caveat remains visible and successful invocation is unverified. A listed model, reasoning picker entry, fixed xAI speech service, account metadata, custom endpoint or expired record cannot silently become compatible for an unproven operation. Under negotiated runtime7, mapped unknown/stale/unavailable/negative facts remain informational and can accompany a ready native resolution. Fixed legacy selections can remain explicitly unknown under their exact policy; this supplies no compatible operation or verified access claim, and their selected named/default profile still needs fresh native protected context. Runtime failures still require ordinary effect reconciliation.
+
+For native execution, keep the child process stdin open and send LF-delimited frames. This complete Python standard-library example deliberately revokes on the first `operation_started` event to exercise withdrawal; replace that trigger with the actual host consent-withdrawal event in an application. It takes a project path and an already reviewed executable request file stored outside the project/package. It performs real execution if run against a live configured provider, so use an authorized disposable fixture for a protocol check.
+
+```python
+# python3 role-session-example.py ./project /private/host/reviewed-request.json
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+project, request_file = sys.argv[1:]
+request = json.loads(Path(request_file).read_text(encoding="utf-8"))
+assert request["schema_version"] == 3
+role = request["role_execution"]
+assert len(role["resolution_id"]) == 64
+revision = role["binding_revision"]["revision"]
+command = ["cargo", "ai", "run", "--project", project,
+           "--interface", request["interface"], "--action", request["action"],
+           "--action-request-stdin", "--role-session", "--output-format", "ndjson"]
+process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                           text=True, encoding="utf-8", bufsize=1)
+
+def send(frame):
+    line = json.dumps(frame, separators=(",", ":"), ensure_ascii=False) + "\n"
+    assert len(line.encode("utf-8")) <= 1048576
+    process.stdin.write(line)
+    process.stdin.flush()
+
+assert len(json.dumps(request, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) <= 65536
+send({"protocol":"cargo_ai_role_session", "version":1, "type":"start", "request":request})
+requested = acknowledged = False
+ack_invocation = None
+terminal = None
+for line in process.stdout:
+    frame = json.loads(line)
+    if frame.get("protocol") == "cargo_ai_role_session":
+        assert frame["version"] == 1 and frame["binding_revision"] == revision
+        if frame["type"] == "revoked":
+            acknowledged = True
+            ack_invocation = frame["invocation_id"]
+            # Outstanding permits may still settle; acknowledgement is not rollback.
+        elif frame["type"] == "control_rejected":
+            raise RuntimeError(frame["code"])
+        continue
+    if frame["event_type"] == "operation_started" and not requested:
+        send({"protocol":"cargo_ai_role_session", "version":1,
+              "type":"revoke", "binding_revision":revision})
+        requested = True
+    if frame["event_type"] == "operation_completed":
+        terminal = frame["data"]
+        process.stdin.close()
+status = process.wait()
+if terminal is None or (requested and not acknowledged):
+    raise RuntimeError("Incomplete native role control/terminal evidence; reconcile before retry")
+snapshot = terminal.get("data", {}).get("native_role_execution")
+if snapshot is not None and acknowledged:
+    assert snapshot["invocation_id"] == ack_invocation
+    assert snapshot["binding_revision"] == revision
+print(json.dumps({"exit_code":status, "terminal":terminal}, ensure_ascii=False))
+```
+
+Production hosts also enforce their advertised deadlines, process-group/native-job cleanup, bounded incremental decoding and finite result retention. Ordinary NDJSON events and dedicated `cargo_ai_role_session` acknowledgements are distinct record types.
+
+Keep draining stdout while sending controls. Negotiated limits are `control_ack_deadline_ms:2000` and `max_control_frames:256`: the acknowledgement deadline runs from just before nonblocking enqueue through writer completion receipt, with one pending queue slot. Full queue, write error or timeout closes admission, requests closure with `control_output_lost`, cancels and requests owned-child cleanup; missing delivery remains uncertain. The terminal snapshot preserves the first closure reason; later output loss or control-limit cancellation may retain an earlier `revoked` reason. The frame count excludes `start` and includes every successfully read later frame, including mismatches and malformed frames. Malformed input terminates immediately; after the 256th handler/acknowledgement attempt, `control_limit` requests closure/cancellation without a 257th read. The 1 MiB bound is per frame including LF, permitting at most 256 MiB of accepted control wire bytes after the separately bounded start; no 4 MiB aggregate budget is claimed.
+
+`revoke` closes admission for the exact revision before attempting its acknowledgement; failed acknowledgement delivery escalates to cancellation. `cancel` additionally requests owned-child termination. EOF closes admission and cancels the invocation; never close the stream after the initial start while expecting later work to remain authorized. Revocation cannot stop already admitted remote effects or recover lost results. Terminal `native_role_execution` reports closure reason, outstanding boundaries and bounded outcomes; read the ordinary terminal outcome separately. Missing terminal/acknowledgement or child completion leaves uncertainty, not success or automatic retry permission.
+
+Native role recovery uses the terminal `native_role_execution` permit tree. Every boundary carries nullable `parent_permit_id` and `target_agent` alongside its session/revision, executing `agent`, `call_site` and kind. Root boundaries have a null parent; a child or tool occurrence owns the descendants whose parent equals its unique `permit_id`. Join those IDs to separate repeated/concurrent calls and nested failures; never infer lineage from result order. Resolve the recorded call site against the reviewed registry for its role. A denied child attempt retains its executing parent and declared target even if the outer tool reports success; its empty permit ID and `not_dispatched` state mean no child was admitted. Preserve prior results and drafts. Missing parent records after bounded omission mean incomplete attribution, and parent/session IDs supply no permission or replay guarantee.
+
+Portable declarations are safe to package; private binding revisions, profile context references and host consent/session state are not. Package assembly rejects reserved private record files and recognizable private binding/context shapes as an additional guard. Do not copy these records into arbitrary renamed assets, exports or business data. Updating a package, selected home, tool/source identity, mode, profile generation, settings, consent or binding revision requires a fresh exact resolution. Older generated descendants/tool scaffolds require rebuilding for native role/session capability; no transparent upgrade, provider fallback or consumer adoption is implied. Update this managed guidance through the existing `add guidance`, `guidance status`, `guidance update` flow; do not rewrite user-owned entry instructions.
+
+Passive generated capability and definition-digest records establish advertised support and exact source match; they do not cryptographically authenticate a build or sandbox native code. User-selected native/generated executables remain trusted code with their existing same-user file/process access. Private bootstrap stays on the core-owned native child channel after these checks and is never part of package tool protocol 2.
+
+Portable presentation resources keep the existing interface-scoped `actions resource` schema 1 contract. Native role resolution grants no additional resource access and no same-interface per-action confidentiality for portable source assets. Keep runtime data/artifact permissions scoped to the selected action/context; use distinct interfaces for distinct declared presentation-resource subsets. The larger native control frame does not expand business input/result budgets.
+
+For fixed request3, use definition revision `2026-10-06.r1` for a speech step whose voice should come from a native role: `{"kind":"generate_audio","text":"A selected narration script.","path":"./artifacts/narration.wav"}`. Declare that exact audio site with the speech role and finite voice/format settings. Native mapping injects the chosen voice before dispatch, allowing a reviewed binding revision to choose another declared and independently qualified voice without source edits. Older revisions still require authored voice; an authored conflict is rejected, and ordinary unmapped omission never chooses a fallback. Shared fixed-profile context checks use current named/default selection and protected UUID/generation; they do not map fixed calls automatically. Structural scopes with no selected profiles can resolve against an absent home without creating it, and later home setup requires a new resolution.
+
+For current native per-generation choices and remembered approval, use request4/resolution2, runtime revision8, `connection_continuity.version:1` and `native_selection_policy.version:2`; rebuild native parents and descendants with that runtime. Request3 retains fixed bindings with runtime7/selection policy1 compatibility. Check every actual action request against its saved per-action policy and current package/role choices. Core independently enforces the credential and authority used at dispatch. A benign check of a shared profile must preserve other packages’ approvals; a meaningful change or explicit revocation still blocks affected execution. Legacy catalog/request 2 remains supported; finite list/validate command metadata advertises payload 2 and 3 separately from envelope 1.
+
+Native account operation evidence also qualifies exact `gpt-6-astra` and `gpt-6.1-sol` text generation at the trusted ChatGPT Codex Responses endpoint, with text/image input, strict schema output and named low/medium/high/xhigh/max reasoning. These reviewed model/wire records expire 2026-11-06 UTC; provider default omits the override. Compatibility is not account invocation access or an execution grant. Account catalog facts alone do not qualify output; contradictory or stale supplied support facts prevent a positive Compatible claim. Under runtime 7 these facts remain informational for structural readiness and independently authorized attempts; unavailable protected connection continuity remains a separate execution blocker. Account Responses image-tool PNG output remains Unknown, and account speech is unsupported. Keep exact choices and separate policies; no model substitution, automatic generation or consent expiry is introduced. Consult the selected binary's machine operation evidence and public machine-payload documentation.
+
+Declared native child artifacts resolve relative to their declaring definition inside the trusted package root, before launch. A separate mutable data working directory does not supply definitions or executable identity. Keep the declared JSON target or generated artifact exact; never copy child definitions into runtime data to repair lookup. Native source/capability checks and independent policy admission still apply. Rebuild generated parents/descendants when updating this runtime behavior.
+
+## Informational native support and custom reasoning
+
+Fixed native request3 compatibility uses runtime revision **7** and `native_selection_policy:{version:1,capability_evidence:"informational",reasoning_choices:"exact_native_attempt",readiness:"structural_not_permission"}`. Capability status/provenance/freshness is advisory; missing, unknown, stale, unavailable or negative support does not itself deny an otherwise valid explicitly authorized request. `ready` describes complete bindings and declared constraints, never permission or remote entitlement. Context/credential verification, revocation, exact separate policies, limits and attachment grants still govern execution. Listing supplies selection suggestions, not proof of every operation.
+
+Native resolution keeps one copy of each complete equal capability record per matching call. Distinct or stale assessments remain visible; compaction changes neither authority identity nor permissions. Native child control frames retain the 1 MiB limit including the final newline. A known outbound overflow reports `role.child_frame_too_large` without payload contents; inspect the package control size before deliberately retrying, retaining completed results. Rebuild generated parents and descendants to gain this diagnostic; existing wire and runtime revisions remain compatible.
+
+Named thinking is already an open tagged string: `{mode:"choice",value:"Custom-Attempt"}`. Preserve case and exact value through binding, resolution and policy; provider default is `{mode:"provider_default"}` and omits reasoning. Native execution performs no thinking-catalog query or metadata-driven substitution. An adapter that can serialize the choice sends it exactly and attributes provider rejection; an adapter lacking that wire control fails explicitly before network dispatch. `applied`/`effective` describe request selection, not successful serialization or remote acceptance. OpenAI API-key image generation/edit, Ollama/xAI/Mistral image and TypeSafe text currently have no exact named reasoning field; use an explicitly selected provider default or an implemented transport, never automatic fallback. OpenAI account text/image and Gemini image retain their existing exact fields; this introduces no new image route or remote-support claim. Generic Boolean native controls are implemented only for the existing Ollama text wire mapping; other named-only adapters reject Boolean controls.
+
+Legacy non-native runs retain their existing discovery/fallback behavior. Fixed request3 wire versions remain outer1, catalog/request3 (legacy2), role/binding/resolution1, policy1 and continuity1. Runtime7/selection policy1 identifies that compatibility mode; current per-generation request4 uses resolution2/runtime8/selection policy2 as described below. Earlier runtime declarations remain readable; rebuild descendants with8 before adopting request4. Re-resolve existing native requests because the runtime identity changed; no time-based consent expiry is introduced. Advisory evidence/status/freshness is excluded from the authority resolution digest; exact requirements, choices, action context, policy, source and verified connection still participate. Support expiry alone therefore changes the displayed information without changing authority. No frontend telemetry, usage upload or server-side verification record is added.
+
+
+## Per-generation choices and editable role defaults
+
+Native action request **4** opts into per-generation choices with resolution **2**, runtime **8** and `native_selection_policy.version:2`. Catalog 3 and machine envelope/event 1 remain current. Request 3 retains fixed bindings and selection policy 1 semantics; request 2 retains its legacy contract. Rebuild every generated descendant with a runtime advertising selection policy 2 before adopting request 4. Unsupported older descendants fail with `role.child_rebuild_required`.
+
+A role supplies editable defaults. Each declared provider call resolves explicit choices, then saved role defaults, then provider defaults. Existing literal/variable `profile`, `model`, `thinking` and `voice` fields resolve separately against that execution's data. Definition revision `2026-10-08.r1` adds a `request_choices` patch to native agent/image/audio/transcription steps, including explicit clearing:
+
+```json
+{
+  "kind":"generate_audio",
+  "text":"Hello",
+  "path":"./speech.wav",
+  "voice":{"var":"runtime.voice"},
+  "request_choices":{
+    "profile":{"mode":"value","value":"approved-speech"},
+    "model":{"mode":"value","value":"speech-model"},
+    "settings":{"thinking":{"mode":"provider_default"},"format":{"mode":"value","value":"wav"}}
+  }
+}
+```
+
+The referenced `runtime.voice` must be declared as a string runtime variable. A declared native tool may compute and forward it as validated business input to the child that declares it. Each child dispatch resolves the value independently; per-voice child definitions are unnecessary. A patch value has `mode:"value"` and a literal value or supported `{var:...}` reference. `mode:"provider_default"` has no value and clears the saved choice; omission inherits it. Patch fields take precedence over ordinary step selector fields. Root caller choices use `role_execution.request_choices` with literal values, not variable references. Thinking values use the existing tagged setting form (or exact string choice). Supported patch settings are thinking, speech voice, media format and text temperature; unsupported setting/kind combinations fail explicitly.
+
+The host supplies one exact scoped `execution_policy` with authorized profile/request-kind/model/thinking alternatives for this action/interface/mode. Core derives and binds protected references for those selectable connections in `request_choices.authorized_connections`. Named profiles and the configured native default mapping must already be approved; role configuration, business inputs and a successful resolution grant no authority. Never combine policies from separate actions. Changed account/settings/default mapping, policy, source or saved role selections invalidate affected resolution identity; elapsed time alone does not.
+
+Each actual generation freezes its own effective selection and private credential snapshot, including concurrent executions of the same source site. Provider permit outcomes include `effective_request:{selection,settings}` with actual adapter settings and existing permit/lineage identifiers. Parent runtimes independently validate descendant attribution against the declared site, exact policy and protected connection. Later requests cannot mutate an earlier request's choices or the saved defaults. Revocation, limits, data/resource confinement and native connection checks remain enforced before dispatch.
+
+Compatibility and finite default-era setting/model metadata are advisory in request 4, including Unknown/stale evidence. They do not establish provider entitlement or guarantee that a request will succeed. Actual unsupported routes/settings, invalid request structure and provider rejection remain failures, with no substitution or automatic paid retry. Media format must match its output path/container. Clearing format removes the role's format preference; the supported native path/container determines the actual format. A route requiring an explicit model or voice cannot silently restore a cleared role/profile value.

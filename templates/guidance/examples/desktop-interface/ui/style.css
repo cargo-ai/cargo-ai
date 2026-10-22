@@ -1,0 +1,9 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; padding: 2rem; }
+main { max-width: 44rem; margin: auto; }
+label, textarea { display: block; }
+textarea { box-sizing: border-box; width: 100%; margin: .5rem 0 1rem; font: inherit; }
+.controls { display: flex; flex-wrap: wrap; gap: .5rem; }
+button { padding: .6rem 1rem; font: inherit; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 3rem; border: 1px solid; padding: 1rem; }
+:focus-visible { outline: 3px solid Highlight; outline-offset: 3px; }

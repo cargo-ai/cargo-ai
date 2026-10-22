@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cargo-ai.org/schemas/action-catalog-v2.json",
   "title": "Cargo AI portable action catalog v2",
-  "$comment": "Replacement catalog; only catalog/request version 2 is supported. Runtime enforces UTF-8 byte, depth, inventory, path, mapping, scope, capability and definition checks. Business schema uses the shared bounded vocabulary. Discovery adds result declarations and native artifact limits; it grants no execution authority.",
+  "$comment": "Replacement catalog; Catalog/request 2 remains supported beside opt-in native role revision 3. Runtime enforces UTF-8 byte, depth, inventory, path, mapping, scope, capability and definition checks. Business schema uses the shared bounded vocabulary. Discovery adds result declarations and native artifact limits; it grants no execution authority.",
   "type": "object",
   "properties": {
     "schema_version": {
@@ -1009,12 +1009,14 @@
         },
         "supported_catalog_versions": {
           "const": [
-            2
+            2,
+            3
           ]
         },
         "supported_request_versions": {
           "const": [
-            2
+            2,
+            3
           ]
         }
       },

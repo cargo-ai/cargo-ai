@@ -5,6 +5,9 @@ Agent-definition examples are meant to be validated and hatched into a CLI execu
 
 ## Example Index
 
+- [desktop-interface/README.md](desktop-interface/README.md)
+  - Complete provider-free Cargo-AI Desktop page, catalog 3, action-only agent and managed tool source. Uses the actual `cargoAICompanion.actions` bridge with bounded observation, cancellation, result handling and draft preservation.
+
 - `basic-agent.json`
   - Smallest useful starting point for a single agent with simple output and one straightforward action.
 - `jev-choice-score.json`

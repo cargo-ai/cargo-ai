@@ -38,6 +38,17 @@ fn absolute_test_path(file_name: &str) -> String {
 }
 
 #[test]
+fn native_role_revision_voice_omission_preserves_prior_contracts() {
+    boundary_cases::visit_native_role_voice_cases(|name, value, accepted| {
+        let actual = build_support::generate_agent_model_from_str(&value.to_string());
+        assert_eq!(actual.is_ok(), accepted, "{name}: {actual:?}");
+        if accepted && name.ends_with(":omitted") {
+            assert!(actual.unwrap().contains("voice: None"));
+        }
+    });
+}
+
+#[test]
 fn thinking_definition_revision_codegen_and_validation_are_exact() {
     use serde_json::json;
     let base = json!({
@@ -2450,7 +2461,13 @@ fn installed_authoring_examples_use_valid_strict_contracts() {
             assert!(
                 matches!(
                     value["agent_definition_schema_version"].as_str(),
-                    Some("2026-09-09.r1" | "2026-09-19.r1" | "2026-10-01.r1" | "2026-10-03.r1")
+                    Some(
+                        "2026-09-09.r1"
+                            | "2026-09-19.r1"
+                            | "2026-10-01.r1"
+                            | "2026-10-03.r1"
+                            | "2026-10-06.r1"
+                    )
                 ),
                 "{}",
                 path.display()

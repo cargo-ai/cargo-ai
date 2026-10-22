@@ -233,6 +233,7 @@ pub fn check(
     let thinking = thinking
         .cloned()
         .unwrap_or(ThinkingSetting::ProviderDefault);
+    let profile = crate::role_runtime::normalize_policy_profile(profile);
     if !policy.allows(profile, kind, &model, &thinking) {
         return Err(failure(
             "action.execution_selection_denied",

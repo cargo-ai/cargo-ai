@@ -868,6 +868,18 @@ fn parse_actions(
                 v,
                 crate::definition_validation::THINKING_SCHEMA_VERSION
                     | crate::definition_validation::RESULT_SCHEMA_VERSION
+                    | crate::definition_validation::NATIVE_ROLE_SCHEMA_VERSION
+                    | crate::definition_validation::REQUEST_CHOICES_SCHEMA_VERSION
+            )
+        });
+    let native_roles_enabled = root_obj
+        .get(crate::definition_validation::VERSION_KEY)
+        .and_then(Value::as_str)
+        .is_some_and(|version| {
+            matches!(
+                version,
+                crate::definition_validation::NATIVE_ROLE_SCHEMA_VERSION
+                    | crate::definition_validation::REQUEST_CHOICES_SCHEMA_VERSION
             )
         });
     let mut parsed = Vec::with_capacity(actions.len());
@@ -898,6 +910,7 @@ fn parse_actions(
                 run_path.as_str(),
                 named_input_kinds,
                 thinking_enabled,
+                native_roles_enabled,
             )?);
         }
 
@@ -939,6 +952,7 @@ fn parse_run_step(
     path: &str,
     named_input_kinds: &BTreeMap<String, crate::InputKind>,
     thinking_enabled: bool,
+    native_roles_enabled: bool,
 ) -> Result<crate::RunStep, String> {
     let run_obj = expect_object(value, path)?;
     let kind = required_string(run_obj, "kind", path)?.to_string();
@@ -965,6 +979,7 @@ fn parse_run_step(
             reject_agent_only_field(run_obj, "usage_log", path)?;
             Ok(crate::RunStep {
                 kind,
+                request_choices: run_obj.get("request_choices").cloned(),
                 program: Some(required_non_empty_string(run_obj, "program", path)?),
                 model: None,
                 thinking: thinking.clone(),
@@ -998,6 +1013,7 @@ fn parse_run_step(
             reject_agent_only_field(run_obj, "usage_log", path)?;
             Ok(crate::RunStep {
                 kind,
+                request_choices: run_obj.get("request_choices").cloned(),
                 program: None,
                 model: None,
                 thinking: thinking.clone(),
@@ -1037,6 +1053,7 @@ fn parse_run_step(
             }
             Ok(crate::RunStep {
                 kind,
+                request_choices: run_obj.get("request_choices").cloned(),
                 program: None,
                 model: None,
                 thinking: thinking.clone(),
@@ -1071,6 +1088,7 @@ fn parse_run_step(
             reject_agent_only_field(run_obj, "usage_log", path)?;
             Ok(crate::RunStep {
                 kind,
+                request_choices: run_obj.get("request_choices").cloned(),
                 program: None,
                 model: None,
                 thinking: thinking.clone(),
@@ -1117,6 +1135,7 @@ fn parse_run_step(
 
             Ok(crate::RunStep {
                 kind,
+                request_choices: run_obj.get("request_choices").cloned(),
                 program: None,
                 model: optional_string_run_arg(run_obj, "model", path)?,
                 thinking: thinking.clone(),
@@ -1159,11 +1178,11 @@ fn parse_run_step(
                 validate_audio_extension(&literal_path, format!("{path}.path").as_str(), "generated audio output")?;
             }
             Ok(crate::RunStep {
-                kind, program: None,
+                kind, request_choices: run_obj.get("request_choices").cloned(), program: None,
                 model: optional_string_run_arg(run_obj, "model", path)?,
                 thinking: thinking.clone(),
                 profile: optional_string_run_arg(run_obj, "profile", path)?,
-                voice: Some(required_string_run_arg(run_obj, "voice", path)?),
+                voice: if native_roles_enabled {optional_string_run_arg(run_obj, "voice", path)?} else {Some(required_string_run_arg(run_obj, "voice", path)?)},
                 audio_path: None,
                 output_variable: None, status_variable, error_variable, failure_mode, when,
                 args: Vec::new(), prompt: None, path: Some(path_parts), subject: None,
@@ -1180,7 +1199,7 @@ fn parse_run_step(
             let output_variable = optional_capture_name(run_obj, "output_variable", path)?
                 .ok_or_else(|| format!("{path}.output_variable: required for `transcribe_audio` actions"))?;
             Ok(crate::RunStep {
-                kind, program: None,
+                kind, request_choices: run_obj.get("request_choices").cloned(), program: None,
                 model: optional_string_run_arg(run_obj, "model", path)?,
                 thinking: thinking.clone(),
                 profile: optional_string_run_arg(run_obj, "profile", path)?,
@@ -1382,6 +1401,7 @@ fn reject_media_step_fields(
         "failure_mode",
         "status_variable",
         "error_variable",
+        "request_choices",
     ];
     for field in run_obj.keys() {
         if !SHARED.contains(&field.as_str()) && !kind_fields.contains(&field.as_str()) {
@@ -2613,6 +2633,16 @@ mod build_support_test_support;
 #[cfg(test)]
 mod tests {
     use super::{build_support_test_support as build_support, RuntimeAgentDefinition};
+    #[test]
+    fn native_role_voice_revision_matches_runtime_validation() {
+        let mut count = 0;
+        super::boundary_cases::visit_native_role_voice_cases(|name, value, accepted| {
+            count += 1;
+            let actual = RuntimeAgentDefinition::from_str(&value.to_string());
+            assert_eq!(actual.is_ok(), accepted, "{name}: {actual:?}");
+        });
+        assert_eq!(count, 30);
+    }
     #[test]
     fn thinking_revision_matches_runtime_and_emitted_settings() {
         use crate::providers::thinking::ThinkingSetting;
