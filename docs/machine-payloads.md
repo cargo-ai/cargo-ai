@@ -1,6 +1,6 @@
 # Application payload contracts
 
-The contracts below are included in the upcoming [0.5.0 milestone](../releases/0.5.0.md), not the published 0.4.5 CLI. Check [release status](testing-and-release-qualification.md#release-status) and negotiate the capabilities of the installed binary; these documents do not establish host adoption.
+The contracts below are available starting with the published [0.5.0 milestone](../releases/0.5.0.md); they are unavailable in the 0.4.5 CLI. Check [release status](testing-and-release-qualification.md#release-status) and negotiate the capabilities of the installed binary; these documents do not establish host adoption.
 
 Use the [machine interface](machine-interface.md) for output selection, error/exit rules, consent, redaction and compatibility. The application envelope revision is selected by `--output-schema-version 1`; usage's separate `--schema-version 1|2` selects only the payload nested inside it. Existing defaults remain available. Check the installed `capabilities` response before selecting a contract; these interfaces require a build containing them.
 

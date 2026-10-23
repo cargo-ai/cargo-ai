@@ -1,6 +1,6 @@
 # Portable client actions
 
-The contracts below are included in the upcoming [0.5.0 milestone](../releases/0.5.0.md), not the published 0.4.5 CLI. Check [release status](testing-and-release-qualification.md#release-status) and negotiate the capabilities of the installed binary; these documents do not establish host adoption.
+The contracts below are available starting with the published [0.5.0 milestone](../releases/0.5.0.md); they are unavailable in the 0.4.5 CLI. Check [release status](testing-and-release-qualification.md#release-status) and negotiate the capabilities of the installed binary; these documents do not establish host adoption.
 
 A project can expose stable actions to a web interface, a native application or a headless caller. Cargo AI discovers and validates those actions and routes them through its existing `run` runtime. Project authors choose controls and agent behavior; clients own presentation, consent, process supervision and scheduling/storage policy.
 

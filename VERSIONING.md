@@ -33,11 +33,11 @@ Implementation details may change underneath those surfaces. Compatible additive
 
 Useful `0.x` releases continue while real use and user feedback inform that decision. There is no fixed `1.0.0` launch date or requirement to align it with another application release. Security and release qualification remain required for the selected release regardless of its version number.
 
-## Selected 0.5.0 Milestone
+## 0.5.0 Milestone
 
 [0.5.0](./releases/0.5.0.md) introduces the application-facing machine interface, portable declared actions, structured results, authorized artifact reads and native AI roles. It is a larger product milestone under the pre-1.0 policy, not a claim that every existing 0.4.x workflow must migrate. Human output, existing command-specific JSON and supported legacy definitions retain their contracts; new interfaces require explicit capability and revision negotiation.
 
-The version is in preparation; publication and qualification status are recorded in [release status](./docs/testing-and-release-qualification.md#release-status). Source-build consumers of interim action protocols must negotiate the currently advertised revisions. Rebuild generated applications to obtain new capabilities; installing the CLI does not update existing binaries or host integrations.
+The version is published; qualification and native registry installation evidence are recorded in [release status](./docs/testing-and-release-qualification.md#release-status). Source-build consumers of interim action protocols must negotiate the currently advertised revisions. Rebuild generated applications to obtain new capabilities; installing the CLI does not update existing binaries or host integrations.
 
 ## Previous 0.4.x Release Line
 

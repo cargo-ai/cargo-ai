@@ -1,6 +1,6 @@
 # Machine interface
 
-The contracts below are included in the upcoming [0.5.0 milestone](../releases/0.5.0.md), not the published 0.4.5 CLI. Check [release status](testing-and-release-qualification.md#release-status) and negotiate the capabilities of the installed binary; these documents do not establish host adoption.
+The contracts below are available starting with the published [0.5.0 milestone](../releases/0.5.0.md); they are unavailable in the 0.4.5 CLI. Check [release status](testing-and-release-qualification.md#release-status) and negotiate the capabilities of the installed binary; these documents do not establish host adoption.
 
 Application callers opt into the application envelope with `--output-format json --output-schema-version 1`. Existing human output and command-specific `--json` contracts retain their meanings. In particular, `run --json` still supplies an input definition; usage `--schema-version` still selects the usage payload revision independently of the application envelope.
 
