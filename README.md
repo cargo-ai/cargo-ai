@@ -1,29 +1,29 @@
 # cargo-ai™
 
 <!-- Update the release version, tag-specific checks and evidence links together after publication verification. -->
-[![Latest release: v0.4.5](https://img.shields.io/badge/release-v0.4.5-blue)](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.5)
-[![v0.4.5 Product Qualification](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/v0.4.5?nameFilter=Product%20qualification%20summary&label=v0.4.5%20Product%20Qualification)](https://github.com/cargo-ai/cargo-ai/actions/runs/36463738958/attempts/2)
-[![v0.4.5 Registry Installation](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/94e0611165bda7b4b5221c6e873fb6328fd8ca36?nameFilter=Registry%20installation%20summary&label=v0.4.5%20Registry%20Installation)](https://github.com/cargo-ai/cargo-ai/actions/runs/36488035975)
+[![Latest release: v0.5.0](https://img.shields.io/badge/release-v0.5.0-blue)](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.5.0)
+[![v0.5.0 Product Qualification](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/v0.5.0?nameFilter=Product%20qualification%20summary&label=v0.5.0%20Product%20Qualification)](https://github.com/cargo-ai/cargo-ai/actions/runs/39857311262)
+[![v0.5.0 Registry Installation](https://img.shields.io/github/check-runs/cargo-ai/cargo-ai/e8616a2a22f17631467573b7fcca97c5de67d02e?nameFilter=Registry%20installation%20summary&label=v0.5.0%20Registry%20Installation)](https://github.com/cargo-ai/cargo-ai/actions/runs/39875868900)
 
 <details>
-<summary>Verified release checks — v0.4.5</summary>
+<summary>Verified release checks — v0.5.0</summary>
 
 | Check | Recorded result |
 |---|---|
 | Core CI | Passed on Linux, macOS and Windows, including packaged-source installation and installed CLI smoke |
 | Package Qualification | Source canary and enrolled official package passed on all three platforms |
 | Security | Audit and separate dependency policy checks passed on the released source |
-| Full Product Qualification | [Passed](https://github.com/cargo-ai/cargo-ai/actions/runs/36463738958/attempts/2); OpenAI, Anthropic, Gemini, xAI and Jev live checks passed; Mistral remains unverified after rate limiting |
+| Full Product Qualification | [Passed](https://github.com/cargo-ai/cargo-ai/actions/runs/39857311262); OpenAI, Anthropic, Gemini, xAI and Jev live checks passed; Mistral remains unverified after rate limiting |
 | Jev | Eight live Choice/Score journey cases passed using requested/returned `jev-1.13.0`, within the GitHub provider aggregate; eight requests, no retry |
-| Registry Installation | [Passed on Linux, macOS and Windows](https://github.com/cargo-ai/cargo-ai/actions/runs/36488035975); verified the published v0.4.5 crate and exact source |
+| Registry Installation | [Passed on Linux, macOS and Windows](https://github.com/cargo-ai/cargo-ai/actions/runs/39875868900); verified the published v0.5.0 crate and exact source |
 
-These checks describe published source `fd48374` and bounded scenarios. Registry Installation ran from workflow revision `94e0611` while explicitly verifying that published source; its badge uses that workflow revision. See [release evidence](./docs/testing-and-release-qualification.md#release-status) for source identities, provider limitations and historical results.
+These checks describe published source `e8616a2` and bounded scenarios. Registry Installation ran from workflow revision `e8616a2` while explicitly verifying that published source; its badge uses that workflow revision. See [release evidence](./docs/testing-and-release-qualification.md#release-status) for source identities, provider limitations and historical results.
 
 </details>
 
-[Release notes](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.4.5) · [Documentation at v0.4.5](https://github.com/cargo-ai/cargo-ai/blob/v0.4.5/README.md) · [Release testing](./docs/testing-and-release-qualification.md#release-status)
+[Release notes](https://github.com/cargo-ai/cargo-ai/releases/tag/v0.5.0) · [Documentation at v0.5.0](https://github.com/cargo-ai/cargo-ai/blob/v0.5.0/README.md) · [Release testing](./docs/testing-and-release-qualification.md#release-status)
 
-**Upcoming 0.5.0:** the [application-interface milestone](./releases/0.5.0.md) adds opt-in machine contracts, portable actions, structured results and native role execution. It is not yet published or release-qualified; the verified release links above remain 0.4.5.
+**New in 0.5.0:** the [application-interface milestone](./releases/0.5.0.md) adds opt-in machine contracts, portable actions, structured results and native role execution. The verified release links above identify this published source.
 
 Development status: [![Development CI](https://github.com/cargo-ai/cargo-ai/actions/workflows/development-ci.yml/badge.svg?branch=develop&event=push)](https://github.com/cargo-ai/cargo-ai/actions/workflows/development-ci.yml?query=branch%3Adevelop)
 
@@ -242,7 +242,7 @@ Runnable repository examples include [adder_test.json](./adder_test.json) and [w
 
 ## Releases
 
-The [release history](./releases/README.md) collects changes and upgrade guidance by version. [0.4.5](./releases/0.4.5.md) is the latest verified release, adding usage attribution by environment, package, location, agent and consuming workspace. It preserves the speech/image, transcription and declaration-inspection capabilities and limitations from [0.4.4](./releases/0.4.4.md). See [release status and verification](./docs/testing-and-release-qualification.md#release-status) for the published source and native installation evidence.
+The [release history](./releases/README.md) collects changes and upgrade guidance by version. [0.5.0](./releases/0.5.0.md) is the latest verified release, adding opt-in machine contracts, portable actions, structured results and native AI roles. It preserves the usage-attribution capabilities from [0.4.5](./releases/0.4.5.md) and the provider/media capabilities and limitations recorded in earlier releases. See [release status and verification](./docs/testing-and-release-qualification.md#release-status) for the published source and native installation evidence.
 
 ## Project Status
 
