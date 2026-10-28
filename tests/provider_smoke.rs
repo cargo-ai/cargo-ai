@@ -2089,6 +2089,109 @@ fn generated_native_account_case(fixture: &Fixture) {
 
 #[test]
 #[ignore = "run explicitly in the provider smoke CI lane"]
+fn generated_usage_custody_isolated_and_deterministic() {
+    generated_usage_custody_case(&Fixture::new());
+}
+
+fn generated_usage_custody_case(fixture: &Fixture) {
+    let name = "usage_custody_smoke";
+    let hatch = fixture
+        .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
+        .args(["--no-update-check", "hatch", name, "--config"])
+        .arg(&fixture.definition)
+        .arg("--output-dir")
+        .arg(fixture.root.join("dist"))
+        .args(["--force", "--keep-project"])
+        .output()
+        .unwrap();
+    assert_warning_free_build(&hatch, "usage custody hatch");
+    assert!(
+        hatch.status.success(),
+        "usage custody hatch failed: {}",
+        String::from_utf8_lossy(&hatch.stderr)
+    );
+    let workspace = fixture.home.join("agents").join(name);
+    let main = workspace.join("src/main.rs");
+    let source = fs::read_to_string(&main).unwrap();
+    fs::write(
+        &main,
+        format!(
+            "{source}\n{}",
+            include_str!("fixtures/generated_usage_custody_tests.rs")
+        ),
+    )
+    .unwrap();
+    fs::write(fixture.home.join("config.toml"), "secret_store = 'file'\n").unwrap();
+    let target =
+        provider_cache::CacheIdentity::current(Path::new(env!("CARGO_BIN_EXE_cargo-ai"))).target;
+    let output = fixture
+        .isolated_command("cargo")
+        .current_dir(&workspace)
+        .env("CARGO_TERM_COLOR", "never")
+        .args([
+            "test",
+            "--locked",
+            "--release",
+            "--target",
+            &target,
+            "generated_usage_scheduler_recovers_exact_custody_after_response_loss",
+            "--",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert_warning_free_build(&output, "emitted usage custody tests");
+    assert!(
+        output.status.success(),
+        "emitted usage custody test failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    let runtime = fixture.root.join("dist").join(if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    });
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    let test_path = diagnostics
+        .lines()
+        .find_map(|line| {
+            line.contains("Running unittests")
+                .then(|| line.split_once('(')?.1.strip_suffix(')'))
+                .flatten()
+        })
+        .expect("Cargo must identify the executed generated test binary");
+    let test_path = Path::new(test_path);
+    let test_binary = if test_path.is_absolute() {
+        test_path.to_path_buf()
+    } else {
+        workspace.join(test_path)
+    };
+    eprintln!(
+        "Emitted usage custody source SHA256: {:x}",
+        Sha256::digest(fs::read(&main).unwrap())
+    );
+    for file in ["Cargo.toml", "Cargo.lock"] {
+        eprintln!(
+            "Emitted usage custody {file} SHA256: {:x}",
+            Sha256::digest(fs::read(workspace.join(file)).unwrap())
+        );
+    }
+    eprintln!(
+        "Emitted usage custody runtime SHA256: {:x}",
+        Sha256::digest(fs::read(runtime).unwrap())
+    );
+    eprintln!(
+        "Executed usage custody test binary SHA256: {:x}",
+        Sha256::digest(fs::read(test_binary).unwrap())
+    );
+    eprintln!("Actual emitted scheduler, monotonic capture, lost response and exact receipt recovery passed");
+}
+
+#[test]
+#[ignore = "run explicitly in the provider smoke CI lane"]
 fn generated_provider_batch_isolated_and_deterministic() {
     let seed = Fixture::new();
     let identity =
@@ -2120,7 +2223,8 @@ fn generated_provider_batch_isolated_and_deterministic() {
         "generated-provider neutral-seed: {:.2}s",
         started.elapsed().as_secs_f64()
     );
-    let cases: [(&str, fn(&Fixture)); 10] = [
+    let cases: [(&str, fn(&Fixture)); 11] = [
+        ("usage-custody", generated_usage_custody_case),
         ("anthropic", generated_anthropic_case),
         ("gemini", generated_gemini_case),
         ("mistral", generated_mistral_case),
@@ -2168,6 +2272,7 @@ fn generated_provider_batch_isolated_and_deterministic() {
     assert_eq!(
         completed,
         [
+            "usage-custody",
             "anthropic",
             "gemini",
             "mistral",
@@ -2181,7 +2286,7 @@ fn generated_provider_batch_isolated_and_deterministic() {
         ]
     );
     eprintln!(
-        "generated-provider batch: 10/10 passed in {:.2}s",
+        "generated-provider batch: 11/11 passed in {:.2}s",
         started.elapsed().as_secs_f64()
     );
 }

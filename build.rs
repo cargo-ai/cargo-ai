@@ -13,6 +13,7 @@ const _: &str = include_str!("templates/build_support.rs");
 
 const BUILD_RERUN_PATHS: &[&str] = &[
     "src/usage_store.rs",
+    "src/usage_store",
     "src/usage_log.rs",
     "src/usage_attribution.rs",
     ".agentcfg",
@@ -87,6 +88,30 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
         source: "../src/generated_capabilities/record.rs",
     },
     TemplateSource {
+        destination: "src/usage_analytics.rs",
+        source: "src/usage_analytics.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_analytics/contract.rs",
+        source: "src/usage_analytics/contract.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_analytics/queue.rs",
+        source: "src/usage_analytics/queue.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_analytics/tests.rs",
+        source: "src/usage_analytics/tests.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_analytics/transport.rs",
+        source: "src/usage_analytics/transport.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_analytics/scheduler.rs",
+        source: "src/usage_analytics/scheduler.rs",
+    },
+    TemplateSource {
         destination: "src/usage_backup.rs",
         source: "src/usage_backup.rs",
     },
@@ -113,6 +138,22 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
     TemplateSource {
         destination: "src/usage_store.rs",
         source: "../src/usage_store.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_store/retention.rs",
+        source: "../src/usage_store/retention.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_store/schema.rs",
+        source: "../src/usage_store/schema.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_store/disk.rs",
+        source: "../src/usage_store/disk.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_store/codec.rs",
+        source: "../src/usage_store/codec.rs",
     },
     TemplateSource {
         destination: "build.rs",

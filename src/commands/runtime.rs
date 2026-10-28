@@ -1879,7 +1879,7 @@ async fn run_with_definition_scoped(
                         step_index: None,
                     },
                     usage: response.usage.as_ref(),
-                    duration: provider_started_at.elapsed(),
+                    duration: crate::usage_log::UsageElapsed::since(provider_started_at),
                     status: crate::usage_log::UsageStatus::Success,
                     error: None,
                 });
@@ -1931,7 +1931,7 @@ async fn run_with_definition_scoped(
                         step_index: None,
                     },
                     usage: error.usage.as_ref(),
-                    duration: provider_started_at.elapsed(),
+                    duration: crate::usage_log::UsageElapsed::since(provider_started_at),
                     status: crate::usage_log::UsageStatus::Failed,
                     error: Some(super::runtime_actions::usage_provider_error(&error)),
                 });
@@ -1976,7 +1976,7 @@ async fn run_with_definition_scoped(
                         step_index: None,
                     },
                     usage: None,
-                    duration: provider_started_at.elapsed(),
+                    duration: crate::usage_log::UsageElapsed::since(provider_started_at),
                     status: crate::usage_log::UsageStatus::Failed,
                     error: Some(crate::usage_log::UsageError::redacted(
                         "timeout",

@@ -74,7 +74,7 @@ pub(super) fn status() -> Result<Value, String> {
             result["account_queues"] = json!(queues);
         }
         if exists(&db, "usage_backup_windows")? {
-            let unscanned:i64=db.query_row("SELECT COUNT(*) FROM usage_events e WHERE COALESCE(json_extract(e.record_json,'$.restored'),0)!=1 AND EXISTS(SELECT 1 FROM usage_backup_windows w WHERE e.sequence>w.last_scan AND e.sequence<=COALESCE(w.end_sequence,?1) AND NOT EXISTS(SELECT 1 FROM usage_backup_queue q WHERE q.event_id=e.event_id AND q.binding=w.binding AND q.generation=w.generation))",[high(&db)?],|r|r.get(0)).map_err(db_error)?;
+            let unscanned:i64=db.query_row("SELECT COUNT(*) FROM usage_event_records e WHERE COALESCE(json_extract(e.record_json,'$.restored'),0)!=1 AND EXISTS(SELECT 1 FROM usage_backup_windows w WHERE e.sequence>w.last_scan AND e.sequence<=COALESCE(w.end_sequence,?1) AND NOT EXISTS(SELECT 1 FROM usage_backup_queue q WHERE q.event_id=e.event_id AND q.binding=w.binding AND q.generation=w.generation))",[high(&db)?],|r|r.get(0)).map_err(db_error)?;
             result["unscanned_records"] = json!(unscanned);
         }
     }
@@ -216,7 +216,7 @@ fn records(
     after: i64,
     through: i64,
 ) -> Result<Vec<(i64, String, String)>, String> {
-    let mut statement=db.prepare("SELECT sequence,event_id,record_json FROM usage_events WHERE sequence>?1 AND sequence<=?2 ORDER BY sequence LIMIT 100").map_err(db_error)?;
+    let mut statement=db.prepare("SELECT sequence,event_id,record_json FROM usage_event_records WHERE sequence>?1 AND sequence<=?2 ORDER BY sequence LIMIT 100").map_err(db_error)?;
     let rows = statement
         .query_map(params![after, through], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -244,7 +244,7 @@ fn capture_at(db: &Connection, binding: &Binding) -> Result<(), String> {
         return Err("Backup consent has no local boundary; enable backup explicitly".into());
     }
     let high = high(db)?;
-    let mut statement=db.prepare("SELECT e.sequence,e.event_id,e.record_json FROM usage_events e JOIN usage_backup_windows w ON e.sequence>w.last_scan AND e.sequence<=COALESCE(w.end_sequence,?3) WHERE w.binding=?1 AND w.generation=?2 ORDER BY e.sequence LIMIT 100").map_err(db_error)?;
+    let mut statement=db.prepare("SELECT e.sequence,e.event_id,e.record_json FROM usage_event_records e JOIN usage_backup_windows w ON e.sequence>w.last_scan AND e.sequence<=COALESCE(w.end_sequence,?3) WHERE w.binding=?1 AND w.generation=?2 ORDER BY e.sequence LIMIT 100").map_err(db_error)?;
     let rows = statement
         .query_map(params![binding.account, generation(binding)?, high], |r| {
             Ok((
@@ -315,7 +315,7 @@ pub(super) fn include_history(
 }
 pub(super) fn batch(binding: &Binding) -> Result<Vec<Value>, String> {
     let db = open()?;
-    let mut statement=db.prepare("SELECT p.record_json,e.record_json FROM usage_backup_queue q JOIN usage_backup_projection p USING(event_id) JOIN usage_events e USING(event_id) WHERE q.binding=?1 AND q.generation=?2 AND q.acknowledged=0 ORDER BY e.sequence LIMIT 100").map_err(db_error)?;
+    let mut statement=db.prepare("SELECT p.record_json,e.record_json FROM usage_backup_queue q JOIN usage_backup_projection p USING(event_id) JOIN usage_event_records e USING(event_id) WHERE q.binding=?1 AND q.generation=?2 AND q.acknowledged=0 ORDER BY e.sequence LIMIT 100").map_err(db_error)?;
     let rows = statement
         .query_map(params![binding.account, generation(binding)?], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -369,7 +369,7 @@ pub(super) fn restore(records: &[Value], account_binding: &str) -> Result<usize,
             .ok_or("Backup event lacks identity")?;
         let existing: Option<String> = tx
             .query_row(
-                "SELECT record_json FROM usage_events WHERE event_id=?1",
+                "SELECT record_json FROM usage_event_records WHERE event_id=?1",
                 [event_id],
                 |r| r.get(0),
             )
@@ -447,7 +447,7 @@ mod tests {
     use super::*;
     fn db() -> Connection {
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("PRAGMA foreign_keys=ON;CREATE TABLE usage_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT UNIQUE NOT NULL,root_run_id TEXT,agent_run_id TEXT,event_type TEXT,created_at TEXT,record_json TEXT);").unwrap();
+        usage_store::initialize_test_database(&db);
         initialize(&db).unwrap();
         db
     }

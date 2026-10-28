@@ -7,7 +7,12 @@ use std::{
     time::Duration,
 };
 
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+mod codec;
+mod disk;
+pub(crate) mod retention;
+mod schema;
+
+pub(crate) const SCHEMA_VERSION: u32 = 2;
 pub(crate) const TRACKING_ENV: &str = "CARGO_AI_USAGE_TRACKING";
 
 pub(crate) fn directory() -> PathBuf {
@@ -145,6 +150,18 @@ fn open_at(dir: &Path, create: bool) -> Result<Option<Connection>, String> {
         return Err("Usage database belongs to a newer incompatible schema; left unchanged".into());
     }
     if create {
+        // Validate before any persistent journal/schema changes.
+        if version == 1 {
+            if let Err(error) = schema::validate_v1(&connection) {
+                let current: u32 = connection
+                    .pragma_query_value(None, "user_version", |row| row.get(0))
+                    .map_err(db_error)?;
+                if current != SCHEMA_VERSION {
+                    return Err(error);
+                }
+            }
+            schema::preflight(&connection, &path)?;
+        }
         // Concurrent first openers may return SQLITE_BUSY from journal-mode
         // activation without invoking SQLite's busy handler. Retry only this
         // transition within the same bounded wait used for ordinary writes.
@@ -175,28 +192,40 @@ fn open_at(dir: &Path, create: bool) -> Result<Option<Connection>, String> {
             .map_err(db_error)?;
         if version == 0 {
             let transaction = connection
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)
                 .map_err(db_error)?;
             let locked_version: u32 = transaction
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .map_err(db_error)?;
             if locked_version == 0 {
-                transaction.execute_batch("CREATE TABLE IF NOT EXISTS usage_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT UNIQUE NOT NULL,root_run_id TEXT,agent_run_id TEXT,event_type TEXT NOT NULL,created_at TEXT NOT NULL,record_json TEXT NOT NULL); CREATE INDEX IF NOT EXISTS usage_events_root ON usage_events(root_run_id,sequence); CREATE INDEX IF NOT EXISTS usage_events_agent ON usage_events(agent_run_id,sequence); CREATE TABLE IF NOT EXISTS usage_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); PRAGMA user_version=1;").map_err(db_error)?;
+                let existing: bool = transaction
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name LIKE 'usage_%')",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(db_error)?;
+                if existing {
+                    return Err(
+                        "Unversioned usage database structure is unknown; left unchanged".into(),
+                    );
+                }
+                schema::initialize(&transaction)?;
             } else if locked_version != SCHEMA_VERSION {
                 return Err("Usage database schema changed; left unchanged".into());
             }
             transaction.commit().map_err(db_error)?;
+        } else if version == 1 {
+            schema::migrate(&mut connection, &path)?;
         }
-        // Optional expression indexes derive only from immutable JSON facts.
-        // Older writers can keep inserting version-1 records without supplying
-        // attribution fields or maintaining a separate projection.
-        connection.execute_batch("CREATE INDEX IF NOT EXISTS usage_events_attribution_environment ON usage_events(json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.environment.id'),sequence) WHERE json_valid(record_json);
-            CREATE INDEX IF NOT EXISTS usage_events_attribution_package ON usage_events(json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.package.source'),json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.package.id'),sequence) WHERE json_valid(record_json);
-            CREATE INDEX IF NOT EXISTS usage_events_attribution_location ON usage_events(json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.environment.id'),json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.package_location.path'),sequence) WHERE json_valid(record_json);
-            CREATE INDEX IF NOT EXISTS usage_events_attribution_agent ON usage_events(json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.agent.source'),json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.agent.id'),sequence) WHERE json_valid(record_json);
-            CREATE INDEX IF NOT EXISTS usage_events_attribution_workspace ON usage_events(json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.workspace.environment_id'),json_extract(CASE WHEN json_valid(record_json) THEN record_json END,'$.attribution.workspace.path'),sequence) WHERE json_valid(record_json);")
-            .map_err(db_error)?;
         private_permissions(&path, false)?;
+    } else if version == 1 {
+        schema::validate_v1(&connection)?;
+        connection
+            .execute_batch(
+                "CREATE TEMP VIEW usage_event_records AS SELECT * FROM main.usage_events",
+            )
+            .map_err(db_error)?;
     } else if version != SCHEMA_VERSION {
         return Err("Usage database requires migration by a current runtime before reading".into());
     }
@@ -212,36 +241,41 @@ fn install_backup_guard(connection: &Connection) -> Result<(), String> {
         CREATE TRIGGER IF NOT EXISTS usage_backup_projection_min_version BEFORE INSERT ON usage_backup_projection
         WHEN CAST(json_extract(NEW.record_json,'$.schema_version') AS INTEGER) <
           COALESCE((SELECT CAST(json_extract(record_json,'$.backup_min_schema_version') AS INTEGER)
-                    FROM usage_events WHERE event_id=NEW.event_id),1)
+                    FROM usage_event_records WHERE event_id=NEW.event_id),1)
         BEGIN SELECT RAISE(ABORT,'backup projection is older than the usage fact requires'); END;")
         .map_err(db_error)
 }
 
 pub(crate) fn insert_event(connection: &Connection, event: &Value) -> Result<bool, String> {
-    if event["backup_min_schema_version"].as_u64() == Some(2) {
-        if connection.is_autocommit() {
-            connection
-                .execute_batch("BEGIN IMMEDIATE")
-                .map_err(db_error)?;
-            let result = install_backup_guard(connection)
-                .and_then(|_| insert_event_inner(connection, event));
-            match result {
-                Ok(inserted) => {
-                    connection.execute_batch("COMMIT").map_err(db_error)?;
-                    Ok(inserted)
-                }
-                Err(error) => {
-                    let _ = connection.execute_batch("ROLLBACK");
-                    Err(error)
-                }
-            }
+    let autocommit = connection.is_autocommit();
+    connection
+        .execute_batch(if autocommit {
+            "BEGIN IMMEDIATE"
         } else {
-            install_backup_guard(connection)?;
-            insert_event_inner(connection, event)
-        }
-    } else {
-        insert_event_inner(connection, event)
+            "SAVEPOINT usage_fact_insert"
+        })
+        .map_err(db_error)?;
+    let result = insert_event_inner(connection, event).and_then(|inserted| {
+        connection
+            .execute_batch(if autocommit {
+                "COMMIT"
+            } else {
+                "RELEASE usage_fact_insert"
+            })
+            .map_err(db_error)?;
+        Ok(inserted)
+    });
+    if result.is_err() {
+        let _ = connection.execute_batch(if autocommit {
+            "ROLLBACK"
+        } else {
+            "ROLLBACK TO usage_fact_insert; RELEASE usage_fact_insert"
+        });
     }
+    if autocommit && matches!(result, Ok(true)) {
+        retention::capture_committed(connection);
+    }
+    result
 }
 
 fn insert_event_inner(connection: &Connection, event: &Value) -> Result<bool, String> {
@@ -252,36 +286,40 @@ fn insert_event_inner(connection: &Connection, event: &Value) -> Result<bool, St
             .ok_or_else(|| format!("Usage record missing {key}"))
     };
     let event_id = required("event_id")?;
-    let encoded = serde_json::to_string(event).map_err(|_| "Cannot encode usage record")?;
+    let event_type = required("event_type")?;
+    let timestamp = required("timestamp")?;
+    let raw = event.to_string();
     let existing: Option<String> = connection
         .query_row(
-            "SELECT record_json FROM usage_events WHERE event_id=?1",
+            "SELECT record_json FROM usage_event_records WHERE event_id=?1",
             [event_id],
             |row| row.get(0),
         )
         .optional()
         .map_err(db_error)?;
     if let Some(existing) = existing {
-        return if existing == encoded {
+        return if serde_json::from_str::<Value>(&existing).ok().as_ref() == Some(event) {
             Ok(false)
         } else {
             Err("Usage event identity conflict; original fact preserved".into())
         };
     }
-    let changed = connection.execute("INSERT INTO usage_events(event_id,root_run_id,agent_run_id,event_type,created_at,record_json) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(event_id) DO NOTHING", params![event_id,event["root_run_id"].as_str(),event["agent_run_id"].as_str(),required("event_type")?,required("timestamp")?,encoded]).map_err(db_error)?;
-    if changed == 0 {
-        let existing: String = connection
-            .query_row(
-                "SELECT record_json FROM usage_events WHERE event_id=?1",
-                [event_id],
-                |row| row.get(0),
-            )
-            .map_err(db_error)?;
-        if existing != encoded {
-            return Err("Usage event identity conflict; original fact preserved".into());
-        }
+    retention::check_capture(connection, raw.len())?;
+    let encoded = codec::encode(&raw)?;
+    let ids = schema::context_ids(connection, &encoded)?;
+    if event["backup_min_schema_version"].as_u64() == Some(2) {
+        install_backup_guard(connection)?;
     }
-    Ok(changed != 0)
+    connection.execute("INSERT INTO usage_events(event_id,root_run_id,agent_run_id,event_type,created_at,envelope_json,residual_json,codec_version,agent_context_id,provider_context_id,attribution_context_id,restored_attribution_context_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)", params![event_id,event["root_run_id"].as_str(),event["agent_run_id"].as_str(),event_type,timestamp,encoded.envelope,encoded.residual,codec::VERSION,ids[0],ids[1],ids[2],ids[3]]).map_err(db_error)?;
+    Ok(true)
+}
+
+#[cfg(test)]
+pub(crate) fn initialize_test_database(connection: &Connection) {
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    schema::initialize(connection).unwrap();
 }
 
 #[cfg(all(cargo_ai_cli, test))]
@@ -333,7 +371,9 @@ mod tests {
         drop(db);
         let db = open_at(&dir, false).unwrap().unwrap();
         let stored: String = db
-            .query_row("SELECT record_json FROM usage_events", [], |r| r.get(0))
+            .query_row("SELECT record_json FROM usage_event_records", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&stored).unwrap(),
@@ -343,7 +383,7 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn enriched_insert_blocks_the_legacy_scanner_without_changing_v1_writes() {
+    fn enriched_insert_blocks_legacy_projection_and_old_sql_writers() {
         let dir = fixture();
         let db = open_at(&dir, true).unwrap().unwrap();
         let mut enriched = event("enriched");
@@ -366,23 +406,24 @@ mod tests {
         old_scanner
             .execute(old_insert, params!["enriched", r#"{"schema_version":2}"#])
             .unwrap();
-        old_scanner.execute("INSERT INTO usage_events(event_id,root_run_id,event_type,created_at,record_json) VALUES(?1,?2,?3,?4,?5)",
-            params!["legacy","root","provider_request_completed","2026-09-22T00:00:00Z",event("legacy").to_string()]).unwrap();
+        assert!(old_scanner.execute("INSERT INTO usage_events(event_id,root_run_id,event_type,created_at,record_json) VALUES(?1,?2,?3,?4,?5)",
+            params!["legacy","root","provider_request_completed","2026-09-22T00:00:00Z",event("legacy").to_string()]).is_err());
+        insert_event(&db, &event("current")).unwrap();
         old_scanner
-            .execute(old_insert, params!["legacy", r#"{"schema_version":1}"#])
+            .execute(old_insert, params!["current", r#"{"schema_version":1}"#])
             .unwrap();
         assert_eq!(
             old_scanner
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            1
+            2
         );
         drop(old_scanner);
         drop(db);
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn optional_attribution_indexes_leave_unrelated_malformed_rows_writable() {
+    fn migration_preserves_unrelated_malformed_rows_and_new_writes() {
         let dir = fixture();
         fs::create_dir_all(&dir).unwrap();
         let old_writer = Connection::open(dir.join("usage.sqlite3")).unwrap();
@@ -397,7 +438,7 @@ mod tests {
         assert_eq!(index_count, 5);
         let legacy: String = reopened
             .query_row(
-                "SELECT record_json FROM usage_events WHERE event_id='legacy'",
+                "SELECT record_json FROM usage_event_records WHERE event_id='legacy'",
                 [],
                 |row| row.get(0),
             )
@@ -413,6 +454,48 @@ mod tests {
         drop(reopened);
         fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn delete_removes_unreferenced_contexts_and_keeps_shared_history() {
+        let dir = fixture();
+        let db = open_at(&dir, true).unwrap().unwrap();
+        let mut first = event("first");
+        first["agent"] = json!({"private_path":"/private/project"});
+        first["provider"] = Value::Null;
+        let mut second = first.clone();
+        second["event_id"] = json!("second");
+        insert_event(&db, &first).unwrap();
+        insert_event(&db, &second).unwrap();
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM usage_contexts", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        db.execute("DELETE FROM usage_events WHERE event_id='first'", [])
+            .unwrap();
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM usage_contexts", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        let raw: String = db
+            .query_row("SELECT record_json FROM usage_event_records", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&raw).unwrap(), second);
+        db.execute("DELETE FROM usage_events", []).unwrap();
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM usage_contexts", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn future_schema_is_refused_without_writes() {
         let dir = fixture();

@@ -396,7 +396,7 @@ pub(super) async fn run_audio_step(
                 finish_reason: None,
                 step: usage_step,
                 usage,
-                duration: started.elapsed(),
+                duration: crate::usage_log::UsageElapsed::since(started),
                 status,
                 error,
             },
