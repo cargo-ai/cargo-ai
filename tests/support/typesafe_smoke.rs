@@ -838,6 +838,26 @@ fn failed_request_diagnostic(
     }
 }
 
+fn fixture_child_exit(captured: &str) -> Option<i64> {
+    captured.lines().find_map(|line| {
+        let (_, status) = line.split_once("child: exited with status ")?;
+        let status = status
+            .strip_prefix("exit code: ")
+            .or_else(|| status.strip_prefix("exit status: "))?;
+        let code = status.split_whitespace().next()?;
+        if let Some(hex) = code.strip_prefix("0x").or_else(|| code.strip_prefix("0X")) {
+            u32::from_str_radix(hex, 16).ok().map(i64::from)
+        } else {
+            code.parse::<i32>().ok().map(i64::from)
+        }
+    })
+}
+
+fn fixture_stack_overflow(captured: &str) -> bool {
+    captured.contains("has overflowed its stack")
+        || captured.contains("fatal runtime error: stack overflow")
+}
+
 fn live_run(
     fixture: &Fixture,
     executable: Option<&Path>,
@@ -887,13 +907,7 @@ fn live_run(
         if invoke_child {
             // These synthetic diagnostics classify fixed labels without exposing matching text.
             let captured = text(&output);
-            let child_exit = captured.lines().find_map(|line| {
-                let (_, status) = line.split_once("child: exited with status ")?;
-                let status = status
-                    .strip_prefix("exit code: ")
-                    .or_else(|| status.strip_prefix("exit status: "))?;
-                status.split_whitespace().next()?.parse::<i32>().ok()
-            });
+            let child_exit = fixture_child_exit(&captured);
             let cli_unavailable = captured.contains("requires Cargo AI to be available");
             let artifact_unavailable =
                 captured.contains("was not found relative to the current working directory");
@@ -906,12 +920,13 @@ fn live_run(
             let parser_rejected = captured.contains("unexpected argument")
                 || captured.contains("unrecognized subcommand");
             let panicked = captured.contains("panicked at");
+            let stack_overflow = fixture_stack_overflow(&captured);
             eprintln!(
-                "TypeSafe fixture child: started={} nonzero={} child_exit={child_exit:?} stderr={} cli_unavailable={cli_unavailable} artifact_unavailable={artifact_unavailable} profile_unavailable={profile_unavailable} spawn_failed={spawn_failed} cargo_dispatch_failed={cargo_dispatch_failed} parser_rejected={parser_rejected} panicked={panicked} unclassified={}",
+                "TypeSafe fixture child: started={} nonzero={} child_exit={child_exit:?} stderr={} cli_unavailable={cli_unavailable} artifact_unavailable={artifact_unavailable} profile_unavailable={profile_unavailable} spawn_failed={spawn_failed} cargo_dispatch_failed={cargo_dispatch_failed} parser_rejected={parser_rejected} panicked={panicked} stack_overflow={stack_overflow} unclassified={}",
                 captured.contains("child: started"),
                 captured.contains("child: exited with status"),
                 captured.contains("Child error:"),
-                !output.status.success() && !(cli_unavailable || artifact_unavailable || profile_unavailable || spawn_failed || cargo_dispatch_failed || parser_rejected || panicked)
+                !output.status.success() && !(cli_unavailable || artifact_unavailable || profile_unavailable || spawn_failed || cargo_dispatch_failed || parser_rejected || panicked || stack_overflow)
             );
         }
     }
@@ -1221,6 +1236,40 @@ fn jev_report_preserves_partial_counts_and_rejects_secret_model_identity() {
         .write_journey(journey, Outcome::Pass, Diagnostic::None, TOKEN)
         .is_err());
     assert!(!report.path.exists());
+}
+
+#[test]
+fn fixture_child_diagnostics_accept_platform_codes_and_reject_unbounded_text() {
+    for (status, expected) in [
+        ("exit status: 1", Some(1)),
+        ("exit code: -1073741571", Some(-1073741571)),
+        ("exit code: 0xc00000fd", Some(3221225725)),
+        ("exit code: 0XFFFFFFFF", Some(4294967295)),
+        ("exit code: 0x100000000", None),
+        ("exit code: 2147483648", None),
+        ("exit code: -2147483649", None),
+        ("exit code: secret-text", None),
+        ("exit code: 0xc00000fdsecret", None),
+        ("signal: 6 (SIGABRT)", None),
+    ] {
+        assert_eq!(
+            fixture_child_exit(&format!("action: child: exited with status {status}")),
+            expected
+        );
+    }
+    assert_eq!(fixture_child_exit("unrelated exit code: 1"), None);
+    assert_eq!(fixture_child_exit(TOKEN), None);
+    assert!(fixture_stack_overflow(
+        "thread 'main' has overflowed its stack"
+    ));
+    assert!(fixture_stack_overflow(
+        "fatal runtime error: stack overflow, aborting"
+    ));
+    assert!(!fixture_stack_overflow(
+        "child: exited with status exit code: 0xc00000fd"
+    ));
+    assert!(!fixture_stack_overflow("panicked at fixture assertion"));
+    assert!(!fixture_stack_overflow(TOKEN));
 }
 
 #[test]

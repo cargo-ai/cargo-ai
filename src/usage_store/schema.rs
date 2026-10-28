@@ -199,7 +199,11 @@ fn recovery_image(path: &Path) -> Result<PathBuf, String> {
         return Err("Usage recovery image integrity check failed; source left unchanged".into());
     }
     drop(image_db);
-    fs::File::open(&image)
+    // Windows requires a writable handle to flush file buffers. Reopen the
+    // existing verified image without creating or truncating its contents.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&image)
         .and_then(|file| file.sync_all())
         .map_err(|_| "Cannot sync usage recovery image")?;
     // The directory entry must also survive a crash before schema commit.
@@ -459,6 +463,13 @@ mod migration_tests {
                 |r| r.get(0),
             )
             .unwrap();
+        let metadata = fs::metadata(&snapshot).unwrap();
+        assert!(metadata.len() > 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        }
         let snapshot =
             Connection::open_with_flags(snapshot, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         assert_eq!(
@@ -473,6 +484,17 @@ mod migration_tests {
                     .get::<_, i64>(0))
                 .unwrap(),
             205
+        );
+        let recovered: String = snapshot
+            .query_row(
+                "SELECT record_json FROM usage_events WHERE sequence=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&recovered).unwrap(),
+            expected[0]
         );
         let accepted = json!({"event_id":"after-migration","event_type":"x","timestamp":"now","agent":{"revision":3}});
         super::super::insert_event(&migrated, &accepted).unwrap();
