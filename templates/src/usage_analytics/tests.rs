@@ -2,6 +2,42 @@ use super::{contract::*, queue::*};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
+#[tokio::test]
+async fn sync_without_cloud_selection_is_passive_and_creates_no_home() {
+    struct SelectedHome {
+        previous: Option<std::ffi::OsString>,
+        path: std::path::PathBuf,
+    }
+    impl Drop for SelectedHome {
+        fn drop(&mut self) {
+            // Home-selecting tests run serially in the isolated test runner.
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var("CARGO_AI_HOME", value),
+                    None => std::env::remove_var("CARGO_AI_HOME"),
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+    assert_eq!(std::env::var("RUST_TEST_THREADS").as_deref(), Ok("1"));
+    assert_eq!(
+        std::env::var("CARGO_AI_DISABLE_KEYCHAIN").as_deref(),
+        Ok("1")
+    );
+    let home = SelectedHome {
+        previous: std::env::var_os("CARGO_AI_HOME"),
+        path: std::env::temp_dir().join(format!("usage-sync-unselected-{}", uuid::Uuid::new_v4())),
+    };
+    unsafe { std::env::set_var("CARGO_AI_HOME", &home.path) };
+    let before = super::local_status().unwrap();
+    assert_eq!(super::sync().await.unwrap(), before);
+    assert_eq!(before["enabled"], false);
+    assert_eq!(before["source"], Value::Null);
+    assert!(super::selected().unwrap().is_none());
+    assert!(!home.path.exists());
+}
+
 fn uuid(index: u64) -> CanonicalUuid {
     CanonicalUuid::try_from(format!("00000000-0000-4000-8000-{index:012}")).unwrap()
 }
