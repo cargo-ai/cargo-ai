@@ -168,14 +168,48 @@ mod generated_usage_custody_tests {
         );
     }
     fn generated_timer_proof() {
-        for name in [
-            "usage_analytics::scheduler::tests::real_timer_wakes_during_active_work_and_stops_at_scope_end",
-            "usage_analytics::scheduler::tests::real_process_cancellation_stops_the_production_scoped_timer",
+        for (name, started, exited, collected) in [
+            (
+                "usage_analytics::scheduler::tests::real_timer_wakes_during_active_work_and_stops_at_scope_end",
+                "scheduler-timer-started",
+                "scheduler-timer-exited",
+                "scheduler-timer-collected",
+            ),
+            (
+                "usage_analytics::scheduler::tests::real_process_cancellation_stops_the_production_scoped_timer",
+                "scheduler-cancel-started",
+                "scheduler-cancel-exited",
+                "scheduler-cancel-collected",
+            ),
         ] {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", name, "--test-threads=1", "--nocapture"])
-                .output()
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
                 .unwrap();
+            eprintln!("generated-usage-custody stage={started}");
+            let mut stdout = child.stdout.take().unwrap();
+            let mut stderr = child.stderr.take().unwrap();
+            let stdout_reader = std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                stdout.read_to_end(&mut bytes).unwrap();
+                bytes
+            });
+            let stderr_reader = std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                stderr.read_to_end(&mut bytes).unwrap();
+                bytes
+            });
+            let status = child.wait().unwrap();
+            eprintln!("generated-usage-custody stage={exited}");
+            let output = std::process::Output {
+                status,
+                stdout: stdout_reader.join().unwrap(),
+                stderr: stderr_reader.join().unwrap(),
+            };
+            eprintln!("generated-usage-custody stage={collected}");
             assert!(
                 output.status.success(),
                 "generated scheduler proof failed: {}\n{}",
@@ -194,6 +228,7 @@ mod generated_usage_custody_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn generated_usage_explicit_upload_preserves_independent_local_history() {
+        eprintln!("generated-usage-custody stage=entered");
         assert_eq!(
             std::env::var("CARGO_AI_DISABLE_KEYCHAIN").as_deref(),
             Ok("1")
@@ -235,7 +270,9 @@ mod generated_usage_custody_tests {
         let _endpoint = Endpoint(cloud::TEST_ENDPOINT.with(|saved| saved.replace(Some(endpoint))));
 
         cloud::scheduler::scope(record_run()).await;
+        eprintln!("generated-usage-custody stage=local-recording-complete");
         generated_timer_proof();
+        eprintln!("generated-usage-custody stage=scheduler-proof-complete");
         assert_no_request(&observer);
         let initial_raw = raw(&db);
         assert!(initial_raw.len() >= 2);
@@ -291,7 +328,9 @@ mod generated_usage_custody_tests {
             respond(&mut next, acknowledgment(&next_request));
             (first_ids.len(), next_ids.len())
         });
+        eprintln!("generated-usage-custody stage=first-sync-started");
         assert!(cloud::sync().await.is_err());
+        eprintln!("generated-usage-custody stage=first-sync-complete");
         assert_eq!(raw(&db), initial_raw);
         assert_eq!(cloud::local_status().unwrap()["pending"], initial_raw.len());
         assert_eq!(cloud::local_status().unwrap()["unknown_batches"], 1);
@@ -307,8 +346,11 @@ mod generated_usage_custody_tests {
         late_event(&db, 100, 3_600_000);
         let before_ack = raw(&db);
         assert!(before_ack.len() > initial_raw.len());
+        eprintln!("generated-usage-custody stage=retry-sync-started");
         let result = cloud::sync().await.unwrap();
+        eprintln!("generated-usage-custody stage=retry-sync-complete");
         let (first_count, next_count) = server.join().unwrap();
+        eprintln!("generated-usage-custody stage=server-joined");
         assert_eq!(result["acknowledged_events"], first_count + next_count);
         assert_eq!(result["processing_status"], "not_observed");
         assert_eq!(cloud::local_status().unwrap()["uploaded"], before_ack.len());
@@ -351,6 +393,7 @@ mod generated_usage_custody_tests {
                 >= 1
         );
         assert_no_request(&observer);
+        eprintln!("generated-usage-custody stage=retention-complete");
         eprintln!(
             "Generated explicit V2 upload: exact lost-response replay, {} acknowledged events, open-hour/earlier-hour gaps, raw ACK preservation, unsent rolling expiry, and real scheduler wake/cancel passed",
             before_ack.len()

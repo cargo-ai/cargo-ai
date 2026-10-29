@@ -20,7 +20,7 @@ mod definition_validation;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -2093,17 +2093,108 @@ fn generated_usage_custody_isolated_and_deterministic() {
     generated_usage_custody_case(&Fixture::new());
 }
 
+fn custody_command_output(command: &mut Command, label: &'static str) -> Output {
+    let started = Instant::now();
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("custody subprocess should start");
+    let pid = child.id();
+    eprintln!("generated-provider {label}: started pid={pid}");
+    let mut stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let stdout_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stderr);
+        let mut bytes = Vec::new();
+        let mut line = Vec::new();
+        let mut compiling = false;
+        loop {
+            line.clear();
+            if reader.read_until(b'\n', &mut line).unwrap() == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&line);
+            let text = String::from_utf8_lossy(&line);
+            let text = text.trim();
+            // Emit fixed classifications only; retain complete diagnostics for
+            // the existing warning and failure assertions after collection.
+            let progress = if text.starts_with("Compiling ") && !compiling {
+                compiling = true;
+                Some("compiling")
+            } else if text.starts_with("Finished ") {
+                Some("build-finished")
+            } else if text.starts_with("Running unittests ") {
+                Some("test-running")
+            } else {
+                text.strip_prefix("generated-usage-custody stage=")
+                    .filter(|stage| {
+                        matches!(
+                            *stage,
+                            "entered"
+                                | "local-recording-complete"
+                                | "scheduler-timer-started"
+                                | "scheduler-timer-exited"
+                                | "scheduler-timer-collected"
+                                | "scheduler-cancel-started"
+                                | "scheduler-cancel-exited"
+                                | "scheduler-cancel-collected"
+                                | "scheduler-proof-complete"
+                                | "first-sync-started"
+                                | "first-sync-complete"
+                                | "retry-sync-started"
+                                | "retry-sync-complete"
+                                | "server-joined"
+                                | "retention-complete"
+                        )
+                    })
+            };
+            if let Some(progress) = progress {
+                eprintln!(
+                    "generated-provider {label}: progress={progress} pid={pid} elapsed={:.2}s",
+                    started.elapsed().as_secs_f64()
+                );
+            }
+        }
+        bytes
+    });
+    let status = child.wait().expect("custody subprocess should exit");
+    eprintln!(
+        "generated-provider {label}: exited pid={pid} success={} elapsed={:.2}s; collecting pipes",
+        status.success(),
+        started.elapsed().as_secs_f64()
+    );
+    let stdout = stdout_reader.join().expect("custody stdout should finish");
+    let stderr = stderr_reader.join().expect("custody stderr should finish");
+    eprintln!("generated-provider {label}: pipes-collected pid={pid}");
+    Output {
+        status,
+        stdout,
+        stderr,
+    }
+}
+
 fn generated_usage_custody_case(fixture: &Fixture) {
     let name = "usage_custody_smoke";
-    let hatch = fixture
-        .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
-        .args(["--no-update-check", "hatch", name, "--config"])
-        .arg(&fixture.definition)
-        .arg("--output-dir")
-        .arg(fixture.root.join("dist"))
-        .args(["--force", "--keep-project"])
-        .output()
-        .unwrap();
+    eprintln!("generated-provider usage-custody: hatch-started");
+    let hatch = custody_command_output(
+        fixture
+            .isolated_command(env!("CARGO_BIN_EXE_cargo-ai"))
+            .env("CARGO_TERM_COLOR", "never")
+            .args(["--no-update-check", "hatch", name, "--config"])
+            .arg(&fixture.definition)
+            .arg("--output-dir")
+            .arg(fixture.root.join("dist"))
+            .args(["--force", "--keep-project"]),
+        "usage-custody-hatch",
+    );
+    eprintln!("generated-provider usage-custody: hatch-complete");
     assert_warning_free_build(&hatch, "usage upload hatch");
     assert!(
         hatch.status.success(),
@@ -2114,6 +2205,7 @@ fn generated_usage_custody_case(fixture: &Fixture) {
     let main = workspace.join("src/main.rs");
     let source = fs::read_to_string(&main).unwrap();
     let production_main_sha256 = Sha256::digest(source.as_bytes());
+    eprintln!("generated-provider usage-custody: fixture-append-started");
     fs::write(
         &main,
         format!(
@@ -2129,30 +2221,34 @@ fn generated_usage_custody_case(fixture: &Fixture) {
     .unwrap();
     let target =
         provider_cache::CacheIdentity::current(Path::new(env!("CARGO_BIN_EXE_cargo-ai"))).target;
-    let output = fixture
-        .isolated_command("cargo")
-        .current_dir(&workspace)
-        .env("CARGO_TERM_COLOR", "never")
-        .env("CARGO_AI_USAGE_TRACKING", "on")
-        .env_remove("CARGO_AI_USAGE_ROOT_RUN_ID")
-        .env_remove("CARGO_AI_USAGE_PARENT_AGENT_RUN_ID")
-        .env_remove("CARGO_AI_USAGE_LAUNCHED_BY_TYPE")
-        .env_remove("CARGO_AI_USAGE_LAUNCHED_BY_ACTION")
-        .env_remove("CARGO_AI_USAGE_LAUNCHED_BY_TOOL")
-        .env_remove("CARGO_AI_USAGE_LAUNCHED_BY_STEP_INDEX")
-        .args([
-            "test",
-            "--locked",
-            "--release",
-            "--target",
-            &target,
-            "generated_usage_explicit_upload_preserves_independent_local_history",
-            "--",
-            "--test-threads=1",
-            "--nocapture",
-        ])
-        .output()
-        .unwrap();
+    eprintln!("generated-provider usage-custody: fixture-prepared");
+    eprintln!("generated-provider usage-custody: generated-cargo-started");
+    let output = custody_command_output(
+        fixture
+            .isolated_command("cargo")
+            .current_dir(&workspace)
+            .env("CARGO_TERM_COLOR", "never")
+            .env("CARGO_AI_USAGE_TRACKING", "on")
+            .env_remove("CARGO_AI_USAGE_ROOT_RUN_ID")
+            .env_remove("CARGO_AI_USAGE_PARENT_AGENT_RUN_ID")
+            .env_remove("CARGO_AI_USAGE_LAUNCHED_BY_TYPE")
+            .env_remove("CARGO_AI_USAGE_LAUNCHED_BY_ACTION")
+            .env_remove("CARGO_AI_USAGE_LAUNCHED_BY_TOOL")
+            .env_remove("CARGO_AI_USAGE_LAUNCHED_BY_STEP_INDEX")
+            .args([
+                "test",
+                "--locked",
+                "--release",
+                "--target",
+                &target,
+                "generated_usage_explicit_upload_preserves_independent_local_history",
+                "--",
+                "--test-threads=1",
+                "--nocapture",
+            ]),
+        "usage-custody-test",
+    );
+    eprintln!("generated-provider usage-custody: generated-cargo-complete");
     assert_warning_free_build(&output, "emitted usage upload tests");
     assert!(
         output.status.success(),
