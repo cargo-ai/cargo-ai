@@ -942,4 +942,147 @@ mod integration_tests {
         assert_eq!(status["enabled"], false);
         cleared.assert_async().await;
     }
+    #[tokio::test]
+    async fn slow_receipt_defers_exact_payload_once_then_unknown_sync_requires_receipt() {
+        let mut server = Server::new_async().await;
+        let _home = Home::new(format!("{}/account", server.url()), true);
+        enable(&mut server, "00000000-0000-4000-8000-000000000001").await;
+        append();
+        let lost = server
+            .mock("POST", "/account")
+            .match_body(matcher("sync"))
+            .with_status(500)
+            .with_body("unknown")
+            .expect(1)
+            .create_async()
+            .await;
+        assert!(cloud::sync().await.is_err());
+        lost.assert_async().await;
+        lost.remove_async().await;
+        let db = crate::usage_store::open_database(false).unwrap().unwrap();
+        let text: String = db
+            .query_row("SELECT request_json FROM usage_cloud_batches", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let retained_response = retained(Request::parse(&text).unwrap());
+        let mut pending = retained_response.clone();
+        pending.as_object_mut().unwrap().remove("receipt");
+        pending["custody"] = json!("pending");
+        pending["payload_required"] = json!(true);
+        let slow_receipt = server
+            .mock("POST", "/account")
+            .match_body(matcher("receipt"))
+            .with_body_from_request(move |_| {
+                std::thread::sleep(std::time::Duration::from_millis(5100));
+                response(pending.clone()).into_bytes()
+            })
+            .expect(1)
+            .create_async()
+            .await;
+        let forbidden_sync = server
+            .mock("POST", "/account")
+            .match_body(matcher("sync"))
+            .expect(0)
+            .create_async()
+            .await;
+        let before = std::time::Instant::now();
+        let deferred = cloud::sync().await.unwrap();
+        assert!(before.elapsed() >= std::time::Duration::from_millis(5100));
+        assert_eq!(deferred["custody"], "pending");
+        assert_eq!(deferred["batches"], 1);
+        let (attempts, hint): (i64, Option<String>) = db
+            .query_row(
+                "SELECT attempts,resend_hint_json FROM usage_cloud_batches",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempts, 1);
+        assert!(hint.is_some());
+        assert_eq!(cloud::local_status().unwrap()["retained"], 0);
+        assert_eq!(cloud::local_status().unwrap()["pending"], 1);
+        let (next_due, failures): (i64, i64) = db
+            .query_row(
+                "SELECT next_due_ms,failures FROM usage_cloud_schedule",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(failures, 2);
+        assert!(next_due <= cloud::now_ms() + 60_000);
+        slow_receipt.assert_async().await;
+        forbidden_sync.assert_async().await;
+        slow_receipt.remove_async().await;
+        forbidden_sync.remove_async().await;
+
+        // This is a new bounded operation: the hint permits exactly one Sync and
+        // cannot survive that request's unknown outcome.
+        let forbidden_receipt = server
+            .mock("POST", "/account")
+            .match_body(matcher("receipt"))
+            .expect(0)
+            .create_async()
+            .await;
+        let exact = text.clone();
+        let unknown_sync = server
+            .mock("POST", "/account")
+            .match_body(matcher("sync"))
+            .with_status(500)
+            .with_body_from_request(move |request| {
+                assert!(std::str::from_utf8(request.body().unwrap())
+                    .unwrap()
+                    .contains(&exact));
+                b"unknown".to_vec()
+            })
+            .expect(1)
+            .create_async()
+            .await;
+        assert!(cloud::sync().await.is_err());
+        let (attempts, hint, after): (i64, Option<String>, String) = db
+            .query_row(
+                "SELECT attempts,resend_hint_json,request_json FROM usage_cloud_batches",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(hint, None);
+        assert_eq!(after, text);
+        assert_eq!(cloud::local_status().unwrap()["pending"], 1);
+        assert_eq!(cloud::local_status().unwrap()["retained"], 0);
+        unknown_sync.assert_async().await;
+        forbidden_receipt.assert_async().await;
+        unknown_sync.remove_async().await;
+        forbidden_receipt.remove_async().await;
+
+        let recovery = server
+            .mock("POST", "/account")
+            .match_body(matcher("receipt"))
+            .with_body(response(retained_response))
+            .expect(1)
+            .create_async()
+            .await;
+        let forbidden_sync = server
+            .mock("POST", "/account")
+            .match_body(matcher("sync"))
+            .expect(0)
+            .create_async()
+            .await;
+        let recovered = cloud::sync().await.unwrap();
+        assert_eq!(recovered["recovered"], true);
+        assert_eq!(cloud::local_status().unwrap()["retained"], 1);
+        assert_eq!(cloud::local_status().unwrap()["pending"], 0);
+        let (attempts, after): (i64, String) = db
+            .query_row(
+                "SELECT attempts,request_json FROM usage_cloud_batches",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(after, text);
+        recovery.assert_async().await;
+        forbidden_sync.assert_async().await;
+    }
 }

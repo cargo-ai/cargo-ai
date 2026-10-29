@@ -98,7 +98,7 @@ pub fn initialize(db: &mut Connection) -> Result<(), String> {
         request_json TEXT NOT NULL CHECK(length(CAST(request_json AS BLOB))<262144),ordered_membership_sha256 TEXT NOT NULL,
         sealed INTEGER NOT NULL CHECK(sealed IN(0,1)),attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
         outcome TEXT NOT NULL DEFAULT 'never_submitted' CHECK(outcome IN('never_submitted','unknown','buffered','terminal_unretained','retained')),
-        admission_json TEXT,receipt_json TEXT,readmitted_from TEXT,
+        admission_json TEXT,receipt_json TEXT,readmitted_from TEXT,resend_hint_json TEXT,
         PRIMARY KEY(binding,source_home_id,data_generation,batch_id),
         FOREIGN KEY(binding,source_home_id,data_generation) REFERENCES usage_cloud_state(binding,source_home_id,data_generation));
     CREATE TABLE IF NOT EXISTS usage_cloud_batch_members(
@@ -117,6 +117,11 @@ pub fn initialize(db: &mut Connection) -> Result<(), String> {
     let has_clear: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage_cloud_state') WHERE name='clear_intent_json')", [], |row| row.get(0)).map_err(failed)?;
     if !has_clear {
         tx.execute_batch("ALTER TABLE usage_cloud_state ADD COLUMN clear_intent_json TEXT;")
+            .map_err(failed)?;
+    }
+    let has_hint: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage_cloud_batches') WHERE name='resend_hint_json')", [], |row| row.get(0)).map_err(failed)?;
+    if !has_hint {
+        tx.execute_batch("ALTER TABLE usage_cloud_batches ADD COLUMN resend_hint_json TEXT;")
             .map_err(failed)?;
     }
     // The unreleased optional metadata upgrade preserves frozen request bytes.
@@ -244,6 +249,7 @@ pub fn enable(
         }
     }
     let boundary = high(&tx)?;
+    invalidate_payload_required(&tx, source)?;
     tx.execute("INSERT INTO usage_cloud_state(binding,source_home_id,data_generation,enabled,lifecycle_epoch,consent_interval) VALUES(?1,?2,?3,1,?4,?5) ON CONFLICT(binding,source_home_id,data_generation) DO UPDATE SET enabled=1,lifecycle_epoch=?4,consent_interval=?5",params![b,h,g,provenance.lifecycle_epoch.get() as i64,provenance.consent_interval.get() as i64]).map_err(failed)?;
     tx.execute(
         "INSERT INTO usage_cloud_windows VALUES(?1,?2,?3,?4,?5,?6,0,?7,NULL,?7)",
@@ -269,6 +275,7 @@ pub fn disable(db: &mut Connection, source: &Source) -> Result<(), String> {
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;
     let (b, h, g) = key(source);
+    invalidate_payload_required(&tx, source)?;
     let boundary = high(&tx)?;
     tx.execute("UPDATE usage_cloud_windows SET end_sequence=?4 WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND end_sequence IS NULL",params![b,h,g,boundary]).map_err(failed)?;
     tx.execute("UPDATE usage_cloud_state SET enabled=0 WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3",params![b,h,g]).map_err(failed)?;
@@ -423,6 +430,7 @@ pub fn begin_clear(db: &mut Connection, request: &Request) -> Result<(), String>
         return Err(invalid());
     }
     let (b, h, g) = key(source);
+    invalidate_payload_required(&tx, source)?;
     let (cleared, prior):(bool,Option<String>)=tx.query_row("SELECT cleared,clear_intent_json FROM usage_cloud_state WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3",params![b,h,g],|row|Ok((row.get(0)?,row.get(1)?))).map_err(failed)?;
     if cleared {
         return Err("Usage cloud generation was already cleared".into());
@@ -468,6 +476,7 @@ pub fn mark_cleared(db: &mut Connection, source: &Source) -> Result<(), String> 
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;
     let (b, h, g) = key(source);
+    invalidate_payload_required(&tx, source)?;
     let boundary = high(&tx)?;
     let changed=tx.execute("UPDATE usage_cloud_state SET enabled=0,cleared=1 WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3",params![b,h,g]).map_err(failed)?;
     if changed != 1 {
@@ -491,6 +500,8 @@ pub fn reconcile_generation(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;
     let boundary = high(&tx)?;
+    tx.execute("UPDATE usage_cloud_batches SET resend_hint_json=NULL WHERE binding=?1 AND data_generation<?2",
+        params![binding.as_str(), generation.get() as i64]).map_err(failed)?;
     tx.execute(
         "UPDATE usage_cloud_state SET enabled=0,cleared=1 WHERE binding=?1 AND data_generation<?2",
         params![binding.as_str(), generation.get() as i64],
@@ -865,6 +876,120 @@ pub fn readmit_batch(
     Ok(next)
 }
 
+// Active queue operations lazily upgrade metadata for already-enabled Homes.
+fn ensure_resend_hint(db: &Connection) -> Result<(), String> {
+    let present: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage_cloud_batches') WHERE name='resend_hint_json')", [], |row| row.get(0)).map_err(failed)?;
+    if !present {
+        db.execute_batch("ALTER TABLE usage_cloud_batches ADD COLUMN resend_hint_json TEXT;")
+            .map_err(failed)?;
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResendHint {
+    source: Source,
+    provenance: Provenance,
+    batch_id: CanonicalUuid,
+    request_sha256: Sha256Hash,
+    attempts: i64,
+}
+
+/// This scheduling decision is armed only by a verified authenticated directive.
+/// It carries no provider token or permission to bypass current server checks.
+pub fn defer_payload_required(
+    db: &mut Connection,
+    lease: &Lease,
+    batch_id: &CanonicalUuid,
+    admission: &AdmissionCommitment,
+    now: i64,
+) -> Result<(), String> {
+    ensure_resend_hint(db)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(failed)?;
+    admission_at(&tx, lease, batch_id, admission, now, false)?;
+    let batch = load_batch(&tx, &lease.source, batch_id)?;
+    authorized(&tx, &lease.source, &batch.provenance)?;
+    let (b, h, g) = key(&lease.source);
+    let attempts: i64 = tx.query_row("SELECT attempts FROM usage_cloud_batches WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND batch_id=?4 AND outcome!='retained'",
+        params![b,h,g,batch_id.as_str()], |row| row.get(0)).map_err(failed)?;
+    if attempts <= 0 {
+        return Err(invalid());
+    }
+    let hint = ResendHint {
+        source: batch.source.clone(),
+        provenance: batch.provenance.clone(),
+        batch_id: batch.id.clone(),
+        request_sha256: Sha256Hash::of(batch.request_json.as_bytes()),
+        attempts,
+    };
+    let text = serde_json::to_string(&hint).map_err(|_| invalid())?;
+    let changed = tx.execute("UPDATE usage_cloud_batches SET resend_hint_json=?5 WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND batch_id=?4",
+        params![b,h,g,batch_id.as_str(),text]).map_err(failed)?;
+    if changed != 1 {
+        return Err(invalid());
+    }
+    tx.commit().map_err(failed)
+}
+
+/// Atomically consumes a matching one-shot decision with the next unknown attempt.
+/// A crash or lost response after consumption always returns to Receipt recovery.
+pub fn consume_payload_required(
+    db: &mut Connection,
+    lease: &Lease,
+    batch_id: &CanonicalUuid,
+    now: i64,
+) -> Result<bool, String> {
+    ensure_resend_hint(db)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(failed)?;
+    check_lease(&tx, lease, now)?;
+    let batch = load_batch(&tx, &lease.source, batch_id)?;
+    authorized(&tx, &lease.source, &batch.provenance)?;
+    let (b, h, g) = key(&lease.source);
+    let (text,attempts,outcome): (Option<String>,i64,String) = tx.query_row(
+        "SELECT resend_hint_json,attempts,outcome FROM usage_cloud_batches WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND batch_id=?4",
+        params![b,h,g,batch_id.as_str()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(failed)?;
+    let hint = text
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<ResendHint>(value).ok());
+    let matches = hint.is_some_and(|hint| {
+        hint.source == batch.source
+            && hint.provenance == batch.provenance
+            && hint.batch_id == batch.id
+            && hint.request_sha256 == Sha256Hash::of(batch.request_json.as_bytes())
+            && hint.attempts == attempts
+            && attempts > 0
+            && outcome != "retained"
+    });
+    let quarantined: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM usage_cloud_batch_members m JOIN usage_cloud_queue q USING(binding,source_home_id,data_generation,event_id) WHERE m.binding=?1 AND m.source_home_id=?2 AND m.data_generation=?3 AND m.batch_id=?4 AND q.quarantined=1)",
+        params![b,h,g,batch_id.as_str()], |row| row.get(0)).map_err(failed)?;
+    if !matches || quarantined {
+        tx.execute("UPDATE usage_cloud_batches SET resend_hint_json=NULL WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND batch_id=?4",
+            params![b,h,g,batch_id.as_str()]).map_err(failed)?;
+        tx.commit().map_err(failed)?;
+        return Ok(false);
+    }
+    let changed = tx.execute("UPDATE usage_cloud_batches SET resend_hint_json=NULL,attempts=attempts+1,outcome='unknown' WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND batch_id=?4 AND outcome!='retained'",
+        params![b,h,g,batch_id.as_str()]).map_err(failed)?;
+    if changed != 1 {
+        return Err(invalid());
+    }
+    tx.commit().map_err(failed)?;
+    Ok(true)
+}
+
+fn invalidate_payload_required(db: &Connection, source: &Source) -> Result<(), String> {
+    ensure_resend_hint(db)?;
+    let (b, h, g) = key(source);
+    db.execute("UPDATE usage_cloud_batches SET resend_hint_json=NULL WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3",
+        params![b,h,g]).map_err(failed)?;
+    Ok(())
+}
+
 /// Must commit before the first network dispatch. Unknown remains retryable and
 /// is never converted to success by timeout, lease expiry or elapsed time.
 pub fn begin_attempt(
@@ -873,6 +998,7 @@ pub fn begin_attempt(
     batch_id: &CanonicalUuid,
     now: i64,
 ) -> Result<(), String> {
+    ensure_resend_hint(db)?;
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;
@@ -884,7 +1010,7 @@ pub fn begin_attempt(
     if quarantined {
         return Err("Usage cloud batch includes quarantined records".into());
     }
-    let changed=tx.execute("UPDATE usage_cloud_batches SET attempts=attempts+1,outcome=CASE WHEN outcome='retained' THEN 'retained' ELSE 'unknown' END WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND batch_id=?4 AND outcome!='retained'",params![b,h,g,batch_id.as_str()]).map_err(failed)?;
+    let changed=tx.execute("UPDATE usage_cloud_batches SET resend_hint_json=NULL,attempts=attempts+1,outcome=CASE WHEN outcome='retained' THEN 'retained' ELSE 'unknown' END WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND batch_id=?4 AND outcome!='retained'",params![b,h,g,batch_id.as_str()]).map_err(failed)?;
     if changed != 1 {
         return Err(invalid());
     }

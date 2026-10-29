@@ -223,7 +223,11 @@ pub(crate) async fn sync() -> Result<Value, String> {
                 .to_string()
         })?
 }
+fn insufficient_payload_budget(elapsed: Duration) -> bool {
+    DEADLINE.saturating_sub(elapsed) < Duration::from_secs(10)
+}
 async fn sync_once() -> Result<Value, String> {
+    let started = std::time::Instant::now();
     let Some(selection) = selected()? else {
         return local_status();
     };
@@ -236,6 +240,7 @@ async fn sync_once() -> Result<Value, String> {
     else {
         return Ok(json!({"schema_version":1,"busy":true,"local":local_status()?}));
     };
+    let mut deferred = false;
     let result=async {
         queue::capture(&mut db,lease.source(),project)?;
         let Some(batch)=queue::prepare_batch(&mut db,&lease,now_ms())? else{let local=local_status()?;return Ok(json!({"schema_version":1,"batches":0,"blocked":local["pending"].as_i64().unwrap_or(0)>0||local["origin_unverified"].as_i64().unwrap_or(0)>0,"local":local}))};
@@ -244,7 +249,8 @@ async fn sync_once() -> Result<Value, String> {
         let mut client=transport::Transport::new(Duration::from_millis(remaining as u64))?;
         // Recover an uncertain prior admission before deciding whether to append again.
         let attempts:i64=db.query_row("SELECT attempts FROM usage_cloud_batches WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND batch_id=?4",params![selection.source.account_binding.as_str(),selection.source.source_home_id.as_str(),selection.source.data_generation.get() as i64,batch.id().as_str()],|row|row.get(0)).map_err(db_error)?;
-        if attempts>0 {
+        let attempt_started=queue::consume_payload_required(&mut db,&lease,batch.id(),now_ms())?;
+        if attempts>0 && !attempt_started {
             let recovered=client.call(&Request::Receipt{protocol_version:Version,source:selection.source.clone(),batch_id:batch.id().clone()}).await?;
             if let Some(admission)=recovered.get("admission").filter(|value|!value.is_null()){
                 let admission=AdmissionCommitment::parse(&admission.to_string()).map_err(encode)?;
@@ -259,10 +265,15 @@ async fn sync_once() -> Result<Value, String> {
                 if recovered["payload_required"]!=true || recovered["custody"]!="pending" {
                     return Ok(json!({"schema_version":1,"batches":1,"custody":"pending","local":local_status()?}));
                 }
+                if insufficient_payload_budget(started.elapsed()) {
+                    queue::defer_payload_required(&mut db,&lease,batch.id(),&admission,now_ms())?;
+                    deferred=true;
+                    return Ok(json!({"schema_version":1,"batches":1,"custody":"pending","local":local_status()?}));
+                }
             }
             if recovered.get("admission").filter(|value|!value.is_null()).is_none() && recovered["custody"]!="not_found" {return Err("Usage cloud admission remains uncertain; exact batch preserved without resubmission".into());}
         }
-        queue::begin_attempt(&mut db,&lease,batch.id(),now_ms())?;
+        if !attempt_started {queue::begin_attempt(&mut db,&lease,batch.id(),now_ms())?;}
         let body=match client.call_exact(batch.request_json()).await{Ok(body)=>body,Err(error)=>{
             if client.terminal_conflict(){for member in batch.members(){queue::quarantine_event(&mut db,batch.source(),&member.event_id)?;}}
             return Err(error);
@@ -279,7 +290,7 @@ async fn sync_once() -> Result<Value, String> {
         }
         Ok(json!({"schema_version":1,"batches":1,"ordered_membership_sha256":batch.membership(),"retained_events":retained,"custody":body["custody"],"disposition":body["disposition"],"local":local_status()?}))
     }.await;
-    let _ = queue::schedule_next(&mut db, &lease, now_ms(), result.is_ok());
+    let _ = queue::schedule_next(&mut db, &lease, now_ms(), result.is_ok() && !deferred);
     let _ = queue::release_lease(&mut db, &lease, now_ms());
     result
 }

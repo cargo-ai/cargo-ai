@@ -848,3 +848,169 @@ fn generation_reconciliation_invalidates_copies_left_under_older_unselected_sour
         1
     );
 }
+
+#[test]
+fn deferred_payload_hint_survives_reinitialization_and_is_consumed_with_attempt() {
+    let (mut db, lease, batch) = prepared();
+    begin_attempt(&mut db, &lease, batch.id(), 100).unwrap();
+    let original = batch.request_json().to_owned();
+    defer_payload_required(&mut db, &lease, batch.id(), &commitment(&batch), 101).unwrap();
+    initialize(&mut db).unwrap();
+    release_lease(&mut db, &lease, 102).unwrap();
+    let fresh = acquire_lease(&mut db, &source(), 103, MAX_LEASE_MS)
+        .unwrap()
+        .unwrap();
+    assert!(consume_payload_required(&mut db, &fresh, batch.id(), 104).unwrap());
+    assert!(!consume_payload_required(&mut db, &fresh, batch.id(), 105).unwrap());
+    let (attempts, hint, text): (i64, Option<String>, String) = db
+        .query_row(
+            "SELECT attempts,resend_hint_json,request_json FROM usage_cloud_batches",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(attempts, 2);
+    assert_eq!(hint, None);
+    assert_eq!(text, original);
+    assert_eq!(status(&db, &source()).unwrap().retained, 0);
+    assert!(protected_event(&db, &batch.members()[0].event_id, 1).unwrap());
+}
+
+#[test]
+fn missing_corrupt_mismatched_and_used_hints_require_receipt() {
+    let (mut db, lease, batch) = prepared();
+    assert!(!consume_payload_required(&mut db, &lease, batch.id(), 100).unwrap());
+    begin_attempt(&mut db, &lease, batch.id(), 101).unwrap();
+    for field in [
+        "source",
+        "provenance",
+        "batch_id",
+        "request_sha256",
+        "attempts",
+        "unknown",
+    ] {
+        defer_payload_required(&mut db, &lease, batch.id(), &commitment(&batch), 102).unwrap();
+        let text: String = db
+            .query_row(
+                "SELECT resend_hint_json FROM usage_cloud_batches",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut value: Value = serde_json::from_str(&text).unwrap();
+        value[field] = match field {
+            "source" => {
+                let mut wrong = source();
+                wrong.source_home_id = uuid(99);
+                json!(wrong)
+            }
+            "provenance" => json!(provenance(2)),
+            "batch_id" => json!(uuid(999)),
+            "request_sha256" => json!(Sha256Hash::of(b"wrong frozen request")),
+            "attempts" => json!(999),
+            _ => json!(null),
+        };
+        db.execute(
+            "UPDATE usage_cloud_batches SET resend_hint_json=?1",
+            [value.to_string()],
+        )
+        .unwrap();
+        assert!(
+            !consume_payload_required(&mut db, &lease, batch.id(), 103).unwrap(),
+            "{field}"
+        );
+    }
+    defer_payload_required(&mut db, &lease, batch.id(), &commitment(&batch), 104).unwrap();
+    begin_attempt(&mut db, &lease, batch.id(), 105).unwrap();
+    assert!(!consume_payload_required(&mut db, &lease, batch.id(), 106).unwrap());
+    assert!(super::insufficient_payload_budget(
+        std::time::Duration::from_millis(5001)
+    ));
+    assert!(!super::insufficient_payload_budget(
+        std::time::Duration::from_millis(5000)
+    ));
+}
+
+#[test]
+fn deferred_payload_hint_cannot_cross_consent_clear_quarantine_or_lease_fences() {
+    for action in ["disable", "clear", "quarantine", "lease"] {
+        let (mut db, lease, batch) = prepared();
+        begin_attempt(&mut db, &lease, batch.id(), 100).unwrap();
+        defer_payload_required(&mut db, &lease, batch.id(), &commitment(&batch), 101).unwrap();
+        match action {
+            "disable" => {
+                disable(&mut db, &source()).unwrap();
+            }
+            "clear" => {
+                mark_cleared(&mut db, &source()).unwrap();
+            }
+            "quarantine" => {
+                quarantine_event(&mut db, &source(), &batch.members()[0].event_id).unwrap();
+            }
+            "lease" => {
+                release_lease(&mut db, &lease, 102).unwrap();
+                let _fresh = acquire_lease(&mut db, &source(), 103, MAX_LEASE_MS)
+                    .unwrap()
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let result = consume_payload_required(&mut db, &lease, batch.id(), 104);
+        assert!(result.is_err() || result == Ok(false), "{action}");
+    }
+}
+
+#[test]
+fn legacy_payload_hint_upgrade_defaults_to_receipt_and_deferral_uses_retry_schedule() {
+    let (mut db, lease, batch) = prepared();
+    db.execute_batch("ALTER TABLE usage_cloud_batches DROP COLUMN resend_hint_json;")
+        .unwrap();
+    assert!(!consume_payload_required(&mut db, &lease, batch.id(), 100).unwrap());
+    initialize(&mut db).unwrap();
+    assert_eq!(schedule_next(&mut db, &lease, 100, false).unwrap(), 30_100);
+}
+
+#[test]
+fn old_writer_attempt_increment_invalidates_hint_without_knowing_new_column() {
+    let (mut db, lease, batch) = prepared();
+    begin_attempt(&mut db, &lease, batch.id(), 100).unwrap();
+    defer_payload_required(&mut db, &lease, batch.id(), &commitment(&batch), 101).unwrap();
+    db.execute(
+        "UPDATE usage_cloud_batches SET attempts=attempts+1,outcome='unknown'",
+        [],
+    )
+    .unwrap();
+    assert!(!consume_payload_required(&mut db, &lease, batch.id(), 102).unwrap());
+    let (attempts, hint): (i64, Option<String>) = db
+        .query_row(
+            "SELECT attempts,resend_hint_json FROM usage_cloud_batches",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(attempts, 2);
+    assert_eq!(hint, None);
+    assert!(protected_event(&db, &batch.members()[0].event_id, 1).unwrap());
+}
+
+#[test]
+fn hint_survives_database_close_and_reopen_but_not_a_replaced_lease() {
+    let (mut db, lease, batch) = prepared();
+    begin_attempt(&mut db, &lease, batch.id(), 100).unwrap();
+    defer_payload_required(&mut db, &lease, batch.id(), &commitment(&batch), 101).unwrap();
+    release_lease(&mut db, &lease, 102).unwrap();
+    let path = std::env::temp_dir().join(format!("usage-resend-{}.sqlite", uuid::Uuid::new_v4()));
+    db.execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+        .unwrap();
+    drop(db);
+    let mut db = Connection::open(&path).unwrap();
+    db.pragma_update(None, "foreign_keys", true).unwrap();
+    let fresh = acquire_lease(&mut db, &source(), 103, MAX_LEASE_MS)
+        .unwrap()
+        .unwrap();
+    assert!(defer_payload_required(&mut db, &lease, batch.id(), &commitment(&batch), 104).is_err());
+    assert!(consume_payload_required(&mut db, &fresh, batch.id(), 105).unwrap());
+    assert!(!consume_payload_required(&mut db, &fresh, batch.id(), 106).unwrap());
+    drop(db);
+    std::fs::remove_file(path).unwrap();
+}
