@@ -146,9 +146,9 @@ fn future_windows_exclude_disabled_gap_and_history_is_explicit() {
 fn bounded_capture_rolls_back_callback_failure_and_blocks_only_unverified_origins() {
     let mut db = db();
     enable(&mut db, &source(), &provenance(1), 0).unwrap();
-    let restored = insert(&db, 1, true);
-    let valid = insert(&db, 2, false);
-    assert!(capture(&mut db, &source(), |_, _| Err(
+    let valid = insert(&db, 1, false);
+    let restored = insert(&db, 2, true);
+    assert!(capture_progress(&mut db, &source(), |_, _| Err(
         "projection unavailable".into()
     ))
     .is_err());
@@ -158,8 +158,8 @@ fn bounded_capture_rolls_back_callback_failure_and_blocks_only_unverified_origin
     let observed = status(&db, &source()).unwrap();
     assert_eq!(observed.origin_unverified, 1);
     assert_eq!(observed.unscanned, 0);
-    assert!(protected_event(&db, &restored, 1).unwrap());
-    assert!(protected_event(&db, &valid, 2).unwrap());
+    assert!(protected_event(&db, &restored, 2).unwrap());
+    assert!(protected_event(&db, &valid, 1).unwrap());
     assert_eq!(
         db.query_row(
             "SELECT COUNT(*) FROM usage_cloud_queue WHERE event_id=?1",
@@ -169,6 +169,89 @@ fn bounded_capture_rolls_back_callback_failure_and_blocks_only_unverified_origin
         .unwrap(),
         0
     );
+}
+
+#[test]
+fn committed_capture_progress_crosses_zero_added_groups_and_survives_restart() {
+    for restored in [false, true] {
+        let path = std::env::temp_dir().join(format!(
+            "usage-capture-progress-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let mut db = Connection::open(&path).unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON;CREATE TABLE usage_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT UNIQUE NOT NULL,record_json TEXT NOT NULL);CREATE VIEW usage_event_records AS SELECT * FROM usage_events;").unwrap();
+        initialize(&mut db).unwrap();
+        enable(&mut db, &source(), &provenance(1), 0).unwrap();
+        let older = insert(&db, 1, false);
+        let newer = insert(&db, 2, false);
+        for index in 3..=102 {
+            let id = insert(&db, index, restored);
+            if !restored {
+                db.execute(
+                    "UPDATE usage_events SET record_json=json_set(record_json,'$.timestamp','invalid') WHERE event_id=?1",
+                    [id],
+                )
+                .unwrap();
+            }
+        }
+        assert_eq!(
+            capture_progress(&mut db, &source(), |_, _| {
+                panic!("excluded events must not be projected")
+            })
+            .unwrap(),
+            CaptureProgress {
+                examined: 100,
+                added: 0,
+            }
+        );
+        drop(db);
+        let mut db = Connection::open(&path).unwrap();
+        initialize(&mut db).unwrap();
+        let projected = std::cell::RefCell::new(Vec::new());
+        assert_eq!(
+            capture_progress(&mut db, &source(), |db, raw| {
+                projected
+                    .borrow_mut()
+                    .push(raw["event_id"].as_str().unwrap().to_owned());
+                super::project(db, raw)
+            })
+            .unwrap(),
+            CaptureProgress {
+                examined: 2,
+                added: 2,
+            }
+        );
+        assert_eq!(*projected.borrow(), vec![newer, older]);
+        assert_eq!(
+            capture_progress(&mut db, &source(), |_, _| {
+                panic!("committed rows must not be projected again")
+            })
+            .unwrap(),
+            CaptureProgress::default()
+        );
+        // The summarized high boundary must not hide a later open-hour addition.
+        insert(&db, 103, false);
+        assert_eq!(
+            capture_progress(&mut db, &source(), super::project).unwrap(),
+            CaptureProgress {
+                examined: 1,
+                added: 1,
+            }
+        );
+        let observed = status(&db, &source()).unwrap();
+        assert_eq!(observed.unscanned, 0);
+        assert_eq!(observed.pending, 3);
+        assert_eq!(observed.origin_unverified, if restored { 100 } else { 0 });
+        assert_eq!(observed.time_ineligible, if restored { 0 } else { 100 });
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            103
+        );
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 #[test]

@@ -455,18 +455,16 @@ async fn sync_leased(
         if started.elapsed() >= DEADLINE {
             break;
         }
-        // Each capture commits at most 100 rows. Recheck the unscanned count
-        // because invalid clocks and unverified origins also advance progress.
+        // Each capture commits at most 100 examined rows, including persisted
+        // exclusions for invalid clocks and unverified origins.
         let capture_started = Instant::now();
         let capture_budget =
             (DEADLINE.saturating_sub(started.elapsed()) / 3).min(Duration::from_secs(5));
         while capture_started.elapsed() < capture_budget && started.elapsed() < DEADLINE {
-            let before = queue::status(db, lease.source())?.unscanned;
-            if before == 0 || scheduler::canceled() {
+            if scheduler::canceled() {
                 break;
             }
-            queue::capture(db, lease.source(), project)?;
-            if queue::status(db, lease.source())?.unscanned >= before {
+            if queue::capture_progress(db, lease.source(), project)?.examined == 0 {
                 break;
             }
             tokio::task::yield_now().await;

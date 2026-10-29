@@ -722,19 +722,20 @@ fn run(config: &Config) -> Proof<Value> {
         let start = Instant::now();
         let mut passes = 0u64;
         let mut captured = 0u64;
+        let mut examined = 0u64;
         loop {
-            let before = queue::status(&db, &source()).map_err(|_| "capture-status")?;
-            if before.unscanned == 0 {
+            let progress =
+                queue::capture_progress(&mut db, &source(), crate::usage_analytics::project)
+                    .map_err(|_| "production-projection-capture")?;
+            if progress.examined == 0 {
                 break;
             }
-            let added = queue::capture(&mut db, &source(), crate::usage_analytics::project)
-                .map_err(|_| "production-projection-capture")?;
-            captured += added as u64;
+            captured += progress.added as u64;
+            examined += progress.examined as u64;
             passes += 1;
-            let after = queue::status(&db, &source()).map_err(|_| "capture-progress")?;
             check(
-                after.unscanned < before.unscanned || added > 0,
-                "capture-must-advance-across-zero-projection-groups",
+                progress.examined <= 100 && progress.added <= progress.examined,
+                "bounded-capture-progress",
             )?;
             check(
                 passes <= config.expected_events + 1,
@@ -742,7 +743,8 @@ fn run(config: &Config) -> Proof<Value> {
             )?;
         }
         let status = queue::status(&db, &source()).map_err(|_| "capture-final-status")?;
-        let capture = json!({"passes":passes,"bounded_rows_per_capture":100,"captured_projection_events":captured,"origin_unverified":status.origin_unverified,"invalid_time_excluded":status.time_ineligible,"measurement":elapsed(start,&before,&sample())});
+        check(status.unscanned == 0, "capture-complete")?;
+        let capture = json!({"passes":passes,"bounded_rows_per_capture":100,"examined_events":examined,"captured_projection_events":captured,"origin_unverified":status.origin_unverified,"invalid_time_excluded":status.time_ineligible,"measurement":elapsed(start,&before,&sample())});
         db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
             .map_err(|_| "baseline-checkpoint")?;
         drop(db);
@@ -889,6 +891,7 @@ fn synthetic_copy_qualification_preserves_unknown_fields_and_iterates_beyond_one
     let result = run(&config).unwrap();
     assert_eq!(result["original_records"]["events"], 257);
     assert_eq!(result["projection_capture"]["passes"], 3);
+    assert_eq!(result["projection_capture"]["examined_events"], 257);
     for target in result["compression_hypotheses"].as_array().unwrap() {
         assert_eq!(target["eligible_events"], 257);
         assert_eq!(target["raw_preserved_after_ack"], true);

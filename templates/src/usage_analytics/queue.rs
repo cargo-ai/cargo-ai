@@ -312,10 +312,29 @@ pub fn select_history(
     tx.commit().map_err(failed)
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CaptureProgress {
+    pub examined: usize,
+    pub added: usize,
+}
+
+#[cfg(test)]
+pub fn capture<F>(db: &mut Connection, source: &Source, project: F) -> Result<usize, String>
+where
+    F: Fn(&Connection, &Value) -> Result<String, String>,
+{
+    capture_progress(db, source, project).map(|progress| progress.added)
+}
+
 /// Project at most 100 newest events from one consented window. Per-event
 /// membership preserves gaps and open-hour additions across restarts. Callback
-/// failures roll back all selection progress.
-pub fn capture<F>(db: &mut Connection, source: &Source, project: F) -> Result<usize, String>
+/// failures roll back all selection progress. Return progress only after commit;
+/// examined rows include persisted origin and time exclusions.
+pub fn capture_progress<F>(
+    db: &mut Connection,
+    source: &Source,
+    project: F,
+) -> Result<CaptureProgress, String>
 where
     F: Fn(&Connection, &Value) -> Result<String, String>,
 {
@@ -326,7 +345,7 @@ where
     let boundary = high(&tx)?;
     let window:Option<(String,i64,i64,bool)>=tx.query_row("SELECT window_id,start_sequence,COALESCE(end_sequence,?4),historical FROM usage_cloud_windows w WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND EXISTS(SELECT 1 FROM usage_event_records e WHERE e.sequence>w.start_sequence AND e.sequence<=COALESCE(w.end_sequence,?4) AND NOT EXISTS(SELECT 1 FROM usage_cloud_queue q WHERE q.binding=?1 AND q.source_home_id=?2 AND q.data_generation=?3 AND q.event_id=e.event_id) AND NOT EXISTS(SELECT 1 FROM usage_cloud_blocked q WHERE q.binding=?1 AND q.source_home_id=?2 AND q.data_generation=?3 AND q.event_id=e.event_id) AND NOT EXISTS(SELECT 1 FROM usage_cloud_time_excluded q WHERE q.binding=?1 AND q.source_home_id=?2 AND q.data_generation=?3 AND q.event_id=e.event_id)) ORDER BY COALESCE(end_sequence,?4) DESC,window_id LIMIT 1",params![b,h,g,boundary],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(failed)?;
     let Some((window, after, through, _historical)) = window else {
-        return Ok(0);
+        return Ok(CaptureProgress::default());
     };
     let rows = {
         let indexed:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='usage_retention_hours' AND type='table')",[],|r|r.get(0)).map_err(failed)?;
@@ -400,7 +419,10 @@ where
     )
     .map_err(failed)?;
     tx.commit().map_err(failed)?;
-    Ok(added)
+    Ok(CaptureProgress {
+        examined: rows.len(),
+        added,
+    })
 }
 
 /// Legacy custody inspection; explicit rolling retention does not use this gate.
