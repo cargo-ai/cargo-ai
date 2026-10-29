@@ -161,6 +161,7 @@ mod generated_usage_custody_tests {
         event_id
     }
     fn assert_no_request(listener: &TcpListener) {
+        listener.set_nonblocking(true).unwrap();
         assert_eq!(
             listener.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock,
