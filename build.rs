@@ -92,8 +92,24 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
         source: "src/usage_analytics.rs",
     },
     TemplateSource {
+        destination: "src/usage_analytics/custody.rs",
+        source: "src/usage_analytics/custody.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_analytics/events.rs",
+        source: "src/usage_analytics/events.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_analytics/elastic.rs",
+        source: "src/usage_analytics/elastic.rs",
+    },
+    TemplateSource {
         destination: "src/usage_analytics/contract.rs",
         source: "src/usage_analytics/contract.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_analytics/local_queue.rs",
+        source: "src/usage_analytics/local_queue.rs",
     },
     TemplateSource {
         destination: "src/usage_analytics/queue.rs",
@@ -102,6 +118,10 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
     TemplateSource {
         destination: "src/usage_analytics/tests.rs",
         source: "src/usage_analytics/tests.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_analytics/client_tests.rs",
+        source: "src/usage_analytics/client_tests.rs",
     },
     TemplateSource {
         destination: "src/usage_analytics/transport.rs",

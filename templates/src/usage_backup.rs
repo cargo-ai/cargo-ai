@@ -463,6 +463,7 @@ pub(crate) async fn delete_cloud(
 }
 
 /// The independent pipeline shares allowed bytes and opaque mappings, not consent or receipts.
+#[cfg(any(cargo_ai_cli, test))]
 pub(crate) fn analytics_projection(
     db: &rusqlite::Connection,
     event: &Value,

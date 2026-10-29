@@ -147,6 +147,14 @@ Selected backup success requires `backup`, `local`, `effects`, `postconditions_v
 
 Backup failure effects can include `remote`, `local`, `queue`, `settings`, decimal `uploaded_records`, decimal `remote_accepted_records`, batch count, nullable binding/generation, and reconciliation guidance. A later uncertain transmission does not erase earlier acknowledgments. Default status cannot resolve uncertain remote acceptance; use explicit `status --remote` and retained local state as appropriate before retrying.
 
+### Rolling retention and cloud analytics
+
+Cloud and retention leaves use the closed [usage maintenance v2 schema](schemas/usage-maintenance-v2.json). The selected application envelope stays version1; the nested maintenance payload is version2. Negotiate the compiled capability and the remote upload protocol independently. Service availability is not implied by a local capability declaration.
+
+Local status is passive. Rolling policy requires explicit destructive-expiry consent; expired-unsent records and retry copies may be removed, while acknowledged in-window raw history remains local. Cloud sending requires separate consent and only runs through explicit `usage cloud sync --json`. Sync is bounded and sequential, resumes newest eligible events and retained gaps, and discloses partial/unknown progress. `durable_acknowledged` attests buffering only; `processing_status:not_observed` does not certify row or model readiness. Uploaded, pending, time-ineligible and expired-without-acknowledgment counts describe different coverage.
+
+Cloud clear leaves local history and fences the old generation. Replaying retained local history after renewed enable requires the exact explicit history-selection preview. The separately consented backup payloads above retain their existing meanings. See [local retention and cloud commands](usage-cloud.md) for flags and policy behavior.
+
 ## Runtime and model discovery
 
 `run` accepts existing target/input/profile/runtime flags plus selected JSON or NDJSON output. `run --json` still supplies definition input; `--include-result-content` separately opts into private validated root result content on stdout. Successful terminal `data` requires `execution:{completed:true}`, `result`, `artifacts`, `child_instrumentation`, and `effects`. Failed execution retains available runtime-known facts. Result availability is `available` with explicit content or `content_included:false`, or `not_produced`; it is separate from action completion. Artifact metadata reports successful generated image/audio writes as `{kind:"image"|"audio",state:"produced",path,content_included:false}`. Empty artifacts do not establish that an arbitrary program wrote no files. Opaque child execution supplies exit/diagnostic counts, no invented result or telemetry; `child_instrumentation:"unavailable"` discloses this.

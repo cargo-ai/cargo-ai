@@ -8,17 +8,23 @@ fn json_flag(command: Command) -> Command {
 }
 pub(crate) fn cloud_command() -> Command {
     Command::new("cloud")
-        .about("Manage independent cloud analytics custody; disabled by default")
+        .about("Manage explicitly consented cloud analytics; disabled by default")
         .subcommand_required(true)
         .subcommand(json_flag(
             Command::new("status")
                 .arg(Arg::new("remote").long("remote").action(ArgAction::SetTrue)),
         ))
-        .subcommand(json_flag(Command::new("enable")))
-        .subcommand(json_flag(Command::new("disable")))
         .subcommand(json_flag(
-            Command::new("sync").about("Reconcile at most one immutable batch within 15 seconds"),
+            Command::new("enable").arg(
+                Arg::new("replace-environment")
+                    .long("replace-environment")
+                    .value_name("HOME_UUID"),
+            ),
         ))
+        .subcommand(json_flag(Command::new("disable")))
+        .subcommand(json_flag(Command::new("sync").about(
+            "Upload bounded newest-first batches with a 15-second budget",
+        )))
         .subcommand(json_flag(
             Command::new("include-history")
                 .about("Preview older history; confirmation selects without uploading")
@@ -99,7 +105,8 @@ pub(crate) fn retention_command() -> Command {
                 .arg(
                     Arg::new("acknowledge-unselected-loss")
                         .long("acknowledge-unselected-loss")
-                        .action(ArgAction::SetTrue),
+                        .action(ArgAction::SetTrue)
+                        .required_if_eq("enabled", "on"),
                 ),
         ))
 }
@@ -155,7 +162,14 @@ async fn execute(args: &ArgMatches) -> Result<Value, String> {
             json!({"local":cloud::local_status()?,"remote":cloud::remote_status().await?})
         }
         ("cloud", "status") => cloud::local_status()?,
-        ("cloud", "enable") => cloud::enable().await?,
+        ("cloud", "enable") => {
+            cloud::enable(
+                leaf.get_one::<String>("replace-environment")
+                    .map(|text| CanonicalUuid::try_from(text.clone()).map_err(|e| e.to_string()))
+                    .transpose()?,
+            )
+            .await?
+        }
         ("cloud", "disable") => cloud::disable().await?,
         ("cloud", "sync") => cloud::sync().await?,
         ("cloud", "include-history") => cloud::history_selection(
@@ -203,7 +217,7 @@ async fn execute(args: &ArgMatches) -> Result<Value, String> {
         ("retention", "preview") => crate::usage_store::retention::preview(cloud::now_ms())?,
         ("retention", "configure") => {
             crate::usage_store::retention::configure(crate::usage_store::retention::Policy {
-                schema_version: 1,
+                schema_version: 2,
                 days: leaf.get_one::<String>("days").unwrap().parse().unwrap(),
                 enabled: leaf.get_one::<String>("enabled").unwrap() == "on",
                 local_detail_loss_acknowledged: leaf.get_flag("acknowledge-local-detail-loss"),
@@ -217,9 +231,16 @@ async fn execute(args: &ArgMatches) -> Result<Value, String> {
         && result.get("batches").and_then(Value::as_u64).unwrap_or(0) == 0;
     let local_read_only_sync = kind == "cloud"
         && command == "sync"
-        && (result["enabled"] == false || result["busy"] == true);
-    let remote_effect = if !remote || inactive_sync {
+        && (result["enabled"] == false
+            || result["busy"] == true && result["policy_refreshed"] != true);
+    let remote_effect = if !remote {
         Effect::Unapplied
+    } else if inactive_sync {
+        if result["policy_refreshed"] == true {
+            Effect::ReadOnly
+        } else {
+            Effect::Unapplied
+        }
     } else if command == "sync" {
         Effect::Requested
     } else if mutates(kind, command, leaf) {
@@ -227,8 +248,9 @@ async fn execute(args: &ArgMatches) -> Result<Value, String> {
     } else {
         Effect::ReadOnly
     };
+    let postconditions_verified = result["partial"] != true;
     serde_json::to_value(Payload {
-        schema_version: 1,
+        schema_version: 2,
         operation: format!("usage {kind} {command}"),
         result,
         local: cloud::local_status()?,
@@ -240,7 +262,7 @@ async fn execute(args: &ArgMatches) -> Result<Value, String> {
             },
             remote: remote_effect,
         },
-        postconditions_verified: true,
+        postconditions_verified,
     })
     .map_err(|_| "Cannot encode usage result".into())
 }
@@ -248,12 +270,12 @@ pub(crate) async fn run(args: &ArgMatches) -> bool {
     match execute(args).await {
         Ok(value) => {
             println!("{value}");
-            true
+            value["result"]["partial"] != true
         }
         Err(error) => {
             println!(
                 "{}",
-                json!({"schema_version":1,"error":{"kind":"usage_maintenance_failed","message":error},"effects":{"local":"unknown","remote":"unknown"}})
+                json!({"schema_version":2,"error":{"kind":"usage_maintenance_failed","message":error},"effects":{"local":"unknown","remote":"unknown"}})
             );
             false
         }
@@ -262,14 +284,22 @@ pub(crate) async fn run(args: &ArgMatches) -> bool {
 pub(crate) async fn machine_run(
     args: &ArgMatches,
 ) -> Result<Value, crate::commands::machine::Failure> {
-    execute(args).await.map_err(|_|{
+    let value = execute(args).await.map_err(|_|{
         let mutation=selection(args).is_ok_and(|(kind,command,leaf)|mutates(kind,command,leaf));
         let remote=selection(args).is_ok_and(|(kind,command,leaf)|requires_remote(kind,command,leaf));
         crate::commands::machine::Failure::new(if mutation{"operation.partial"}else{"usage.operation_failed"},"Usage maintenance did not complete; inspect preserved local state before retrying.").with_data(json!({"partial":mutation,"observed_local":cloud::local_status().ok(),"effects":Effects{local:if mutation{Effect::Unknown}else{Effect::ReadOnly},remote:if remote{Effect::Unknown}else{Effect::Unapplied}}}))
-    })
+    })?;
+    if value["result"]["partial"] == true {
+        return Err(crate::commands::machine::Failure::new(
+            "operation.partial",
+            "Usage sync stopped after partial progress; inspect acknowledged and pending counts.",
+        )
+        .with_data(value));
+    }
+    Ok(value)
 }
 #[cfg(test)]
-mod schema_tests;
+pub(crate) mod schema_tests;
 
 #[cfg(test)]
 mod tests {
@@ -309,780 +339,5 @@ mod tests {
                 "off"
             ])
             .is_err());
-    }
-}
-
-#[cfg(test)]
-mod integration_tests {
-    use super::*;
-    use mockito::{Matcher, Server};
-    use std::{ffi::OsString, path::PathBuf};
-    struct Home {
-        path: PathBuf,
-        previous: Vec<(&'static str, Option<OsString>)>,
-        endpoint: Option<String>,
-    }
-    impl Home {
-        fn new(endpoint: String, credentials: bool) -> Self {
-            assert_eq!(std::env::var("RUST_TEST_THREADS").as_deref(), Ok("1"));
-            let path =
-                std::env::temp_dir().join(format!("analytics-client-{}", uuid::Uuid::new_v4()));
-            let previous = ["CARGO_AI_HOME", "CARGO_AI_DISABLE_KEYCHAIN"]
-                .into_iter()
-                .map(|key| (key, std::env::var_os(key)))
-                .collect();
-            unsafe {
-                std::env::set_var("CARGO_AI_HOME", &path);
-                std::env::set_var("CARGO_AI_DISABLE_KEYCHAIN", "1");
-            }
-            let endpoint = cloud::TEST_ENDPOINT.with(|value| value.replace(Some(endpoint)));
-            let home = Self {
-                path,
-                previous,
-                endpoint,
-            };
-            if credentials {
-                std::fs::create_dir_all(&home.path).unwrap();
-                std::fs::write(
-                    home.path.join("config.toml"),
-                    "profile = []\nsecret_store = \"file\"\n",
-                )
-                .unwrap();
-                crate::credentials::store::store_account_tokens(
-                    "fixture-access",
-                    Some("fixture-refresh"),
-                )
-                .unwrap();
-            }
-            home
-        }
-    }
-    impl Drop for Home {
-        fn drop(&mut self) {
-            cloud::TEST_ENDPOINT.with(|value| value.replace(self.endpoint.take()));
-            for (key, old) in &self.previous {
-                unsafe {
-                    match old {
-                        Some(value) => std::env::set_var(key, value),
-                        None => std::env::remove_var(key),
-                    }
-                }
-            }
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
-    async fn invoke(arguments: &[&str]) -> Value {
-        let args = Command::new("test")
-            .subcommand(cloud_command())
-            .subcommand(retention_command())
-            .try_get_matches_from(std::iter::once("test").chain(arguments.iter().copied()))
-            .unwrap();
-        let value = execute(&args).await.unwrap();
-        super::schema_tests::assert_valid(&value);
-        value
-    }
-    fn matcher(command: &str) -> Matcher {
-        Matcher::PartialJson(
-            json!({"action":"usage_analytics","usage_analytics":{"command":command}}),
-        )
-    }
-    fn response(body: Value) -> String {
-        json!({"status":"success","type":"usage_analytics_succeeded","usage_analytics":body})
-            .to_string()
-    }
-    async fn enable(server: &mut Server, binding: &str) {
-        let status=server.mock("POST","/account").match_body(matcher("status")).with_body(response(json!({"protocol_version":1,"capability":{"enabled":true,"supported_protocol_versions":[1]},"account_binding":binding,"data_generation":1,"lifecycle_epoch":0,"consent_interval":null}))).expect(1).create_async().await;
-        let enabled=server.mock("POST","/account").match_body(matcher("enable")).with_body_from_request(|request|{let body:Value=serde_json::from_slice(request.body().unwrap()).unwrap();response(json!({"source":body["usage_analytics"]["source"],"provenance":{"lifecycle_epoch":0,"consent_interval":1},"enabled":true})).into_bytes()}).expect(1).create_async().await;
-        assert_eq!(
-            invoke(&["cloud", "enable"]).await["result"]["enabled"],
-            true
-        );
-        status.assert_async().await;
-        enabled.assert_async().await;
-        status.remove_async().await;
-        enabled.remove_async().await;
-    }
-    fn append() {
-        crate::usage_store::persist(&json!({"schema_version":1,"event_id":format!("cai_event_{}",uuid::Uuid::new_v4()),"root_run_id":format!("cai_run_{}",uuid::Uuid::new_v4()),"agent_run_id":format!("cai_agent_run_{}",uuid::Uuid::new_v4()),"event_type":"provider_request_completed","timestamp":"2026-10-27T00:00:00Z","provider":{"server":"typesafe","profile":"private fixture customer","requested_model":"jev-1.13.0"},"agent":{"project_root":"/private/fixture/project","name":"private fixture agent"},"usage":{"input_tokens":u64::MAX,"output_tokens":3},"status":"success"})).unwrap();
-    }
-    fn retained(request: Request) -> Value {
-        let Request::Sync {
-            source,
-            provenance,
-            batch_id,
-            ordered_membership_sha256,
-            events,
-            ..
-        } = request
-        else {
-            panic!("expected exact sync")
-        };
-        let members = events
-            .iter()
-            .map(EventSubmission::member)
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        let admission = AdmissionCommitment {
-            protocol_version: Version,
-            source: source.clone(),
-            provenance: provenance.clone(),
-            batch_id: batch_id.clone(),
-            ordered_membership_sha256: ordered_membership_sha256.clone(),
-            manifest_sha256: Sha256Hash::of(b"authenticated fixture manifest"),
-        };
-        let receipt = Receipt {
-            protocol_version: Version,
-            source,
-            provenance,
-            batch_id,
-            ordered_membership_sha256,
-            manifest_sha256: admission.manifest_sha256.clone(),
-            custody: Custody::Retained,
-            members,
-        };
-        json!({"admission":admission,"custody":"retained","receipt":receipt})
-    }
-    #[tokio::test]
-    async fn real_operation_results_match_closed_machine_schema() {
-        let mut server = Server::new_async().await;
-        let _home = Home::new(format!("{}/account", server.url()), true);
-        invoke(&["cloud", "status"]).await;
-        invoke(&["cloud", "sync"]).await;
-        invoke(&["retention", "status"]).await;
-        invoke(&["retention", "preview"]).await;
-        invoke(&["retention", "configure", "--days", "7", "--enabled", "off"]).await;
-        let unavailable=server.mock("POST","/account").match_body(matcher("status"))
-            .with_body(response(json!({"protocol_version":1,"capability":{"enabled":false,"supported_protocol_versions":[1]}})))
-            .expect(1).create_async().await;
-        invoke(&["cloud", "status", "--remote"]).await;
-        unavailable.assert_async().await;
-        unavailable.remove_async().await;
-        enable(&mut server, "00000000-0000-4000-8000-000000000001").await;
-        let source = cloud::selected().unwrap().unwrap().source;
-        let mut lease_db = crate::usage_store::open_database(true).unwrap().unwrap();
-        let lease = cloud::queue::acquire_lease(&mut lease_db, &source, cloud::now_ms(), 10_000)
-            .unwrap()
-            .unwrap();
-        assert_eq!(invoke(&["cloud", "sync"]).await["result"]["busy"], true);
-        cloud::queue::release_lease(&mut lease_db, &lease, cloud::now_ms()).unwrap();
-        let remote=server.mock("POST","/account").match_body(matcher("status"))
-            .with_body(response(json!({"protocol_version":1,"capability":{"enabled":true,"supported_protocol_versions":[1]},"account_binding":source.account_binding,"data_generation":1,"lifecycle_epoch":0,"consent_interval":1,"enabled":true})))
-            .expect(1).create_async().await;
-        invoke(&["cloud", "status", "--remote"]).await;
-        remote.assert_async().await;
-        remote.remove_async().await;
-        let selection = invoke(&["cloud", "include-history"]).await;
-        let through = selection["result"]["through_sequence"].as_str().unwrap();
-        let hash = selection["result"]["preview_sha256"].as_str().unwrap();
-        invoke(&[
-            "cloud",
-            "include-history",
-            "--confirm",
-            "--through",
-            through,
-            "--preview-hash",
-            hash,
-        ])
-        .await;
-        invoke(&["cloud", "sync"]).await;
-        append();
-        let sync = server
-            .mock("POST", "/account")
-            .match_body(matcher("sync"))
-            .with_body_from_request(|request| {
-                let value: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
-                response(retained(
-                    Request::parse(&value["usage_analytics"].to_string()).unwrap(),
-                ))
-                .into_bytes()
-            })
-            .expect(1)
-            .create_async()
-            .await;
-        invoke(&["cloud", "sync"]).await;
-        sync.assert_async().await;
-        let history = server
-            .mock("POST", "/account")
-            .match_body(matcher("history"))
-            .with_body(response(
-                json!({"protocol_version":1,"source":source,"high_watermark":0,"events":[]}),
-            ))
-            .expect(1)
-            .create_async()
-            .await;
-        invoke(&["cloud", "history"]).await;
-        history.assert_async().await;
-        let disabled = server
-            .mock("POST", "/account")
-            .match_body(matcher("disable"))
-            .with_body(response(
-                json!({"protocol_version":1,"source":source,"enabled":false}),
-            ))
-            .expect(1)
-            .create_async()
-            .await;
-        invoke(&["cloud", "disable"]).await;
-        disabled.assert_async().await;
-        let preview_id = "00000000-0000-4000-8000-000000000020";
-        let hash = Sha256Hash::of(b"exact synthetic clear preview");
-        let preview=server.mock("POST","/account").match_body(matcher("clear_preview"))
-            .with_body(response(json!({"protocol_version":1,"source":source,"preview_id":preview_id,"preview_sha256":hash,"data_generation":1})))
-            .expect(1).create_async().await;
-        invoke(&["cloud", "clear"]).await;
-        preview.assert_async().await;
-        let cleared=server.mock("POST","/account").match_body(matcher("clear_confirm"))
-            .with_body(response(json!({"protocol_version":1,"source":source,"cleared":true,"data_generation":2,"purge_state":"pending"})))
-            .expect(1).create_async().await;
-        invoke(&[
-            "cloud",
-            "clear",
-            "--confirm",
-            "--preview-id",
-            preview_id,
-            "--preview-hash",
-            hash.as_str(),
-        ])
-        .await;
-        cleared.assert_async().await;
-        invoke(&["cloud", "status"]).await;
-        invoke(&["retention", "status"]).await;
-        invoke(&["retention", "preview"]).await;
-        invoke(&[
-            "retention",
-            "configure",
-            "--days",
-            "1",
-            "--enabled",
-            "on",
-            "--acknowledge-local-detail-loss",
-        ])
-        .await;
-    }
-    #[tokio::test]
-    async fn passive_local_status_and_disabled_sync_have_no_home_or_account_effects() {
-        let home = Home::new("http://127.0.0.1:1/never".into(), false);
-        assert_eq!(cloud::local_status().unwrap()["enabled"], false);
-        assert_eq!(cloud::sync().await.unwrap()["enabled"], false);
-        assert!(!home.path.exists());
-    }
-    #[tokio::test]
-    async fn authenticated_readiness_is_required_before_home_or_consent_creation() {
-        let mut server = Server::new_async().await;
-        let home = Home::new(format!("{}/account", server.url()), true);
-        let status=server.mock("POST","/account").match_body(matcher("status")).with_body(response(json!({"protocol_version":1,"capability":{"enabled":false,"supported_protocol_versions":[1]}}))).expect(1).create_async().await;
-        assert!(cloud::enable().await.is_err());
-        assert!(!home.path.join("usage").exists());
-        status.assert_async().await;
-    }
-    #[tokio::test]
-    async fn lost_sync_response_recovers_authenticated_exact_receipt_without_reappend() {
-        let mut server = Server::new_async().await;
-        let _home = Home::new(format!("{}/account", server.url()), true);
-        enable(&mut server, "00000000-0000-4000-8000-000000000001").await;
-        append();
-        let lost = server
-            .mock("POST", "/account")
-            .match_body(matcher("sync"))
-            .with_status(500)
-            .with_body("unknown private provider body")
-            .expect(1)
-            .create_async()
-            .await;
-        assert!(cloud::sync().await.is_err());
-        lost.assert_async().await;
-        lost.remove_async().await;
-        let db = crate::usage_store::open_database(false).unwrap().unwrap();
-        let text: String = db
-            .query_row("SELECT request_json FROM usage_cloud_batches", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert!(!text.contains("private fixture"));
-        assert!(!text.contains("/private/"));
-        let exact = Request::parse(&text).unwrap();
-        let result = retained(exact);
-        let recovery = server
-            .mock("POST", "/account")
-            .match_body(matcher("receipt"))
-            .with_body(response(result))
-            .expect(1)
-            .create_async()
-            .await;
-        let result = invoke(&["cloud", "sync"]).await["result"].clone();
-        assert_eq!(result["recovered"], true);
-        assert_eq!(cloud::local_status().unwrap()["retained"], 1);
-        recovery.assert_async().await;
-        assert_eq!(
-            db.query_row("SELECT COUNT(*) FROM usage_backup_queue", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            db.query_row(
-                "SELECT COUNT(*) FROM usage_cloud_queue WHERE original_text IS NOT NULL",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-            1
-        );
-    }
-    #[tokio::test]
-    async fn admitted_dispatch_gap_resends_only_on_authoritative_payload_required_with_identical_bytes(
-    ) {
-        let mut server = Server::new_async().await;
-        let _home = Home::new(format!("{}/account", server.url()), true);
-        enable(&mut server, "00000000-0000-4000-8000-000000000001").await;
-        append();
-        let lost = server
-            .mock("POST", "/account")
-            .match_body(matcher("sync"))
-            .with_status(500)
-            .with_body("unknown")
-            .expect(1)
-            .create_async()
-            .await;
-        assert!(cloud::sync().await.is_err());
-        lost.assert_async().await;
-        lost.remove_async().await;
-        let db = crate::usage_store::open_database(false).unwrap().unwrap();
-        let text: String = db
-            .query_row("SELECT request_json FROM usage_cloud_batches", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        let retained = retained(Request::parse(&text).unwrap());
-        let mut pending = retained.clone();
-        pending.as_object_mut().unwrap().remove("receipt");
-        pending["custody"] = json!("pending");
-        let poll = server
-            .mock("POST", "/account")
-            .match_body(matcher("receipt"))
-            .with_body(response(pending.clone()))
-            .expect(1)
-            .create_async()
-            .await;
-        assert_eq!(
-            invoke(&["cloud", "sync"]).await["result"]["custody"],
-            "pending"
-        );
-        poll.assert_async().await;
-        poll.remove_async().await;
-        assert_eq!(
-            db.query_row("SELECT attempts FROM usage_cloud_batches", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
-        pending["payload_required"] = json!(true);
-        let reopen = server
-            .mock("POST", "/account")
-            .match_body(matcher("receipt"))
-            .with_body(response(pending))
-            .expect(1)
-            .create_async()
-            .await;
-        let same = text.clone();
-        let appended = server
-            .mock("POST", "/account")
-            .match_body(matcher("sync"))
-            .with_body_from_request(move |request| {
-                assert!(std::str::from_utf8(request.body().unwrap())
-                    .unwrap()
-                    .contains(&same));
-                response(retained.clone()).into_bytes()
-            })
-            .expect(1)
-            .create_async()
-            .await;
-        assert_eq!(cloud::sync().await.unwrap()["retained_events"], 1);
-        reopen.assert_async().await;
-        appended.assert_async().await;
-        assert_eq!(
-            db.query_row("SELECT request_json FROM usage_cloud_batches", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .unwrap(),
-            text
-        );
-        assert_eq!(
-            db.query_row("SELECT attempts FROM usage_cloud_batches", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            2
-        );
-    }
-    #[tokio::test]
-    async fn terminal_identity_conflicts_are_durably_quarantined_without_losing_payload() {
-        let mut server = Server::new_async().await;
-        let _home = Home::new(format!("{}/account", server.url()), true);
-        enable(&mut server, "00000000-0000-4000-8000-000000000001").await;
-        append();
-        let conflict = server
-            .mock("POST", "/account")
-            .match_body(matcher("sync"))
-            .with_body(json!({"status":"failed","type":"usage_analytics_conflict"}).to_string())
-            .expect(1)
-            .create_async()
-            .await;
-        assert!(cloud::sync().await.is_err());
-        assert_eq!(cloud::local_status().unwrap()["quarantined"], 1);
-        assert_eq!(cloud::local_status().unwrap()["pending"], 1);
-        let next = invoke(&["cloud", "sync"]).await["result"].clone();
-        assert_eq!(next["batches"], 0);
-        assert_eq!(next["blocked"], true);
-        conflict.assert_async().await;
-    }
-    #[tokio::test]
-    async fn history_pages_keep_the_captured_high_watermark_and_exact_identity() {
-        let mut server = Server::new_async().await;
-        let _home = Home::new(format!("{}/account", server.url()), true);
-        enable(&mut server, "00000000-0000-4000-8000-000000000001").await;
-        let source = cloud::selected().unwrap().unwrap().source;
-        let event = |sequence: u64| {
-            let id = format!("cai_event_00000000-0000-4000-8000-{sequence:012}");
-            let text=json!({"schema_version":1,"normalization_version":1,"event_id":id,"root_run_id":"00000000-0000-4000-8000-000000000010","agent_run_id":"00000000-0000-4000-8000-000000000011","event_type":"provider_request","occurred_at_ms":1,"tokens":{"input_tokens":u64::MAX,"output_tokens":null}}).to_string();
-            let mut event =
-                serde_json::to_value(EventSubmission::from_allowed_text(text).unwrap()).unwrap();
-            event["sequence"] = json!(sequence);
-            event["event_id"] = json!(id);
-            event
-        };
-        let first=server.mock("POST","/account").match_body(matcher("history")).with_body(response(json!({"protocol_version":1,"source":source,"high_watermark":2,"events":[event(1)]}))).expect(1).create_async().await;
-        let page = invoke(&["cloud", "history", "--limit", "1"]).await["result"].clone();
-        assert_eq!(page["next_sequence"], 1);
-        assert_eq!(page["through_sequence"], 2);
-        first.assert_async().await;
-        first.remove_async().await;
-        let second=server.mock("POST","/account").match_body(Matcher::PartialJson(json!({"usage_analytics":{"command":"history","after_sequence":1,"through_sequence":2,"limit":1}}))).with_body(response(json!({"protocol_version":1,"source":source,"high_watermark":2,"events":[event(2)]}))).expect(1).create_async().await;
-        let page = invoke(&[
-            "cloud",
-            "history",
-            "--after-sequence",
-            "1",
-            "--through-sequence",
-            "2",
-            "--limit",
-            "1",
-        ])
-        .await["result"]
-            .clone();
-        assert!(page["next_sequence"].is_null());
-        second.assert_async().await;
-        second.remove_async().await;
-        let changed = server
-            .mock("POST", "/account")
-            .match_body(matcher("history"))
-            .with_body(response(
-                json!({"protocol_version":1,"source":source,"high_watermark":3,"events":[]}),
-            ))
-            .expect(1)
-            .create_async()
-            .await;
-        assert!(cloud::history(Some(1), Some(2), 1).await.is_err());
-        changed.assert_async().await;
-        assert!(cloud::history(Some(1), None, 1).await.is_err());
-    }
-    #[tokio::test]
-    async fn lost_clear_response_protects_local_history_until_generation_reconciliation() {
-        let mut server = Server::new_async().await;
-        let home = Home::new(format!("{}/account", server.url()), true);
-        enable(&mut server, "00000000-0000-4000-8000-000000000001").await;
-        let original_source = cloud::selected().unwrap().unwrap().source;
-        append();
-        let sync = server
-            .mock("POST", "/account")
-            .match_body(matcher("sync"))
-            .with_body_from_request(|request| {
-                let body: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
-                response(retained(
-                    Request::parse(&body["usage_analytics"].to_string()).unwrap(),
-                ))
-                .into_bytes()
-            })
-            .expect(1)
-            .create_async()
-            .await;
-        invoke(&["cloud", "sync"]).await;
-        sync.assert_async().await;
-        sync.remove_async().await;
-        append();
-        let mut db = crate::usage_store::open_database(true).unwrap().unwrap();
-        cloud::queue::capture(&mut db, &original_source, cloud::project).unwrap();
-        let (retained_id, sequence): (String, i64) = db
-            .query_row(
-                "SELECT event_id,sequence FROM usage_cloud_queue WHERE retained=1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert!(cloud::queue::retained_event(&db, &retained_id).unwrap());
-        crate::usage_store::retention::configure(crate::usage_store::retention::Policy {
-            schema_version: 1,
-            days: 1,
-            enabled: true,
-            local_detail_loss_acknowledged: true,
-            unselected_loss_acknowledged: true,
-        })
-        .unwrap();
-        let path = home.path.join("usage/usage.sqlite3");
-        let lost=server.mock("POST","/account").match_body(matcher("clear_confirm"))
-            .with_status(500).with_body_from_request(move |_|{
-                let check=rusqlite::Connection::open(&path).unwrap();
-                assert!(check.query_row("SELECT enabled=0 AND clear_intent_json IS NOT NULL FROM usage_cloud_state",[],|row|row.get::<_,bool>(0)).unwrap(),"clear intent must commit before network dispatch");
-                b"unknown clear outcome".to_vec()
-            }).expect(1).create_async().await;
-        assert!(cloud::clear(Some((
-            CanonicalUuid::try_from("00000000-0000-4000-8000-000000000020".to_owned()).unwrap(),
-            Sha256Hash::of(b"exact clear preview")
-        )))
-        .await
-        .is_err());
-        lost.assert_async().await;
-        lost.remove_async().await;
-        assert!(cloud::queue::clear_outcome_unknown(&db, &original_source).unwrap());
-        assert!(!cloud::queue::retained_event(&db, &retained_id).unwrap());
-        assert!(cloud::queue::protected_event(&db, &retained_id, sequence).unwrap());
-        assert_eq!(
-            invoke(&["cloud", "status"]).await["result"]["clear_outcome_unknown"],
-            true
-        );
-        let age = cloud::now_ms() + 31 * 86_400_000;
-        let retention = crate::usage_store::retention::apply(age).unwrap();
-        assert_eq!(retention["deleted_records"], 0);
-        assert_eq!(retention["custody_blocked_records"], 2);
-        let unchanged=server.mock("POST","/account").match_body(matcher("status"))
-            .with_body(response(json!({"protocol_version":1,"capability":{"enabled":true,"supported_protocol_versions":[1]},"account_binding":original_source.account_binding,"data_generation":1,"lifecycle_epoch":0,"consent_interval":1,"enabled":false})))
-            .expect(1).create_async().await;
-        let forbidden = server
-            .mock("POST", "/account")
-            .match_body(matcher("enable"))
-            .expect(0)
-            .create_async()
-            .await;
-        assert!(cloud::enable().await.is_err());
-        unchanged.assert_async().await;
-        forbidden.assert_async().await;
-        unchanged.remove_async().await;
-        forbidden.remove_async().await;
-        assert!(!cloud::queue::retained_event(&db, &retained_id).unwrap());
-        let advanced=server.mock("POST","/account").match_body(matcher("status"))
-            .with_body(response(json!({"protocol_version":1,"capability":{"enabled":true,"supported_protocol_versions":[1]},"account_binding":original_source.account_binding,"data_generation":2,"lifecycle_epoch":0,"consent_interval":1,"enabled":false})))
-            .expect(1).create_async().await;
-        let renewed=server.mock("POST","/account").match_body(matcher("enable"))
-            .with_body_from_request(|request|{let body:Value=serde_json::from_slice(request.body().unwrap()).unwrap();assert_eq!(body["usage_analytics"]["source"]["data_generation"],2);response(json!({"protocol_version":1,"source":body["usage_analytics"]["source"],"provenance":{"lifecycle_epoch":0,"consent_interval":2},"enabled":true})).into_bytes()})
-            .expect(1).create_async().await;
-        invoke(&["cloud", "enable"]).await;
-        advanced.assert_async().await;
-        renewed.assert_async().await;
-        let old = cloud::queue::status(&db, &original_source).unwrap();
-        assert!(old.cleared);
-        assert!(!old.clear_outcome_unknown);
-        assert!(!cloud::queue::retained_event(&db, &retained_id).unwrap());
-        assert_eq!(
-            db.query_row(
-                "SELECT COUNT(*) FROM usage_cloud_queue WHERE original_text IS NOT NULL",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-            2
-        );
-        assert_eq!(
-            db.query_row(
-                "SELECT COUNT(*) FROM usage_cloud_batches WHERE receipt_json IS NOT NULL",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-            1
-        );
-        crate::usage_store::retention::configure(crate::usage_store::retention::Policy {
-            schema_version: 1,
-            days: 1,
-            enabled: true,
-            local_detail_loss_acknowledged: true,
-            unselected_loss_acknowledged: false,
-        })
-        .unwrap();
-        let retention = crate::usage_store::retention::apply(age).unwrap();
-        assert_eq!(retention["deleted_records"], 0);
-        assert_eq!(retention["unselected_loss_blocked_records"], 1);
-        assert_eq!(retention["custody_blocked_records"], 1);
-    }
-    #[tokio::test]
-    async fn exact_clear_marks_only_logical_copy_loss_and_preserves_pending_payloads() {
-        let mut server = Server::new_async().await;
-        let _home = Home::new(format!("{}/account", server.url()), true);
-        enable(&mut server, "00000000-0000-4000-8000-000000000001").await;
-        append();
-        let selection = cloud::selected().unwrap().unwrap();
-        let mut db = crate::usage_store::open_database(true).unwrap().unwrap();
-        cloud::queue::capture(&mut db, &selection.source, cloud::project).unwrap();
-        let cleared = server
-            .mock("POST", "/account")
-            .match_body(matcher("clear_confirm"))
-            .with_body(response(
-                json!({"protocol_version":1,"source":selection.source,"cleared":true,"data_generation":2,"purge_state":"pending"}),
-            ))
-            .expect(1)
-            .create_async()
-            .await;
-        let result = cloud::clear(Some((
-            CanonicalUuid::try_from("00000000-0000-4000-8000-000000000020".to_string()).unwrap(),
-            Sha256Hash::of(b"exact approved preview"),
-        )))
-        .await
-        .unwrap();
-        assert_eq!(result["purge_state"], "pending");
-        let status = cloud::local_status().unwrap();
-        assert_eq!(status["cleared"], true);
-        assert_eq!(status["pending"], 1);
-        assert_eq!(status["enabled"], false);
-        cleared.assert_async().await;
-    }
-    #[tokio::test]
-    async fn slow_receipt_defers_exact_payload_once_then_unknown_sync_requires_receipt() {
-        let mut server = Server::new_async().await;
-        let _home = Home::new(format!("{}/account", server.url()), true);
-        enable(&mut server, "00000000-0000-4000-8000-000000000001").await;
-        append();
-        let lost = server
-            .mock("POST", "/account")
-            .match_body(matcher("sync"))
-            .with_status(500)
-            .with_body("unknown")
-            .expect(1)
-            .create_async()
-            .await;
-        assert!(cloud::sync().await.is_err());
-        lost.assert_async().await;
-        lost.remove_async().await;
-        let db = crate::usage_store::open_database(false).unwrap().unwrap();
-        let text: String = db
-            .query_row("SELECT request_json FROM usage_cloud_batches", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        let retained_response = retained(Request::parse(&text).unwrap());
-        let mut pending = retained_response.clone();
-        pending.as_object_mut().unwrap().remove("receipt");
-        pending["custody"] = json!("pending");
-        pending["payload_required"] = json!(true);
-        let slow_receipt = server
-            .mock("POST", "/account")
-            .match_body(matcher("receipt"))
-            .with_body_from_request(move |_| {
-                std::thread::sleep(std::time::Duration::from_millis(5100));
-                response(pending.clone()).into_bytes()
-            })
-            .expect(1)
-            .create_async()
-            .await;
-        let forbidden_sync = server
-            .mock("POST", "/account")
-            .match_body(matcher("sync"))
-            .expect(0)
-            .create_async()
-            .await;
-        let before = std::time::Instant::now();
-        let deferred = cloud::sync().await.unwrap();
-        assert!(before.elapsed() >= std::time::Duration::from_millis(5100));
-        assert_eq!(deferred["custody"], "pending");
-        assert_eq!(deferred["batches"], 1);
-        let (attempts, hint): (i64, Option<String>) = db
-            .query_row(
-                "SELECT attempts,resend_hint_json FROM usage_cloud_batches",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(attempts, 1);
-        assert!(hint.is_some());
-        assert_eq!(cloud::local_status().unwrap()["retained"], 0);
-        assert_eq!(cloud::local_status().unwrap()["pending"], 1);
-        let (next_due, failures): (i64, i64) = db
-            .query_row(
-                "SELECT next_due_ms,failures FROM usage_cloud_schedule",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(failures, 2);
-        assert!(next_due <= cloud::now_ms() + 60_000);
-        slow_receipt.assert_async().await;
-        forbidden_sync.assert_async().await;
-        slow_receipt.remove_async().await;
-        forbidden_sync.remove_async().await;
-
-        // This is a new bounded operation: the hint permits exactly one Sync and
-        // cannot survive that request's unknown outcome.
-        let forbidden_receipt = server
-            .mock("POST", "/account")
-            .match_body(matcher("receipt"))
-            .expect(0)
-            .create_async()
-            .await;
-        let exact = text.clone();
-        let unknown_sync = server
-            .mock("POST", "/account")
-            .match_body(matcher("sync"))
-            .with_status(500)
-            .with_body_from_request(move |request| {
-                assert!(std::str::from_utf8(request.body().unwrap())
-                    .unwrap()
-                    .contains(&exact));
-                b"unknown".to_vec()
-            })
-            .expect(1)
-            .create_async()
-            .await;
-        assert!(cloud::sync().await.is_err());
-        let (attempts, hint, after): (i64, Option<String>, String) = db
-            .query_row(
-                "SELECT attempts,resend_hint_json,request_json FROM usage_cloud_batches",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(attempts, 2);
-        assert_eq!(hint, None);
-        assert_eq!(after, text);
-        assert_eq!(cloud::local_status().unwrap()["pending"], 1);
-        assert_eq!(cloud::local_status().unwrap()["retained"], 0);
-        unknown_sync.assert_async().await;
-        forbidden_receipt.assert_async().await;
-        unknown_sync.remove_async().await;
-        forbidden_receipt.remove_async().await;
-
-        let recovery = server
-            .mock("POST", "/account")
-            .match_body(matcher("receipt"))
-            .with_body(response(retained_response))
-            .expect(1)
-            .create_async()
-            .await;
-        let forbidden_sync = server
-            .mock("POST", "/account")
-            .match_body(matcher("sync"))
-            .expect(0)
-            .create_async()
-            .await;
-        let recovered = cloud::sync().await.unwrap();
-        assert_eq!(recovered["recovered"], true);
-        assert_eq!(cloud::local_status().unwrap()["retained"], 1);
-        assert_eq!(cloud::local_status().unwrap()["pending"], 0);
-        let (attempts, after): (i64, String) = db
-            .query_row(
-                "SELECT attempts,request_json FROM usage_cloud_batches",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(attempts, 2);
-        assert_eq!(after, text);
-        recovery.assert_async().await;
-        forbidden_sync.assert_async().await;
     }
 }

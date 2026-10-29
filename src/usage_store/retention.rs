@@ -8,9 +8,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const POLICY_KEY: &str = "local_retention_policy_v1";
+const POLICY_KEY: &str = "local_retention_policy_v2";
+#[cfg(any(cargo_ai_cli, test))]
+const LEGACY_POLICY_KEY: &str = "local_retention_policy_v1";
+#[cfg(any(cargo_ai_cli, test))]
 const CURSOR_KEY: &str = "local_retention_scan_after_v1";
-const PASS_LIMIT: usize = 100;
+const INDEX_CURSOR_KEY: &str = "local_retention_index_after_v2";
+const PASS_LIMIT: usize = 1000;
+const MAX_PASSES: usize = 64;
+const HOUR_MS: i64 = 3_600_000;
 const BUDGET: u64 = 512 * 1024 * 1024;
 const FREE_RESERVE: u64 = 256 * 1024 * 1024;
 const PROJECTION_ALLOWANCE: u64 = 2 * 16 * 1024;
@@ -28,7 +34,7 @@ pub(crate) struct Policy {
 impl Default for Policy {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             days: 7,
             enabled: false,
             local_detail_loss_acknowledged: false,
@@ -38,10 +44,12 @@ impl Default for Policy {
 }
 impl Policy {
     fn validate(&self) -> Result<(), String> {
-        if self.schema_version != 1 || !matches!(self.days, 1 | 7 | 30) {
-            return Err("Local retention requires schema version 1 and 1, 7 or 30 days".into());
+        if self.schema_version != 2 || !matches!(self.days, 1 | 7 | 30) {
+            return Err("Local retention requires schema version 2 and 1, 7 or 30 days".into());
         }
-        if self.enabled && !self.local_detail_loss_acknowledged {
+        if self.enabled
+            && (!self.local_detail_loss_acknowledged || !self.unselected_loss_acknowledged)
+        {
             return Err("Local retention requires explicit acknowledgment that expiry permanently removes richer local details; export them first if needed".into());
         }
         Ok(())
@@ -73,7 +81,7 @@ pub(crate) fn configure(next: Policy) -> Result<Value, String> {
     let mut db = super::open_database(true)?.ok_or("Usage database unavailable")?;
     configure_at(&mut db, &next)?;
     Ok(
-        json!({"schema_version":1,"policy":next,"configured":true,"deleted_records":0,"upload_consent_changed":false,"local_detail_loss":loss_disclosure()}),
+        json!({"schema_version":2,"policy":next,"configured":true,"deleted_records":0,"upload_consent_changed":false,"local_detail_loss":loss_disclosure()}),
     )
 }
 #[cfg(any(cargo_ai_cli, test))]
@@ -83,13 +91,14 @@ fn configure_at(db: &mut Connection, next: &Policy) -> Result<(), String> {
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(db_error)?;
     tx.execute("INSERT INTO usage_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![POLICY_KEY,serde_json::to_string(next).map_err(|_| "Cannot encode local retention policy")?]).map_err(db_error)?;
+    install_hours(&tx)?;
     tx.execute("DELETE FROM usage_meta WHERE key=?1", [CURSOR_KEY])
         .map_err(db_error)?;
     tx.commit().map_err(db_error)
 }
 
 fn loss_disclosure() -> Value {
-    json!({"permanent":true,"full_local_restoration_from_cloud":false,"local_fields_removed":["local labels","local paths","unknown local extensions","other event details excluded from sanitized projections"],"export_command":"usage export","old_backup_acknowledgment_is_new_retained_custody":false,"unselected_loss_acknowledgment_required_without_new_retained_copy":true})
+    json!({"permanent":true,"full_local_restoration_from_cloud":false,"local_fields_removed":["local labels","local paths","unknown local extensions","other event details excluded from sanitized projections"],"export_command":"usage export","pending_uploads_expire":true,"expiry_is_acknowledgment":false,"explicit_rolling_policy_version":2})
 }
 
 fn exists(db: &Connection, table: &str) -> Result<bool, String> {
@@ -100,98 +109,110 @@ fn exists(db: &Connection, table: &str) -> Result<bool, String> {
     )
     .map_err(db_error)
 }
-fn old_protected(db: &Connection, id: &str, sequence: i64) -> Result<bool, String> {
-    if exists(db,"usage_backup_queue")? && db.query_row("SELECT EXISTS(SELECT 1 FROM usage_backup_queue WHERE event_id=?1 AND acknowledged=0)", [id], |row|row.get::<_,bool>(0)).map_err(db_error)? { return Ok(true); }
-    if exists(db,"usage_backup_windows")? && db.query_row("SELECT EXISTS(SELECT 1 FROM usage_backup_windows WHERE ?1>start_sequence AND ?1>last_scan AND (end_sequence IS NULL OR ?1<=end_sequence))", [sequence], |row|row.get::<_,bool>(0)).map_err(db_error)? { return Ok(true); }
-    Ok(false)
-}
 
+/// Sidecar metadata never changes original event timestamps, JSON or identities.
+/// Invalid and future clocks use their first observation hour, permanently.
+fn install_hours(db: &Connection) -> Result<(), String> {
+    db.execute_batch("CREATE TABLE IF NOT EXISTS usage_retention_hours(event_id TEXT PRIMARY KEY REFERENCES usage_events(event_id) ON DELETE CASCADE,sequence INTEGER NOT NULL UNIQUE,hour_ms INTEGER NOT NULL,cloud_eligible INTEGER NOT NULL CHECK(cloud_eligible IN(0,1)));
+        CREATE INDEX IF NOT EXISTS usage_retention_hour_expiry ON usage_retention_hours(hour_ms,sequence);
+        CREATE TABLE IF NOT EXISTS usage_retention_retry_hours(event_id TEXT PRIMARY KEY,hour_ms INTEGER NOT NULL,cloud_eligible INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS usage_retention_retry_expiry ON usage_retention_retry_hours(hour_ms);
+        DROP TRIGGER IF EXISTS usage_retention_hour_capture;").map_err(db_error)
+}
+fn event_hour(created: &str, now: i64) -> (i64, bool) {
+    let valid =
+        time::OffsetDateTime::parse(created, &time::format_description::well_known::Rfc3339)
+            .ok()
+            .and_then(|t| i64::try_from(t.unix_timestamp_nanos() / 1_000_000).ok())
+            .filter(|t| *t >= 0 && *t <= now.saturating_add(300_000));
+    (valid.unwrap_or(now) / HOUR_MS * HOUR_MS, valid.is_some())
+}
+/// Capture and historical backfill share the same strict timestamp validator.
+pub(super) fn index_capture(
+    db: &Connection,
+    id: &str,
+    sequence: i64,
+    created: &str,
+) -> Result<(), String> {
+    if !exists(db, "usage_retention_hours")? {
+        return Ok(());
+    }
+    let now = i64::try_from(time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
+        .map_err(|_| "Local retention time is invalid")?;
+    let (hour, valid) = event_hour(created, now);
+    db.execute(
+        "DELETE FROM usage_retention_retry_hours WHERE event_id=?1",
+        [id],
+    )
+    .map_err(db_error)?;
+    db.execute(
+        "INSERT OR IGNORE INTO usage_retention_hours VALUES(?1,?2,?3,?4)",
+        params![id, sequence, hour, valid],
+    )
+    .map_err(db_error)?;
+    db.execute(
+        "UPDATE usage_meta SET value=?2 WHERE key=?1 AND CAST(value AS INTEGER)=?3",
+        params![INDEX_CURSOR_KEY, sequence.to_string(), sequence - 1],
+    )
+    .map_err(db_error)?;
+    Ok(())
+}
+fn cutoff(policy: &Policy, now: i64) -> i64 {
+    now / HOUR_MS * HOUR_MS - i64::from(policy.days) * 24 * HOUR_MS
+}
 #[derive(Default)]
 struct Scan {
     examined: usize,
-    age_eligible: usize,
-    custody_blocked: usize,
-    unselected_loss_blocked: usize,
     invalid_timestamp: usize,
     eligible: Vec<String>,
-    next_after: i64,
     complete: bool,
+    indexing_pending: bool,
+    expired_without_ack: usize,
 }
-fn scan(db: &Connection, policy: &Policy, now_ms: i64) -> Result<Scan, String> {
-    if now_ms < 0 {
+fn scan(db: &Connection, policy: &Policy, now: i64) -> Result<Scan, String> {
+    if now < 0 {
         return Err("Local retention time is invalid".into());
     }
-    let after: Option<String> = db
-        .query_row(
-            "SELECT value FROM usage_meta WHERE key=?1",
-            [CURSOR_KEY],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(db_error)?;
-    let after = after
-        .as_deref()
-        .unwrap_or("0")
-        .parse::<i64>()
-        .ok()
-        .filter(|n| *n >= 0)
-        .ok_or("Local retention cursor is invalid; history preserved")?;
-    let mut statement = db.prepare("SELECT sequence,event_id,created_at FROM usage_events WHERE sequence>?1 ORDER BY sequence LIMIT ?2").map_err(db_error)?;
-    let rows = statement
-        .query_map(params![after, PASS_LIMIT as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
+    // A passive preview uses the index when installed; it never creates/backfills it.
+    if !exists(db, "usage_retention_hours")? {
+        return Ok(Scan {
+            complete: false,
+            indexing_pending: true,
+            ..Scan::default()
+        });
+    }
+    let mut indexing_pending:bool=db.query_row("SELECT COALESCE((SELECT MAX(sequence) FROM usage_events),0)>COALESCE((SELECT CAST(value AS INTEGER) FROM usage_meta WHERE key=?1),0)",[INDEX_CURSOR_KEY],|r|r.get(0)).map_err(db_error)?;
+    if crate::usage_analytics::queue::installed(db)? {
+        indexing_pending |= db.query_row("SELECT EXISTS(SELECT 1 FROM usage_cloud_queue q WHERE NOT EXISTS(SELECT 1 FROM usage_events e WHERE e.event_id=q.event_id) AND NOT EXISTS(SELECT 1 FROM usage_retention_retry_hours h WHERE h.event_id=q.event_id))",[],|r|r.get::<_,bool>(0)).map_err(db_error)?;
+    }
+    let mut stmt=db.prepare("SELECT event_id,cloud_eligible FROM (SELECT event_id,hour_ms,cloud_eligible FROM usage_retention_hours WHERE hour_ms<?1 UNION ALL SELECT event_id,hour_ms,cloud_eligible FROM usage_retention_retry_hours WHERE hour_ms<?1) ORDER BY hour_ms,event_id LIMIT ?2").map_err(db_error)?;
+    let rows = stmt
+        .query_map(params![cutoff(policy, now), PASS_LIMIT as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))
         })
         .map_err(db_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_error)?;
-    let cutoff = (i128::from(now_ms) - i128::from(policy.days) * 86_400_000) * 1_000_000;
     let mut scan = Scan {
         examined: rows.len(),
-        complete: rows.len() < PASS_LIMIT,
+        complete: rows.len() < PASS_LIMIT && !indexing_pending,
+        indexing_pending,
         ..Scan::default()
     };
-    for (sequence, id, created) in rows {
-        scan.next_after = sequence;
-        let Ok(time) =
-            time::OffsetDateTime::parse(&created, &time::format_description::well_known::Rfc3339)
-        else {
+    for (id, valid) in rows {
+        if !valid {
             scan.invalid_timestamp += 1;
-            continue;
-        };
-        if time.unix_timestamp_nanos() >= cutoff {
-            continue;
         }
-        scan.age_eligible += 1;
-        if old_protected(db, &id, sequence)?
-            || crate::usage_analytics::queue::protected_event(db, &id, sequence)?
-        {
-            scan.custody_blocked += 1;
-            continue;
-        }
-        // Old acknowledgments cannot prove a current copy after old-path clear.
-        // Only exact new retained custody exempts the explicit local-only loss choice.
-        if !policy.unselected_loss_acknowledged
-            && !crate::usage_analytics::queue::retained_event(db, &id)?
-        {
-            scan.unselected_loss_blocked += 1;
-            continue;
+        if !crate::usage_analytics::queue::retained_event(db, &id)? {
+            scan.expired_without_ack += 1;
         }
         scan.eligible.push(id);
-    }
-    if scan.complete {
-        scan.next_after = 0;
     }
     Ok(scan)
 }
 fn report(policy: &Policy, scan: &Scan, deleted: usize) -> Value {
-    json!({"schema_version":1,"policy":policy,"retention_consent_required":!policy.enabled,"local_detail_loss":loss_disclosure(),"scan_limit":PASS_LIMIT,"examined_records":scan.examined,"age_eligible_records":scan.age_eligible,"custody_blocked_records":scan.custody_blocked,"unselected_loss_blocked_records":scan.unselected_loss_blocked,"invalid_timestamp_records":scan.invalid_timestamp,"eligible_records":if policy.enabled {scan.eligible.len()} else {0},"deleted_records":deleted,"scan_complete":scan.complete,"next_scan_after":scan.next_after.to_string(),"counts_scope":"this bounded scan; not whole history"})
+    json!({"schema_version":2,"policy":policy,"retention_consent_required":!policy.enabled,"local_detail_loss":loss_disclosure(),"scan_limit":PASS_LIMIT,"examined_records":scan.examined,"age_eligible_records":scan.eligible.len(),"custody_blocked_records":0,"unselected_loss_blocked_records":0,"invalid_timestamp_records":scan.invalid_timestamp,"eligible_records":if policy.enabled {scan.eligible.len()} else {0},"deleted_records":deleted,"expired_without_acknowledgment_records":if policy.enabled {scan.expired_without_ack} else {0},"coverage_incomplete":scan.expired_without_ack>0,"scan_complete":scan.complete,"maintenance_pending":policy.enabled && !scan.complete,"capture_paused":policy.enabled && !scan.complete,"upload_paused":policy.enabled && !scan.complete,"indexing_pending":scan.indexing_pending,"next_scan_after":"0","counts_scope":"this maintenance invocation; expired coverage total is persisted separately"})
 }
-
-/// Read-only views never initialize upload tables, migrate, expire or advance cursors.
 #[cfg(any(cargo_ai_cli, test))]
 pub(crate) fn preview(now_ms: i64) -> Result<Value, String> {
     if now_ms < 0 {
@@ -212,61 +233,206 @@ pub(crate) fn preview(now_ms: i64) -> Result<Value, String> {
 #[cfg(any(cargo_ai_cli, test))]
 fn preview_at(db: &Connection, now_ms: i64) -> Result<Value, String> {
     let policy = policy(db)?;
-    Ok(report(&policy, &scan(db, &policy, now_ms)?, 0))
+    let mut result = report(&policy, &scan(db, &policy, now_ms)?, 0);
+    result["legacy_policy_requires_reselection"] = json!(
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM usage_meta WHERE key=?1)",
+            [LEGACY_POLICY_KEY],
+            |r| r.get::<_, bool>(0)
+        )
+        .map_err(db_error)?
+            && !policy.enabled
+    );
+    let total: Option<String> = db
+        .query_row(
+            "SELECT value FROM usage_meta WHERE key='rolling_expired_without_ack_total_v2'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    result["expired_without_acknowledgment_total"] =
+        json!(total.and_then(|s| s.parse::<u64>().ok()).unwrap_or(0));
+    Ok(result)
 }
-
-/// One bounded operation; a fresh write transaction rechecks policy and both custodians.
+/// Drain expired logical hours through short transactions. A finite budget leaves
+/// an explicit pause; it never lets capture/upload race ahead of unfinished work.
 pub(crate) fn apply(now_ms: i64) -> Result<Value, String> {
     if now_ms < 0 {
         return Err("Local retention time is invalid".into());
     }
-    // Active-operation catch-up must remain passive until this Home has made
-    // its explicit retention choice, including when usage tracking is off.
     let Some(reader) = super::open_database(false)? else {
-        return Ok(report(&Policy::default(), &Scan::default(), 0));
+        return Ok(report(
+            &Policy::default(),
+            &Scan {
+                complete: true,
+                ..Scan::default()
+            },
+            0,
+        ));
     };
     let selected = policy(&reader)?;
     if !selected.enabled {
-        return Ok(report(&selected, &Scan::default(), 0));
+        return Ok(report(
+            &selected,
+            &Scan {
+                complete: true,
+                ..Scan::default()
+            },
+            0,
+        ));
     }
     drop(reader);
-    let mut db = super::open_database(true)?.ok_or("Usage database unavailable")?;
-    apply_at(&mut db, now_ms)
+    let db = super::open_database(true)?.ok_or("Usage database unavailable")?;
+    maintain_connection(&db, now_ms)
 }
-fn apply_at(db: &mut Connection, now_ms: i64) -> Result<Value, String> {
-    if now_ms < 0 {
-        return Err("Local retention time is invalid".into());
+
+pub(super) fn before_capture(db: &Connection) -> Result<(), String> {
+    if !db.is_autocommit() {
+        return Ok(());
     }
-    let tx = db
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(db_error)?;
-    let policy = policy(&tx)?;
-    if !policy.enabled {
-        return Ok(report(&policy, &Scan::default(), 0));
+    if !policy(db)?.enabled {
+        return Ok(());
     }
-    let scan = scan(&tx, &policy, now_ms)?;
-    let mut deleted = 0;
-    for id in &scan.eligible {
-        let sequence: Option<i64> = tx
-            .query_row(
-                "SELECT sequence FROM usage_events WHERE event_id=?1",
-                [id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(db_error)?;
-        if let Some(sequence) = sequence {
-            if old_protected(&tx, id, sequence)?
-                || crate::usage_analytics::queue::protected_event(&tx, id, sequence)?
-            {
-                return Err("Usage custody changed; local history preserved".into());
-            }
-            deleted += tx
-                .execute("DELETE FROM usage_events WHERE event_id=?1", [id])
-                .map_err(db_error)?;
+    let now = i64::try_from(time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
+        .map_err(|_| "Local retention time is invalid")?;
+    let result = maintain_connection(db, now)?;
+    if result["maintenance_pending"] == true {
+        paused(db, "retention_maintenance");
+        return Err("Usage capture paused while expired history maintenance catches up; application execution can continue".into());
+    }
+    Ok(())
+}
+fn maintain_connection(db: &Connection, now: i64) -> Result<Value, String> {
+    let start = std::time::Instant::now();
+    let mut deleted = 0u64;
+    let mut expired = 0u64;
+    let mut result;
+    let mut passes = 0;
+    loop {
+        result = apply_connection(db, now)?;
+        deleted += result["deleted_records"].as_u64().unwrap_or(0);
+        expired += result["expired_without_acknowledgment_records"]
+            .as_u64()
+            .unwrap_or(0);
+        passes += 1;
+        if result["maintenance_pending"] != true
+            || passes >= MAX_PASSES
+            || start.elapsed() >= std::time::Duration::from_millis(250)
+        {
+            break;
         }
     }
-    tx.execute("INSERT INTO usage_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![CURSOR_KEY,scan.next_after.to_string()]).map_err(db_error)?;
+    result["deleted_records"] = json!(deleted);
+    result["expired_without_acknowledgment_records"] = json!(expired);
+    result["coverage_incomplete"] = json!(expired > 0);
+    result["maintenance_passes"] = json!(passes);
+    Ok(result)
+}
+#[cfg(test)]
+fn apply_at(db: &mut Connection, now: i64) -> Result<Value, String> {
+    apply_connection(db, now)
+}
+fn apply_connection(db: &Connection, now: i64) -> Result<Value, String> {
+    if now < 0 {
+        return Err("Local retention time is invalid".into());
+    }
+    let tx = rusqlite::Transaction::new_unchecked(db, TransactionBehavior::Immediate)
+        .map_err(db_error)?;
+    // A waiting writer may have changed consent or the window before this lock.
+    let policy = policy(&tx)?;
+    if !policy.enabled {
+        return Ok(report(
+            &policy,
+            &Scan {
+                complete: true,
+                ..Scan::default()
+            },
+            0,
+        ));
+    }
+    install_hours(&tx)?;
+    let after: i64 = tx
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM usage_meta WHERE key=?1",
+            [INDEX_CURSOR_KEY],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db_error)?
+        .unwrap_or(0);
+    let rows = {
+        let mut stmt=tx.prepare("SELECT sequence,event_id,created_at FROM usage_events WHERE sequence>?1 ORDER BY sequence LIMIT ?2").map_err(db_error)?;
+        let rows = stmt
+            .query_map(params![after, PASS_LIMIT as i64], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        rows
+    };
+    let next = if rows.len() < PASS_LIMIT {
+        crate::usage_analytics::queue::high(&tx)?
+    } else {
+        rows.last().map(|row| row.0).unwrap_or(after)
+    };
+    for (seq, id, created) in rows {
+        let (hour, valid) = event_hour(&created, now);
+        tx.execute(
+            "INSERT OR IGNORE INTO usage_retention_hours VALUES(?1,?2,?3,?4)",
+            params![id, seq, hour, valid],
+        )
+        .map_err(db_error)?;
+    }
+    tx.execute("INSERT INTO usage_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![INDEX_CURSOR_KEY,next.to_string()]).map_err(db_error)?;
+    if crate::usage_analytics::queue::installed(&tx)? {
+        let retries = {
+            let mut stmt=tx.prepare("SELECT event_id,original_text FROM usage_cloud_queue q WHERE NOT EXISTS(SELECT 1 FROM usage_events e WHERE e.event_id=q.event_id) AND NOT EXISTS(SELECT 1 FROM usage_retention_retry_hours h WHERE h.event_id=q.event_id) GROUP BY event_id ORDER BY event_id LIMIT ?1").map_err(db_error)?;
+            let rows = stmt
+                .query_map([PASS_LIMIT as i64], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })
+                .map_err(db_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(db_error)?;
+            rows
+        };
+        for (id, text) in retries {
+            let stamp = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v["occurred_at_ms"].as_i64())
+                .filter(|t| *t >= 0 && *t <= now.saturating_add(300_000));
+            tx.execute(
+                "INSERT OR IGNORE INTO usage_retention_retry_hours VALUES(?1,?2,?3)",
+                params![
+                    id,
+                    stamp.unwrap_or(now) / HOUR_MS * HOUR_MS,
+                    stamp.is_some()
+                ],
+            )
+            .map_err(db_error)?;
+        }
+    }
+    let mut scan = scan(&tx, &policy, now)?;
+    crate::usage_analytics::queue::expire_events(&tx, &scan.eligible, now)?;
+    let mut deleted = 0;
+    for id in &scan.eligible {
+        deleted += tx
+            .execute("DELETE FROM usage_events WHERE event_id=?1", [id])
+            .map_err(db_error)?;
+        tx.execute(
+            "DELETE FROM usage_retention_retry_hours WHERE event_id=?1",
+            [id],
+        )
+        .map_err(db_error)?;
+    }
+    tx.execute("INSERT INTO usage_meta(key,value) VALUES('rolling_expired_without_ack_total_v2',?1) ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+CAST(excluded.value AS INTEGER) AS TEXT)",[scan.expired_without_ack.to_string()]).map_err(db_error)?;
+    scan.complete=!scan.indexing_pending && !tx.query_row("SELECT EXISTS(SELECT 1 FROM usage_retention_hours WHERE hour_ms<?1) OR EXISTS(SELECT 1 FROM usage_retention_retry_hours WHERE hour_ms<?1)",[cutoff(&policy,now)],|r|r.get::<_,bool>(0)).map_err(db_error)?;
     tx.commit().map_err(db_error)?;
     Ok(report(&policy, &scan, deleted))
 }
@@ -385,6 +551,7 @@ fn paused(db: &Connection, code: &str) {
         "capture-paused",
         match code {
             "storage_budget" => "storage_budget\n",
+            "retention_maintenance" => "retention_maintenance\n",
             "free_space_reserve" => "free_space_reserve\n",
             _ => "free_space_unavailable\n",
         },
@@ -412,6 +579,15 @@ fn resumed(db: &Connection) {
 /// pages include all actual queues/projections; prospective growth reserves both
 /// pipelines plus index/page splits without scanning historical payloads.
 pub(super) fn check_capture(db: &Connection, raw_bytes: usize) -> Result<(), String> {
+    let selected = policy(db)?;
+    if selected.enabled {
+        let now = i64::try_from(time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
+            .map_err(|_| "Local retention time is invalid")?;
+        if !scan(db, &selected, now)?.complete {
+            paused(db, "retention_maintenance");
+            return Err("Usage capture paused while expired history maintenance catches up; application execution can continue".into());
+        }
+    }
     let observed = storage(db).map_err(|_| {
         paused(db, "free_space_unavailable");
         "Usage capture paused because storage could not be verified; retained history is preserved"
@@ -465,7 +641,10 @@ fn last_pause(dir: Option<&Path>) -> Option<String> {
         .ok()?;
     matches!(
         text.trim(),
-        "storage_budget" | "free_space_reserve" | "free_space_unavailable"
+        "storage_budget"
+            | "free_space_reserve"
+            | "free_space_unavailable"
+            | "retention_maintenance"
     )
     .then(|| text.trim().to_owned())
 }
@@ -515,6 +694,9 @@ pub(crate) fn status(now_ms: i64) -> Result<Value, String> {
 #[cfg(test)]
 thread_local! { static TEST_LIMITS: std::cell::RefCell<Option<(Limits,Option<u64>)>> = const {std::cell::RefCell::new(None)}; }
 
+#[cfg(all(test, cargo_ai_cli))]
+#[path = "migration_benchmark_tests.rs"]
+mod migration_benchmark_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,136 +730,6 @@ mod tests {
     fn old_queue(db: &Connection) {
         db.execute_batch("CREATE TABLE usage_backup_queue(event_id TEXT NOT NULL REFERENCES usage_events(event_id) ON DELETE CASCADE,binding TEXT NOT NULL,generation INTEGER NOT NULL,acknowledged INTEGER NOT NULL,PRIMARY KEY(event_id,binding,generation)); CREATE TABLE usage_backup_windows(window_id INTEGER PRIMARY KEY,binding TEXT NOT NULL,generation INTEGER NOT NULL,start_sequence INTEGER NOT NULL,end_sequence INTEGER,last_scan INTEGER NOT NULL);").unwrap();
     }
-    #[test]
-    fn explicit_policy_preserves_upgraded_history_and_requires_both_loss_choices() {
-        let mut db = db();
-        insert_event(&db, &event(1, "2026-10-01T00:00:00Z")).unwrap();
-        assert_eq!(policy(&db).unwrap(), Policy::default());
-        assert_eq!(apply_at(&mut db, NOW).unwrap()["deleted_records"], 0);
-        assert_eq!(count(&db), 1);
-        let mut rejected = enabled(false);
-        rejected.local_detail_loss_acknowledged = false;
-        assert!(configure_at(&mut db, &rejected).is_err());
-        assert!(configure_at(
-            &mut db,
-            &Policy {
-                days: 0,
-                ..enabled(true)
-            }
-        )
-        .is_err());
-        for days in [1, 7, 30] {
-            configure_at(
-                &mut db,
-                &Policy {
-                    days,
-                    ..enabled(false)
-                },
-            )
-            .unwrap();
-        }
-        configure_at(&mut db, &enabled(false)).unwrap();
-        let preview = preview_at(&db, NOW).unwrap();
-        assert_eq!(preview["unselected_loss_blocked_records"], 1);
-        assert_eq!(
-            preview["local_detail_loss"]["full_local_restoration_from_cloud"],
-            false
-        );
-        assert_eq!(preview["eligible_records"], 0);
-        assert_eq!(apply_at(&mut db, NOW).unwrap()["deleted_records"], 0);
-        configure_at(&mut db, &enabled(true)).unwrap();
-        assert_eq!(apply_at(&mut db, NOW).unwrap()["deleted_records"], 1);
-    }
-    #[test]
-    fn strict_age_boundary_invalid_dates_and_preview_are_nonmutating() {
-        let mut db = db();
-        for (index, stamp) in [
-            (1, "2026-10-20T23:59:59.999999999Z"),
-            (2, "2026-10-21T00:00:00Z"),
-            (3, "2026-10-21T00:00:00.000000001Z"),
-            (4, "2020-01-01"),
-        ] {
-            insert_event(&db, &event(index, stamp)).unwrap();
-        }
-        configure_at(&mut db, &enabled(true)).unwrap();
-        let before: i64 = db
-            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| r.get(0))
-            .unwrap();
-        let preview = preview_at(&db, NOW).unwrap();
-        assert_eq!(preview["eligible_records"], 1);
-        assert_eq!(preview["invalid_timestamp_records"], 1);
-        assert_eq!(count(&db), 4);
-        assert_eq!(
-            db.query_row(
-                "SELECT COUNT(*) FROM usage_meta WHERE key=?1",
-                [CURSOR_KEY],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            db.query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            before
-        );
-        assert!(!exists(&db, "usage_cloud_state").unwrap());
-        assert!(!exists(&db, "usage_backup_windows").unwrap());
-        assert_eq!(apply_at(&mut db, NOW).unwrap()["deleted_records"], 1);
-        assert_eq!(count(&db), 3);
-    }
-    #[test]
-    fn closed_unscanned_windows_and_disabled_pending_queues_cannot_be_waived() {
-        let mut db = db();
-        old_queue(&db);
-        for i in 1..=251 {
-            insert_event(&db, &event(i, "2026-10-01T00:00:00Z")).unwrap();
-        }
-        db.execute(
-            "INSERT INTO usage_backup_windows VALUES(1,'disabled-account',1,0,100,0)",
-            [],
-        )
-        .unwrap();
-        db.execute(
-            "INSERT INTO usage_backup_queue VALUES(?1,'other-account',2,0)",
-            [id(1)],
-        )
-        .unwrap();
-        configure_at(&mut db, &enabled(true)).unwrap();
-        let first = apply_at(&mut db, NOW).unwrap();
-        assert_eq!(first["examined_records"], 100);
-        assert_eq!(first["custody_blocked_records"], 100);
-        assert_eq!(first["deleted_records"], 0);
-        let second = apply_at(&mut db, NOW).unwrap();
-        assert_eq!(second["deleted_records"], 100);
-        let third = apply_at(&mut db, NOW).unwrap();
-        assert_eq!(third["deleted_records"], 51);
-        assert_eq!(count(&db), 100);
-        assert_eq!(third["next_scan_after"], "0");
-    }
-    #[test]
-    fn apply_rechecks_new_custody_after_preview_and_partial_schema_fails_closed() {
-        let mut db = db();
-        insert_event(&db, &event(1, "2026-10-01T00:00:00Z")).unwrap();
-        configure_at(&mut db, &enabled(true)).unwrap();
-        assert_eq!(preview_at(&db, NOW).unwrap()["eligible_records"], 1);
-        old_queue(&db);
-        db.execute(
-            "INSERT INTO usage_backup_queue VALUES(?1,'new-obligation',1,0)",
-            [id(1)],
-        )
-        .unwrap();
-        assert_eq!(apply_at(&mut db, NOW).unwrap()["deleted_records"], 0);
-        assert_eq!(count(&db), 1);
-        db.execute("UPDATE usage_backup_queue SET acknowledged=1", [])
-            .unwrap();
-        db.execute("CREATE TABLE usage_cloud_state(incomplete TEXT)", [])
-            .unwrap();
-        assert!(apply_at(&mut db, NOW).is_err());
-        assert_eq!(count(&db), 1);
-    }
-
     fn source() -> Source {
         Source {
             account_binding: CanonicalUuid::try_from(id(9003)).unwrap(),
@@ -692,101 +744,277 @@ mod tests {
         }
     }
     fn projection(_: &Connection, event: &Value) -> Result<String, String> {
-        Ok(json!({"schema_version":1,"normalization_version":1,"event_id":event["event_id"],"root_run_id":id(9001),"agent_run_id":id(9002),"event_type":"provider_request","event_kind":"provider_request_completed","occurred_at_ms":1,"tokens":{"input_tokens":5,"output_tokens":null}}).to_string())
-    }
-    fn retain(db: &mut Connection) {
-        let lease = queue::acquire_lease(db, &source(), 100, queue::MAX_LEASE_MS)
-            .unwrap()
-            .unwrap();
-        let batch = queue::prepare_batch(db, &lease, 100).unwrap().unwrap();
-        let admission = AdmissionCommitment {
-            protocol_version: Version,
-            source: batch.source().clone(),
-            provenance: batch.provenance().clone(),
-            batch_id: batch.id().clone(),
-            ordered_membership_sha256: batch.membership().clone(),
-            manifest_sha256: Sha256Hash::of(b"synthetic exact authenticated manifest"),
-        };
-        queue::begin_attempt(db, &lease, batch.id(), 100).unwrap();
-        queue::record_admission(db, &lease, batch.id(), &admission, 100).unwrap();
-        let receipt = Receipt {
-            protocol_version: Version,
-            source: admission.source,
-            provenance: admission.provenance,
-            batch_id: admission.batch_id,
-            manifest_sha256: admission.manifest_sha256,
-            ordered_membership_sha256: admission.ordered_membership_sha256,
-            custody: Custody::Retained,
-            members: batch.members().to_vec(),
-        };
-        queue::acknowledge_retained(db, &lease, batch.id(), &receipt, 100).unwrap();
-        queue::release_lease(db, &lease, 100).unwrap();
+        let occurred = time::OffsetDateTime::parse(
+            event["timestamp"].as_str().unwrap(),
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap()
+        .unix_timestamp()
+            * 1000;
+        Ok(json!({"schema_version":1,"normalization_version":1,"event_id":event["event_id"],"root_run_id":id(9001),"agent_run_id":id(9002),"event_type":"provider_request","event_kind":"provider_request_completed","occurred_at_ms":occurred,"tokens":{"input_tokens":5,"output_tokens":null}}).to_string())
     }
     #[test]
-    fn exact_new_receipt_frees_only_new_custody_and_disable_preserves_both_obligations() {
-        let mut db = db();
-        old_queue(&db);
-        queue::initialize(&mut db).unwrap();
-        queue::enable(&mut db, &source(), &provenance(), 0).unwrap();
-        insert_event(&db, &event(1, "2026-10-01T00:00:00Z")).unwrap();
-        configure_at(&mut db, &enabled(false)).unwrap();
-        // A future interval is an obligation even before projection/scanning.
-        assert_eq!(
-            apply_at(&mut db, NOW).unwrap()["custody_blocked_records"],
-            1
-        );
-        queue::capture(&mut db, &source(), projection).unwrap();
-        db.execute(
-            "INSERT INTO usage_backup_queue VALUES(?1,'old-account',1,0)",
-            [id(1)],
-        )
-        .unwrap();
-        retain(&mut db);
-        queue::disable(&mut db, &source()).unwrap();
-        assert_eq!(
-            apply_at(&mut db, NOW).unwrap()["custody_blocked_records"],
-            1
-        );
-        db.execute("UPDATE usage_backup_queue SET acknowledged=1", [])
-            .unwrap();
-        assert_eq!(apply_at(&mut db, NOW).unwrap()["deleted_records"], 1);
-        assert_eq!(count(&db), 0);
-        assert!(queue::retained_event(&db, &id(1)).unwrap());
-    }
-    #[test]
-    fn old_ack_is_not_current_new_copy_and_new_quarantine_stays_protected() {
-        let mut db = db();
-        old_queue(&db);
-        queue::initialize(&mut db).unwrap();
-        queue::enable(&mut db, &source(), &provenance(), 0).unwrap();
-        insert_event(&db, &event(1, "2026-10-01T00:00:00Z")).unwrap();
-        queue::capture(&mut db, &source(), projection).unwrap();
-        queue::quarantine_event(&mut db, &source(), &id(1)).unwrap();
-        queue::disable(&mut db, &source()).unwrap();
-        db.execute(
-            "INSERT INTO usage_backup_queue VALUES(?1,'old-account',1,1)",
-            [id(1)],
-        )
-        .unwrap();
-        configure_at(&mut db, &enabled(true)).unwrap();
-        assert_eq!(
-            apply_at(&mut db, NOW).unwrap()["custody_blocked_records"],
-            1
-        );
-        let mut old_only = super::tests::db();
-        old_queue(&old_only);
-        insert_event(&old_only, &event(2, "2026-10-01T00:00:00Z")).unwrap();
-        old_only
-            .execute(
-                "INSERT INTO usage_backup_queue VALUES(?1,'old-account',1,1)",
-                [id(2)],
+    fn policy_committed_while_expiry_waits_on_writer_is_reloaded_before_deletion() {
+        use std::sync::mpsc::{self, SyncSender};
+        thread_local! {static WAITING:std::cell::RefCell<Option<SyncSender<()>>>=const {std::cell::RefCell::new(None)};}
+        fn waiting_for_writer(attempt: i32) -> bool {
+            WAITING.with(|slot| {
+                if let Some(sender) = slot.borrow_mut().take() {
+                    let _ = sender.send(());
+                }
+            });
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            attempt < 5000
+        }
+        for next in [
+            Policy {
+                enabled: false,
+                ..enabled(true)
+            },
+            Policy {
+                days: 30,
+                ..enabled(true)
+            },
+        ] {
+            let fixture = Fixture::new();
+            let mut writer = super::super::open_at(&fixture.0, true).unwrap().unwrap();
+            insert_event(&writer, &event(1, "2026-10-10T00:00:00Z")).unwrap();
+            configure_at(&mut writer, &enabled(true)).unwrap();
+            let reader = Connection::open(fixture.0.join("usage.sqlite3")).unwrap();
+            reader.pragma_update(None, "foreign_keys", true).unwrap();
+            reader.busy_handler(Some(waiting_for_writer)).unwrap();
+            let tx = writer
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            next.validate().unwrap();
+            tx.execute(
+                "UPDATE usage_meta SET value=?2 WHERE key=?1",
+                params![POLICY_KEY, serde_json::to_string(&next).unwrap()],
             )
             .unwrap();
-        configure_at(&mut old_only, &enabled(false)).unwrap();
+            let (send, receive) = mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                WAITING.with(|slot| *slot.borrow_mut() = Some(send));
+                apply_connection(&reader, NOW)
+            });
+            receive
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("expiry must actually wait behind the policy writer");
+            tx.commit().unwrap();
+            let result = worker.join().unwrap().unwrap();
+            assert_eq!(
+                result["deleted_records"], 0,
+                "a newer consent/window must govern expiry after the writer lock is acquired"
+            );
+            assert_eq!(result["policy"], serde_json::to_value(&next).unwrap());
+            assert_eq!(count(&writer), 1);
+        }
+    }
+    #[test]
+    fn old_policy_and_backup_material_require_explicit_new_loss_consent() {
+        let mut db = db();
+        old_queue(&db);
+        insert_event(&db, &event(1, "2026-10-01T00:00:00Z")).unwrap();
+        db.execute(
+            "INSERT INTO usage_backup_queue VALUES(?1,'legacy',1,0)",
+            [id(1)],
+        )
+        .unwrap();
+        let mut legacy = enabled(true);
+        legacy.schema_version = 1;
+        db.execute(
+            "INSERT INTO usage_meta VALUES(?1,?2)",
+            params![LEGACY_POLICY_KEY, serde_json::to_string(&legacy).unwrap()],
+        )
+        .unwrap();
+        assert_eq!(apply_at(&mut db, NOW).unwrap()["deleted_records"], 0);
+        assert_eq!(count(&db), 1);
+        assert!(configure_at(&mut db, &legacy).is_err());
+        assert!(configure_at(&mut db, &enabled(false)).is_err());
         assert_eq!(
-            apply_at(&mut old_only, NOW).unwrap()["unselected_loss_blocked_records"],
+            db.query_row("SELECT COUNT(*) FROM usage_backup_queue", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
             1
         );
+        configure_at(&mut db, &enabled(true)).unwrap();
+        let result = apply_at(&mut db, NOW).unwrap();
+        assert_eq!(result["deleted_records"], 1);
+        assert_eq!(result["expired_without_acknowledgment_records"], 1);
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM usage_backup_queue", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    #[test]
+    fn one_seven_thirty_days_keep_current_partial_hour_and_exact_boundary() {
+        for days in [1, 7, 30] {
+            let mut db = db();
+            let now = NOW + 37 * 60_000;
+            let boundary = now / HOUR_MS * HOUR_MS - i64::from(days) * 24 * HOUR_MS;
+            for (id, stamp) in [(1, boundary - 1), (2, boundary), (3, now)] {
+                let stamp =
+                    time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(stamp) * 1_000_000)
+                        .unwrap()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap();
+                insert_event(&db, &event(id, &stamp)).unwrap();
+            }
+            configure_at(
+                &mut db,
+                &Policy {
+                    days,
+                    ..enabled(true)
+                },
+            )
+            .unwrap();
+            let preview = preview_at(&db, now).unwrap();
+            assert!(preview["indexing_pending"].as_bool().unwrap());
+            assert_eq!(count(&db), 3);
+            assert_eq!(apply_at(&mut db, now).unwrap()["deleted_records"], 1);
+            assert_eq!(count(&db), 2);
+        }
+    }
+    #[test]
+    fn unfinished_maintenance_pauses_nested_capture_and_fresh_append_drains_expiry_first() {
+        let mut db = db();
+        for i in 1..=1101 {
+            insert_event(&db, &event(i, "2026-10-01T00:00:00Z")).unwrap();
+        }
+        configure_at(&mut db, &enabled(true)).unwrap();
+        assert_eq!(apply_at(&mut db, NOW).unwrap()["maintenance_pending"], true);
+        let stamp = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(insert_event(&db, &event(5000, &stamp))
+            .unwrap_err()
+            .contains("maintenance catches up"));
+        db.execute_batch("COMMIT").unwrap();
+        assert_eq!(count(&db), 101);
+        insert_event(&db, &event(5000, &stamp)).unwrap();
+        assert_eq!(count(&db), 1);
+    }
+    #[test]
+    fn restart_keeps_fixed_invalid_anchor_and_unknown_raw_fields() {
+        let fixture = Fixture::new();
+        let mut db = super::super::open_at(&fixture.0, true).unwrap().unwrap();
+        let raw = event(1, "invalid-clock");
+        insert_event(&db, &raw).unwrap();
+        configure_at(&mut db, &enabled(true)).unwrap();
+        apply_at(&mut db, NOW).unwrap();
+        drop(db);
+        let mut reopened = super::super::open_at(&fixture.0, true).unwrap().unwrap();
+        let actual: String = reopened
+            .query_row("SELECT record_json FROM usage_event_records", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&actual).unwrap(), raw);
+        assert_eq!(
+            reopened
+                .query_row("SELECT hour_ms FROM usage_retention_hours", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            NOW
+        );
+        assert_eq!(
+            apply_at(&mut reopened, NOW + 8 * 24 * HOUR_MS).unwrap()["deleted_records"],
+            1
+        );
+    }
+    #[test]
+    fn invalid_and_future_clocks_have_finite_persisted_anchor_and_no_cloud_eligibility() {
+        let mut db = db();
+        insert_event(&db, &event(1, "bad-date")).unwrap();
+        insert_event(&db, &event(2, "2099-01-01T00:00:00Z")).unwrap();
+        configure_at(&mut db, &enabled(true)).unwrap();
+        assert_eq!(apply_at(&mut db, NOW).unwrap()["deleted_records"], 0);
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM usage_retention_hours WHERE hour_ms=?1 AND cloud_eligible=0",
+                [NOW],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            apply_at(&mut db, NOW + 8 * 24 * HOUR_MS).unwrap()["deleted_records"],
+            2
+        );
+    }
+    #[test]
+    fn large_inactivity_catchup_drains_short_transactions_before_capture() {
+        let mut db = db();
+        for i in 1..=2501 {
+            insert_event(&db, &event(i, "2026-10-01T00:00:00Z")).unwrap();
+        }
+        configure_at(&mut db, &enabled(true)).unwrap();
+        let first = apply_at(&mut db, NOW).unwrap();
+        assert_eq!(first["deleted_records"], 1000);
+        assert_eq!(first["maintenance_pending"], true);
+        let rest = maintain_connection(&db, NOW).unwrap();
+        assert_eq!(rest["deleted_records"], 1501);
+        assert_eq!(rest["maintenance_pending"], false);
+        assert_eq!(count(&db), 0);
+        assert_eq!(
+            preview_at(&db, NOW).unwrap()["expired_without_acknowledgment_total"],
+            2501
+        );
+    }
+    #[test]
+    fn expiry_discards_mixed_frozen_batch_requeues_survivor_and_fences_late_ack() {
+        let mut db = db();
+        queue::initialize(&mut db).unwrap();
+        queue::enable(&mut db, &source(), &provenance(), 0).unwrap();
+        insert_event(&db, &event(1, "2026-10-01T00:00:00Z")).unwrap();
+        insert_event(&db, &event(2, "2026-10-27T00:00:00Z")).unwrap();
+        queue::capture(&mut db, &source(), projection).unwrap();
+        let lease = queue::acquire_lease(&mut db, &source(), NOW, queue::MAX_LEASE_MS)
+            .unwrap()
+            .unwrap();
+        let batch = queue::prepare_batch(&mut db, &lease, NOW).unwrap().unwrap();
+        configure_at(&mut db, &enabled(true)).unwrap();
+        assert_eq!(apply_at(&mut db, NOW).unwrap()["deleted_records"], 1);
+        assert!(
+            queue::acknowledge_uploaded(&mut db, &lease, batch.id(), NOW)
+                .unwrap_err()
+                .contains("expired")
+        );
+        assert_eq!(count(&db), 1);
+        let new_lease = queue::acquire_lease(&mut db, &source(), NOW, queue::MAX_LEASE_MS)
+            .unwrap()
+            .unwrap();
+        let survivor = queue::prepare_batch(&mut db, &new_lease, NOW)
+            .unwrap()
+            .unwrap();
+        assert_ne!(batch.id(), survivor.id());
+        assert_eq!(survivor.members().len(), 1);
+        assert_eq!(survivor.members()[0].event_id, id(2));
+        queue::acknowledge_uploaded(&mut db, &new_lease, survivor.id(), NOW).unwrap();
+        assert_eq!(count(&db), 1);
+        assert!(queue::retained_event(&db, &id(2)).unwrap());
+        assert_eq!(
+            apply_at(&mut db, NOW + 8 * 24 * HOUR_MS).unwrap()["deleted_records"],
+            1
+        );
+        assert_eq!(queue::status(&db, &source()).unwrap().pending, 0);
+        assert!(!queue::retained_event(&db, &id(2)).unwrap());
+    }
+    #[test]
+    fn selected_retention_expires_orphaned_retry_material_from_old_raw_cleanup() {
+        let mut db = db();
+        queue::initialize(&mut db).unwrap();
+        queue::enable(&mut db, &source(), &provenance(), 0).unwrap();
+        insert_event(&db, &event(1, "2026-10-01T00:00:00Z")).unwrap();
+        queue::capture(&mut db, &source(), projection).unwrap();
+        db.execute("DELETE FROM usage_events", []).unwrap();
+        configure_at(&mut db, &enabled(true)).unwrap();
+        apply_at(&mut db, NOW).unwrap();
+        assert_eq!(queue::status(&db, &source()).unwrap().pending, 0);
     }
     struct Override;
     impl Override {
@@ -883,7 +1111,7 @@ mod tests {
         assert!(fixture.0.join("capture-paused").is_file());
         assert!(fixture.0.join("capture-incomplete").is_file());
         insert_event(&db, &next).unwrap();
-        assert_eq!(count(&db), 2);
+        assert_eq!(count(&db), 1);
         assert!(!fixture.0.join("capture-paused").exists());
         assert!(fixture.0.join("capture-resumed").is_file());
         assert!(fixture.0.join("capture-incomplete").is_file());
@@ -915,23 +1143,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(serde_json::from_str::<Value>(&original).unwrap(), large);
-    }
-
-    #[test]
-    fn cleared_new_copy_requires_local_only_loss_choice_again() {
-        let mut db = db();
-        queue::initialize(&mut db).unwrap();
-        queue::enable(&mut db, &source(), &provenance(), 0).unwrap();
-        insert_event(&db, &event(1, "2026-10-01T00:00:00Z")).unwrap();
-        queue::capture(&mut db, &source(), projection).unwrap();
-        retain(&mut db);
-        queue::mark_cleared(&mut db, &source()).unwrap();
-        configure_at(&mut db, &enabled(false)).unwrap();
-        assert_eq!(
-            apply_at(&mut db, NOW).unwrap()["unselected_loss_blocked_records"],
-            1
-        );
-        assert_eq!(count(&db), 1);
     }
 
     #[test]

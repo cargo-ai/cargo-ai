@@ -2104,15 +2104,16 @@ fn generated_usage_custody_case(fixture: &Fixture) {
         .args(["--force", "--keep-project"])
         .output()
         .unwrap();
-    assert_warning_free_build(&hatch, "usage custody hatch");
+    assert_warning_free_build(&hatch, "usage upload hatch");
     assert!(
         hatch.status.success(),
-        "usage custody hatch failed: {}",
+        "usage upload hatch failed: {}",
         String::from_utf8_lossy(&hatch.stderr)
     );
     let workspace = fixture.home.join("agents").join(name);
     let main = workspace.join("src/main.rs");
     let source = fs::read_to_string(&main).unwrap();
+    let production_main_sha256 = Sha256::digest(source.as_bytes());
     fs::write(
         &main,
         format!(
@@ -2121,30 +2122,41 @@ fn generated_usage_custody_case(fixture: &Fixture) {
         ),
     )
     .unwrap();
-    fs::write(fixture.home.join("config.toml"), "secret_store = 'file'\n").unwrap();
+    fs::write(
+        fixture.home.join("config.toml"),
+        "secret_store = 'file'\n[usage]\ntracking = true\n",
+    )
+    .unwrap();
     let target =
         provider_cache::CacheIdentity::current(Path::new(env!("CARGO_BIN_EXE_cargo-ai"))).target;
     let output = fixture
         .isolated_command("cargo")
         .current_dir(&workspace)
         .env("CARGO_TERM_COLOR", "never")
+        .env("CARGO_AI_USAGE_TRACKING", "on")
+        .env_remove("CARGO_AI_USAGE_ROOT_RUN_ID")
+        .env_remove("CARGO_AI_USAGE_PARENT_AGENT_RUN_ID")
+        .env_remove("CARGO_AI_USAGE_LAUNCHED_BY_TYPE")
+        .env_remove("CARGO_AI_USAGE_LAUNCHED_BY_ACTION")
+        .env_remove("CARGO_AI_USAGE_LAUNCHED_BY_TOOL")
+        .env_remove("CARGO_AI_USAGE_LAUNCHED_BY_STEP_INDEX")
         .args([
             "test",
             "--locked",
             "--release",
             "--target",
             &target,
-            "generated_usage_scheduler_recovers_exact_custody_after_response_loss",
+            "generated_usage_explicit_upload_preserves_independent_local_history",
             "--",
             "--test-threads=1",
             "--nocapture",
         ])
         .output()
         .unwrap();
-    assert_warning_free_build(&output, "emitted usage custody tests");
+    assert_warning_free_build(&output, "emitted usage upload tests");
     assert!(
         output.status.success(),
-        "emitted usage custody test failed: {}\n{}",
+        "emitted usage upload test failed: {}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -2169,25 +2181,50 @@ fn generated_usage_custody_case(fixture: &Fixture) {
     } else {
         workspace.join(test_path)
     };
-    eprintln!(
-        "Emitted usage custody source SHA256: {:x}",
-        Sha256::digest(fs::read(&main).unwrap())
-    );
-    for file in ["Cargo.toml", "Cargo.lock"] {
+    eprintln!("Emitted usage upload production main SHA256: {production_main_sha256:x}");
+    for file in [
+        "src/usage_analytics.rs",
+        "src/usage_analytics/contract.rs",
+        "src/usage_analytics/custody.rs",
+        "src/usage_analytics/events.rs",
+        "src/usage_analytics/elastic.rs",
+        "src/usage_analytics/queue.rs",
+        "src/usage_analytics/local_queue.rs",
+        "src/usage_analytics/transport.rs",
+        "src/usage_analytics/scheduler.rs",
+        "src/usage_store.rs",
+        "src/usage_store/retention.rs",
+        "src/usage_store/schema.rs",
+        "src/usage_store/codec.rs",
+        "src/usage_log.rs",
+    ] {
         eprintln!(
-            "Emitted usage custody {file} SHA256: {:x}",
+            "Emitted usage upload {file} SHA256: {:x}",
             Sha256::digest(fs::read(workspace.join(file)).unwrap())
         );
     }
     eprintln!(
-        "Emitted usage custody runtime SHA256: {:x}",
+        "Emitted usage upload test-augmented main SHA256: {:x}",
+        Sha256::digest(fs::read(&main).unwrap())
+    );
+    for file in ["Cargo.toml", "Cargo.lock"] {
+        eprintln!(
+            "Emitted usage upload {file} SHA256: {:x}",
+            Sha256::digest(fs::read(workspace.join(file)).unwrap())
+        );
+    }
+    eprintln!(
+        "Emitted usage upload runtime SHA256: {:x}",
         Sha256::digest(fs::read(runtime).unwrap())
     );
     eprintln!(
-        "Executed usage custody test binary SHA256: {:x}",
+        "Executed usage upload test binary SHA256: {:x}",
         Sha256::digest(fs::read(test_binary).unwrap())
     );
-    eprintln!("Actual emitted scheduler, monotonic capture, lost response and exact receipt recovery passed");
+    eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+    eprintln!(
+        "Actual emitted release runtime: local-only maintenance, explicit V2 compressed upload/retry, independent raw retention, and scheduler wake/cancel passed"
+    );
 }
 
 #[test]

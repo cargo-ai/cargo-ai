@@ -191,7 +191,10 @@ fn outcome(error: Option<&Failure>) -> &'static str {
     }
 }
 fn payload_schema(command: &str) -> String {
-    let revision = if matches!(command, "actions list" | "actions validate") {
+    let revision = if matches!(command, "actions list" | "actions validate")
+        || command.starts_with("usage cloud ")
+        || command.starts_with("usage retention ")
+    {
         2
     } else {
         1
@@ -620,7 +623,7 @@ fn contracts() -> Vec<Value> {
             "account status"=>vec!["account_read","possible_session_refresh_and_persistence"],
             "account register"|"account confirm"|"account deactivate"=>vec!["remote_account_mutation","local_account_persistence"],
             "auth login openai"=>vec!["none_until_existing_terminal_flow"],
-            name if name.starts_with("usage cloud")=>vec!["explicit_cloud_custody_operation_or_passive_local_status","independent_consent_and_exact_retained_receipts"],
+            name if name.starts_with("usage cloud")=>vec!["explicit_cloud_custody_operation_or_passive_local_status","independent_cloud_consent_and_exact_durable_upload_acknowledgments"],
             name if name.starts_with("usage retention")=>vec!["passive_local_inspection_or_explicit_loss_acknowledged_policy"],
             name if name.starts_with("usage backup")=>vec!["local_queue_or_consent_maintenance","explicit_remote_operation_when_applicable"],
             name if name.starts_with("usage")=>vec!["local_usage_read_or_explicit_settings_mutation"],
@@ -637,7 +640,7 @@ fn contracts() -> Vec<Value> {
             _=>json!([]),
         };
         let mut contract = json!({"command":name,"payload_schema":payload_schema(name),"formats":["json"],"schema_versions":[1],"effects":effects,"variants":variants,"interaction":if *name=="auth login openai"{"existing_terminal_protocol_exception"}else{"noninteractive_explicit_consent_required_when_applicable"}});
-        if name.starts_with("usage cloud ")||name.starts_with("usage retention "){contract["data_json_schema"]=json!("https://cargo-ai.org/schemas/usage-maintenance-v1.json");}
+        if name.starts_with("usage cloud ")||name.starts_with("usage retention "){contract["data_json_schema"]=json!("https://cargo-ai.org/schemas/usage-maintenance-v2.json");}
         if matches!(*name, "actions list" | "actions validate") {
             let selector = if *name == "actions list" { "catalog_version" } else { "request_version" };
             contract["payload_schemas"] = json!([
@@ -965,7 +968,7 @@ mod thinking_tests {
     #[test]
     fn usage_maintenance_capabilities_bind_the_finite_typed_payload_schema() {
         let schema: Value =
-            serde_json::from_str(include_str!("../../docs/schemas/usage-maintenance-v1.json"))
+            serde_json::from_str(include_str!("../../docs/schemas/usage-maintenance-v2.json"))
                 .unwrap();
         let contracts = contracts();
         assert_eq!(
@@ -990,7 +993,7 @@ mod thinking_tests {
                 let name = contract["command"].as_str().unwrap();
                 assert_eq!(
                     contract["payload_schema"],
-                    format!("cargo-ai.{}.v1", name.replace(' ', "."))
+                    format!("cargo-ai.{}.v2", name.replace(' ', "."))
                 );
                 assert_eq!(contract["data_json_schema"], schema["$id"]);
                 assert!(schema["properties"]["operation"]["enum"]
@@ -1001,8 +1004,8 @@ mod thinking_tests {
         }
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(
-            schema["properties"]["postconditions_verified"]["const"],
-            true
+            schema["properties"]["postconditions_verified"]["type"],
+            "boolean"
         );
     }
 

@@ -23,7 +23,6 @@ async fn pass() {
     if canceled() {
         return;
     }
-    let _ = super::opportunistic().await;
     if !canceled() {
         let _ = crate::usage_store::retention::apply(super::now_ms());
     }

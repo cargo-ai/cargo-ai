@@ -579,7 +579,7 @@ fn timing_survives_file_reopen_and_exact_receipt_controls_custody() {
     let mut p = projection(91);
     p["elapsed_ms"] = json!(3);
     let id = p["event_id"].as_str().unwrap().to_owned();
-    let raw = json!({"event_id":id,"root_run_id":p["root_run_id"],"agent_run_id":p["agent_run_id"],"event_type":"provider_request_completed","timestamp":"1900-01-01T00:00:00Z","duration_ms":3,"backup_projection":p,"elapsed_timing":{"version":1,"basis":"monotonic_elapsed","elapsed_ms":3}});
+    let raw = json!({"event_id":id,"root_run_id":p["root_run_id"],"agent_run_id":p["agent_run_id"],"event_type":"provider_request_completed","timestamp":"2026-10-27T00:00:00Z","duration_ms":3,"backup_projection":p,"elapsed_timing":{"version":1,"basis":"monotonic_elapsed","elapsed_ms":3}});
     db.execute(
         "INSERT INTO usage_events(event_id,record_json) VALUES(?1,?2)",
         params![id, raw.to_string()],
@@ -1013,4 +1013,439 @@ fn hint_survives_database_close_and_reopen_but_not_a_replaced_lease() {
     assert!(!consume_payload_required(&mut db, &fresh, batch.id(), 106).unwrap());
     drop(db);
     std::fs::remove_file(path).unwrap();
+}
+
+fn upload_builder(
+    source: &Source,
+    provenance: &Provenance,
+    id: &CanonicalUuid,
+    events: &[EventSubmission],
+) -> Result<(String, usize, Sha256Hash), String> {
+    let (batch, count) = super::elastic::encode_batch(
+        &events[..events.len().min(150)],
+        super::elastic::DEFAULT_TARGET_BYTES,
+    )
+    .map_err(|e| e.to_string())?;
+    let members = events[..count]
+        .iter()
+        .map(EventSubmission::member)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let hash = super::elastic::membership_sha256(source, &members).map_err(|e| e.to_string())?;
+    let request = super::elastic::Request::Upload {
+        protocol_version: super::elastic::Version,
+        source: source.clone(),
+        provenance: provenance.clone(),
+        batch_id: id.clone(),
+        ordered_membership_sha256: hash.clone(),
+        batch,
+        retry_count: 0,
+    };
+    Ok((serde_json::to_string(&request).unwrap(), count, hash))
+}
+#[test]
+fn explicit_upload_batches_exceed_old_row_limit_and_preserve_restart_bytes_and_raw() {
+    let path = std::env::temp_dir().join(format!(
+        "usage-upload-restart-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let mut db = Connection::open(&path).unwrap();
+    db.execute_batch("PRAGMA foreign_keys=ON;CREATE TABLE usage_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT UNIQUE NOT NULL,record_json TEXT NOT NULL);CREATE VIEW usage_event_records AS SELECT * FROM usage_events;").unwrap();
+    initialize(&mut db).unwrap();
+    enable(&mut db, &source(), &provenance(1), 0).unwrap();
+    for i in 1..=205 {
+        insert(&db, i, false);
+    }
+    while capture(&mut db, &source(), super::project).unwrap() > 0 {}
+    let lease = acquire_lease(&mut db, &source(), 100, MAX_LEASE_MS)
+        .unwrap()
+        .unwrap();
+    let batch = prepare_upload_batch(&mut db, &lease, 100, upload_builder)
+        .unwrap()
+        .unwrap();
+    assert_eq!(batch.members().len(), 150);
+    assert_eq!(batch.members()[0].event_id, uuid(305).as_str());
+    assert_eq!(batch.members()[149].event_id, uuid(156).as_str());
+    begin_upload_attempt(&mut db, &lease, batch.id(), 100).unwrap();
+    assert!(db
+        .execute(
+            "UPDATE usage_cloud_upload_batches SET request_json='{}'",
+            []
+        )
+        .is_err());
+    assert!(db
+        .execute("DELETE FROM usage_cloud_upload_members", [])
+        .is_err());
+    release_lease(&mut db, &lease, 100).unwrap();
+    drop(db);
+    let mut db = Connection::open(&path).unwrap();
+    initialize(&mut db).unwrap();
+    let restarted = acquire_lease(&mut db, &source(), 101, MAX_LEASE_MS)
+        .unwrap()
+        .unwrap();
+    let replay = prepare_upload_batch(&mut db, &restarted, 101, |_, _, _, _| {
+        panic!("unknown outcome must reuse frozen bytes")
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(replay.request_json(), batch.request_json());
+    assert_eq!(replay.id(), batch.id());
+    acknowledge_uploaded(&mut db, &restarted, replay.id(), 101).unwrap();
+    assert_eq!(status(&db, &source()).unwrap().pending, 55);
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        205
+    );
+    let next = prepare_upload_batch(&mut db, &restarted, 101, upload_builder)
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.members().len(), 55);
+    assert_eq!(next.members()[0].event_id, uuid(155).as_str());
+    acknowledge_uploaded(&mut db, &restarted, next.id(), 101).unwrap();
+    insert(&db, 206, false); // Same logical hour, independently eligible after ACK.
+    assert_eq!(capture(&mut db, &source(), super::project).unwrap(), 1);
+    let open_hour = prepare_upload_batch(&mut db, &restarted, 101, upload_builder)
+        .unwrap()
+        .unwrap();
+    assert_eq!(open_hour.members().len(), 1);
+    assert_eq!(open_hour.members()[0].event_id, uuid(306).as_str());
+    drop(db);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn cloud_age_retires_mixed_unknown_batch_without_deleting_local_history_or_blocking_new_events() {
+    let mut db = db();
+    enable(&mut db, &source(), &provenance(1), 0).unwrap();
+    for index in 1..=3 {
+        let id = insert(&db, index, false);
+        let text: String = db
+            .query_row(
+                "SELECT record_json FROM usage_events WHERE event_id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut raw: Value = serde_json::from_str(&text).unwrap();
+        raw["backup_projection"]["occurred_at_ms"] = json!(index);
+        db.execute(
+            "UPDATE usage_events SET record_json=?2 WHERE event_id=?1",
+            params![id, raw.to_string()],
+        )
+        .unwrap();
+    }
+    while capture(&mut db, &source(), super::project).unwrap() > 0 {}
+    let old = acquire_lease(&mut db, &source(), 100, MAX_LEASE_MS)
+        .unwrap()
+        .unwrap();
+    let frozen = prepare_upload_batch(&mut db, &old, 100, upload_builder)
+        .unwrap()
+        .unwrap();
+    assert_eq!(frozen.members().len(), 3);
+    begin_upload_attempt(&mut db, &old, frozen.id(), 100).unwrap();
+    assert_eq!(
+        retire_uploads_before(&mut db, &source(), 2, 101).unwrap(),
+        1
+    );
+    assert_eq!(cloud_window_ineligible(&db, &source(), 2).unwrap(), 1);
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    assert!(acknowledge_uploaded(&mut db, &old, frozen.id(), 101).is_err());
+    let active = acquire_lease(&mut db, &source(), 101, MAX_LEASE_MS)
+        .unwrap()
+        .unwrap();
+    let current = prepare_upload_batch_since(&mut db, &active, 101, 2, upload_builder)
+        .unwrap()
+        .unwrap();
+    assert_ne!(current.id(), frozen.id());
+    assert_eq!(current.members().len(), 2);
+    acknowledge_uploaded(&mut db, &active, current.id(), 101).unwrap();
+    assert_eq!(status(&db, &source()).unwrap().retained, 2);
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM usage_cloud_upload_batches", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    let id = insert(&db, 4, false);
+    let text: String = db
+        .query_row(
+            "SELECT record_json FROM usage_events WHERE event_id=?1",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut raw: Value = serde_json::from_str(&text).unwrap();
+    raw["backup_projection"]["occurred_at_ms"] = json!(4);
+    db.execute(
+        "UPDATE usage_events SET record_json=?2 WHERE event_id=?1",
+        params![id, raw.to_string()],
+    )
+    .unwrap();
+    assert_eq!(capture(&mut db, &source(), super::project).unwrap(), 1);
+    let newest = prepare_upload_batch_since(&mut db, &active, 101, 2, upload_builder)
+        .unwrap()
+        .unwrap();
+    assert_eq!(newest.members().len(), 1);
+    assert_eq!(newest.members()[0].event_id, id);
+}
+#[test]
+fn upload_expiry_discards_whole_frozen_bytes_requeues_survivors_and_late_ack_cannot_resurrect() {
+    let mut db = db();
+    enable(&mut db, &source(), &provenance(1), 0).unwrap();
+    let expired = insert(&db, 1, false);
+    let survivor = insert(&db, 2, false);
+    capture(&mut db, &source(), super::project).unwrap();
+    let lease = acquire_lease(&mut db, &source(), 100, MAX_LEASE_MS)
+        .unwrap()
+        .unwrap();
+    let frozen = prepare_upload_batch(&mut db, &lease, 100, upload_builder)
+        .unwrap()
+        .unwrap();
+    begin_upload_attempt(&mut db, &lease, frozen.id(), 100).unwrap();
+    let tx = db.transaction().unwrap();
+    let counts = expire_events(&tx, &[expired.clone()], 100).unwrap();
+    assert_eq!(counts.expired_without_ack, 1);
+    tx.execute("DELETE FROM usage_events WHERE event_id=?1", [&expired])
+        .unwrap();
+    tx.commit().unwrap();
+    assert!(acknowledge_uploaded(&mut db, &lease, frozen.id(), 100)
+        .unwrap_err()
+        .contains("expired"));
+    let fresh = acquire_lease(&mut db, &source(), 101, MAX_LEASE_MS)
+        .unwrap()
+        .unwrap();
+    let remaining = prepare_upload_batch(&mut db, &fresh, 101, upload_builder)
+        .unwrap()
+        .unwrap();
+    assert_ne!(remaining.id(), frozen.id());
+    assert_eq!(remaining.members().len(), 1);
+    assert_eq!(remaining.members()[0].event_id, survivor);
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM usage_cloud_queue WHERE event_id=?1",
+            [expired],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}
+#[test]
+fn invalid_event_time_is_excluded_from_cloud_without_inventing_occurrence_time() {
+    let mut db = db();
+    enable(&mut db, &source(), &provenance(1), 0).unwrap();
+    let id = insert(&db, 1, false);
+    let text: String = db
+        .query_row(
+            "SELECT record_json FROM usage_events WHERE event_id=?1",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut raw: Value = serde_json::from_str(&text).unwrap();
+    raw["timestamp"] = json!("2099-01-01T00:00:00Z");
+    db.execute(
+        "UPDATE usage_events SET record_json=?2 WHERE event_id=?1",
+        params![id, raw.to_string()],
+    )
+    .unwrap();
+    assert_eq!(capture(&mut db, &source(), super::project).unwrap(), 0);
+    assert_eq!(status(&db, &source()).unwrap().unscanned, 0);
+    assert_eq!(status(&db, &source()).unwrap().time_ineligible, 1);
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM usage_cloud_time_excluded", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+fn upload_clear_request(preview: u64) -> super::elastic::Request {
+    super::elastic::Request::ClearConfirm {
+        protocol_version: super::elastic::Version,
+        source: source(),
+        lifecycle_epoch: provenance(1).lifecycle_epoch,
+        preview_id: uuid(preview),
+        preview_sha256: Sha256Hash::of(format!("exact V2 preview {preview}").as_bytes()),
+    }
+}
+#[test]
+fn upload_clear_freezes_v2_intent_across_restart_and_fences_unknown_outcomes() {
+    let path = std::env::temp_dir().join(format!(
+        "usage-upload-clear-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let mut db = Connection::open(&path).unwrap();
+    db.execute_batch("PRAGMA foreign_keys=ON;CREATE TABLE usage_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT UNIQUE NOT NULL,record_json TEXT NOT NULL);CREATE VIEW usage_event_records AS SELECT * FROM usage_events;").unwrap();
+    initialize(&mut db).unwrap();
+    enable(&mut db, &source(), &provenance(1), 0).unwrap();
+    insert(&db, 1, false);
+    insert(&db, 2, false);
+    capture(&mut db, &source(), super::project).unwrap();
+    let lease = acquire_lease(&mut db, &source(), 100, MAX_LEASE_MS)
+        .unwrap()
+        .unwrap();
+    let batch = prepare_upload_batch(&mut db, &lease, 100, upload_builder)
+        .unwrap()
+        .unwrap();
+    begin_upload_attempt(&mut db, &lease, batch.id(), 100).unwrap();
+    let request = upload_clear_request(501);
+    let exact = serde_json::to_string(&request).unwrap();
+    begin_upload_clear(&mut db, &request).unwrap();
+    assert!(clear_outcome_unknown(&db, &source()).unwrap());
+    assert!(acknowledge_uploaded(&mut db, &lease, batch.id(), 100).is_err());
+    assert!(acquire_lease(&mut db, &source(), 100, MAX_LEASE_MS)
+        .unwrap()
+        .is_none());
+    assert!(enable(&mut db, &source(), &provenance(2), 100).is_err());
+    assert_eq!(status(&db, &source()).unwrap().pending, 2);
+    drop(db);
+    let mut db = Connection::open(&path).unwrap();
+    initialize(&mut db).unwrap();
+    let saved = pending_upload_clear(&db, &source()).unwrap().unwrap();
+    assert_eq!(serde_json::to_string(&saved).unwrap(), exact);
+    assert!(matches!(
+        exact.parse::<super::elastic::Request>().unwrap(),
+        super::elastic::Request::ClearConfirm { .. }
+    ));
+    begin_upload_clear(&mut db, &saved).unwrap(); // An exact retry adds no attempt.
+    let fresh = upload_clear_request(502);
+    begin_upload_clear(&mut db, &fresh).unwrap();
+    let attempts: String = db
+        .query_row("SELECT clear_intent_json FROM usage_cloud_state", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let attempts: Vec<super::elastic::Request> = serde_json::from_str(&attempts).unwrap();
+    assert_eq!(attempts, vec![request, fresh.clone()]);
+    assert_eq!(pending_upload_clear(&db, &source()).unwrap(), Some(fresh));
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    finish_upload_clear(&mut db, &source()).unwrap();
+    assert!(pending_upload_clear(&db, &source()).unwrap().is_none());
+    assert!(status(&db, &source()).unwrap().cleared);
+    assert!(enable(&mut db, &source(), &provenance(2), 100).is_err());
+    assert!(acknowledge_uploaded(&mut db, &lease, batch.id(), 100).is_err());
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM usage_cloud_upload_batches", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    let next = Source {
+        data_generation: counter(2),
+        ..source()
+    };
+    enable(&mut db, &next, &provenance(1), 200).unwrap();
+    assert_eq!(capture(&mut db, &next, super::project).unwrap(), 0);
+    assert_eq!(status(&db, &next).unwrap().pending, 0);
+    let through = high(&db).unwrap();
+    select_history(&mut db, &next, &provenance(1), through).unwrap();
+    assert_eq!(capture(&mut db, &next, super::project).unwrap(), 2);
+    let new_lease = acquire_lease(&mut db, &next, 200, MAX_LEASE_MS)
+        .unwrap()
+        .unwrap();
+    let new_batch = prepare_upload_batch(&mut db, &new_lease, 200, upload_builder)
+        .unwrap()
+        .unwrap();
+    assert_eq!(new_batch.source(), &next);
+    assert_ne!(new_batch.id(), batch.id());
+    assert_eq!(new_batch.members().len(), 2);
+    drop(db);
+    std::fs::remove_file(path).unwrap();
+}
+#[test]
+fn upload_clear_pending_lookup_is_passive_and_invalid_intent_is_preserved() {
+    let mut absent = Connection::open_in_memory().unwrap();
+    assert!(pending_upload_clear(&absent, &source()).unwrap().is_none());
+    assert_eq!(
+        absent
+            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    absent.execute_batch("CREATE TABLE usage_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT UNIQUE NOT NULL,record_json TEXT NOT NULL);CREATE VIEW usage_event_records AS SELECT * FROM usage_events;").unwrap();
+    initialize(&mut absent).unwrap();
+    enable(&mut absent, &source(), &provenance(1), 0).unwrap();
+    let request = upload_clear_request(501);
+    let mut wrong = request.clone();
+    if let super::elastic::Request::ClearConfirm {
+        lifecycle_epoch, ..
+    } = &mut wrong
+    {
+        *lifecycle_epoch = counter(2).into();
+    }
+    assert!(begin_upload_clear(&mut absent, &wrong).is_err());
+    assert!(status(&absent, &source()).unwrap().enabled);
+    let mut mixed = request.clone();
+    if let super::elastic::Request::ClearConfirm { source, .. } = &mut mixed {
+        source.source_home_id = uuid(999);
+    }
+    let malformed = serde_json::to_string(&vec![request.clone(), mixed]).unwrap();
+    absent
+        .execute(
+            "UPDATE usage_cloud_state SET clear_intent_json=?1",
+            [&malformed],
+        )
+        .unwrap();
+    assert!(pending_upload_clear(&absent, &source()).is_err());
+    assert!(begin_upload_clear(&mut absent, &request).is_err());
+    assert_eq!(
+        absent
+            .query_row("SELECT clear_intent_json FROM usage_cloud_state", [], |r| r
+                .get::<_, String>(0))
+            .unwrap(),
+        malformed
+    );
+    let old = Request::ClearConfirm {
+        protocol_version: Version,
+        source: source(),
+        lifecycle_epoch: provenance(1).lifecycle_epoch,
+        preview_id: uuid(501),
+        preview_sha256: Sha256Hash::of(b"old preview"),
+    };
+    let old = serde_json::to_string(&vec![old]).unwrap();
+    absent
+        .execute("UPDATE usage_cloud_state SET clear_intent_json=?1", [&old])
+        .unwrap();
+    assert!(pending_upload_clear(&absent, &source()).is_err());
+    assert!(begin_upload_clear(&mut absent, &request).is_err());
+    assert_eq!(
+        absent
+            .query_row("SELECT clear_intent_json FROM usage_cloud_state", [], |r| r
+                .get::<_, String>(0))
+            .unwrap(),
+        old
+    );
 }

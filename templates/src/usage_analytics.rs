@@ -1,32 +1,75 @@
 //! Independent, explicitly consented cloud custody for immutable usage history.
+#[cfg(test)]
+#[path = "usage_analytics/client_tests.rs"]
+mod client_tests;
+#[cfg(any(cargo_ai_cli, test))]
 #[path = "usage_analytics/contract.rs"]
 pub(crate) mod contract;
+#[cfg(any(cargo_ai_cli, test))]
+#[path = "usage_analytics/elastic.rs"]
+pub(crate) mod elastic;
+#[cfg(any(cargo_ai_cli, test))]
 #[path = "usage_analytics/queue.rs"]
+pub(crate) mod queue;
+#[cfg(not(any(cargo_ai_cli, test)))]
+#[path = "usage_analytics/local_queue.rs"]
 pub(crate) mod queue;
 #[path = "usage_analytics/scheduler.rs"]
 pub(crate) mod scheduler;
 #[cfg(test)]
 #[path = "usage_analytics/tests.rs"]
 mod tests;
+#[cfg(any(cargo_ai_cli, test))]
 #[path = "usage_analytics/transport.rs"]
 mod transport;
 #[cfg(test)]
 thread_local! { pub(crate) static TEST_ENDPOINT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) }; }
 
+#[cfg(any(cargo_ai_cli, test))]
 use contract::*;
+#[cfg(any(cargo_ai_cli, test))]
+use elastic::{Request, Version};
+#[cfg(any(cargo_ai_cli, test))]
 use rusqlite::{params, Connection, OptionalExtension};
+#[cfg(any(cargo_ai_cli, test))]
 use serde::{Deserialize, Serialize};
+#[cfg(any(cargo_ai_cli, test))]
 use serde_json::{json, Value};
-use std::time::Duration;
-const SELECTED: &str = "usage_cloud_selected_v1";
+#[cfg(any(cargo_ai_cli, test))]
+use std::time::{Duration, Instant};
+// A previous experimental selection cannot grant this protocol's cloud consent.
+#[cfg(any(cargo_ai_cli, test))]
+const SELECTED: &str = "usage_cloud_selected_v2";
 #[cfg(cargo_ai_cli)]
 const HOME: &str = "usage_cloud_home_id_v1";
+#[cfg(any(cargo_ai_cli, test))]
 const DEADLINE: Duration = Duration::from_secs(15);
+#[cfg(any(cargo_ai_cli, test))]
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(any(cargo_ai_cli, test))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Selection {
     pub(crate) source: Source,
     pub(crate) provenance: Provenance,
+    pub(crate) cloud_retention_days: u32,
+}
+#[cfg(any(cargo_ai_cli, test))]
+fn cloud_days(body: &Value) -> Result<u32, String> {
+    body["policy"]["retention_days"]
+        .as_u64()
+        .and_then(|days| u32::try_from(days).ok())
+        .filter(|days| (1..=3650).contains(days))
+        .ok_or("Usage cloud returned an invalid age policy".into())
+}
+#[cfg(any(cargo_ai_cli, test))]
+fn cloud_cutoff(selection: &Selection, now: i64) -> Result<i64, String> {
+    if !(1..=3650).contains(&selection.cloud_retention_days) {
+        return Err("Saved server cloud policy is invalid; pending history preserved".into());
+    }
+    Ok(now
+        .saturating_sub(i64::from(selection.cloud_retention_days) * 86_400_000)
+        .max(0))
 }
 pub(crate) fn now_ms() -> i64 {
     time::OffsetDateTime::now_utc()
@@ -34,18 +77,23 @@ pub(crate) fn now_ms() -> i64 {
         .div_euclid(1_000_000)
         .clamp(0, i64::MAX as i128) as i64
 }
+#[cfg(any(cargo_ai_cli, test))]
 pub(crate) fn project(db: &Connection, event: &Value) -> Result<String, String> {
     crate::usage_backup::analytics_projection(db, event)
 }
+#[cfg(any(cargo_ai_cli, test))]
 fn encode(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
+#[cfg(any(cargo_ai_cli, test))]
 fn db_error(_: impl std::fmt::Display) -> String {
     "Usage cloud local persistence failed; pending history preserved".into()
 }
+#[cfg(any(cargo_ai_cli, test))]
 fn open() -> Result<Connection, String> {
     crate::usage_store::open_database(true)?.ok_or("Usage history database unavailable".into())
 }
+#[cfg(any(cargo_ai_cli, test))]
 fn read_selection(db: &Connection) -> Result<Option<Selection>, String> {
     let text: Option<String> = db
         .query_row(
@@ -56,112 +104,166 @@ fn read_selection(db: &Connection) -> Result<Option<Selection>, String> {
         .optional()
         .map_err(db_error)?;
     text.map(|text| {
-        serde_json::from_str(&text)
-            .map_err(|_| "Saved usage cloud selection is invalid; it was not redirected".into())
+        let selection: Selection = serde_json::from_str(&text).map_err(|_| {
+            "Saved usage cloud selection is invalid; it was not redirected".to_owned()
+        })?;
+        cloud_cutoff(&selection, now_ms())?;
+        Ok(selection)
     })
     .transpose()
 }
+#[cfg(any(cargo_ai_cli, test))]
 pub(crate) fn selected() -> Result<Option<Selection>, String> {
     let Some(db) = crate::usage_store::open_database(false)? else {
         return Ok(None);
     };
     read_selection(&db)
 }
+#[cfg(any(cargo_ai_cli, test))]
+fn rolling_enabled(db: &Connection) -> Result<bool, String> {
+    let text: Option<String> = db
+        .query_row(
+            "SELECT value FROM usage_meta WHERE key='local_retention_policy_v2'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    let Some(text) = text else { return Ok(false) };
+    let policy: crate::usage_store::retention::Policy =
+        serde_json::from_str(&text).map_err(|_| "Local rolling history policy is invalid")?;
+    Ok(policy.schema_version == 2
+        && matches!(policy.days, 1 | 7 | 30)
+        && policy.enabled
+        && policy.local_detail_loss_acknowledged
+        && policy.unselected_loss_acknowledged)
+}
+#[cfg(any(cargo_ai_cli, test))]
 pub(crate) fn local_status() -> Result<Value, String> {
+    let mut value = json!({"schema_version":2,"enabled":false,"cleared":false,"clear_outcome_unknown":false,"pending_clear_confirmation":null,"source":null,"provenance":null,"pending":0,"quarantined":0,"uploaded":0,"origin_unverified":0,"time_ineligible":0,"cloud_window_ineligible":0,"cloud_retention_days":null,"unscanned":0,"unknown_batches":0,"expired_without_acknowledgment_total":0,"retention_requires_exact_receipt":false,"processing_status":"not_observed","full_local_restoration_from_cloud":false});
     let Some(db) = crate::usage_store::open_database(false)? else {
-        return Ok(
-            json!({"schema_version":1,"enabled":false,"source":null,"pending":0,"retained":0,"origin_unverified":0,"unscanned":0}),
-        );
+        return Ok(value);
     };
+    let expired: Option<String> = db
+        .query_row(
+            "SELECT value FROM usage_meta WHERE key='rolling_expired_without_ack_total_v2'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    value["expired_without_acknowledgment_total"] =
+        json!(expired.and_then(|s| s.parse::<u64>().ok()).unwrap_or(0));
     let Some(selection) = read_selection(&db)? else {
-        return Ok(
-            json!({"schema_version":1,"enabled":false,"source":null,"pending":0,"retained":0,"origin_unverified":0,"unscanned":0}),
-        );
+        return Ok(value);
     };
     let status = queue::status(&db, &selection.source)?;
-    Ok(
-        json!({"schema_version":1,"enabled":status.enabled,"cleared":status.cleared,"clear_outcome_unknown":status.clear_outcome_unknown,"source":selection.source,"provenance":selection.provenance,"pending":status.pending,"quarantined":status.quarantined,"retained":status.retained,"origin_unverified":status.origin_unverified,"unscanned":status.unscanned,"unknown_batches":status.unknown_batches,"buffered_batches":status.buffered_batches,"terminal_unretained_batches":status.terminal_unretained_batches,"retention_requires_exact_receipt":true,"full_local_restoration_from_cloud":false}),
-    )
+    value["enabled"] =
+        json!(status.enabled && rolling_enabled(&db)? && crate::usage_store::tracking_enabled()?);
+    value["cleared"] = json!(status.cleared);
+    value["clear_outcome_unknown"] = json!(status.clear_outcome_unknown);
+    if let Some(Request::ClearConfirm {
+        source,
+        lifecycle_epoch,
+        preview_id,
+        preview_sha256,
+        ..
+    }) = queue::pending_upload_clear(&db, &selection.source)?
+    {
+        value["pending_clear_confirmation"] = json!({"source":source,"lifecycle_epoch":lifecycle_epoch,"preview_id":preview_id,"preview_sha256":preview_sha256});
+    }
+    value["source"] = json!(selection.source);
+    value["cloud_retention_days"] = json!(selection.cloud_retention_days);
+    value["provenance"] = json!(selection.provenance);
+    value["pending"] = json!(status.pending);
+    value["cloud_window_ineligible"] = json!(queue::cloud_window_ineligible(
+        &db,
+        &selection.source,
+        cloud_cutoff(&selection, now_ms())?
+    )?);
+    value["quarantined"] = json!(status.quarantined);
+    value["uploaded"] = json!(status.retained);
+    value["origin_unverified"] = json!(status.origin_unverified);
+    value["time_ineligible"] = json!(status.time_ineligible);
+    value["unscanned"] = json!(status.unscanned);
+    value["unknown_batches"] = json!(status.unknown_batches);
+    Ok(value)
 }
-#[cfg(cargo_ai_cli)]
+#[cfg(any(cargo_ai_cli, test))]
 fn supported(body: &Value) -> Result<(), String> {
-    if body["protocol_version"] != 1
+    if body["protocol_version"] != 2
         || body["capability"]["enabled"] != true
         || !body["capability"]["supported_protocol_versions"]
             .as_array()
-            .is_some_and(|versions| versions.contains(&json!(1)))
+            .is_some_and(|versions| versions.contains(&json!(2)))
     {
         return Err(
-            "Usage cloud protocol 1 is not available; local consent was not enabled".into(),
+            "Usage cloud protocol 2 is not available; local consent was not enabled".into(),
         );
     }
     Ok(())
 }
 #[cfg(cargo_ai_cli)]
+#[cfg(any(cargo_ai_cli, test))]
 pub(crate) async fn remote_status() -> Result<Value, String> {
-    transport::Transport::new(Duration::from_secs(10))?
+    transport::V2Transport::new(REQUEST_TIMEOUT)?
         .call(&Request::Status {
             protocol_version: Version,
         })
         .await
 }
 #[cfg(cargo_ai_cli)]
-pub(crate) async fn enable() -> Result<Value, String> {
-    tokio::time::timeout(DEADLINE,async {
-        let mut client=transport::Transport::new(Duration::from_secs(10))?;
-        let status=client.call(&Request::Status{protocol_version:Version}).await?;supported(&status)?;
-        let prior=selected()?;
-        let binding=if let Some(binding)=status["account_binding"].as_str(){CanonicalUuid::try_from(binding.to_owned()).map_err(encode)?}else{CanonicalUuid::try_from(uuid::Uuid::new_v4().to_string()).map_err(encode)?};
-        if prior.as_ref().is_some_and(|prior|prior.source.account_binding!=binding){return Err("Signed-in account differs; existing usage queues were not redirected".into())}
-        let generation=Counter::try_from(match status["data_generation"].as_u64(){Some(value)=>value,None if status["account_binding"].is_null()=>1,None=>return Err("Usage cloud generation is missing".into())}).map_err(encode)?;
-        let epoch=LifecycleEpoch::try_from(status["lifecycle_epoch"].as_u64().ok_or("Usage cloud lifecycle epoch is missing")?).map_err(encode)?;
-        let mut db=open()?;queue::initialize(&mut db)?;
-        if let Some(prior)=prior.as_ref(){
-            if generation<prior.source.data_generation{return Err("Usage cloud returned an older generation; local custody remains unchanged".into())}
+#[cfg(any(cargo_ai_cli, test))]
+pub(crate) async fn enable(replace_home_id: Option<CanonicalUuid>) -> Result<Value, String> {
+    tokio::time::timeout(DEADLINE, async {
+        let mut db = open()?;
+        if !rolling_enabled(&db)? || !crate::usage_store::tracking_enabled()? {
+            return Err("Enable local history and explicitly select rolling policy version 2 before enabling cloud uploads".into());
         }
-        // Only explicit clear advances the authenticated binding's generation.
-        queue::reconcile_generation(&mut db,&binding,generation)?;
-        if let Some(prior)=prior.as_ref(){
-            if generation==prior.source.data_generation && queue::clear_outcome_unknown(&db,&prior.source)?{
-                return Err("Usage cloud clear outcome is unknown; retry the preserved exact confirmation or reconcile a newer generation".into());
+        let prior = read_selection(&db)?;
+        let mut client = transport::V2Transport::new(REQUEST_TIMEOUT)?;
+        let status = client.call(&Request::Status { protocol_version: Version }).await?;
+        supported(&status)?;
+        let binding = status["account_binding"].as_str().map(|s| CanonicalUuid::try_from(s.to_owned())).transpose().map_err(encode)?;
+        if prior.as_ref().is_some_and(|prior| binding.as_ref() != Some(&prior.source.account_binding)) {
+            return Err("Signed-in account differs; existing usage queues were not redirected".into());
+        }
+        queue::initialize(&mut db)?;
+        if let Some(prior) = &prior {
+            let generation = Counter::try_from(status["data_generation"].as_u64().ok_or("Usage cloud generation is missing")?).map_err(encode)?;
+            if generation < prior.source.data_generation { return Err("Usage cloud returned an older generation".into()) }
+            queue::reconcile_generation(&mut db, &prior.source.account_binding, generation)?;
+            if generation == prior.source.data_generation && queue::clear_outcome_unknown(&db, &prior.source)? {
+                return Err("Usage cloud clear outcome is unknown; reconcile the preserved exact confirmation".into());
             }
         }
-        let home:Option<String>=db.query_row("SELECT value FROM usage_meta WHERE key=?1",[HOME],|row|row.get(0)).optional().map_err(db_error)?;
-        let home=CanonicalUuid::try_from(home.unwrap_or_else(||uuid::Uuid::new_v4().to_string())).map_err(encode)?;
-        db.execute("INSERT OR IGNORE INTO usage_meta(key,value) VALUES(?1,?2)",params![HOME,home.as_str()]).map_err(db_error)?;
-        let source=Source{account_binding:binding,source_home_id:home,data_generation:generation};
-        let body=client.call(&Request::Enable{protocol_version:Version,source:source.clone(),lifecycle_epoch:epoch}).await?;
-        let returned:Source=serde_json::from_value(body["source"].clone()).map_err(|_|"Usage cloud enable omitted its source")?;
-        let provenance:Provenance=serde_json::from_value(body["provenance"].clone()).map_err(|_|"Usage cloud enable omitted its permission")?;
-        if returned!=source || provenance.lifecycle_epoch!=epoch || body["enabled"]!=true{return Err("Usage cloud enable returned mismatched authority; reconcile remote consent before retrying".into())}
-        if let Some(prior)=prior.as_ref(){
-            if prior.source!=source||prior.provenance!=provenance||local_status()?["enabled"]!=true {
-                queue::disable(&mut db,&prior.source)?;
-            }
+        let home: Option<String> = db.query_row("SELECT value FROM usage_meta WHERE key=?1", [HOME], |row| row.get(0)).optional().map_err(db_error)?;
+        let home = CanonicalUuid::try_from(home.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())).map_err(encode)?;
+        db.execute("INSERT OR IGNORE INTO usage_meta(key,value) VALUES(?1,?2)", params![HOME, home.as_str()]).map_err(db_error)?;
+        let body = client.call(&Request::Enable { protocol_version: Version, source_home_id: home.clone(), replace_home_id }).await?;
+        let source: Source = serde_json::from_value(body["source"].clone()).map_err(|_| "Usage cloud enable omitted its source")?;
+        let provenance: Provenance = serde_json::from_value(body["provenance"].clone()).map_err(|_| "Usage cloud enable omitted its permission")?;
+        let cloud_retention_days = cloud_days(&body)?;
+        let generation_matches = status["data_generation"].as_u64().is_none_or(|g| g == source.data_generation.get());
+        if body["protocol_version"] != 2 || body["enabled"] != true || source.source_home_id != home || binding.as_ref().is_some_and(|b| b != &source.account_binding) || !generation_matches || status["lifecycle_epoch"].as_u64() != Some(provenance.lifecycle_epoch.get()) {
+            return Err("Usage cloud enable returned mismatched authority; reconcile remote consent before retrying".into());
         }
-        let boundary=queue::enable(&mut db,&source,&provenance,now_ms())?;
-        let selection=Selection{source:source.clone(),provenance:provenance.clone()};
-        db.execute("INSERT INTO usage_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![SELECTED,serde_json::to_string(&selection).map_err(encode)?]).map_err(db_error)?;
-        // Only this explicit renewed permission may create replacement admission batches.
-        let mut readmitted=0;
-        if prior.as_ref().is_some_and(|old|old.source==source && old.provenance!=provenance){
-            if let Some(lease)=queue::acquire_lease(&mut db,&source,now_ms(),queue::MAX_LEASE_MS)?{
-                let ids={let mut statement=db.prepare("SELECT DISTINCT b.batch_id FROM usage_cloud_batches b JOIN usage_cloud_queue q ON q.binding=b.binding AND q.source_home_id=b.source_home_id AND q.data_generation=b.data_generation AND q.active_batch_id=b.batch_id WHERE b.binding=?1 AND b.source_home_id=?2 AND b.data_generation=?3 AND b.outcome!='retained' AND (b.lifecycle_epoch!=?4 OR b.consent_interval!=?5) ORDER BY b.rowid LIMIT 100").map_err(db_error)?;
-                    let rows=statement.query_map(params![source.account_binding.as_str(),source.source_home_id.as_str(),source.data_generation.get() as i64,provenance.lifecycle_epoch.get() as i64,provenance.consent_interval.get() as i64],|row|row.get::<_,String>(0)).map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;rows};
-                for id in ids {queue::readmit_batch(&mut db,&lease,&CanonicalUuid::try_from(id).map_err(encode)?,now_ms())?;readmitted+=1;}
-                queue::release_lease(&mut db,&lease,now_ms())?;
-            }
+        if let Some(prior) = &prior {
+            if prior.source != source || prior.provenance != provenance { queue::disable(&mut db, &prior.source)?; }
         }
-        Ok(json!({"schema_version":1,"enabled":true,"source":source,"provenance":provenance,"future_after_sequence":boundary.to_string(),"historical_records_selected":0,"readmitted_batches":readmitted,"local":local_status()?}))
-    }).await.map_err(|_|"Usage cloud enable deadline elapsed; remote outcome may be unknown; inspect status before retrying".to_string())?
+        queue::reconcile_generation(&mut db, &source.account_binding, source.data_generation)?;
+        let boundary = queue::enable(&mut db, &source, &provenance, now_ms())?;
+        let selection = Selection { source: source.clone(), provenance: provenance.clone(), cloud_retention_days };
+        db.execute("INSERT INTO usage_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![SELECTED, serde_json::to_string(&selection).map_err(encode)?]).map_err(db_error)?;
+        Ok(json!({"schema_version":2,"enabled":true,"source":source,"provenance":provenance,"future_after_sequence":boundary.to_string(),"historical_records_selected":0,"local":local_status()?}))
+    }).await.map_err(|_| "Usage cloud enable deadline elapsed; remote outcome may be unknown; inspect status before retrying".to_string())?
 }
 #[cfg(cargo_ai_cli)]
+#[cfg(any(cargo_ai_cli, test))]
 pub(crate) async fn disable() -> Result<Value, String> {
     let selection = selected()?.ok_or("Usage cloud is not enabled")?;
-    let mut db = open()?;
-    queue::disable(&mut db, &selection.source)?;
-    drop(db);
-    let body = transport::Transport::new(Duration::from_secs(10))?
+    queue::disable(&mut open()?, &selection.source)?;
+    let body = transport::V2Transport::new(REQUEST_TIMEOUT)?
         .call(&Request::Disable {
             protocol_version: Version,
             source: selection.source.clone(),
@@ -170,18 +272,20 @@ pub(crate) async fn disable() -> Result<Value, String> {
         .await?;
     let returned: Source = serde_json::from_value(body["source"].clone())
         .map_err(|_| "Usage cloud disable omitted its source")?;
-    if returned != selection.source || body["enabled"] != false {
+    if returned != selection.source || body["protocol_version"] != 2 || body["enabled"] != false {
         return Err("Remote disable requires reconciliation; local sends remain stopped".into());
     }
     Ok(
-        json!({"schema_version":1,"enabled":false,"history_deleted":false,"pending_preserved":true,"remote":body,"local":local_status()?}),
+        json!({"schema_version":2,"enabled":false,"history_deleted":false,"pending_preserved":true,"remote":body,"local":local_status()?}),
     )
 }
 #[cfg(cargo_ai_cli)]
+#[cfg(any(cargo_ai_cli, test))]
 fn preview_hash(selection: &Selection, through: i64) -> Result<Sha256Hash, String> {
-    canonical_hash("cargo-ai-usage-history-selection-v1", &(selection, through)).map_err(encode)
+    canonical_hash("cargo-ai-usage-history-selection-v2", &(selection, through)).map_err(encode)
 }
 #[cfg(cargo_ai_cli)]
+#[cfg(any(cargo_ai_cli, test))]
 pub(crate) fn history_selection(
     through: Option<i64>,
     confirmation: Option<&str>,
@@ -212,101 +316,239 @@ pub(crate) fn history_selection(
         )?;
     }
     Ok(
-        json!({"schema_version":1,"source":selection.source,"provenance":selection.provenance,"through_sequence":through.to_string(),"preview_sha256":hash,"selected":confirmation.is_some(),"upload_started":false,"restored_origin_unverified_records_remain_blocked":true}),
+        json!({"schema_version":2,"source":selection.source,"provenance":selection.provenance,"through_sequence":through.to_string(),"preview_sha256":hash,"selected":confirmation.is_some(),"upload_started":false,"restored_origin_unverified_records_remain_blocked":true}),
     )
 }
+#[cfg(any(cargo_ai_cli, test))]
+fn build_upload(
+    source: &Source,
+    provenance: &Provenance,
+    id: &CanonicalUuid,
+    events: &[EventSubmission],
+) -> Result<(String, usize, Sha256Hash), String> {
+    let (batch, count) = elastic::encode_batch(events, elastic::DEFAULT_TARGET_BYTES).map_err(|_| "Usage upload contains an event exceeding its bounded codec limits; no event was truncated")?;
+    let members = events[..count]
+        .iter()
+        .map(EventSubmission::member)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(encode)?;
+    let membership = elastic::membership_sha256(source, &members).map_err(encode)?;
+    let request = Request::Upload {
+        protocol_version: Version,
+        source: source.clone(),
+        provenance: provenance.clone(),
+        batch_id: id.clone(),
+        ordered_membership_sha256: membership.clone(),
+        batch,
+        retry_count: 0,
+    };
+    let text = serde_json::to_string(&request).map_err(encode)?;
+    // The transport also checks the actual authenticated outer envelope.
+    if text.len() >= elastic::MAX_ACCOUNT_BYTES {
+        return Err("Usage upload request exceeds its envelope limit".into());
+    }
+    Ok((text, count, membership))
+}
+#[cfg(any(cargo_ai_cli, test))]
 pub(crate) async fn sync() -> Result<Value, String> {
-    tokio::time::timeout(DEADLINE, sync_once())
-        .await
-        .map_err(|_| {
-            "Usage cloud sync deadline elapsed; unknown attempts and exact payloads remain pending"
-                .to_string()
-        })?
-}
-fn insufficient_payload_budget(elapsed: Duration) -> bool {
-    DEADLINE.saturating_sub(elapsed) < Duration::from_secs(10)
-}
-async fn sync_once() -> Result<Value, String> {
-    let started = std::time::Instant::now();
-    let Some(selection) = selected()? else {
+    let started = Instant::now();
+    let Some(mut selection) = selected()? else {
         return local_status();
     };
     if local_status()?["enabled"] != true {
         return local_status();
     }
+    let maintenance = crate::usage_store::retention::apply(now_ms())?;
+    if maintenance["maintenance_pending"] == true {
+        return Ok(
+            json!({"schema_version":2,"batches":0,"upload_paused":true,"maintenance_pending":true,"local":local_status()?}),
+        );
+    }
+    let remaining = DEADLINE
+        .saturating_sub(started.elapsed())
+        .min(REQUEST_TIMEOUT);
+    if remaining.is_zero() {
+        return Err("Usage sync deadline elapsed before policy refresh".into());
+    }
+    let mut policy_client = transport::V2Transport::new(remaining)?;
+    let status = tokio::time::timeout(
+        DEADLINE.saturating_sub(started.elapsed()),
+        policy_client.call(&Request::Status {
+            protocol_version: Version,
+        }),
+    )
+    .await
+    .map_err(|_| "Usage sync deadline elapsed during policy refresh")??;
+    supported(&status)?;
+    if status["account_binding"] != json!(selection.source.account_binding)
+        || status["data_generation"].as_u64() != Some(selection.source.data_generation.get())
+        || status["lifecycle_epoch"].as_u64() != Some(selection.provenance.lifecycle_epoch.get())
+    {
+        return Err("Usage cloud account or generation changed; explicitly enable the current source before uploading".into());
+    }
+    let registered = status["environments"]
+        .as_array()
+        .is_some_and(|environments| {
+            environments.iter().any(|environment| {
+                environment["source_home_id"] == json!(selection.source.source_home_id)
+                    && environment["consent_interval"].as_u64()
+                        == Some(selection.provenance.consent_interval.get())
+            })
+        });
+    let current = selected()?.ok_or("Usage cloud consent changed during policy refresh")?;
+    if current.source != selection.source
+        || current.provenance != selection.provenance
+        || local_status()?["enabled"] != true
+    {
+        return Err("Usage cloud consent changed during policy refresh".into());
+    }
     let mut db = open()?;
-    let now = now_ms();
-    let Some(lease) = queue::acquire_lease(&mut db, &selection.source, now, queue::MAX_LEASE_MS)?
+    if !registered {
+        queue::disable(&mut db, &selection.source)?;
+        return Err(
+            "Usage cloud environment is no longer upload-enabled; pending local history preserved"
+                .into(),
+        );
+    }
+    selection.cloud_retention_days = cloud_days(&status)?;
+    db.execute(
+        "UPDATE usage_meta SET value=?2 WHERE key=?1",
+        params![SELECTED, serde_json::to_string(&selection).map_err(encode)?],
+    )
+    .map_err(db_error)?;
+    let cutoff_ms = cloud_cutoff(&selection, now_ms())?;
+    queue::retire_uploads_before(&mut db, &selection.source, cutoff_ms, now_ms())?;
+    let Some(lease) =
+        queue::acquire_lease(&mut db, &selection.source, now_ms(), queue::MAX_LEASE_MS)?
     else {
-        return Ok(json!({"schema_version":1,"busy":true,"local":local_status()?}));
+        return Ok(
+            json!({"schema_version":2,"busy":true,"batches":0,"policy_refreshed":true,"local":local_status()?}),
+        );
     };
-    let mut deferred = false;
-    let result=async {
-        queue::capture(&mut db,lease.source(),project)?;
-        let Some(batch)=queue::prepare_batch(&mut db,&lease,now_ms())? else{let local=local_status()?;return Ok(json!({"schema_version":1,"batches":0,"blocked":local["pending"].as_i64().unwrap_or(0)>0||local["origin_unverified"].as_i64().unwrap_or(0)>0,"local":local}))};
-        let remaining=lease.expires_ms().saturating_sub(now_ms()).min(10_000);
-        if remaining<=0{return Err("Usage cloud lease expired before transmission".into());}
-        let mut client=transport::Transport::new(Duration::from_millis(remaining as u64))?;
-        // Recover an uncertain prior admission before deciding whether to append again.
-        let attempts:i64=db.query_row("SELECT attempts FROM usage_cloud_batches WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND batch_id=?4",params![selection.source.account_binding.as_str(),selection.source.source_home_id.as_str(),selection.source.data_generation.get() as i64,batch.id().as_str()],|row|row.get(0)).map_err(db_error)?;
-        let attempt_started=queue::consume_payload_required(&mut db,&lease,batch.id(),now_ms())?;
-        if attempts>0 && !attempt_started {
-            let recovered=client.call(&Request::Receipt{protocol_version:Version,source:selection.source.clone(),batch_id:batch.id().clone()}).await?;
-            if let Some(admission)=recovered.get("admission").filter(|value|!value.is_null()){
-                let admission=AdmissionCommitment::parse(&admission.to_string()).map_err(encode)?;
-                queue::record_admission(&mut db,&lease,batch.id(),&admission,now_ms())?;
-                if recovered["disposition"]=="terminal_unretained" {queue::record_terminal_unretained(&mut db,&lease,batch.id(),&admission,now_ms())?;}
-                if let Some(receipt)=recovered.get("receipt").filter(|value|!value.is_null()){
-                    let receipt=Receipt::parse(&receipt.to_string()).map_err(encode)?;
-                    if receipt.custody!=Custody::Buffered {queue::acknowledge_retained(&mut db,&lease,batch.id(),&receipt,now_ms())?;return Ok(json!({"schema_version":1,"batches":1,"retained_events":batch.members().len(),"recovered":true,"local":local_status()?}))}
-                }
-                // Only an authenticated authoritative resend directive reopens
-                // the same immutable payload after an admitted dispatch gap.
-                if recovered["payload_required"]!=true || recovered["custody"]!="pending" {
-                    return Ok(json!({"schema_version":1,"batches":1,"custody":"pending","local":local_status()?}));
-                }
-                if insufficient_payload_budget(started.elapsed()) {
-                    queue::defer_payload_required(&mut db,&lease,batch.id(),&admission,now_ms())?;
-                    deferred=true;
-                    return Ok(json!({"schema_version":1,"batches":1,"custody":"pending","local":local_status()?}));
-                }
-            }
-            if recovered.get("admission").filter(|value|!value.is_null()).is_none() && recovered["custody"]!="not_found" {return Err("Usage cloud admission remains uncertain; exact batch preserved without resubmission".into());}
-        }
-        if !attempt_started {queue::begin_attempt(&mut db,&lease,batch.id(),now_ms())?;}
-        let body=match client.call_exact(batch.request_json()).await{Ok(body)=>body,Err(error)=>{
-            if client.terminal_conflict(){for member in batch.members(){queue::quarantine_event(&mut db,batch.source(),&member.event_id)?;}}
-            return Err(error);
-        }};
-        if !matches!(body["custody"].as_str(),Some("pending"|"buffered"|"retained"|"analytics_ready")){return Err("Usage cloud returned invalid custody; exact batch preserved".into());}
-        let admission=AdmissionCommitment::parse(&body["admission"].to_string()).map_err(encode)?;
-        admission.verify(batch.source(),batch.provenance(),batch.id(),batch.members()).map_err(encode)?;
-        if body["custody"]=="buffered" {queue::record_buffered(&mut db,&lease,batch.id(),&admission,now_ms())?;}else{queue::record_admission(&mut db,&lease,batch.id(),&admission,now_ms())?;}
-        if body["disposition"]=="terminal_unretained" {queue::record_terminal_unretained(&mut db,&lease,batch.id(),&admission,now_ms())?;}
-        let mut retained=0;
-        if let Some(receipt)=body.get("receipt").filter(|value|!value.is_null()){
-            let receipt=Receipt::parse(&receipt.to_string()).map_err(encode)?;
-            if receipt.custody!=Custody::Buffered{queue::acknowledge_retained(&mut db,&lease,batch.id(),&receipt,now_ms())?;retained=batch.members().len();}
-        }
-        Ok(json!({"schema_version":1,"batches":1,"ordered_membership_sha256":batch.membership(),"retained_events":retained,"custody":body["custody"],"disposition":body["disposition"],"local":local_status()?}))
-    }.await;
-    let _ = queue::schedule_next(&mut db, &lease, now_ms(), result.is_ok() && !deferred);
+    let result = sync_leased(&mut db, &lease, cutoff_ms, started).await;
     let _ = queue::release_lease(&mut db, &lease, now_ms());
     result
 }
-pub(crate) async fn opportunistic() -> Result<Value, String> {
-    let Some(selection) = selected()? else {
-        return Ok(Value::Null);
-    };
-    if local_status()?["enabled"] != true {
-        return Ok(Value::Null);
+#[cfg(test)]
+#[cfg(any(cargo_ai_cli, test))]
+fn insufficient_payload_budget(elapsed: Duration) -> bool {
+    DEADLINE.saturating_sub(elapsed) < REQUEST_TIMEOUT
+}
+#[cfg(any(cargo_ai_cli, test))]
+async fn sync_leased(
+    db: &mut Connection,
+    lease: &queue::Lease,
+    cutoff_ms: i64,
+    started: Instant,
+) -> Result<Value, String> {
+    let mut batches = 0usize;
+    let mut acknowledged = 0usize;
+    let mut uploaded = 0usize;
+    let mut expired_ack = 0usize;
+    let mut canceled = false;
+    let mut stopped_error: Option<String> = None;
+    loop {
+        if scheduler::canceled() {
+            canceled = true;
+            break;
+        }
+        if started.elapsed() >= DEADLINE {
+            break;
+        }
+        // Each capture commits at most 100 rows. Recheck the unscanned count
+        // because invalid clocks and unverified origins also advance progress.
+        let capture_started = Instant::now();
+        let capture_budget =
+            (DEADLINE.saturating_sub(started.elapsed()) / 3).min(Duration::from_secs(5));
+        while capture_started.elapsed() < capture_budget && started.elapsed() < DEADLINE {
+            let before = queue::status(db, lease.source())?.unscanned;
+            if before == 0 || scheduler::canceled() {
+                break;
+            }
+            queue::capture(db, lease.source(), project)?;
+            if queue::status(db, lease.source())?.unscanned >= before {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        if scheduler::canceled() {
+            canceled = true;
+            break;
+        }
+        let remaining = DEADLINE
+            .saturating_sub(started.elapsed())
+            .min(REQUEST_TIMEOUT);
+        if remaining.is_zero() {
+            break;
+        }
+        let Some(batch) =
+            queue::prepare_upload_batch_since(db, lease, now_ms(), cutoff_ms, build_upload)?
+        else {
+            break;
+        };
+        let request = batch.request_json().parse::<Request>().map_err(encode)?;
+        if !matches!(&request, Request::Upload { ordered_membership_sha256, source, provenance, batch_id, .. } if ordered_membership_sha256 == batch.membership() && source == batch.source() && provenance == batch.provenance() && batch_id == batch.id())
+        {
+            return Err(
+                "Saved usage upload changed exact batch authority; pending batch preserved".into(),
+            );
+        }
+        queue::begin_upload_attempt(db, lease, batch.id(), now_ms())?;
+        let remaining = DEADLINE
+            .saturating_sub(started.elapsed())
+            .min(REQUEST_TIMEOUT);
+        if remaining.is_zero() {
+            break;
+        }
+        let mut client = transport::V2Transport::new(remaining)?;
+        batches += 1;
+        let response = tokio::time::timeout(
+            DEADLINE.saturating_sub(started.elapsed()),
+            client.call_exact(batch.request_json()),
+        )
+        .await
+        .map_err(|_| "Usage sync deadline elapsed; submitted outcomes remain unknown".to_owned())
+        .and_then(|result| result);
+        let body = match response {
+            Ok(body) => body,
+            Err(error) => {
+                if acknowledged == 0 {
+                    return Err(error);
+                }
+                stopped_error = Some(error);
+                break;
+            }
+        };
+        let verified = serde_json::from_value::<elastic::UploadAck>(body)
+            .map_err(|_| "Usage upload acknowledgment is invalid; exact pending batch preserved".to_owned())
+            .and_then(|ack| ack.verify(&request).map_err(|_| "Usage upload acknowledgment changed exact batch authority; pending batch preserved".to_owned()));
+        if let Err(error) = verified {
+            if acknowledged == 0 {
+                return Err(error);
+            }
+            stopped_error = Some(error);
+            break;
+        }
+        acknowledged += batch.members().len();
+        match queue::acknowledge_uploaded(db, lease, batch.id(), now_ms()) {
+            Ok(()) => uploaded += batch.members().len(),
+            Err(error) if error.contains("after its local batch expired") => {
+                expired_ack += batch.members().len();
+                break;
+            }
+            Err(error) => {
+                stopped_error = Some(error);
+                break;
+            }
+        }
+        tokio::task::yield_now().await;
     }
-    if !queue::due(&mut open()?, &selection.source, now_ms())? {
-        return Ok(Value::Null);
-    }
-    sync().await
+    Ok(
+        json!({"schema_version":2,"batches":batches,"policy_refreshed":true,"acknowledged_events":acknowledged,"uploaded_events":uploaded,"acknowledged_after_expiry_events":expired_ack,"processing_status":"not_observed","canceled":canceled,"deadline_reached":started.elapsed() >= DEADLINE,"partial":canceled || stopped_error.is_some() || started.elapsed() >= DEADLINE,"stopped_error":stopped_error,"local":local_status()?}),
+    )
 }
 #[cfg(cargo_ai_cli)]
+#[cfg(any(cargo_ai_cli, test))]
 pub(crate) async fn clear(preview: Option<(CanonicalUuid, Sha256Hash)>) -> Result<Value, String> {
     let selection = selected()?.ok_or("Usage cloud source is missing")?;
     let request = match preview {
@@ -324,39 +566,37 @@ pub(crate) async fn clear(preview: Option<(CanonicalUuid, Sha256Hash)>) -> Resul
         },
     };
     let confirm = matches!(request, Request::ClearConfirm { .. });
-    let mut client = transport::Transport::new(Duration::from_secs(10))?;
     if confirm {
-        let mut db = open()?;
-        queue::initialize(&mut db)?;
-        queue::begin_clear(&mut db, &request)?;
+        queue::begin_upload_clear(&mut open()?, &request)?;
     }
-    let body = client.call(&request).await?;
+    let body = transport::V2Transport::new(REQUEST_TIMEOUT)?
+        .call(&request)
+        .await?;
     let returned: Source = serde_json::from_value(body["source"].clone())
         .map_err(|_| "Clear result omitted its exact source")?;
-    if returned != selection.source {
+    if returned != selection.source || body["protocol_version"] != 2 {
         return Err("Clear preview or result changed source; local state preserved".into());
     }
     if confirm {
-        let source: Source = serde_json::from_value(body["source"].clone())
-            .map_err(|_| "Clear result omitted its exact source")?;
-        if source != selection.source
-            || body["cleared"] != true
-            || body["protocol_version"] != 1
-            || body["data_generation"]
-                .as_u64()
-                .and_then(|generation| Counter::try_from(generation).ok())
-                .map(Counter::get)
+        if body["cleared"] != true
+            || body["data_generation"].as_u64()
                 != selection.source.data_generation.get().checked_add(1)
         {
             return Err(
-                "Clear outcome requires reconciliation; local payloads remain preserved".into(),
+                "Clear outcome requires reconciliation; local history remains preserved".into(),
             );
         }
-        queue::mark_cleared(&mut open()?, &source)?;
+        queue::finish_upload_clear(&mut open()?, &selection.source)?;
+    } else if body["lifecycle_epoch"].as_u64() != Some(selection.provenance.lifecycle_epoch.get())
+        || serde_json::from_value::<CanonicalUuid>(body["preview_id"].clone()).is_err()
+        || serde_json::from_value::<Sha256Hash>(body["preview_sha256"].clone()).is_err()
+    {
+        return Err("Clear preview is invalid; local state preserved".into());
     }
     Ok(body)
 }
 #[cfg(cargo_ai_cli)]
+#[cfg(any(cargo_ai_cli, test))]
 pub(crate) async fn history(
     after: Option<u64>,
     through: Option<u64>,
@@ -366,42 +606,38 @@ pub(crate) async fn history(
         return Err("History pagination requires the captured through-sequence boundary".into());
     }
     let selection = selected()?.ok_or("Usage cloud source is missing")?;
-    let after_sequence = after.map(Counter::try_from).transpose().map_err(encode)?;
-    let through_sequence = through
-        .map(SequenceBoundary::try_from)
-        .transpose()
-        .map_err(encode)?;
-    let mut body = transport::Transport::new(Duration::from_secs(10))?
+    let mut body = transport::V2Transport::new(REQUEST_TIMEOUT)?
         .call(&Request::History {
             protocol_version: Version,
             source: selection.source.clone(),
-            after_sequence,
-            through_sequence,
+            after_sequence: after,
             limit,
         })
         .await?;
-    let returned: Source = serde_json::from_value(body["source"].clone())
+    let source: Source = serde_json::from_value(body["source"].clone())
         .map_err(|_| "Usage cloud history omitted its source")?;
+    let high = body["high_watermark"]
+        .as_u64()
+        .filter(|n| *n <= i64::MAX as u64)
+        .ok_or("Usage cloud history omitted its bounded snapshot")?;
     let events = body["events"]
         .as_array()
         .ok_or("Usage cloud history omitted its bounded events")?;
-    let high = body["high_watermark"]
-        .as_u64()
-        .filter(|value| *value <= i64::MAX as u64)
-        .ok_or("Usage cloud history omitted its bounded snapshot")?;
-    if returned != selection.source
+    if source != selection.source
+        || body["protocol_version"] != 2
         || events.len() > usize::from(limit)
-        || through.is_some_and(|through| through != high)
+        || through.is_some_and(|bound| high < bound)
     {
         return Err("Usage cloud history returned mismatched scope or snapshot bounds".into());
     }
+    let bound = through.unwrap_or(high);
     let mut previous = after.unwrap_or(0);
     let mut ids = std::collections::BTreeSet::new();
     for event in events {
         let sequence = event["sequence"]
             .as_u64()
-            .filter(|sequence| *sequence > previous && *sequence <= high)
-            .ok_or("Usage cloud history returned unordered snapshot members")?;
+            .filter(|n| *n > previous && *n <= high)
+            .ok_or("Usage cloud history returned unordered members")?;
         let mut record = event.clone();
         let object = record
             .as_object_mut()
@@ -409,22 +645,25 @@ pub(crate) async fn history(
         object.remove("sequence");
         let event_id = object
             .remove("event_id")
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .ok_or("Usage cloud history event identity is missing")?;
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .ok_or("Usage cloud history identity is missing")?;
         let submission: EventSubmission = serde_json::from_value(record)
             .map_err(|_| "Usage cloud history event fields are invalid")?;
-        let member = submission.member().map_err(encode)?;
-        if member.event_id != event_id || !ids.insert(event_id) {
-            return Err("Usage cloud history contains conflicting event identities".into());
+        if submission.member().map_err(encode)?.event_id != event_id || !ids.insert(event_id) {
+            return Err("Usage cloud history contains conflicting identities".into());
         }
         previous = sequence;
     }
-    let next = if !events.is_empty() && previous < high {
-        Some(previous)
-    } else {
-        None
-    };
-    body["next_sequence"] = json!(next);
-    body["through_sequence"] = json!(high);
+    body["events"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|event| event["sequence"].as_u64().is_some_and(|n| n <= bound));
+    let last = body["events"]
+        .as_array()
+        .unwrap()
+        .last()
+        .and_then(|event| event["sequence"].as_u64());
+    body["next_sequence"] = json!(last.filter(|n| *n < bound));
+    body["through_sequence"] = json!(bound);
     Ok(body)
 }

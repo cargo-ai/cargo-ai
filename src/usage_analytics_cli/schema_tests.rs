@@ -144,9 +144,9 @@ fn matches(value: &Value, schema: &Value, root: &Value) -> bool {
     true
 }
 fn schema() -> Value {
-    serde_json::from_str(include_str!("../../docs/schemas/usage-maintenance-v1.json")).unwrap()
+    serde_json::from_str(include_str!("../../docs/schemas/usage-maintenance-v2.json")).unwrap()
 }
-pub(super) fn assert_valid(value: &Value) {
+pub(crate) fn assert_valid(value: &Value) {
     let schema = schema();
     assert!(
         matches(value, &schema, &schema),

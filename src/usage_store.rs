@@ -248,6 +248,7 @@ fn install_backup_guard(connection: &Connection) -> Result<(), String> {
 
 pub(crate) fn insert_event(connection: &Connection, event: &Value) -> Result<bool, String> {
     let autocommit = connection.is_autocommit();
+    retention::before_capture(connection)?;
     connection
         .execute_batch(if autocommit {
             "BEGIN IMMEDIATE"
@@ -311,6 +312,12 @@ fn insert_event_inner(connection: &Connection, event: &Value) -> Result<bool, St
         install_backup_guard(connection)?;
     }
     connection.execute("INSERT INTO usage_events(event_id,root_run_id,agent_run_id,event_type,created_at,envelope_json,residual_json,codec_version,agent_context_id,provider_context_id,attribution_context_id,restored_attribution_context_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)", params![event_id,event["root_run_id"].as_str(),event["agent_run_id"].as_str(),event_type,timestamp,encoded.envelope,encoded.residual,codec::VERSION,ids[0],ids[1],ids[2],ids[3]]).map_err(db_error)?;
+    retention::index_capture(
+        connection,
+        event_id,
+        connection.last_insert_rowid(),
+        timestamp,
+    )?;
     Ok(true)
 }
 
