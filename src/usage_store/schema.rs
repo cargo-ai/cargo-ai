@@ -606,20 +606,100 @@ mod migration_tests {
     }
 
     #[test]
+    fn migration_reports_bounded_contention_then_preserves_source_on_retry() {
+        let (dir, old) = legacy();
+        let expected = append(&old, 1, json!({"revision":1}));
+        let original: String = old
+            .query_row("SELECT record_json FROM usage_events", [], |row| row.get(0))
+            .unwrap();
+        old.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let started = std::time::Instant::now();
+        assert!(super::super::open_or_busy_for_test(&dir).is_none());
+        let elapsed = started.elapsed();
+        println!("held migration writer returned Busy in {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(2));
+        assert!(!dir.join("recovery").exists());
+        assert_eq!(
+            old.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            old.query_row("SELECT record_json FROM usage_events", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            original
+        );
+        old.execute_batch("ROLLBACK").unwrap();
+        let db = super::super::open_at(&dir, true).unwrap().unwrap();
+        let stored: String = db
+            .query_row("SELECT record_json FROM usage_event_records", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(), expected);
+        let images: Vec<_> = fs::read_dir(dir.join("recovery"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(images.len(), 1);
+        let recovery =
+            Connection::open_with_flags(&images[0], OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert_eq!(
+            recovery
+                .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert_eq!(
+            recovery
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            recovery
+                .query_row("SELECT record_json FROM usage_events", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            original
+        );
+        drop(recovery);
+        drop(db);
+        drop(old);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn concurrent_migrators_recheck_locked_version_and_share_one_image() {
         let (dir, old) = legacy();
-        append(&old, 1, json!({"revision":1}));
+        let expected_legacy = append(&old, 1, json!({"revision":1}));
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
         let threads: Vec<_> = (0..4).map(|index| {
             let dir=dir.clone(); let barrier=barrier.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                let db=super::super::open_at(&dir,true).unwrap().unwrap();
-                super::super::insert_event(&db,&json!({"event_id":format!("new-{index}"),"event_type":"x","timestamp":"now"})).unwrap();
+                let event = json!({"event_id":format!("new-{index}"),"event_type":"x","timestamp":"now"});
+                let Some(db) = super::super::open_or_busy_for_test(&dir) else {
+                    return Some(event);
+                };
+                super::super::insert_event(&db, &event).unwrap();
+                None
             })
         }).collect();
-        for thread in threads {
-            thread.join().unwrap();
+        let attempts: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert!(
+            attempts.iter().any(Option::is_none),
+            "one migrator must complete"
+        );
+        // A bounded Busy is not a schema failure. Retry only after the winning
+        // migration and every other initial attempt have released their locks.
+        for event in attempts.into_iter().flatten() {
+            let db = super::super::open_at(&dir, true).unwrap().unwrap();
+            super::super::insert_event(&db, &event).unwrap();
         }
         let db = super::super::open_at(&dir, false).unwrap().unwrap();
         assert_eq!(
@@ -628,6 +708,30 @@ mod migration_tests {
                 .unwrap(),
             5
         );
+        let stored_legacy: String = db
+            .query_row(
+                "SELECT record_json FROM usage_event_records WHERE event_id='event-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&stored_legacy).unwrap(),
+            expected_legacy
+        );
+        for index in 0..4 {
+            let stored: String = db
+                .query_row(
+                    "SELECT record_json FROM usage_event_records WHERE event_id=?1",
+                    [format!("new-{index}")],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&stored).unwrap(),
+                json!({"event_id":format!("new-{index}"),"event_type":"x","timestamp":"now"})
+            );
+        }
         assert_eq!(fs::read_dir(dir.join("recovery")).unwrap().count(), 1);
         drop(db);
         drop(old);

@@ -540,6 +540,17 @@ mod tests {
 }
 
 #[cfg(test)]
+fn open_or_busy_for_test(dir: &Path) -> Option<Connection> {
+    match open_at(dir, true) {
+        Ok(connection) => Some(connection.expect("a writable opener must return a database")),
+        Err(error) => {
+            assert_eq!(error, "Usage database operation failed: database is locked");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
 mod failure_tests {
     use super::*;
     use serde_json::json;
@@ -547,12 +558,87 @@ mod failure_tests {
         std::env::temp_dir().join(format!("usage-failure-{}", uuid::Uuid::now_v7()))
     }
     #[test]
+    fn first_use_reports_bounded_contention_then_initializes_after_release() {
+        let dir = fixture();
+        fs::create_dir_all(&dir).unwrap();
+        let holder = Connection::open(dir.join("usage.sqlite3")).unwrap();
+        holder
+            .execute_batch("PRAGMA journal_mode=WAL; BEGIN EXCLUSIVE")
+            .unwrap();
+        let started = std::time::Instant::now();
+        assert!(open_or_busy_for_test(&dir).is_none());
+        let elapsed = started.elapsed();
+        println!("held first-use writer returned Busy in {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(2));
+        assert_eq!(
+            holder
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            holder
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'usage_%'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert!(!dir.join("recovery").exists());
+        holder.execute_batch("ROLLBACK").unwrap();
+        drop(holder);
+        let db = open_at(&dir, true).unwrap().unwrap();
+        let event = json!({"event_id":"after-contention","event_type":"agent_run_started","timestamp":"2026-09-22T00:00:00Z"});
+        insert_event(&db, &event).unwrap();
+        let stored: String = db
+            .query_row("SELECT record_json FROM usage_event_records", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(), event);
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn concurrent_first_use_initializes_one_compatible_schema() {
         let dir = fixture();
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
-        let threads:Vec<_>=(0..8).map(|index| {let dir=dir.clone();let barrier=barrier.clone();std::thread::spawn(move || {barrier.wait();let db=open_at(&dir,true).unwrap().unwrap();insert_event(&db,&json!({"event_id":format!("event-{index}"),"event_type":"agent_run_started","timestamp":"2026-09-22T00:00:00Z"})).unwrap();})}).collect();
-        for thread in threads {
-            thread.join().unwrap();
+        let threads: Vec<_> = (0..8)
+            .map(|index| {
+                let dir = dir.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let event = json!({"event_id":format!("event-{index}"),"event_type":"agent_run_started","timestamp":"2026-09-22T00:00:00Z"});
+                    barrier.wait();
+                    let Some(db) = open_or_busy_for_test(&dir) else {
+                        return Some(event);
+                    };
+                    insert_event(&db, &event).unwrap();
+                    None
+                })
+            })
+            .collect();
+        let attempts: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert!(
+            attempts.iter().any(Option::is_none),
+            "one initializer must complete"
+        );
+        // Openers may exhaust their lock budget while another initializes.
+        // Retry only those openers once every concurrent attempt has settled.
+        for event in attempts.into_iter().flatten() {
+            let db = open_at(&dir, true).unwrap().unwrap();
+            insert_event(&db, &event).unwrap();
         }
         let db = open_at(&dir, false).unwrap().unwrap();
         assert_eq!(
@@ -566,6 +652,19 @@ mod failure_tests {
                 .unwrap(),
             "wal"
         );
+        for index in 0..8 {
+            let stored: String = db
+                .query_row(
+                    "SELECT record_json FROM usage_event_records WHERE event_id=?1",
+                    [format!("event-{index}")],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&stored).unwrap(),
+                json!({"event_id":format!("event-{index}"),"event_type":"agent_run_started","timestamp":"2026-09-22T00:00:00Z"})
+            );
+        }
         drop(db);
         fs::remove_dir_all(dir).unwrap();
     }
