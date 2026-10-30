@@ -711,8 +711,10 @@ mod contract_tests {
         let first = query(&["runs", "--limit", "1", "--json"]);
         assert_eq!(first["runs"][0]["root_run_id"], "root-0");
         let db = usage_store::open_database(true).unwrap().unwrap();
+        db.execute_batch("DROP TRIGGER usage_events_immutable")
+            .unwrap();
         db.execute(
-            "UPDATE usage_events SET record_json='not JSON' WHERE sequence<39 OR sequence=40",
+            "UPDATE usage_events SET opaque_json='not JSON' WHERE sequence<39 OR sequence=40",
             [],
         )
         .unwrap();
@@ -729,8 +731,10 @@ mod contract_tests {
             record(&format!("event-{index}"), "root", index);
         }
         let db = usage_store::open_database(true).unwrap().unwrap();
+        db.execute_batch("DROP TRIGGER usage_events_immutable")
+            .unwrap();
         db.execute(
-            "UPDATE usage_events SET record_json='not JSON' WHERE sequence<39",
+            "UPDATE usage_events SET opaque_json='not JSON' WHERE sequence<39",
             [],
         )
         .unwrap();
@@ -1229,8 +1233,10 @@ mod contract_tests {
         );
         record("broken", "unrelated", 9);
         let db = usage_store::open_database(true).unwrap().unwrap();
+        db.execute_batch("DROP TRIGGER usage_events_immutable")
+            .unwrap();
         db.execute(
-            "UPDATE usage_events SET record_json='not JSON' WHERE event_id='broken'",
+            "UPDATE usage_events SET opaque_json='not JSON' WHERE event_id='broken'",
             [],
         )
         .unwrap();
@@ -1261,7 +1267,7 @@ mod contract_tests {
         assert!(error.contains("malformed JSON"), "{error}");
         let raw: String = db
             .query_row(
-                "SELECT record_json FROM usage_events WHERE event_id='broken'",
+                "SELECT record_json FROM usage_event_records WHERE event_id='broken'",
                 [],
                 |row| row.get(0),
             )

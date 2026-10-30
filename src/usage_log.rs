@@ -66,6 +66,30 @@ pub(crate) struct UsageTool {
     pub(crate) step_index: Option<usize>,
 }
 
+/// Explicit clock provenance for provider completions. Arbitrary reported
+/// durations stay unqualified; only an Instant observation can assert its basis.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct UsageElapsed {
+    duration: Duration,
+    monotonic: bool,
+}
+impl UsageElapsed {
+    pub(crate) fn since(started: Instant) -> Self {
+        Self {
+            duration: started.elapsed(),
+            monotonic: true,
+        }
+    }
+}
+impl From<Duration> for UsageElapsed {
+    fn from(duration: Duration) -> Self {
+        Self {
+            duration,
+            monotonic: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct UsageProviderRequest<'a> {
     pub(crate) attempt: &'a UsageProviderAttempt,
@@ -78,7 +102,7 @@ pub(crate) struct UsageProviderRequest<'a> {
     pub(crate) finish_reason: Option<&'a str>,
     pub(crate) step: UsageStep,
     pub(crate) usage: Option<&'a ProviderUsage>,
-    pub(crate) duration: Duration,
+    pub(crate) duration: UsageElapsed,
     pub(crate) status: UsageStatus,
     pub(crate) error: Option<UsageError>,
 }
@@ -348,12 +372,15 @@ impl UsageLogContext {
             "normalization_version": 1,
             "detail_semantics": "provider_native_details_may_overlap_headline_counters"
         });
-        event["duration_ms"] = json!(duration_ms(request.duration));
-        add_time_range(&mut event, request.duration);
+        event["duration_ms"] = json!(duration_ms(request.duration.duration));
+        if request.duration.monotonic {
+            add_elapsed_timing(&mut event, request.duration.duration);
+        }
+        add_time_range(&mut event, request.duration.duration);
         event["started_at"] = json!(request.attempt.started_at);
         event["timestamp_basis"] = json!("observed_request_start_and_completion");
         event["timing"] = json!({
-            "provider_round_trip_ms": duration_ms(request.duration),
+            "provider_round_trip_ms": duration_ms(request.duration.duration),
         });
         event["status"] = json!(request.status.as_str());
         event["provider_completion"] =
@@ -403,6 +430,7 @@ impl UsageLogContext {
         event["operation_id"] = json!(operation_id);
         event["tool"] = tool.to_json();
         event["duration_ms"] = json!(duration_ms(duration));
+        add_elapsed_timing(&mut event, duration);
         event["status"] = json!(status.as_str());
         add_time_range(&mut event, duration);
         self.write_event_lossy(event);
@@ -411,6 +439,7 @@ impl UsageLogContext {
     fn record_agent_completed(&self, duration: Duration, status: UsageStatus) {
         let mut event = self.agent_event_base("agent_run_completed");
         event["duration_ms"] = json!(duration_ms(duration));
+        add_elapsed_timing(&mut event, duration);
         event["status"] = json!(status.as_str());
         add_time_range(&mut event, duration);
         self.write_event_lossy(event);
@@ -426,6 +455,7 @@ impl UsageLogContext {
                 "attribution": self.attribution,
             });
             add_time_range(&mut event, duration);
+            add_elapsed_timing(&mut event, duration);
             self.write_event_lossy(event);
         }
     }
@@ -765,6 +795,11 @@ fn launched_by_from_env() -> Option<UsageLaunchedBy> {
     })
 }
 
+fn add_elapsed_timing(event: &mut Value, duration: Duration) {
+    event["elapsed_timing"] =
+        json!({"version":1,"basis":"monotonic_elapsed","elapsed_ms":duration_ms(duration)});
+}
+
 fn add_time_range(event: &mut Value, duration: Duration) {
     let end = OffsetDateTime::now_utc();
     event["timestamp_basis"] = json!("completion_clock_minus_monotonic_elapsed");
@@ -833,7 +868,7 @@ mod tests {
                 finish_reason: None,
                 step,
                 usage: None,
-                duration: Duration::from_millis(1),
+                duration: Duration::from_millis(1).into(),
                 status: UsageStatus::Success,
                 error: None,
             },
@@ -896,7 +931,7 @@ mod tests {
                 input_token_details: None,
                 output_token_details: None,
             }),
-            duration: Duration::from_millis(42),
+            duration: Duration::from_millis(42).into(),
             status: UsageStatus::Success,
             error: None,
         });
@@ -918,7 +953,7 @@ mod tests {
         );
         assert!(!contents.contains("provider_request_started"));
         let db = crate::usage_store::open_database(false).unwrap().unwrap();
-        let raw: String = db.query_row("SELECT record_json FROM usage_events WHERE root_run_id=?1 AND event_type='provider_request_started'", [&context.root_run_id], |row|row.get(0)).unwrap();
+        let raw: String = db.query_row("SELECT record_json FROM usage_event_records WHERE root_run_id=?1 AND event_type='provider_request_started'", [&context.root_run_id], |row|row.get(0)).unwrap();
         let started: Value = serde_json::from_str(&raw).unwrap();
         let completed: Value = serde_json::from_str(lines[2]).unwrap();
         assert_eq!(started["event_type"], "provider_request_started");
@@ -963,7 +998,7 @@ mod tests {
                 step_index: None,
             },
             usage: None,
-            duration: Duration::from_millis(12),
+            duration: Duration::from_millis(12).into(),
             status: UsageStatus::Failed,
             error: Some(UsageError::redacted(
                 "invalid_response",
@@ -1023,6 +1058,149 @@ mod automatic_failure_tests {
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }
+    #[test]
+    fn monotonic_capture_reaches_frozen_queue_without_rewriting_old_projection() {
+        use crate::usage_analytics::{contract::*, queue};
+        let home = Home::new();
+        let mut db = crate::usage_store::open_database(true).unwrap().unwrap();
+        queue::initialize(&mut db).unwrap();
+        let source = Source {
+            account_binding: CanonicalUuid::try_from(Uuid::new_v4().to_string()).unwrap(),
+            source_home_id: CanonicalUuid::try_from(Uuid::new_v4().to_string()).unwrap(),
+            data_generation: Counter::try_from(1).unwrap(),
+        };
+        let provenance = Provenance {
+            lifecycle_epoch: LifecycleEpoch::try_from(0).unwrap(),
+            consent_interval: Counter::try_from(1).unwrap(),
+        };
+        queue::enable(&mut db, &source, &provenance, 100).unwrap();
+        drop(db);
+        let path = home.path.join("timing.ndjson");
+        let (context, mut guard) =
+            UsageLogContext::from_runtime(Some(path.to_str().unwrap()), 0, None)
+                .unwrap()
+                .unwrap();
+        let step = UsageStep {
+            kind: "agent_inference",
+            action: None,
+            step_index: None,
+        };
+        let attempt = context.start_provider_request(
+            ProviderKind::TypeSafe,
+            None,
+            "none",
+            "fixture",
+            step.clone(),
+        );
+        let started = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        context.record_provider_request(UsageProviderRequest {
+            attempt: &attempt,
+            provider: ProviderKind::TypeSafe,
+            profile_name: None,
+            auth_mode: "none",
+            model: "fixture",
+            resolved_model: None,
+            provider_request_id: None,
+            finish_reason: None,
+            step: step.clone(),
+            usage: None,
+            duration: UsageElapsed::since(started),
+            status: UsageStatus::Success,
+            error: None,
+        });
+        let attempt = context.start_provider_request(
+            ProviderKind::TypeSafe,
+            None,
+            "none",
+            "fixture",
+            step.clone(),
+        );
+        context.record_provider_request(UsageProviderRequest {
+            attempt: &attempt,
+            provider: ProviderKind::TypeSafe,
+            profile_name: None,
+            auth_mode: "none",
+            model: "fixture",
+            resolved_model: None,
+            provider_request_id: None,
+            finish_reason: None,
+            step,
+            usage: None,
+            duration: Duration::from_millis(42).into(),
+            status: UsageStatus::Success,
+            error: None,
+        });
+        let mut tool = context.start_tool_run(UsageTool {
+            name: "fixture".into(),
+            action: "inspect".into(),
+            step_index: None,
+        });
+        tool.finish_success();
+        guard.finish_success();
+        let recorded: Vec<Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let providers: Vec<_> = recorded
+            .iter()
+            .filter(|event| event["event_type"] == "provider_request_completed")
+            .collect();
+        assert_eq!(providers.len(), 2);
+        assert!(
+            providers[0]["elapsed_timing"]["elapsed_ms"]
+                .as_u64()
+                .unwrap()
+                >= 2
+        );
+        assert!(
+            providers[1].get("elapsed_timing").is_none(),
+            "an arbitrary reported Duration stays unknown"
+        );
+        let mut db = crate::usage_store::open_database(true).unwrap().unwrap();
+        queue::capture(&mut db, &source, crate::usage_backup::analytics_projection).unwrap();
+        let lease = queue::acquire_lease(&mut db, &source, 100, queue::MAX_LEASE_MS)
+            .unwrap()
+            .unwrap();
+        let batch = queue::prepare_batch(&mut db, &lease, 100).unwrap().unwrap();
+        let Request::Sync { events, .. } = Request::parse(batch.request_json()).unwrap() else {
+            panic!("sync")
+        };
+        let mut qualified = std::collections::BTreeSet::new();
+        for event in events {
+            let old = EventSubmission::from_allowed_text(event.original_text.clone()).unwrap();
+            assert_eq!(old.original_sha256, event.original_sha256);
+            assert_eq!(old.semantic_sha256, event.semantic_sha256);
+            let payload: Value = serde_json::from_str(&event.original_text).unwrap();
+            assert!(payload.get("elapsed_timing").is_none());
+            if let Some(timing) = &event.timing {
+                assert_eq!(
+                    payload["elapsed_ms"].as_u64(),
+                    Some(timing.elapsed_ms.get())
+                );
+                assert!(event.member().unwrap().timing_sha256.is_some());
+                qualified.insert(payload["event_kind"].as_str().unwrap().to_owned());
+            }
+        }
+        assert_eq!(
+            qualified,
+            std::collections::BTreeSet::from([
+                "provider_request_completed".into(),
+                "root_run_completed".into(),
+                "agent_run_completed".into(),
+                "tool_run_completed".into()
+            ])
+        );
+        assert_eq!(
+            queue::prepare_batch(&mut db, &lease, 100)
+                .unwrap()
+                .unwrap()
+                .request_json(),
+            batch.request_json()
+        );
+    }
+
     #[test]
     fn unavailable_history_preserves_success_and_explicit_export() {
         let home = Home::new();
@@ -1145,7 +1323,9 @@ mod automatic_failure_tests {
 
         phases.wait();
         let initial_count: i64 = reader
-            .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM usage_event_records", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         drop(transaction);
         phases.wait();
@@ -1155,7 +1335,9 @@ mod automatic_failure_tests {
         );
         assert!(crate::usage_store::incomplete());
         let live_count: i64 = reader
-            .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM usage_event_records", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert!((16..=176).contains(&live_count));
         let completed: Vec<_> = threads
@@ -1172,7 +1354,7 @@ mod automatic_failure_tests {
                 expected.insert(event["event_id"].as_str().unwrap().to_owned(), event);
             }
         }
-        let mut statement = reader.prepare("SELECT event_id, record_json FROM usage_events WHERE event_type='provider_request_completed'").unwrap();
+        let mut statement = reader.prepare("SELECT event_id, record_json FROM usage_event_records WHERE event_type='provider_request_completed'").unwrap();
         let records: Vec<(String, String)> = statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap()
@@ -1189,7 +1371,7 @@ mod automatic_failure_tests {
         assert!(expected.is_empty());
         let (total, unique): (i64, i64) = reader
             .query_row(
-                "SELECT COUNT(*), COUNT(DISTINCT event_id) FROM usage_events",
+                "SELECT COUNT(*), COUNT(DISTINCT event_id) FROM usage_event_records",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -1213,14 +1395,14 @@ mod automatic_failure_tests {
         guard.finish_success();
         assert!(context.sink.pending.lock().unwrap().is_empty());
         assert_eq!(
-            db.query_row("SELECT COUNT(*) FROM usage_events", [], |row| row
+            db.query_row("SELECT COUNT(*) FROM usage_event_records", [], |row| row
                 .get::<_, i64>(0))
                 .unwrap(),
             4
         );
         assert_eq!(
             db.query_row(
-                "SELECT COUNT(DISTINCT event_id) FROM usage_events",
+                "SELECT COUNT(DISTINCT event_id) FROM usage_event_records",
                 [],
                 |row| row.get::<_, i64>(0)
             )

@@ -2503,7 +2503,7 @@ async fn run_generate_image_step(
                         step_index: Some(step_index),
                     },
                     usage: response.usage.as_ref(),
-                    duration: provider_started_at.elapsed(),
+                    duration: crate::usage_log::UsageElapsed::since(provider_started_at),
                     status: crate::usage_log::UsageStatus::Success,
                     error: None,
                 });
@@ -2529,7 +2529,7 @@ async fn run_generate_image_step(
                         step_index: Some(step_index),
                     },
                     usage: error.usage.as_ref(),
-                    duration: provider_started_at.elapsed(),
+                    duration: crate::usage_log::UsageElapsed::since(provider_started_at),
                     status: crate::usage_log::UsageStatus::Failed,
                     error: Some(usage_provider_error(&error)),
                 });
@@ -2560,7 +2560,7 @@ async fn run_generate_image_step(
                         step_index: Some(step_index),
                     },
                     usage: None,
-                    duration: provider_started_at.elapsed(),
+                    duration: crate::usage_log::UsageElapsed::since(provider_started_at),
                     status: crate::usage_log::UsageStatus::Failed,
                     error: Some(usage_timeout_error()),
                 });
@@ -7992,7 +7992,7 @@ timeout_in_sec = 60
         );
         db.execute_batch("ROLLBACK").unwrap();
         guard.finish_failed();
-        let mut statement = db.prepare("SELECT record_json FROM usage_events WHERE event_type='provider_request_completed'").unwrap();
+        let mut statement = db.prepare("SELECT record_json FROM usage_event_records WHERE event_type='provider_request_completed'").unwrap();
         let events: Vec<serde_json::Value> = statement
             .query_map([], |row| row.get::<_, String>(0))
             .unwrap()

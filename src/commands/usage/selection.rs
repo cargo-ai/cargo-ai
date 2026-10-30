@@ -225,7 +225,7 @@ pub(super) fn v2_event_page(
     let after = values.len();
     values.push(Parameter::Integer(limit as i64 + 1));
     let count = values.len();
-    let sql = format!("SELECT sequence,record_json FROM usage_events WHERE sequence>?{after} AND {filter} ORDER BY sequence LIMIT ?{count}");
+    let sql = format!("SELECT sequence,record_json FROM usage_event_records WHERE sequence>?{after} AND {filter} ORDER BY sequence LIMIT ?{count}");
     let mut statement = db.prepare(&sql).map_err(db_error)?;
     let rows = statement
         .query_map(params_from_iter(values), |row| {
@@ -251,7 +251,7 @@ pub(super) fn v2_root_page(
     let after = values.len();
     values.push(Parameter::Integer(limit as i64 + 1));
     let count = values.len();
-    let sql = format!("SELECT MIN(sequence) AS first_sequence,root_run_id FROM usage_events WHERE root_run_id IS NOT NULL AND {filter} GROUP BY root_run_id HAVING first_sequence>?{after} ORDER BY first_sequence LIMIT ?{count}");
+    let sql = format!("SELECT MIN(sequence) AS first_sequence,root_run_id FROM usage_event_records WHERE root_run_id IS NOT NULL AND {filter} GROUP BY root_run_id HAVING first_sequence>?{after} ORDER BY first_sequence LIMIT ?{count}");
     let mut statement = db.prepare(&sql).map_err(db_error)?;
     let rows = statement
         .query_map(params_from_iter(values), |row| {
@@ -270,7 +270,7 @@ pub(super) fn v2_root_records(
     let (filter, mut values) = v2_filter(snapshot, None, args)?;
     values.push(Parameter::Text(root.into()));
     let root_parameter = values.len();
-    let sql = format!("SELECT record_json,COALESCE(({filter}),0) FROM usage_events WHERE root_run_id=?{root_parameter} AND sequence<=?1 ORDER BY sequence");
+    let sql = format!("SELECT record_json,COALESCE(({filter}),0) FROM usage_event_records WHERE root_run_id=?{root_parameter} AND sequence<=?1 ORDER BY sequence");
     let mut statement = db.prepare(&sql).map_err(db_error)?;
     let rows = statement
         .query_map(params_from_iter(values), |row| {
@@ -299,7 +299,7 @@ pub(super) fn v2_context_page(
     let after = values.len();
     values.push(Parameter::Integer(limit as i64));
     let count = values.len();
-    let sql = format!("SELECT sequence,record_json,COALESCE(({filter}),0) FROM usage_events WHERE sequence>?{after} AND sequence<=?1 AND root_run_id IN (SELECT root_run_id FROM temp.v2_roots) ORDER BY sequence LIMIT ?{count}");
+    let sql = format!("SELECT sequence,record_json,COALESCE(({filter}),0) FROM usage_event_records WHERE sequence>?{after} AND sequence<=?1 AND root_run_id IN (SELECT root_run_id FROM temp.v2_roots) ORDER BY sequence LIMIT ?{count}");
     let mut statement = db.prepare(&sql).map_err(db_error)?;
     let rows = statement
         .query_map(params_from_iter(values), |row| {
@@ -323,7 +323,7 @@ pub(super) fn v2_populate_roots(
     args: &ArgMatches,
 ) -> Result<(), String> {
     let (filter, values) = v2_filter(snapshot, None, args)?;
-    let sql = format!("INSERT INTO temp.v2_roots(root_run_id) SELECT DISTINCT root_run_id FROM usage_events WHERE root_run_id IS NOT NULL AND {filter}");
+    let sql = format!("INSERT INTO temp.v2_roots(root_run_id) SELECT DISTINCT root_run_id FROM usage_event_records WHERE root_run_id IS NOT NULL AND {filter}");
     db.execute(&sql, params_from_iter(values))
         .map_err(db_error)?;
     Ok(())
@@ -347,7 +347,7 @@ pub(super) fn event_page(
         Parameter::Integer(after_sequence),
         Parameter::Integer(limit as i64 + 1),
     ]);
-    let mut statement = db.prepare(&format!("SELECT sequence,record_json FROM usage_events WHERE sequence>?9 AND {FILTER} ORDER BY sequence LIMIT ?10")).map_err(db_error)?;
+    let mut statement = db.prepare(&format!("SELECT sequence,record_json FROM usage_event_records WHERE sequence>?9 AND {FILTER} ORDER BY sequence LIMIT ?10")).map_err(db_error)?;
     let rows = statement
         .query_map(params_from_iter(values), |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
@@ -372,7 +372,7 @@ pub(super) fn root_page(
         Parameter::Integer(after_sequence),
         Parameter::Integer(limit.map_or(-1, |limit| limit as i64 + 1)),
     ]);
-    let mut statement = db.prepare(&format!("SELECT MIN(sequence) AS first_sequence,root_run_id FROM usage_events WHERE root_run_id IS NOT NULL AND {FILTER} GROUP BY root_run_id HAVING first_sequence>?9 ORDER BY first_sequence LIMIT ?10")).map_err(db_error)?;
+    let mut statement = db.prepare(&format!("SELECT MIN(sequence) AS first_sequence,root_run_id FROM usage_event_records WHERE root_run_id IS NOT NULL AND {FILTER} GROUP BY root_run_id HAVING first_sequence>?9 ORDER BY first_sequence LIMIT ?10")).map_err(db_error)?;
     let rows = statement
         .query_map(params_from_iter(values), |row| {
             Ok((row.get(0)?, row.get(1)?))
@@ -396,7 +396,7 @@ pub(super) fn root_records(
     values.push(Parameter::Text(root.into()));
     // Context is restricted to the already selected root and the same snapshot.
     // The flag controls usage totals; out-of-window completion remains context.
-    let mut statement=db.prepare(&format!("SELECT record_json,COALESCE(({FILTER}),0) FROM usage_events WHERE root_run_id=?9 AND sequence<=?1 ORDER BY sequence")).map_err(db_error)?;
+    let mut statement=db.prepare(&format!("SELECT record_json,COALESCE(({FILTER}),0) FROM usage_event_records WHERE root_run_id=?9 AND sequence<=?1 ORDER BY sequence")).map_err(db_error)?;
     let rows = statement
         .query_map(params_from_iter(values), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))

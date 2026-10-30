@@ -93,6 +93,8 @@ Discovery follows pagination within one connection/query for at most 20 requests
 
 Use capabilities instead of help-text parsing. Profile reads and installed-package inspection supply typed fields instead of table/headline parsing. Installed lists retain the legacy default limit of 20, disclose available count/completeness, and offer the existing limit/all selectors where supported. Hosted lists preserve existing ordering/filter semantics and disclose their display limit. Usage v1/v2 payloads remain unchanged inside the explicitly selected envelope. Backup contracts describe remote acceptance and local queue/settings persistence separately.
 
+Cloud analytics and rolling retention use nested maintenance payload2 in the unchanged application envelope1. Negotiate the installed capability and remote upload protocol separately. These controls require explicit consent, and new cloud analytics sends only through `usage cloud sync --json`. Durable buffering, row processing and model coverage are distinct. See the [maintenance payload](machine-payloads.md#rolling-retention-and-cloud-analytics) and [command guide](usage-cloud.md).
+
 This development interface becomes available only in a build containing it. Integration does not publish a release or upgrade users. Application wrappers consume these contracts; Cargo AI owns runtime, configuration, authentication and provider requests.
 
 

@@ -191,7 +191,10 @@ fn outcome(error: Option<&Failure>) -> &'static str {
     }
 }
 fn payload_schema(command: &str) -> String {
-    let revision = if matches!(command, "actions list" | "actions validate") {
+    let revision = if matches!(command, "actions list" | "actions validate")
+        || command.starts_with("usage cloud ")
+        || command.starts_with("usage retention ")
+    {
         2
     } else {
         1
@@ -592,6 +595,16 @@ fn contracts() -> Vec<Value> {
         "usage backup disable",
         "usage backup sync",
         "usage backup include-history",
+        "usage cloud status",
+        "usage cloud enable",
+        "usage cloud disable",
+        "usage cloud include-history",
+        "usage cloud sync",
+        "usage cloud clear",
+        "usage cloud history",
+        "usage retention status",
+        "usage retention preview",
+        "usage retention configure",
         "models list",
         "models thinking",
     ];
@@ -610,6 +623,8 @@ fn contracts() -> Vec<Value> {
             "account status"=>vec!["account_read","possible_session_refresh_and_persistence"],
             "account register"|"account confirm"|"account deactivate"=>vec!["remote_account_mutation","local_account_persistence"],
             "auth login openai"=>vec!["none_until_existing_terminal_flow"],
+            name if name.starts_with("usage cloud")=>vec!["explicit_cloud_custody_operation_or_passive_local_status","independent_cloud_consent_and_exact_durable_upload_acknowledgments"],
+            name if name.starts_with("usage retention")=>vec!["passive_local_inspection_or_explicit_loss_acknowledged_policy"],
             name if name.starts_with("usage backup")=>vec!["local_queue_or_consent_maintenance","explicit_remote_operation_when_applicable"],
             name if name.starts_with("usage")=>vec!["local_usage_read_or_explicit_settings_mutation"],
             _=>vec!["selected_local_or_account_operation"],
@@ -625,6 +640,7 @@ fn contracts() -> Vec<Value> {
             _=>json!([]),
         };
         let mut contract = json!({"command":name,"payload_schema":payload_schema(name),"formats":["json"],"schema_versions":[1],"effects":effects,"variants":variants,"interaction":if *name=="auth login openai"{"existing_terminal_protocol_exception"}else{"noninteractive_explicit_consent_required_when_applicable"}});
+        if name.starts_with("usage cloud ")||name.starts_with("usage retention "){contract["data_json_schema"]=json!("https://cargo-ai.org/schemas/usage-maintenance-v2.json");}
         if matches!(*name, "actions list" | "actions validate") {
             let selector = if *name == "actions list" { "catalog_version" } else { "request_version" };
             contract["payload_schemas"] = json!([
@@ -851,7 +867,9 @@ async fn execute(matches: &ArgMatches) -> Result<Value, Failure> {
         Some(("actions", m)) => super::client_actions::machine_run(m),
         Some(("new", m)) => super::new::machine_run(m),
         Some(("usage", m)) => {
-            if let Some(b) = m.subcommand_matches("backup") {
+            if matches!(m.subcommand_name(), Some("cloud" | "retention")) {
+                crate::usage_analytics_cli::machine_run(m).await
+            } else if let Some(b) = m.subcommand_matches("backup") {
                 crate::usage_backup_cli::machine_run(b).await
             } else {
                 super::usage::machine_run(m)
@@ -878,7 +896,9 @@ async fn execute(matches: &ArgMatches) -> Result<Value, Failure> {
         #[cfg(feature = "developer-tools")]
         Some(("package", m)) => super::package::machine_run(m),
         Some(("auth", m)) => super::auth::machine_run(m).await,
-        Some(("run", m)) => super::run::machine_run(m).await,
+        Some(("run", m)) => {
+            crate::usage_analytics::scheduler::scope(super::run::machine_run(m)).await
+        }
         _ => Err(Failure::new(
             "cli.unsupported_contract",
             "No application contract is available for this command.",
@@ -944,6 +964,50 @@ pub(crate) fn runtime_outcome(succeeded: bool) -> Result<Value, Failure> {
 #[cfg(test)]
 mod thinking_tests {
     use super::*;
+
+    #[test]
+    fn usage_maintenance_capabilities_bind_the_finite_typed_payload_schema() {
+        let schema: Value =
+            serde_json::from_str(include_str!("../../docs/schemas/usage-maintenance-v2.json"))
+                .unwrap();
+        let contracts = contracts();
+        assert_eq!(
+            contracts
+                .iter()
+                .filter(|contract| contract["command"]
+                    .as_str()
+                    .is_some_and(|name| name.starts_with("usage cloud ")
+                        || name.starts_with("usage retention ")))
+                .count(),
+            schema["properties"]["operation"]["enum"]
+                .as_array()
+                .unwrap()
+                .len()
+        );
+        for group in ["cloud", "retention"] {
+            for contract in contracts.iter().filter(|contract| {
+                contract["command"]
+                    .as_str()
+                    .is_some_and(|name| name.starts_with(&format!("usage {group} ")))
+            }) {
+                let name = contract["command"].as_str().unwrap();
+                assert_eq!(
+                    contract["payload_schema"],
+                    format!("cargo-ai.{}.v2", name.replace(' ', "."))
+                );
+                assert_eq!(contract["data_json_schema"], schema["$id"]);
+                assert!(schema["properties"]["operation"]["enum"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(name)));
+            }
+        }
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["postconditions_verified"]["type"],
+            "boolean"
+        );
+    }
 
     #[test]
     fn action_payload_versions_follow_the_selected_contract() {

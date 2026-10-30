@@ -148,7 +148,7 @@ fn stored(event_id: &str) -> Option<Value> {
     let db = usage_store::open_database(false).unwrap().unwrap();
     let text: Option<String> = db
         .query_row(
-            "SELECT record_json FROM usage_events WHERE event_id=?1",
+            "SELECT record_json FROM usage_event_records WHERE event_id=?1",
             [event_id],
             |r| r.get(0),
         )

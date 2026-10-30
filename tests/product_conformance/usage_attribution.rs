@@ -140,7 +140,22 @@ pub(super) fn assert_generated_runtime_initializes_without_cli(fixture: &Fixture
         .unwrap();
     let recorded = events(&isolated);
     assert!(!recorded.is_empty());
+    let mut qualified_completions = 0;
     for event in recorded {
+        if matches!(
+            event["event_type"].as_str(),
+            Some(
+                "agent_run_completed"
+                    | "root_run_completed"
+                    | "tool_run_completed"
+                    | "provider_request_completed"
+            )
+        ) {
+            assert_eq!(event["elapsed_timing"]["version"], 1);
+            assert_eq!(event["elapsed_timing"]["basis"], "monotonic_elapsed");
+            assert_eq!(event["elapsed_timing"]["elapsed_ms"], event["duration_ms"]);
+            qualified_completions += 1;
+        }
         assert_eq!(event["attribution"]["environment"]["id"], id);
         assert_eq!(event["attribution"]["runtime"]["kind"], "generated");
         assert!(event["attribution"]["package"]["id"].is_string());
@@ -155,6 +170,10 @@ pub(super) fn assert_generated_runtime_initializes_without_cli(fixture: &Fixture
         );
         assert!(event["attribution"]["workspace"]["path"].is_null());
     }
+    assert!(
+        qualified_completions >= 2,
+        "actual emitted agent/root completions carry producer timing provenance"
+    );
 }
 
 fn provider_run(fixture: &Fixture, cwd: &Path, args: &[&str]) {
@@ -183,6 +202,17 @@ fn provider_run(fixture: &Fixture, cwd: &Path, args: &[&str]) {
     );
     assert_success(&data_cli(fixture, cwd, args), "attributed provider run");
     assert!(server.finish().contains("Return status ok."));
+    let completed = events(fixture)
+        .into_iter()
+        .rev()
+        .find(|event| event["event_type"] == "provider_request_completed")
+        .expect("actual native provider completion is captured");
+    assert_eq!(completed["elapsed_timing"]["version"], 1);
+    assert_eq!(completed["elapsed_timing"]["basis"], "monotonic_elapsed");
+    assert_eq!(
+        completed["elapsed_timing"]["elapsed_ms"],
+        completed["duration_ms"]
+    );
 }
 
 #[test]
@@ -390,7 +420,7 @@ fn usage_attribution_separates_homes_and_observes_actual_executable() {
 
 #[test]
 #[ignore = "requires an explicitly provisioned older Cargo AI binary in an isolated test installation"]
-fn usage_attribution_legacy_binary_writes_initialized_store_without_rewriting_new_facts() {
+fn usage_attribution_legacy_binary_refuses_normalized_store_without_rewriting_facts() {
     let binary = std::env::var_os("CARGO_AI_LEGACY_TEST_BINARY")
         .expect("set the isolated older binary path");
     let fixture = Fixture::new("usage-old-writer");
@@ -410,17 +440,222 @@ fn usage_attribution_legacy_binary_writes_initialized_store_without_rewriting_ne
         .args(["--no-update-check", "run", "--config", "agent.json"])
         .output()
         .unwrap();
-    assert_success(&output, "older writer into updated store");
-    let mixed = events(&fixture);
-    assert!(mixed.len() > original.len());
-    assert_eq!(&mixed[..original.len()], original.as_slice());
-    assert!(mixed[original.len()..]
-        .iter()
-        .all(|event| event.get("attribution").is_none()));
+    // Agent execution remains best effort even when an older capture runtime
+    // refuses a newer ledger. Historical v1 coexistence does not apply to v2.
+    assert_success(&output, "older execution with incompatible usage storage");
+    assert_eq!(events(&fixture), original);
+    assert!(fixture
+        .cargo_ai_home
+        .join("usage/capture-incomplete")
+        .is_file());
     let version: i64 =
         rusqlite::Connection::open(fixture.cargo_ai_home.join("usage/usage.sqlite3"))
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
+}
+
+#[test]
+#[ignore = "run explicitly with a compiled historical store probe in CARGO_AI_LEGACY_STORE_TEST_BINARY"]
+fn usage_normalization_generated_runtime_migrates_and_fences_historical_writer() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+    let historical = std::env::var_os("CARGO_AI_LEGACY_STORE_TEST_BINARY")
+        .expect("set the isolated compiled historical store probe path");
+    let author = Fixture::new("usage-normalization-author");
+    let workspace = author.root.join("project");
+    project(&workspace, PACKAGE_ID);
+    fs::write(
+        workspace.join("agent.json"),
+        json!({
+            "agent_definition_schema_version":"2026-03-03.r1",
+            "inputs":[{"type":"text","name":"job","text":"local normalization probe"}],
+            "agent_schema":{"type":"object","properties":{}},
+            "actions":[]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let hatch = data_cli(
+        &author,
+        &workspace,
+        &["hatch", "normalization_probe", "--config", "agent.json"],
+    );
+    assert_success(&hatch, "hatch actual normalization probe");
+    assert!(
+        !String::from_utf8_lossy(&hatch.stderr).contains("warning:"),
+        "{}",
+        String::from_utf8_lossy(&hatch.stderr)
+    );
+    let binary = workspace.join(if cfg!(windows) {
+        "normalization_probe.exe"
+    } else {
+        "normalization_probe"
+    });
+    assert!(binary.is_file());
+    use sha2::{Digest, Sha256};
+    eprintln!(
+        "Emitted normalization runtime SHA256: {:x}",
+        Sha256::digest(fs::read(&binary).unwrap())
+    );
+
+    let selected = Fixture::new("usage-normalization-selected");
+    fs::write(selected.cargo_ai_home.join("config.toml"), "default_profile = 'local'\n[[profile]]\nname = 'local'\nserver = 'ollama'\nmodel = 'unused'\nauth_mode = 'none'\n").unwrap();
+    let dir = selected.cargo_ai_home.join("usage");
+    fs::create_dir(&dir).unwrap();
+    let db = rusqlite::Connection::open(dir.join("usage.sqlite3")).unwrap();
+    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
+        CREATE TABLE usage_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT UNIQUE NOT NULL,root_run_id TEXT,agent_run_id TEXT,event_type TEXT NOT NULL,created_at TEXT NOT NULL,record_json TEXT NOT NULL);
+        CREATE INDEX usage_events_root ON usage_events(root_run_id,sequence);
+        CREATE INDEX usage_events_agent ON usage_events(agent_run_id,sequence);
+        CREATE TABLE usage_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+        CREATE TABLE usage_backup_projection(event_id TEXT PRIMARY KEY REFERENCES usage_events(event_id) ON DELETE CASCADE,record_json TEXT NOT NULL);
+        CREATE TABLE usage_backup_queue(event_id TEXT NOT NULL REFERENCES usage_events(event_id) ON DELETE CASCADE,binding TEXT NOT NULL,generation INTEGER NOT NULL,acknowledged INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(event_id,binding,generation));
+        PRAGMA user_version=1;").unwrap();
+    let original = json!({"schema_version":1,"event_id":"synthetic-original","root_run_id":"synthetic-root","event_type":"provider_request_completed","timestamp":"2026-10-27T00:00:00Z","agent":{"revision":"old","path":"/synthetic/project"},"provider":null,"attribution":{"schema_version":99,"opaque":null},"restored_attribution":false,"usage":{"input_tokens":u64::MAX},"duration_ms":"wrong-type","status":null,"extension":{"null":null,"wide":u64::MAX}});
+    db.execute("INSERT INTO usage_events(sequence,event_id,root_run_id,event_type,created_at,record_json) VALUES(77,'synthetic-original','synthetic-root','provider_request_completed','2026-10-27T00:00:00Z',?1)", [original.to_string()]).unwrap();
+    let projection = " { \"schema_version\" : 1, \"kept\" : null } ";
+    db.execute(
+        "INSERT INTO usage_backup_projection VALUES('synthetic-original',?1)",
+        [projection],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO usage_backup_queue VALUES('synthetic-original','synthetic-binding',1,0)",
+        [],
+    )
+    .unwrap();
+    // The exact historical code opens the v1 connection before the real emitted
+    // runtime changes the schema. It stays alive across the migration boundary.
+    let mut old = selected
+        .command(&historical, &selected.root)
+        .arg("wait")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut readiness = String::new();
+    BufReader::new(old.stdout.take().unwrap())
+        .read_line(&mut readiness)
+        .unwrap();
+    assert_eq!(readiness.trim(), "ready");
+    let empty_path = selected.root.join("empty-path");
+    fs::create_dir(&empty_path).unwrap();
+    let output = selected
+        .command(&binary, &selected.root)
+        .env("PATH", &empty_path)
+        .output()
+        .unwrap();
+    assert_success(
+        &output,
+        "actual emitted runtime migration without CLI on PATH",
+    );
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    old.stdin.take().unwrap().write_all(b"append\n").unwrap();
+    let old_output = old.wait_with_output().unwrap();
+    assert!(
+        !old_output.status.success(),
+        "already-open historical writer unexpectedly appended"
+    );
+    assert!(String::from_utf8_lossy(&old_output.stderr).contains("record_json"));
+    let later = selected
+        .command(&historical, &selected.root)
+        .arg("fresh")
+        .output()
+        .unwrap();
+    assert!(
+        !later.status.success(),
+        "later historical runtime unexpectedly opened v2"
+    );
+    assert!(String::from_utf8_lossy(&later.stderr).contains("newer incompatible schema"));
+
+    let stored: String = db
+        .query_row(
+            "SELECT record_json FROM usage_event_records WHERE event_id='synthetic-original'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(), original);
+    assert_eq!(
+        db.query_row(
+            "SELECT sequence FROM usage_events WHERE event_id='synthetic-original'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        77
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT record_json FROM usage_backup_projection",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        projection
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT binding||':'||generation||':'||acknowledged FROM usage_backup_queue",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        "synthetic-binding:1:0"
+    );
+    let all = events(&selected);
+    assert_eq!(all.first(), Some(&original));
+    let appended: Vec<_> = all.iter().skip(1).collect();
+    assert!(!appended.is_empty());
+    assert!(appended
+        .iter()
+        .all(|event| event["attribution"]["runtime"]["kind"] == "generated"));
+    assert_eq!(
+        appended
+            .iter()
+            .filter(|event| event["event_type"] == "root_run_completed")
+            .count(),
+        1
+    );
+    assert!(!dir.join("capture-incomplete").exists());
+    let image: String = db
+        .query_row(
+            "SELECT value FROM usage_meta WHERE key='schema_v2_recovery_image'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let recovery =
+        rusqlite::Connection::open_with_flags(image, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    assert_eq!(
+        recovery
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        recovery
+            .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM usage_events WHERE event_id='historical-writer'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    eprintln!("Actual emitted runtime: v1 event77 preserved, {} generated facts appended, recovery retained; already-open and later historical writers refused", appended.len());
 }

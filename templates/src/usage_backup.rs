@@ -461,3 +461,35 @@ pub(crate) async fn delete_cloud(
         json!({"deleted":true,"cloud":result,"local_history_deleted":false,"note":"Old queues cannot repopulate the deleted generation. Re-enable explicitly and preview/select older history to back it up again."}),
     )
 }
+
+/// The independent pipeline shares allowed bytes and opaque mappings, not consent or receipts.
+#[cfg(any(cargo_ai_cli, test))]
+pub(crate) fn analytics_projection(
+    db: &rusqlite::Connection,
+    event: &Value,
+) -> Result<String, String> {
+    use rusqlite::OptionalExtension;
+    // Mapping creation is shared, but no old backup selection or acknowledgment changes.
+    queue::initialize(db)?;
+    let id = event
+        .get("event_id")
+        .and_then(Value::as_str)
+        .ok_or("Usage event identity is missing")?;
+    let stored: Option<String> = db
+        .query_row(
+            "SELECT record_json FROM usage_backup_projection WHERE event_id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(usage_store::db_error)?;
+    if let Some(text) = stored {
+        let record: Value =
+            serde_json::from_str(&text).map_err(|_| "Stored backup projection is invalid")?;
+        projection::validate_cloud_record(&record)?;
+        return Ok(text);
+    }
+    let record = projection::project(db, event)?;
+    projection::validate_cloud_record(&record)?;
+    serde_json::to_string(&record).map_err(|_| "Cannot encode allowed usage projection".into())
+}

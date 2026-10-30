@@ -1,0 +1,1530 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cargo-ai.org/schemas/usage-maintenance-v2.json",
+  "title": "Usage cloud and rolling retention finite result v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operation",
+    "result",
+    "local",
+    "effects",
+    "postconditions_verified"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "operation": {
+      "enum": [
+        "usage cloud status",
+        "usage cloud enable",
+        "usage cloud disable",
+        "usage cloud include-history",
+        "usage cloud sync",
+        "usage cloud clear",
+        "usage cloud history",
+        "usage retention status",
+        "usage retention preview",
+        "usage retention configure"
+      ]
+    },
+    "result": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/cloud_status"
+        },
+        {
+          "$ref": "#/$defs/cloud_enable"
+        },
+        {
+          "$ref": "#/$defs/cloud_disable"
+        },
+        {
+          "$ref": "#/$defs/cloud_selection"
+        },
+        {
+          "$ref": "#/$defs/cloud_sync"
+        },
+        {
+          "$ref": "#/$defs/cloud_clear"
+        },
+        {
+          "$ref": "#/$defs/cloud_history"
+        },
+        {
+          "$ref": "#/$defs/retention_status"
+        },
+        {
+          "$ref": "#/$defs/retention_preview"
+        },
+        {
+          "$ref": "#/$defs/retention_configure"
+        }
+      ]
+    },
+    "local": {
+      "$ref": "#/$defs/local_status"
+    },
+    "effects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "local",
+        "remote"
+      ],
+      "properties": {
+        "local": {
+          "enum": [
+            "unapplied",
+            "applied",
+            "unknown",
+            "read_only",
+            "requested"
+          ]
+        },
+        "remote": {
+          "enum": [
+            "unapplied",
+            "applied",
+            "unknown",
+            "read_only",
+            "requested"
+          ]
+        }
+      }
+    },
+    "postconditions_verified": {
+      "type": "boolean"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "operation": {
+          "const": "usage cloud status"
+        },
+        "result": {
+          "$ref": "#/$defs/cloud_status"
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "usage cloud enable"
+        },
+        "result": {
+          "$ref": "#/$defs/cloud_enable"
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "usage cloud disable"
+        },
+        "result": {
+          "$ref": "#/$defs/cloud_disable"
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "usage cloud include-history"
+        },
+        "result": {
+          "$ref": "#/$defs/cloud_selection"
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "usage cloud sync"
+        },
+        "result": {
+          "$ref": "#/$defs/cloud_sync"
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "usage cloud clear"
+        },
+        "result": {
+          "$ref": "#/$defs/cloud_clear"
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "usage cloud history"
+        },
+        "result": {
+          "$ref": "#/$defs/cloud_history"
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "usage retention status"
+        },
+        "result": {
+          "$ref": "#/$defs/retention_status"
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "usage retention preview"
+        },
+        "result": {
+          "$ref": "#/$defs/retention_preview"
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "usage retention configure"
+        },
+        "result": {
+          "$ref": "#/$defs/retention_configure"
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "decimal_sequence": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6]|9223372036854775807)$",
+      "maxLength": 19,
+      "description": "Canonical nonnegative decimal sequence in the signed 64-bit database range."
+    },
+    "counter": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_binding",
+        "source_home_id",
+        "data_generation"
+      ],
+      "properties": {
+        "account_binding": {
+          "$ref": "#/$defs/uuid"
+        },
+        "source_home_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "data_generation": {
+          "$ref": "#/$defs/counter"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lifecycle_epoch",
+        "consent_interval"
+      ],
+      "properties": {
+        "lifecycle_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "consent_interval": {
+          "$ref": "#/$defs/counter"
+        }
+      }
+    },
+    "local_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "enabled",
+        "cleared",
+        "clear_outcome_unknown",
+        "source",
+        "provenance",
+        "pending",
+        "quarantined",
+        "uploaded",
+        "origin_unverified",
+        "time_ineligible",
+        "unscanned",
+        "unknown_batches",
+        "expired_without_acknowledgment_total",
+        "retention_requires_exact_receipt",
+        "processing_status",
+        "full_local_restoration_from_cloud",
+        "cloud_window_ineligible",
+        "cloud_retention_days",
+        "pending_clear_confirmation"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "cleared": {
+          "type": "boolean"
+        },
+        "clear_outcome_unknown": {
+          "type": "boolean"
+        },
+        "source": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/source"
+            }
+          ]
+        },
+        "provenance": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/provenance"
+            }
+          ]
+        },
+        "pending": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "quarantined": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "uploaded": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "origin_unverified": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "time_ineligible": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "unscanned": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "unknown_batches": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expired_without_acknowledgment_total": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "retention_requires_exact_receipt": {
+          "const": false
+        },
+        "processing_status": {
+          "const": "not_observed"
+        },
+        "full_local_restoration_from_cloud": {
+          "const": false
+        },
+        "cloud_window_ineligible": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "cloud_retention_days": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3650
+            }
+          ]
+        },
+        "pending_clear_confirmation": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/pending_clear_confirmation"
+            }
+          ]
+        }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "supported_protocol_versions"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "supported_protocol_versions": {
+          "const": [
+            2
+          ]
+        }
+      }
+    },
+    "remote_unavailable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "capability"
+      ],
+      "properties": {
+        "protocol_version": {
+          "const": 2
+        },
+        "capability": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "supported_protocol_versions"
+          ],
+          "properties": {
+            "enabled": {
+              "const": false
+            },
+            "supported_protocol_versions": {
+              "const": [
+                1
+              ]
+            }
+          }
+        }
+      }
+    },
+    "remote_available": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "capability",
+        "account_binding",
+        "data_generation",
+        "lifecycle_epoch",
+        "environments",
+        "policy",
+        "processing_status"
+      ],
+      "properties": {
+        "protocol_version": {
+          "const": 2
+        },
+        "capability": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "supported_protocol_versions"
+          ],
+          "properties": {
+            "enabled": {
+              "const": true
+            },
+            "supported_protocol_versions": {
+              "const": [
+                2
+              ]
+            }
+          }
+        },
+        "account_binding": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/uuid"
+            }
+          ]
+        },
+        "data_generation": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/counter"
+            }
+          ]
+        },
+        "lifecycle_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "environments": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "source_home_id",
+                  "consent_interval"
+                ],
+                "properties": {
+                  "source_home_id": {
+                    "$ref": "#/$defs/uuid"
+                  },
+                  "consent_interval": {
+                    "$ref": "#/$defs/counter"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "policy": {
+          "$ref": "#/$defs/cloud_policy"
+        },
+        "processing_status": {
+          "const": "not_observed"
+        }
+      }
+    },
+    "cloud_status": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/local_status"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "local",
+            "remote"
+          ],
+          "properties": {
+            "local": {
+              "$ref": "#/$defs/local_status"
+            },
+            "remote": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/remote_unavailable"
+                },
+                {
+                  "$ref": "#/$defs/remote_available"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "cloud_enable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "enabled",
+        "source",
+        "provenance",
+        "future_after_sequence",
+        "historical_records_selected",
+        "local"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "enabled": {
+          "const": true
+        },
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "future_after_sequence": {
+          "$ref": "#/$defs/decimal_sequence"
+        },
+        "historical_records_selected": {
+          "const": 0
+        },
+        "local": {
+          "$ref": "#/$defs/local_status"
+        }
+      }
+    },
+    "cloud_disable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "enabled",
+        "history_deleted",
+        "pending_preserved",
+        "remote",
+        "local"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "enabled": {
+          "const": false
+        },
+        "history_deleted": {
+          "const": false
+        },
+        "pending_preserved": {
+          "const": true
+        },
+        "remote": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "protocol_version",
+            "source",
+            "enabled"
+          ],
+          "properties": {
+            "protocol_version": {
+              "const": 2
+            },
+            "source": {
+              "$ref": "#/$defs/source"
+            },
+            "enabled": {
+              "const": false
+            },
+            "history_deleted": {
+              "const": false
+            }
+          }
+        },
+        "local": {
+          "$ref": "#/$defs/local_status"
+        }
+      }
+    },
+    "cloud_selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "source",
+        "provenance",
+        "through_sequence",
+        "preview_sha256",
+        "selected",
+        "upload_started",
+        "restored_origin_unverified_records_remain_blocked"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "through_sequence": {
+          "$ref": "#/$defs/decimal_sequence"
+        },
+        "preview_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "selected": {
+          "type": "boolean"
+        },
+        "upload_started": {
+          "const": false
+        },
+        "restored_origin_unverified_records_remain_blocked": {
+          "const": true
+        }
+      }
+    },
+    "sync_busy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "busy",
+        "batches",
+        "local",
+        "policy_refreshed"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "busy": {
+          "const": true
+        },
+        "local": {
+          "$ref": "#/$defs/local_status"
+        },
+        "batches": {
+          "const": 0
+        },
+        "policy_refreshed": {
+          "const": true
+        }
+      }
+    },
+    "cloud_sync": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/local_status"
+        },
+        {
+          "$ref": "#/$defs/sync_busy"
+        },
+        {
+          "$ref": "#/$defs/sync_maintenance"
+        },
+        {
+          "$ref": "#/$defs/sync_progress"
+        }
+      ]
+    },
+    "clear_preview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "source",
+        "preview_id",
+        "preview_sha256",
+        "lifecycle_epoch"
+      ],
+      "properties": {
+        "protocol_version": {
+          "const": 2
+        },
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "preview_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "preview_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "lifecycle_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        }
+      }
+    },
+    "clear_confirmed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "source",
+        "cleared",
+        "data_generation",
+        "purge_state"
+      ],
+      "properties": {
+        "protocol_version": {
+          "const": 2
+        },
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "cleared": {
+          "const": true
+        },
+        "data_generation": {
+          "$ref": "#/$defs/counter"
+        },
+        "purge_state": {
+          "enum": [
+            "active_removed",
+            "pending_processing",
+            "recovery_expiry"
+          ]
+        }
+      }
+    },
+    "cloud_clear": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/clear_preview"
+        },
+        {
+          "$ref": "#/$defs/clear_confirmed"
+        }
+      ]
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "basis",
+        "elapsed_ms"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "basis": {
+          "const": "monotonic_elapsed"
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        }
+      }
+    },
+    "history_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "event_id",
+        "original_text",
+        "original_sha256",
+        "semantic_hash_version",
+        "semantic_sha256"
+      ],
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/counter"
+        },
+        "event_id": {
+          "$ref": "#/$defs/logical_event_id"
+        },
+        "original_text": {
+          "type": "string",
+          "maxLength": 16384
+        },
+        "original_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "semantic_hash_version": {
+          "const": 1
+        },
+        "semantic_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "timing": {
+          "$ref": "#/$defs/timing"
+        }
+      }
+    },
+    "cloud_history": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "source",
+        "high_watermark",
+        "events",
+        "next_sequence",
+        "through_sequence"
+      ],
+      "properties": {
+        "protocol_version": {
+          "const": 2
+        },
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "high_watermark": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/history_event"
+          },
+          "maxItems": 100
+        },
+        "next_sequence": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/counter"
+            }
+          ]
+        },
+        "through_sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        }
+      }
+    },
+    "retention_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "days",
+        "enabled",
+        "local_detail_loss_acknowledged",
+        "unselected_loss_acknowledged"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "days": {
+          "enum": [
+            1,
+            7,
+            30
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "local_detail_loss_acknowledged": {
+          "type": "boolean"
+        },
+        "unselected_loss_acknowledged": {
+          "type": "boolean"
+        }
+      }
+    },
+    "local_detail_loss": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "permanent",
+        "full_local_restoration_from_cloud",
+        "local_fields_removed",
+        "export_command",
+        "pending_uploads_expire",
+        "expiry_is_acknowledgment",
+        "explicit_rolling_policy_version"
+      ],
+      "properties": {
+        "permanent": {
+          "const": true
+        },
+        "full_local_restoration_from_cloud": {
+          "const": false
+        },
+        "local_fields_removed": {
+          "const": [
+            "local labels",
+            "local paths",
+            "unknown local extensions",
+            "other event details excluded from sanitized projections"
+          ]
+        },
+        "export_command": {
+          "const": "usage export"
+        },
+        "pending_uploads_expire": {
+          "const": true
+        },
+        "expiry_is_acknowledgment": {
+          "const": false
+        },
+        "explicit_rolling_policy_version": {
+          "const": 2
+        }
+      }
+    },
+    "retention_configure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "policy",
+        "configured",
+        "deleted_records",
+        "upload_consent_changed",
+        "local_detail_loss"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "policy": {
+          "$ref": "#/$defs/retention_policy"
+        },
+        "configured": {
+          "const": true
+        },
+        "deleted_records": {
+          "const": 0
+        },
+        "upload_consent_changed": {
+          "const": false
+        },
+        "local_detail_loss": {
+          "$ref": "#/$defs/local_detail_loss"
+        }
+      }
+    },
+    "retention_preview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "policy",
+        "retention_consent_required",
+        "local_detail_loss",
+        "scan_limit",
+        "examined_records",
+        "age_eligible_records",
+        "custody_blocked_records",
+        "unselected_loss_blocked_records",
+        "invalid_timestamp_records",
+        "eligible_records",
+        "deleted_records",
+        "scan_complete",
+        "next_scan_after",
+        "counts_scope",
+        "expired_without_acknowledgment_records",
+        "coverage_incomplete",
+        "maintenance_pending",
+        "capture_paused",
+        "upload_paused",
+        "indexing_pending"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "policy": {
+          "$ref": "#/$defs/retention_policy"
+        },
+        "retention_consent_required": {
+          "type": "boolean"
+        },
+        "local_detail_loss": {
+          "$ref": "#/$defs/local_detail_loss"
+        },
+        "scan_limit": {
+          "const": 1000
+        },
+        "examined_records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "age_eligible_records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "custody_blocked_records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "unselected_loss_blocked_records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "invalid_timestamp_records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "eligible_records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "deleted_records": {
+          "const": 0
+        },
+        "scan_complete": {
+          "type": "boolean"
+        },
+        "next_scan_after": {
+          "$ref": "#/$defs/decimal_sequence"
+        },
+        "counts_scope": {
+          "const": "this maintenance invocation; expired coverage total is persisted separately"
+        },
+        "expired_without_acknowledgment_records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expired_without_acknowledgment_total": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "coverage_incomplete": {
+          "type": "boolean"
+        },
+        "maintenance_pending": {
+          "type": "boolean"
+        },
+        "capture_paused": {
+          "type": "boolean"
+        },
+        "upload_paused": {
+          "type": "boolean"
+        },
+        "indexing_pending": {
+          "type": "boolean"
+        },
+        "legacy_policy_requires_reselection": {
+          "type": "boolean"
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "used_storage_upper_bound_bytes",
+        "active_sqlite_bytes",
+        "reusable_sqlite_bytes",
+        "physical_wal_bytes",
+        "budget_bytes",
+        "warning_threshold_percent",
+        "warning",
+        "free_space_bytes",
+        "free_space_reserve_bytes",
+        "prospective_projection_allowance_bytes",
+        "prospective_page_allowance_bytes",
+        "capture_paused",
+        "pause_reason",
+        "last_pause_reason",
+        "ready_to_resume",
+        "coverage_gap_recorded",
+        "resumed_after_gap",
+        "capture_budget_excludes",
+        "measurement"
+      ],
+      "properties": {
+        "used_storage_upper_bound_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "active_sqlite_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "reusable_sqlite_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "physical_wal_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "budget_bytes": {
+          "const": 536870912
+        },
+        "warning_threshold_percent": {
+          "const": 80
+        },
+        "warning": {
+          "type": "boolean"
+        },
+        "free_space_bytes": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            }
+          ]
+        },
+        "free_space_reserve_bytes": {
+          "const": 268435456
+        },
+        "prospective_projection_allowance_bytes": {
+          "const": 32768
+        },
+        "prospective_page_allowance_bytes": {
+          "const": 2097152
+        },
+        "capture_paused": {
+          "type": "boolean"
+        },
+        "pause_reason": {
+          "enum": [
+            null,
+            "storage_budget",
+            "free_space_reserve",
+            "free_space_unavailable",
+            "retention_maintenance"
+          ]
+        },
+        "last_pause_reason": {
+          "enum": [
+            null,
+            "storage_budget",
+            "free_space_reserve",
+            "free_space_unavailable",
+            "retention_maintenance"
+          ]
+        },
+        "ready_to_resume": {
+          "type": "boolean"
+        },
+        "coverage_gap_recorded": {
+          "type": "boolean"
+        },
+        "resumed_after_gap": {
+          "type": "boolean"
+        },
+        "capture_budget_excludes": {
+          "const": [
+            "reusable database pages",
+            "recovery images",
+            "SQLite SHM"
+          ]
+        },
+        "measurement": {
+          "const": "SQLite active pages plus physical WAL; includes actual payload/projection/queue storage and may count WAL copies twice. Prospective allowance is per new fact, not escrow for all existing unscanned events. Queue growth can pause later capture; protected data is never removed for the budget. Recovery images remain preserved separately and consume physical free space."
+        }
+      }
+    },
+    "retention_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "policy",
+        "retention_consent_required",
+        "local_detail_loss",
+        "scan_limit",
+        "examined_records",
+        "age_eligible_records",
+        "custody_blocked_records",
+        "unselected_loss_blocked_records",
+        "invalid_timestamp_records",
+        "eligible_records",
+        "deleted_records",
+        "scan_complete",
+        "next_scan_after",
+        "counts_scope",
+        "storage",
+        "expired_without_acknowledgment_records",
+        "coverage_incomplete",
+        "maintenance_pending",
+        "capture_paused",
+        "upload_paused",
+        "indexing_pending"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "policy": {
+          "$ref": "#/$defs/retention_policy"
+        },
+        "retention_consent_required": {
+          "type": "boolean"
+        },
+        "local_detail_loss": {
+          "$ref": "#/$defs/local_detail_loss"
+        },
+        "scan_limit": {
+          "const": 1000
+        },
+        "examined_records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "age_eligible_records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "custody_blocked_records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "unselected_loss_blocked_records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "invalid_timestamp_records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "eligible_records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "deleted_records": {
+          "const": 0
+        },
+        "scan_complete": {
+          "type": "boolean"
+        },
+        "next_scan_after": {
+          "$ref": "#/$defs/decimal_sequence"
+        },
+        "counts_scope": {
+          "const": "this maintenance invocation; expired coverage total is persisted separately"
+        },
+        "storage": {
+          "$ref": "#/$defs/storage"
+        },
+        "expired_without_acknowledgment_records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expired_without_acknowledgment_total": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "coverage_incomplete": {
+          "type": "boolean"
+        },
+        "maintenance_pending": {
+          "type": "boolean"
+        },
+        "capture_paused": {
+          "type": "boolean"
+        },
+        "upload_paused": {
+          "type": "boolean"
+        },
+        "indexing_pending": {
+          "type": "boolean"
+        },
+        "legacy_policy_requires_reselection": {
+          "type": "boolean"
+        }
+      }
+    },
+    "logical_event_id": {
+      "type": "string",
+      "pattern": "^(cai_event_|cai_run_|cai_agent_run_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sync_maintenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "batches",
+        "upload_paused",
+        "maintenance_pending",
+        "local"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "batches": {
+          "const": 0
+        },
+        "upload_paused": {
+          "const": true
+        },
+        "maintenance_pending": {
+          "const": true
+        },
+        "local": {
+          "$ref": "#/$defs/local_status"
+        }
+      }
+    },
+    "sync_progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "batches",
+        "acknowledged_events",
+        "uploaded_events",
+        "acknowledged_after_expiry_events",
+        "processing_status",
+        "canceled",
+        "deadline_reached",
+        "partial",
+        "stopped_error",
+        "local",
+        "policy_refreshed"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "batches": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "acknowledged_events": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "uploaded_events": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "acknowledged_after_expiry_events": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "processing_status": {
+          "const": "not_observed"
+        },
+        "canceled": {
+          "type": "boolean"
+        },
+        "deadline_reached": {
+          "type": "boolean"
+        },
+        "partial": {
+          "type": "boolean"
+        },
+        "stopped_error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "maxLength": 512
+            }
+          ]
+        },
+        "local": {
+          "$ref": "#/$defs/local_status"
+        },
+        "policy_refreshed": {
+          "const": true
+        }
+      }
+    },
+    "cloud_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "retention_days",
+        "retained_event_target",
+        "max_active_environments"
+      ],
+      "properties": {
+        "retention_days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650
+        },
+        "retained_event_target": {
+          "$ref": "#/$defs/counter"
+        },
+        "max_active_environments": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        }
+      }
+    },
+    "pending_clear_confirmation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "lifecycle_epoch",
+        "preview_id",
+        "preview_sha256"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "lifecycle_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "preview_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "preview_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

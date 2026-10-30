@@ -44,6 +44,9 @@ mod runtime_definition;
 mod schema_version;
 mod ui;
 mod update_check;
+#[path = "../templates/src/usage_analytics.rs"]
+mod usage_analytics;
+mod usage_analytics_cli;
 mod usage_attribution;
 #[path = "../templates/src/usage_backup.rs"]
 mod usage_backup;
@@ -95,13 +98,19 @@ async fn main() {
             || run.get_flag("native_role_child")
             || execution_policy::inheritance_requested()
         {
-            if !commands::run::run(run).await {
+            if !usage_analytics::scheduler::scope(commands::run::run(run)).await {
                 process::exit(1);
             }
             return;
         }
     }
     if let Some(usage) = cmd_args.subcommand_matches("usage") {
+        if matches!(usage.subcommand_name(), Some("cloud" | "retention")) {
+            if !usage_analytics_cli::run(usage).await {
+                process::exit(1);
+            }
+            return;
+        }
         if let Some(backup) = usage.subcommand_matches("backup") {
             if !usage_backup_cli::run(backup).await {
                 process::exit(1);
@@ -221,7 +230,7 @@ async fn main() {
         }
 
         if let Some(sub_m) = cmd_args.subcommand_matches("run") {
-            commands::run::run(sub_m).await
+            usage_analytics::scheduler::scope(commands::run::run(sub_m)).await
         } else if let Some(command_succeeded) = try_run_build(&cmd_args) {
             command_succeeded
         } else if let Some(command_succeeded) = try_run_package(&cmd_args) {

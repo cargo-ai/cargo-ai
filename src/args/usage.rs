@@ -63,6 +63,8 @@ fn page(command: Command) -> Command {
 pub(super) fn command() -> Command {
     Command::new("usage")
         .subcommand(crate::usage_backup_cli::command())
+        .subcommand(crate::usage_analytics_cli::cloud_command())
+        .subcommand(crate::usage_analytics_cli::retention_command())
         .about("Inspect and manage automatic local usage metadata")
         .subcommand_required(true)
         .subcommand(json(

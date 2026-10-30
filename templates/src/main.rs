@@ -17,6 +17,7 @@ mod runtime_data;
 mod runtime_media;
 mod runtime_thinking;
 mod usage_attribution;
+mod usage_analytics;
 mod usage_backup;
 mod usage_backup_host;
 mod usage_log;
@@ -3227,12 +3228,12 @@ async fn main() {
                     cmd_args.get_one::<String>("model").map(String::as_str),
                     runtime_thinking::invocation_setting(&cmd_args).as_ref(),
                 ) { Ok(context) => context, Err(error) => {eprintln!("{error}");context.scope(async {let _=role_runtime::finish_native(false);}).await;std::process::exit(1);} };
-                context.scope(async{run_with_matches(cmd_args).await;let _=role_runtime::finish_native(true);}).await;return;
+                context.scope(async{usage_analytics::scheduler::scope(run_with_matches(cmd_args)).await;let _=role_runtime::finish_native(true);}).await;return;
             },
             Err(error)=>{eprintln!("{error}");std::process::exit(1);},
         }
     }
-    match execution_policy::scope_inherited(Box::pin(run_with_matches(cmd_args))).await {
+    match execution_policy::scope_inherited(Box::pin(usage_analytics::scheduler::scope(run_with_matches(cmd_args)))).await {
         Ok(()) => {}
         Err(error) => {
             eprintln!("❌ {error}");
@@ -3808,7 +3809,7 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
                         step_index: None,
                     },
                     usage: response.usage.as_ref(),
-                    duration: provider_started_at.elapsed(),
+                    duration: usage_log::UsageElapsed::since(provider_started_at),
                     status: usage_log::UsageStatus::Success,
                     error: None,
                 });
@@ -3836,7 +3837,7 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
                         step_index: None,
                     },
                     usage: error.usage.as_ref(),
-                    duration: provider_started_at.elapsed(),
+                    duration: usage_log::UsageElapsed::since(provider_started_at),
                     status: usage_log::UsageStatus::Failed,
                     error: Some(usage_provider_error(&error)),
                 });
@@ -3867,7 +3868,7 @@ async fn run_with_matches(cmd_args: clap::ArgMatches) {
                         step_index: None,
                     },
                     usage: None,
-                    duration: provider_started_at.elapsed(),
+                    duration: usage_log::UsageElapsed::since(provider_started_at),
                     status: usage_log::UsageStatus::Failed,
                     error: Some(usage_timeout_error()),
                 });
@@ -5413,7 +5414,7 @@ async fn run_generate_image_step(
                         step_index: Some(step_index),
                     },
                     usage: response.usage.as_ref(),
-                    duration: provider_started_at.elapsed(),
+                    duration: usage_log::UsageElapsed::since(provider_started_at),
                     status: usage_log::UsageStatus::Success,
                     error: None,
                 });
@@ -5439,7 +5440,7 @@ async fn run_generate_image_step(
                         step_index: Some(step_index),
                     },
                     usage: error.usage.as_ref(),
-                    duration: provider_started_at.elapsed(),
+                    duration: usage_log::UsageElapsed::since(provider_started_at),
                     status: usage_log::UsageStatus::Failed,
                     error: Some(usage_provider_error(&error)),
                 });
@@ -5470,7 +5471,7 @@ async fn run_generate_image_step(
                         step_index: Some(step_index),
                     },
                     usage: None,
-                    duration: provider_started_at.elapsed(),
+                    duration: usage_log::UsageElapsed::since(provider_started_at),
                     status: usage_log::UsageStatus::Failed,
                     error: Some(usage_timeout_error()),
                 });
