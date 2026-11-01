@@ -54,7 +54,7 @@ pub(crate) struct Selection {
     pub(crate) provenance: Provenance,
     pub(crate) cloud_retention_days: u32,
 }
-#[cfg(any(cargo_ai_cli, test))]
+#[cfg(cargo_ai_cli)]
 fn cloud_days(body: &Value) -> Result<u32, String> {
     body["policy"]["retention_days"]
         .as_u64()

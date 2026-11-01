@@ -224,6 +224,7 @@ pub fn disable(db: &mut Connection, source: &Source) -> Result<(), String> {
     tx.commit().map_err(failed)
 }
 
+#[cfg(cargo_ai_cli)]
 pub fn mark_cleared(db: &mut Connection, source: &Source) -> Result<(), String> {
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -242,7 +243,7 @@ pub fn mark_cleared(db: &mut Connection, source: &Source) -> Result<(), String> 
 /// Authenticated status for this exact account binding proves every older
 /// generation was logically cleared. Reconcile all saved sources, even when a
 /// previous enable already selected the newer generation after a lost response.
-#[cfg(any(cargo_ai_cli, test))]
+#[cfg(cargo_ai_cli)]
 pub fn reconcile_generation(
     db: &mut Connection,
     binding: &CanonicalUuid,
@@ -647,6 +648,7 @@ fn upload_clear_attempts(
 /// Freeze the exact protocol-2 confirmation before dispatch. Closing consent and
 /// invalidating the source lease prevents uploads while a clear result is unknown.
 /// Later previews append bounded attempts without losing earlier confirmations.
+#[cfg(cargo_ai_cli)]
 pub fn begin_upload_clear(
     db: &mut Connection,
     request: &super::elastic::Request,
@@ -714,7 +716,7 @@ pub fn pending_upload_clear(
 /// same-binding generation advance. Old raw and per-event progress are retained;
 /// consent and all old-source upload leases remain fenced. Enabling a negotiated
 /// new generation starts after the current high-water and does not select history.
-#[cfg(any(cargo_ai_cli, test))]
+#[cfg(cargo_ai_cli)]
 pub fn finish_upload_clear(db: &mut Connection, source: &Source) -> Result<(), String> {
     mark_cleared(db, source)
 }

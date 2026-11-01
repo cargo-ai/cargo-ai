@@ -64,7 +64,7 @@ mod generated_usage_custody_tests {
         write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
     }
     fn status(source: &Source, provenance: &Provenance) -> Value {
-        json!({"protocol_version":2,"capability":{"enabled":true,"supported_protocol_versions":[2]},"account_binding":source.account_binding,"data_generation":source.data_generation,"lifecycle_epoch":provenance.lifecycle_epoch,"environments":[{"source_home_id":source.source_home_id,"consent_interval":provenance.consent_interval}],"policy":{"retention_days":7,"retained_event_target":1_000_000,"max_active_environments":3},"processing_status":"not_observed"})
+        json!({"protocol_version":2,"capability":{"enabled":true,"supported_protocol_versions":[2]},"account_binding":source.account_binding,"data_generation":source.data_generation,"lifecycle_epoch":provenance.lifecycle_epoch,"environments":[{"source_home_id":source.source_home_id,"consent_interval":provenance.consent_interval}],"policy":{"retention_days":30,"retained_event_target":1_000_000,"max_active_environments":3},"processing_status":"not_observed"})
     }
     fn upload(body: &Value) -> (elastic::Request, Vec<EventSubmission>) {
         let request = body["usage_analytics"]
@@ -93,16 +93,18 @@ mod generated_usage_custody_tests {
             *ordered_membership_sha256
         );
         assert!(events.iter().any(|event| event.timing.is_some()) || events.len() == 1);
-        let hours = events
+        let occurrence_times = events
             .iter()
             .map(|event| {
                 serde_json::from_str::<Value>(&event.original_text).unwrap()["occurred_at_ms"]
                     .as_i64()
                     .unwrap()
-                    / 3_600_000
             })
             .collect::<Vec<_>>();
-        assert!(hours.windows(2).all(|pair| pair[0] >= pair[1]));
+        assert!(
+            occurrence_times.windows(2).all(|pair| pair[0] <= pair[1]),
+            "upload members must preserve oldest-first occurrence order"
+        );
         (request, events)
     }
     fn acknowledgment(request: &elastic::Request) -> Value {
@@ -257,7 +259,7 @@ mod generated_usage_custody_tests {
         db.execute(
             "INSERT INTO usage_meta(key,value) VALUES('usage_cloud_selected_v2',?1)",
             [
-                json!({"source":source,"provenance":provenance,"cloud_retention_days":7})
+                json!({"source":source,"provenance":provenance,"cloud_retention_days":30})
                     .to_string(),
             ],
         )
