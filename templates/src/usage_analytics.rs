@@ -335,16 +335,16 @@ pub(crate) fn build_upload(
     }
     Ok((text, count, membership))
 }
-#[cfg(test)]
+#[cfg(all(test, cargo_ai_cli))]
 pub(crate) async fn sync() -> Result<Value, String> {
     sync_with_history(None).await
 }
-#[cfg(any(cargo_ai_cli, test))]
+#[cfg(cargo_ai_cli)]
 pub(crate) async fn sync_with_history(history_days: Option<u32>) -> Result<Value, String> {
     sync_pass(history_days, true).await
 }
 #[cfg(any(cargo_ai_cli, test))]
-async fn sync_pass(history_days: Option<u32>, explicit: bool) -> Result<Value, String> {
+pub(crate) async fn sync_pass(history_days: Option<u32>, explicit: bool) -> Result<Value, String> {
     // Deny unsupported plans before opening history or loading credentials.
     if history_days.is_some_and(|days| days == 0 || days > 30) {
         return Ok(

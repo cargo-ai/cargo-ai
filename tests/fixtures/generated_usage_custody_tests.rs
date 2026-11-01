@@ -335,7 +335,10 @@ mod generated_usage_custody_tests {
             (first_ids.len(), next_ids.len())
         });
         eprintln!("generated-usage-custody stage=first-sync-started");
-        assert_eq!(cloud::sync().await.unwrap()["outcome"], "outcome_unknown");
+        assert_eq!(
+            cloud::sync_pass(None, true).await.unwrap()["outcome"],
+            "outcome_unknown"
+        );
         eprintln!("generated-usage-custody stage=first-sync-complete");
         assert_eq!(raw(&db), initial_raw);
         assert_eq!(cloud::local_status().unwrap()["pending"], initial_raw.len());
@@ -353,10 +356,10 @@ mod generated_usage_custody_tests {
         let before_ack = raw(&db);
         assert!(before_ack.len() > initial_raw.len());
         eprintln!("generated-usage-custody stage=retry-sync-started");
-        let first_result = cloud::sync().await.unwrap();
+        let first_result = cloud::sync_pass(None, true).await.unwrap();
         assert_eq!(first_result["outcome"], "fully_synced");
         assert_eq!(first_result["job"]["target_events"], initial_raw.len());
-        let result = cloud::sync().await.unwrap();
+        let result = cloud::sync_pass(None, true).await.unwrap();
         assert_eq!(result["outcome"], "fully_synced");
         eprintln!("generated-usage-custody stage=retry-sync-complete");
         let (first_count, next_count) = server.join().unwrap();
