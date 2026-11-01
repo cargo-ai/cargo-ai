@@ -92,10 +92,6 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
         source: "src/usage_analytics.rs",
     },
     TemplateSource {
-        destination: "src/usage_analytics/custody.rs",
-        source: "src/usage_analytics/custody.rs",
-    },
-    TemplateSource {
         destination: "src/usage_analytics/events.rs",
         source: "src/usage_analytics/events.rs",
     },
@@ -110,6 +106,10 @@ const TEMPLATE_SOURCES: &[TemplateSource] = &[
     TemplateSource {
         destination: "src/usage_analytics/local_queue.rs",
         source: "src/usage_analytics/local_queue.rs",
+    },
+    TemplateSource {
+        destination: "src/usage_analytics/sync_job.rs",
+        source: "src/usage_analytics/sync_job.rs",
     },
     TemplateSource {
         destination: "src/usage_analytics/queue.rs",

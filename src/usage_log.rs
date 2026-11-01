@@ -1159,14 +1159,27 @@ mod automatic_failure_tests {
             "an arbitrary reported Duration stays unknown"
         );
         let mut db = crate::usage_store::open_database(true).unwrap().unwrap();
-        queue::capture(&mut db, &source, crate::usage_backup::analytics_projection).unwrap();
-        let lease = queue::acquire_lease(&mut db, &source, 100, queue::MAX_LEASE_MS)
+        let now = crate::usage_analytics::now_ms();
+        let lease = queue::acquire_lease(&mut db, &source, now, queue::MAX_LEASE_MS)
             .unwrap()
             .unwrap();
-        let batch = queue::prepare_batch(&mut db, &lease, 100).unwrap().unwrap();
-        let Request::Sync { events, .. } = Request::parse(batch.request_json()).unwrap() else {
-            panic!("sync")
+        let job = queue::job::start(&mut db, &lease, now, None).unwrap();
+        queue::job::capture(&mut db, &lease, &job, now).unwrap();
+        let batch = queue::prepare_job_upload(
+            &mut db,
+            &lease,
+            now,
+            &job.id,
+            crate::usage_analytics::build_upload,
+        )
+        .unwrap()
+        .unwrap();
+        let crate::usage_analytics::elastic::Request::Upload { batch: encoded, .. } =
+            batch.request_json().parse().unwrap()
+        else {
+            panic!("upload")
         };
+        let events = crate::usage_analytics::elastic::decode_batch(&encoded).unwrap();
         let mut qualified = std::collections::BTreeSet::new();
         for event in events {
             let old = EventSubmission::from_allowed_text(event.original_text.clone()).unwrap();
@@ -1193,10 +1206,16 @@ mod automatic_failure_tests {
             ])
         );
         assert_eq!(
-            queue::prepare_batch(&mut db, &lease, 100)
-                .unwrap()
-                .unwrap()
-                .request_json(),
+            queue::prepare_job_upload(
+                &mut db,
+                &lease,
+                now,
+                &job.id,
+                crate::usage_analytics::build_upload
+            )
+            .unwrap()
+            .unwrap()
+            .request_json(),
             batch.request_json()
         );
     }

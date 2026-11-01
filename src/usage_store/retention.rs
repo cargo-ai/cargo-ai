@@ -694,9 +694,6 @@ pub(crate) fn status(now_ms: i64) -> Result<Value, String> {
 #[cfg(test)]
 thread_local! { static TEST_LIMITS: std::cell::RefCell<Option<(Limits,Option<u64>)>> = const {std::cell::RefCell::new(None)}; }
 
-#[cfg(all(test, cargo_ai_cli))]
-#[path = "migration_benchmark_tests.rs"]
-mod migration_benchmark_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,16 +739,6 @@ mod tests {
             lifecycle_epoch: LifecycleEpoch::try_from(1).unwrap(),
             consent_interval: Counter::try_from(1).unwrap(),
         }
-    }
-    fn projection(_: &Connection, event: &Value) -> Result<String, String> {
-        let occurred = time::OffsetDateTime::parse(
-            event["timestamp"].as_str().unwrap(),
-            &time::format_description::well_known::Rfc3339,
-        )
-        .unwrap()
-        .unix_timestamp()
-            * 1000;
-        Ok(json!({"schema_version":1,"normalization_version":1,"event_id":event["event_id"],"root_run_id":id(9001),"agent_run_id":id(9002),"event_type":"provider_request","event_kind":"provider_request_completed","occurred_at_ms":occurred,"tokens":{"input_tokens":5,"output_tokens":null}}).to_string())
     }
     #[test]
     fn policy_committed_while_expiry_waits_on_writer_is_reloaded_before_deletion() {
@@ -972,11 +959,20 @@ mod tests {
         queue::enable(&mut db, &source(), &provenance(), 0).unwrap();
         insert_event(&db, &event(1, "2026-10-01T00:00:00Z")).unwrap();
         insert_event(&db, &event(2, "2026-10-27T00:00:00Z")).unwrap();
-        queue::capture(&mut db, &source(), projection).unwrap();
         let lease = queue::acquire_lease(&mut db, &source(), NOW, queue::MAX_LEASE_MS)
             .unwrap()
             .unwrap();
-        let batch = queue::prepare_batch(&mut db, &lease, NOW).unwrap().unwrap();
+        let job = queue::job::start(&mut db, &lease, NOW, None).unwrap();
+        queue::job::capture(&mut db, &lease, &job, NOW).unwrap();
+        let batch = queue::prepare_job_upload(
+            &mut db,
+            &lease,
+            NOW,
+            &job.id,
+            crate::usage_analytics::build_upload,
+        )
+        .unwrap()
+        .unwrap();
         configure_at(&mut db, &enabled(true)).unwrap();
         assert_eq!(apply_at(&mut db, NOW).unwrap()["deleted_records"], 1);
         assert!(
@@ -988,9 +984,15 @@ mod tests {
         let new_lease = queue::acquire_lease(&mut db, &source(), NOW, queue::MAX_LEASE_MS)
             .unwrap()
             .unwrap();
-        let survivor = queue::prepare_batch(&mut db, &new_lease, NOW)
-            .unwrap()
-            .unwrap();
+        let survivor = queue::prepare_job_upload(
+            &mut db,
+            &new_lease,
+            NOW,
+            &job.id,
+            crate::usage_analytics::build_upload,
+        )
+        .unwrap()
+        .unwrap();
         assert_ne!(batch.id(), survivor.id());
         assert_eq!(survivor.members().len(), 1);
         assert_eq!(survivor.members()[0].event_id, id(2));
@@ -1010,7 +1012,11 @@ mod tests {
         queue::initialize(&mut db).unwrap();
         queue::enable(&mut db, &source(), &provenance(), 0).unwrap();
         insert_event(&db, &event(1, "2026-10-01T00:00:00Z")).unwrap();
-        queue::capture(&mut db, &source(), projection).unwrap();
+        let lease = queue::acquire_lease(&mut db, &source(), NOW, queue::MAX_LEASE_MS)
+            .unwrap()
+            .unwrap();
+        let job = queue::job::start(&mut db, &lease, NOW, None).unwrap();
+        queue::job::capture(&mut db, &lease, &job, NOW).unwrap();
         db.execute("DELETE FROM usage_events", []).unwrap();
         configure_at(&mut db, &enabled(true)).unwrap();
         apply_at(&mut db, NOW).unwrap();

@@ -21,10 +21,8 @@
         "usage cloud status",
         "usage cloud enable",
         "usage cloud disable",
-        "usage cloud include-history",
         "usage cloud sync",
         "usage cloud clear",
-        "usage cloud history",
         "usage retention status",
         "usage retention preview",
         "usage retention configure"
@@ -42,16 +40,10 @@
           "$ref": "#/$defs/cloud_disable"
         },
         {
-          "$ref": "#/$defs/cloud_selection"
-        },
-        {
           "$ref": "#/$defs/cloud_sync"
         },
         {
           "$ref": "#/$defs/cloud_clear"
-        },
-        {
-          "$ref": "#/$defs/cloud_history"
         },
         {
           "$ref": "#/$defs/retention_status"
@@ -133,16 +125,6 @@
     {
       "properties": {
         "operation": {
-          "const": "usage cloud include-history"
-        },
-        "result": {
-          "$ref": "#/$defs/cloud_selection"
-        }
-      }
-    },
-    {
-      "properties": {
-        "operation": {
           "const": "usage cloud sync"
         },
         "result": {
@@ -157,16 +139,6 @@
         },
         "result": {
           "$ref": "#/$defs/cloud_clear"
-        }
-      }
-    },
-    {
-      "properties": {
-        "operation": {
-          "const": "usage cloud history"
-        },
-        "result": {
-          "$ref": "#/$defs/cloud_history"
         }
       }
     },
@@ -282,7 +254,9 @@
         "full_local_restoration_from_cloud",
         "cloud_window_ineligible",
         "cloud_retention_days",
-        "pending_clear_confirmation"
+        "pending_clear_confirmation",
+        "sync_job",
+        "server_expired_events"
       ],
       "properties": {
         "schema_version": {
@@ -392,6 +366,20 @@
               "$ref": "#/$defs/pending_clear_confirmation"
             }
           ]
+        },
+        "sync_job": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sync_job"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "server_expired_events": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -441,6 +429,9 @@
               ]
             }
           }
+        },
+        "freshness": {
+          "$ref": "#/$defs/refresh_status"
         }
       }
     },
@@ -536,6 +527,9 @@
         },
         "processing_status": {
           "const": "not_observed"
+        },
+        "freshness": {
+          "$ref": "#/$defs/refresh_status"
         }
       }
     },
@@ -657,89 +651,154 @@
         }
       }
     },
-    "cloud_selection": {
+    "cloud_sync": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "schema_version",
-        "source",
-        "provenance",
-        "through_sequence",
-        "preview_sha256",
-        "selected",
-        "upload_started",
-        "restored_origin_unverified_records_remain_blocked"
-      ],
-      "properties": {
-        "schema_version": {
-          "const": 2
-        },
-        "source": {
-          "$ref": "#/$defs/source"
-        },
-        "provenance": {
-          "$ref": "#/$defs/provenance"
-        },
-        "through_sequence": {
-          "$ref": "#/$defs/decimal_sequence"
-        },
-        "preview_sha256": {
-          "$ref": "#/$defs/sha256"
-        },
-        "selected": {
-          "type": "boolean"
-        },
-        "upload_started": {
-          "const": false
-        },
-        "restored_origin_unverified_records_remain_blocked": {
-          "const": true
-        }
-      }
-    },
-    "sync_busy": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "schema_version",
-        "busy",
+        "outcome",
         "batches",
-        "local",
-        "policy_refreshed"
+        "partial"
       ],
       "properties": {
         "schema_version": {
           "const": 2
         },
-        "busy": {
-          "const": true
+        "outcome": {
+          "enum": [
+            "fully_synced",
+            "already_running",
+            "partial",
+            "quota_paused",
+            "plan_limit_denied",
+            "failed",
+            "outcome_unknown"
+          ]
         },
-        "local": {
-          "$ref": "#/$defs/local_status"
+        "maximum_history_days": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requested_history_days": {
+          "type": "integer",
+          "minimum": 0
         },
         "batches": {
-          "const": 0
+          "type": "integer",
+          "minimum": 0
+        },
+        "partial": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
         },
         "policy_refreshed": {
-          "const": true
+          "type": "boolean"
+        },
+        "uploaded_events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "acknowledged_events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "processing_status": {
+          "const": "not_observed"
+        },
+        "canceled": {
+          "type": "boolean"
+        },
+        "deadline_reached": {
+          "type": "boolean"
+        },
+        "stopped_error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retry_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reset_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quota": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "protocol_version",
+                "outcome",
+                "retry_at_ms",
+                "reset_at_ms",
+                "daily_bytes_limit",
+                "daily_request_limit"
+              ],
+              "properties": {
+                "protocol_version": {
+                  "const": 2
+                },
+                "outcome": {
+                  "const": "quota_paused"
+                },
+                "retry_at_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "reset_at_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "daily_bytes_limit": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "daily_request_limit": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "job": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sync_job"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
-    },
-    "cloud_sync": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/local_status"
-        },
-        {
-          "$ref": "#/$defs/sync_busy"
-        },
-        {
-          "$ref": "#/$defs/sync_maintenance"
-        },
-        {
-          "$ref": "#/$defs/sync_progress"
-        }
-      ]
     },
     "clear_preview": {
       "type": "object",
@@ -829,89 +888,6 @@
           "const": "monotonic_elapsed"
         },
         "elapsed_ms": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9223372036854775807
-        }
-      }
-    },
-    "history_event": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "sequence",
-        "event_id",
-        "original_text",
-        "original_sha256",
-        "semantic_hash_version",
-        "semantic_sha256"
-      ],
-      "properties": {
-        "sequence": {
-          "$ref": "#/$defs/counter"
-        },
-        "event_id": {
-          "$ref": "#/$defs/logical_event_id"
-        },
-        "original_text": {
-          "type": "string",
-          "maxLength": 16384
-        },
-        "original_sha256": {
-          "$ref": "#/$defs/sha256"
-        },
-        "semantic_hash_version": {
-          "const": 1
-        },
-        "semantic_sha256": {
-          "$ref": "#/$defs/sha256"
-        },
-        "timing": {
-          "$ref": "#/$defs/timing"
-        }
-      }
-    },
-    "cloud_history": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "protocol_version",
-        "source",
-        "high_watermark",
-        "events",
-        "next_sequence",
-        "through_sequence"
-      ],
-      "properties": {
-        "protocol_version": {
-          "const": 2
-        },
-        "source": {
-          "$ref": "#/$defs/source"
-        },
-        "high_watermark": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9223372036854775807
-        },
-        "events": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/history_event"
-          },
-          "maxItems": 100
-        },
-        "next_sequence": {
-          "oneOf": [
-            {
-              "type": "null"
-            },
-            {
-              "$ref": "#/$defs/counter"
-            }
-          ]
-        },
-        "through_sequence": {
           "type": "integer",
           "minimum": 0,
           "maximum": 9223372036854775807
@@ -1376,106 +1352,6 @@
       "type": "string",
       "pattern": "^(cai_event_|cai_run_|cai_agent_run_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
     },
-    "sync_maintenance": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "schema_version",
-        "batches",
-        "upload_paused",
-        "maintenance_pending",
-        "local"
-      ],
-      "properties": {
-        "schema_version": {
-          "const": 2
-        },
-        "batches": {
-          "const": 0
-        },
-        "upload_paused": {
-          "const": true
-        },
-        "maintenance_pending": {
-          "const": true
-        },
-        "local": {
-          "$ref": "#/$defs/local_status"
-        }
-      }
-    },
-    "sync_progress": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "schema_version",
-        "batches",
-        "acknowledged_events",
-        "uploaded_events",
-        "acknowledged_after_expiry_events",
-        "processing_status",
-        "canceled",
-        "deadline_reached",
-        "partial",
-        "stopped_error",
-        "local",
-        "policy_refreshed"
-      ],
-      "properties": {
-        "schema_version": {
-          "const": 2
-        },
-        "batches": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9223372036854775807
-        },
-        "acknowledged_events": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9223372036854775807
-        },
-        "uploaded_events": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9223372036854775807
-        },
-        "acknowledged_after_expiry_events": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9223372036854775807
-        },
-        "processing_status": {
-          "const": "not_observed"
-        },
-        "canceled": {
-          "type": "boolean"
-        },
-        "deadline_reached": {
-          "type": "boolean"
-        },
-        "partial": {
-          "type": "boolean"
-        },
-        "stopped_error": {
-          "oneOf": [
-            {
-              "type": "null"
-            },
-            {
-              "type": "string",
-              "maxLength": 512
-            }
-          ]
-        },
-        "local": {
-          "$ref": "#/$defs/local_status"
-        },
-        "policy_refreshed": {
-          "const": true
-        }
-      }
-    },
     "cloud_policy": {
       "type": "object",
       "additionalProperties": false,
@@ -1497,6 +1373,14 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 32
+        },
+        "daily_uncompressed_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "daily_upload_requests": {
+          "type": "integer",
+          "minimum": 1
         }
       }
     },
@@ -1523,6 +1407,129 @@
         },
         "preview_sha256": {
           "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "sync_job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "started_at_ms",
+        "through_sequence",
+        "history_days",
+        "target_events",
+        "pending_events",
+        "uploaded_events",
+        "expired_events",
+        "excluded_events",
+        "outcome",
+        "finished"
+      ],
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "started_at_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "through_sequence": {
+          "$ref": "#/$defs/decimal_sequence"
+        },
+        "history_days": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending_events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "uploaded_events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expired_events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "excluded_events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retry_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "fully_synced",
+            "already_running",
+            "partial",
+            "quota_paused",
+            "plan_limit_denied",
+            "failed",
+            "outcome_unknown"
+          ]
+        },
+        "finished": {
+          "type": "boolean"
+        }
+      }
+    },
+    "refresh_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "refresh_status",
+        "last_refresh_ms",
+        "target_age_ms"
+      ],
+      "properties": {
+        "protocol_version": {
+          "const": 2
+        },
+        "refresh_status": {
+          "enum": [
+            "fresh",
+            "overdue",
+            "missing",
+            "failed"
+          ]
+        },
+        "last_refresh_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_age_ms": {
+          "const": 86400000
         }
       }
     }

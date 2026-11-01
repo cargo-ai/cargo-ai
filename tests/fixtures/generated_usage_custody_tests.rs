@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod generated_usage_custody_tests {
     use crate::usage_analytics::{self as cloud, contract::*, elastic, queue};
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use std::collections::BTreeSet;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -81,11 +81,9 @@ mod generated_usage_custody_tests {
             panic!("expected explicit V2 upload")
         };
         let events = elastic::decode_batch(batch).unwrap();
-        assert!(
-            events
-                .iter()
-                .all(|event| !event.original_text.contains("local only"))
-        );
+        assert!(events
+            .iter()
+            .all(|event| !event.original_text.contains("local only")));
         let members = events
             .iter()
             .map(|event| event.member().unwrap())
@@ -314,6 +312,11 @@ mod generated_usage_custody_tests {
             let (retry_request, _) = upload(&retry_body);
             respond(&mut retry, acknowledgment(&retry_request));
             drop(retry);
+            let mut policy = accept(&listener);
+            let (_, body) = read_request(&mut policy);
+            assert_eq!(body["usage_analytics"]["command"], "status");
+            respond(&mut policy, status(&server_source, &server_provenance));
+            drop(policy);
             let mut next = accept(&listener);
             let (_, next_body) = read_request(&mut next);
             let (next_request, next_events) = upload(&next_body);
@@ -330,7 +333,7 @@ mod generated_usage_custody_tests {
             (first_ids.len(), next_ids.len())
         });
         eprintln!("generated-usage-custody stage=first-sync-started");
-        assert!(cloud::sync().await.is_err());
+        assert_eq!(cloud::sync().await.unwrap()["outcome"], "outcome_unknown");
         eprintln!("generated-usage-custody stage=first-sync-complete");
         assert_eq!(raw(&db), initial_raw);
         assert_eq!(cloud::local_status().unwrap()["pending"], initial_raw.len());
@@ -343,16 +346,21 @@ mod generated_usage_custody_tests {
             )
             .unwrap();
         assert!(frozen.parse::<elastic::Request>().is_ok());
-        cloud::scheduler::scope(record_run()).await;
+        record_run().await;
         late_event(&db, 100, 3_600_000);
         let before_ack = raw(&db);
         assert!(before_ack.len() > initial_raw.len());
         eprintln!("generated-usage-custody stage=retry-sync-started");
+        let first_result = cloud::sync().await.unwrap();
+        assert_eq!(first_result["outcome"], "fully_synced");
+        assert_eq!(first_result["job"]["target_events"], initial_raw.len());
         let result = cloud::sync().await.unwrap();
+        assert_eq!(result["outcome"], "fully_synced");
         eprintln!("generated-usage-custody stage=retry-sync-complete");
         let (first_count, next_count) = server.join().unwrap();
         eprintln!("generated-usage-custody stage=server-joined");
-        assert_eq!(result["acknowledged_events"], first_count + next_count);
+        assert_eq!(first_result["acknowledged_events"], first_count);
+        assert_eq!(result["acknowledged_events"], next_count);
         assert_eq!(result["processing_status"], "not_observed");
         assert_eq!(cloud::local_status().unwrap()["uploaded"], before_ack.len());
         assert_eq!(cloud::local_status().unwrap()["pending"], 0);
@@ -374,7 +382,13 @@ mod generated_usage_custody_tests {
         assert_no_request(&observer);
 
         late_event(&db, 101, 0);
-        queue::capture(&mut db, &source, cloud::project).unwrap();
+        let now = cloud::now_ms();
+        let lease = queue::acquire_lease(&mut db, &source, now, queue::MAX_LEASE_MS)
+            .unwrap()
+            .unwrap();
+        let job = queue::job::start(&mut db, &lease, now, None).unwrap();
+        queue::job::capture(&mut db, &lease, &job, now).unwrap();
+        queue::release_lease(&mut db, &lease, now).unwrap();
         assert_eq!(cloud::local_status().unwrap()["pending"], 1);
         let expired =
             crate::usage_store::retention::apply(cloud::now_ms() + 8 * 86_400_000).unwrap();
