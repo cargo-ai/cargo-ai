@@ -111,7 +111,7 @@ fn current_status(days: u32) -> Value {
     let selection = selected().unwrap().unwrap();
     json!({"protocol_version":2,"capability":{"enabled":true,"supported_protocol_versions":[2]},"account_binding":selection.source.account_binding,"data_generation":selection.source.data_generation,"lifecycle_epoch":selection.provenance.lifecycle_epoch,"environments":[{"source_home_id":selection.source.source_home_id,"consent_interval":selection.provenance.consent_interval}],"policy":{"retention_days":days,"retained_event_target":1_000_000,"max_active_environments":3},"processing_status":"not_observed"})
 }
-fn append(index: u64, offset_ms: i64, restored: bool) -> String {
+fn local_event(index: u64, offset_ms: i64, restored: bool) -> Value {
     let event_id = uuid(index + 100).as_str().to_owned();
     let timestamp = time::OffsetDateTime::from_unix_timestamp_nanos(
         i128::from(now_ms() - offset_ms) * 1_000_000,
@@ -119,8 +119,12 @@ fn append(index: u64, offset_ms: i64, restored: bool) -> String {
     .unwrap()
     .format(&time::format_description::well_known::Rfc3339)
     .unwrap();
-    crate::usage_store::persist(&json!({"schema_version":1,"event_id":event_id,"root_run_id":uuid(10),"agent_run_id":uuid(11),"event_type":"provider_request_completed","timestamp":timestamp,"provider":{"server":"typesafe","profile":"private fixture customer","requested_model":"jev-1.13.0"},"agent":{"project_root":"/private/fixture/project","name":"private fixture agent"},"usage":{"input_tokens":100,"output_tokens":3},"status":"success","restored":restored})).unwrap();
-    event_id
+    json!({"schema_version":1,"event_id":event_id,"root_run_id":uuid(10),"agent_run_id":uuid(11),"event_type":"provider_request_completed","timestamp":timestamp,"provider":{"server":"typesafe","profile":"private fixture customer","requested_model":"jev-1.13.0"},"agent":{"project_root":"/private/fixture/project","name":"private fixture agent"},"usage":{"input_tokens":100,"output_tokens":3},"status":"success","restored":restored})
+}
+fn append(index: u64, offset_ms: i64, restored: bool) -> String {
+    let event = local_event(index, offset_ms, restored);
+    crate::usage_store::persist(&event).unwrap();
+    event["event_id"].as_str().unwrap().to_owned()
 }
 fn ack(text: &[u8]) -> Value {
     let body: Value = serde_json::from_slice(text).unwrap();
@@ -684,9 +688,46 @@ async fn review_machine_effects_preserve_ack_before_a_later_capture_fault() {
     let home = Home::new(format!("{}/account", server.url()), true);
     home.policy();
     enable_source(&mut server, 1).await;
-    for n in 0..4201 {
-        append(n, 10_000 - n as i64, false);
-    }
+    assert_eq!(
+        crate::usage_store::retention::apply(now_ms()).unwrap()["maintenance_pending"],
+        false
+    );
+    let expected = {
+        let mut db = open().unwrap();
+        let tx = db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let mut expected = std::collections::BTreeMap::new();
+        for n in 0..4201 {
+            let event = local_event(n, 10_000 - n as i64, false);
+            assert!(crate::usage_store::insert_event(&tx, &event).unwrap());
+            expected.insert(event["event_id"].as_str().unwrap().to_owned(), event);
+        }
+        tx.commit().unwrap();
+        expected
+    };
+    let check_raw_history = || {
+        let db = open().unwrap();
+        let mut statement = db
+            .prepare("SELECT event_id,record_json FROM usage_event_records")
+            .unwrap();
+        let records = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(records.len(), expected.len());
+        for (id, text) in records {
+            assert_eq!(
+                serde_json::from_str::<Value>(&text).unwrap(),
+                expected[&id],
+                "Local raw event changed: {id}"
+            );
+        }
+    };
+    check_raw_history();
     let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = count.clone();
     let upload=server.mock("POST","/account").match_body(matcher("upload")).with_body_from_request(move|request|{
@@ -713,6 +754,7 @@ async fn review_machine_effects_preserve_ack_before_a_later_capture_fault() {
     assert_eq!(value["result"]["job"]["pending_events"], 4201 - count);
     assert_ne!(value["effects"]["remote"], "unapplied");
     assert_eq!(value["local"]["uploaded"], count);
+    check_raw_history();
     upload.assert_async().await;
 }
 
