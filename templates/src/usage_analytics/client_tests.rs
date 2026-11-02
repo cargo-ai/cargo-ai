@@ -684,13 +684,15 @@ async fn review_machine_effects_preserve_ack_before_a_later_capture_fault() {
     let home = Home::new(format!("{}/account", server.url()), true);
     home.policy();
     enable_source(&mut server, 1).await;
-    let mut last = String::new();
-    for n in 0..101 {
-        last = append(n, 10_000 - n as i64, false);
+    for n in 0..4201 {
+        append(n, 10_000 - n as i64, false);
     }
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = count.clone();
     let upload=server.mock("POST","/account").match_body(matcher("upload")).with_body_from_request(move|request|{
-        let body:Value=serde_json::from_slice(request.body().unwrap()).unwrap();assert_eq!(body["usage_analytics"]["batch"]["event_count"],100);
-        open().unwrap().execute_batch(&format!("CREATE TRIGGER fixture_capture_fault BEFORE INSERT ON usage_cloud_queue WHEN NEW.event_id='{last}' BEGIN SELECT RAISE(ABORT,'fixture capture failure'); END;")).unwrap();
+        let body:Value=serde_json::from_slice(request.body().unwrap()).unwrap();
+        observed.store(body["usage_analytics"]["batch"]["event_count"].as_u64().unwrap() as usize,std::sync::atomic::Ordering::SeqCst);
+        open().unwrap().execute_batch("CREATE TRIGGER fixture_capture_fault BEFORE INSERT ON usage_cloud_queue BEGIN SELECT RAISE(ABORT,'fixture capture failure'); END;").unwrap();
         response(ack(request.body().unwrap())).into_bytes()
     }).expect(1).create_async().await;
     let args = clap::Command::new("test")
@@ -702,12 +704,266 @@ async fn review_machine_effects_preserve_ack_before_a_later_capture_fault() {
         .unwrap_err();
     let value = failure.data;
     crate::usage_analytics_cli::schema_tests::assert_valid(&value);
+    let count = count.load(std::sync::atomic::Ordering::SeqCst);
+    assert!((101..=4096).contains(&count));
     assert_eq!(value["result"]["outcome"], "partial");
     assert_eq!(value["result"]["batches"], 1);
-    assert_eq!(value["result"]["acknowledged_events"], 100);
-    assert_eq!(value["result"]["uploaded_events"], 100);
-    assert_eq!(value["result"]["job"]["pending_events"], 1);
+    assert_eq!(value["result"]["acknowledged_events"], count);
+    assert_eq!(value["result"]["uploaded_events"], count);
+    assert_eq!(value["result"]["job"]["pending_events"], 4201 - count);
     assert_ne!(value["effects"]["remote"], "unapplied");
-    assert_eq!(value["local"]["uploaded"], 100);
+    assert_eq!(value["local"]["uploaded"], count);
     upload.assert_async().await;
+}
+
+async fn invoke_stopped_sync() -> Value {
+    let args = clap::Command::new("test")
+        .subcommand(crate::usage_analytics_cli::cloud_command())
+        .try_get_matches_from(["test", "cloud", "sync"])
+        .unwrap();
+    let value = crate::usage_analytics_cli::machine_run(&args)
+        .await
+        .unwrap_err()
+        .data;
+    crate::usage_analytics_cli::schema_tests::assert_valid(&value);
+    value
+}
+
+#[tokio::test]
+async fn transient_upload_budget_and_cooldown_survive_another_invocation() {
+    let mut server = Server::new_async().await;
+    let home = Home::new(format!("{}/account", server.url()), true);
+    home.policy();
+    enable_source(&mut server, 1).await;
+    append(1, 1000, false);
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = bodies.clone();
+    let rejected = server
+        .mock("POST", "/account")
+        .match_body(matcher("upload"))
+        .with_status(503)
+        .with_body_from_request(move |request| {
+            observed.lock().unwrap().push(
+                serde_json::from_slice::<Value>(request.body().unwrap()).unwrap()
+                    ["usage_analytics"]
+                    .to_string(),
+            );
+            b"temporarily unavailable".to_vec()
+        })
+        .expect(4)
+        .create_async()
+        .await;
+    let first = invoke_stopped_sync().await;
+    assert_eq!(first["result"]["batches"], 4);
+    assert_eq!(first["result"]["reason"], "retry_cooldown");
+    assert_eq!(first["result"]["outcome"], "outcome_unknown");
+    assert!(first["result"]["reset_at_ms"].is_null());
+    let retry = first["result"]["retry_at_ms"].as_i64().unwrap();
+    assert!((299_000..=300_000).contains(&(retry - now_ms())));
+    let frozen = bodies.lock().unwrap();
+    assert_eq!(frozen.len(), 4);
+    assert!(frozen.iter().all(|body| body == &frozen[0]));
+    drop(frozen);
+    rejected.assert_async().await;
+    rejected.remove_async().await;
+    let forbidden = server
+        .mock("POST", "/account")
+        .expect(0)
+        .create_async()
+        .await;
+    let again = invoke_stopped_sync().await;
+    assert_eq!(again["result"]["reason"], "retry_cooldown");
+    assert_eq!(again["result"]["retry_at_ms"], retry);
+    assert_eq!(
+        again["result"]["job"]["job_id"],
+        first["result"]["job"]["job_id"]
+    );
+    assert_eq!(again["result"]["batches"], 0);
+    forbidden.assert_async().await;
+    let db = open().unwrap();
+    assert_eq!(
+        db.query_row("SELECT attempts FROM usage_cloud_upload_batches", [], |r| r
+            .get::<_, u32>(0))
+            .unwrap(),
+        4
+    );
+}
+
+#[tokio::test]
+async fn longer_retry_after_is_persisted_without_waiting_or_daily_reset() {
+    let mut server = Server::new_async().await;
+    let home = Home::new(format!("{}/account", server.url()), true);
+    home.policy();
+    enable_source(&mut server, 1).await;
+    append(1, 1000, false);
+    let retry = now_ms() + 90_000;
+    let gate=server.mock("POST","/account").match_body(matcher("upload"))
+        .with_header("Retry-After","60")
+        .with_body(response(json!({"protocol_version":2,"outcome":"rate_limited","retry_after_ms":30_000,"retry_at_ms":retry})))
+        .expect(1).create_async().await;
+    let result = invoke_stopped_sync().await;
+    assert_eq!(result["result"]["reason"], "retry_backoff");
+    assert_eq!(result["result"]["retry_at_ms"], retry);
+    assert_eq!(result["result"]["batches"], 1);
+    assert!(result["result"]["reset_at_ms"].is_null());
+    gate.assert_async().await;
+    gate.remove_async().await;
+    let forbidden = server
+        .mock("POST", "/account")
+        .expect(0)
+        .create_async()
+        .await;
+    resume_active().await;
+    forbidden.assert_async().await;
+}
+
+#[tokio::test]
+async fn invalid_unchanged_payload_is_terminal_across_invocations() {
+    let mut server = Server::new_async().await;
+    let home = Home::new(format!("{}/account", server.url()), true);
+    home.policy();
+    enable_source(&mut server, 1).await;
+    append(1, 1000, false);
+    let invalid = server
+        .mock("POST", "/account")
+        .match_body(matcher("upload"))
+        .with_status(400)
+        .with_body(
+            json!({"status":"failed","type":"usage_analytics_invalid_request","retryable":true})
+                .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let first = invoke_stopped_sync().await;
+    assert_eq!(first["result"]["reason"], "invalid_request");
+    assert_eq!(first["result"]["batches"], 1);
+    invalid.assert_async().await;
+    invalid.remove_async().await;
+    let forbidden = server
+        .mock("POST", "/account")
+        .expect(0)
+        .create_async()
+        .await;
+    let again = invoke_stopped_sync().await;
+    assert_eq!(again["result"]["reason"], "invalid_request");
+    assert_eq!(again["result"]["batches"], 0);
+    forbidden.assert_async().await;
+}
+
+#[tokio::test]
+async fn expired_token_refresh_consumes_one_of_four_physical_upload_attempts() {
+    let mut server = Server::new_async().await;
+    let home = Home::new(format!("{}/account", server.url()), true);
+    home.policy();
+    enable_source(&mut server, 1).await;
+    append(1, 1000, false);
+    let expired = server
+        .mock("POST", "/account")
+        .match_body(Matcher::AllOf(vec![
+            matcher("upload"),
+            Matcher::PartialJson(json!({"credentials":{"access_token":"fixture-access"}})),
+        ]))
+        .with_body(json!({"status":"failed","type":"access_token_expired"}).to_string())
+        .expect(1)
+        .create_async()
+        .await;
+    let refresh = server
+        .mock("POST", "/account")
+        .match_body(Matcher::PartialJson(json!({"action":"status"})))
+        .with_body(
+            json!({"status":"success","session":{"access_token":"renewed-fixture-access"}})
+                .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let unavailable = server
+        .mock("POST", "/account")
+        .match_body(Matcher::AllOf(vec![
+            matcher("upload"),
+            Matcher::PartialJson(json!({"credentials":{"access_token":"renewed-fixture-access"}})),
+        ]))
+        .with_status(503)
+        .with_body("unavailable")
+        .expect(3)
+        .create_async()
+        .await;
+    let result = invoke_stopped_sync().await;
+    assert_eq!(result["result"]["batches"], 4);
+    assert_eq!(result["result"]["reason"], "retry_cooldown");
+    expired.assert_async().await;
+    refresh.assert_async().await;
+    unavailable.assert_async().await;
+}
+
+#[tokio::test]
+async fn admitted_request_keeps_its_deadline_after_pass_budget() {
+    let mut server = Server::new_async().await;
+    let home = Home::new(format!("{}/account", server.url()), true);
+    home.policy();
+    enable_source(&mut server, 1).await;
+    append(1, 1000, false);
+    let mut db = open().unwrap();
+    let selection = selected().unwrap().unwrap();
+    let mut lease = queue::acquire_lease(&mut db, &selection.source, now_ms(), queue::MAX_LEASE_MS)
+        .unwrap()
+        .unwrap();
+    let job = queue::job::start(&mut db, &lease, now_ms(), None).unwrap();
+    let upload = server
+        .mock("POST", "/account")
+        .match_body(matcher("upload"))
+        .with_body_from_request(|request| {
+            std::thread::sleep(Duration::from_millis(250));
+            response(ack(request.body().unwrap())).into_bytes()
+        })
+        .expect(1)
+        .create_async()
+        .await;
+    let mut transport = transport::V2Transport::new(REQUEST_TIMEOUT).unwrap();
+    let started = Instant::now() - DEADLINE + Duration::from_millis(100);
+    let result = sync_leased(&mut db, &mut lease, &job, started, &mut transport)
+        .await
+        .unwrap();
+    assert_eq!(result["uploaded_events"], 1);
+    assert_eq!(result["outcome"], "fully_synced");
+    assert_eq!(result["deadline_reached"], true);
+    upload.assert_async().await;
+}
+
+#[tokio::test]
+async fn changed_credentials_stop_a_reused_client_before_retry_transmission() {
+    let mut server = Server::new_async().await;
+    let home = Home::new(format!("{}/account", server.url()), true);
+    home.policy();
+    enable_source(&mut server, 1).await;
+    append(1, 1000, false);
+    let first = server
+        .mock("POST", "/account")
+        .match_body(matcher("upload"))
+        .with_status(503)
+        .with_body_from_request(|_| {
+            crate::credentials::store::store_account_tokens("different-account-token", None)
+                .unwrap();
+            b"unavailable".to_vec()
+        })
+        .expect(1)
+        .create_async()
+        .await;
+    let result = sync().await.unwrap();
+    assert_eq!(result["batches"], 1);
+    assert_eq!(result["uploaded_events"], 0);
+    assert!(result["stopped_error"]
+        .as_str()
+        .unwrap()
+        .contains("credentials changed"));
+    first.assert_async().await;
+    assert_eq!(
+        open()
+            .unwrap()
+            .query_row("SELECT attempts FROM usage_cloud_upload_batches", [], |r| r
+                .get::<_, u32>(0))
+            .unwrap(),
+        1
+    );
 }

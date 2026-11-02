@@ -275,6 +275,9 @@ mod generated_usage_custody_tests {
         generated_timer_proof();
         eprintln!("generated-usage-custody stage=scheduler-proof-complete");
         assert_no_request(&observer);
+        for n in 1000..1512 {
+            late_event(&db, n, 1000);
+        }
         let initial_raw = raw(&db);
         assert!(initial_raw.len() >= 2);
         assert_eq!(cloud::local_status().unwrap()["uploaded"], 0);
@@ -300,6 +303,21 @@ mod generated_usage_custody_tests {
                 .map(|event| event.member().unwrap().event_id)
                 .collect::<BTreeSet<_>>();
             drop(first); // The durable outcome is unknown after an accepted request loses its response.
+            let mut automatic = accept(&listener);
+            let (automatic_text, automatic_body) = read_request(&mut automatic);
+            assert_eq!(
+                automatic_text, first_text,
+                "automatic retry must preserve exact authenticated bytes"
+            );
+            let (_, automatic_events) = upload(&automatic_body);
+            assert!(
+                automatic_events.len() > 100,
+                "backlog capture must fill beyond a single transaction"
+            );
+            // An invalid acknowledgment remains unknown and requires a later
+            // explicit reconciliation using the same immutable batch.
+            respond(&mut automatic, json!({}));
+            drop(automatic);
             let mut policy = accept(&listener);
             let (_, body) = read_request(&mut policy);
             assert_eq!(body["usage_analytics"]["command"], "status");
@@ -336,7 +354,11 @@ mod generated_usage_custody_tests {
         });
         eprintln!("generated-usage-custody stage=first-sync-started");
         assert_eq!(
-            cloud::sync_pass(None, true).await.unwrap()["outcome"],
+            {
+                let result = cloud::sync_pass(None, true).await.unwrap();
+                assert_eq!(result["batches"], 2);
+                result["outcome"].clone()
+            },
             "outcome_unknown"
         );
         eprintln!("generated-usage-custody stage=first-sync-complete");
@@ -415,7 +437,7 @@ mod generated_usage_custody_tests {
         assert_no_request(&observer);
         eprintln!("generated-usage-custody stage=retention-complete");
         eprintln!(
-            "Generated explicit V2 upload: exact lost-response replay, {} acknowledged events, open-hour/earlier-hour gaps, raw ACK preservation, unsent rolling expiry, and real scheduler wake/cancel passed",
+            "Generated explicit V2 upload: filled backlog, bounded automatic retry and exact lost-response replay, {} acknowledged events, open-hour/earlier-hour gaps, raw ACK preservation, unsent rolling expiry, and real scheduler wake/cancel passed",
             before_ack.len()
         );
     }

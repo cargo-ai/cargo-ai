@@ -396,6 +396,20 @@ pub fn acquire_lease(
     Ok(Some(lease))
 }
 
+/// Renew only the still-current token; consent changes cannot revive a sender.
+pub fn renew_lease(db: &mut Connection, lease: &mut Lease, now: i64) -> Result<(), String> {
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(failed)?;
+    check_lease(&tx, lease, now)?;
+    let (b, h, g) = key(&lease.source);
+    let expires = now.checked_add(MAX_LEASE_MS).ok_or_else(invalid)?;
+    tx.execute("UPDATE usage_cloud_schedule SET lease_expires_ms=?5 WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND lease_token=?4",params![b,h,g,lease.token,expires]).map_err(failed)?;
+    tx.commit().map_err(failed)?;
+    lease.expires_ms = expires;
+    Ok(())
+}
+
 pub fn release_lease(db: &mut Connection, lease: &Lease, now: i64) -> Result<(), String> {
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -432,6 +446,7 @@ pub fn acknowledge_uploaded(
         if jobs_installed {
             tx.execute("UPDATE usage_cloud_job_members SET state='uploaded' WHERE state='pending' AND job_id IN(SELECT job_id FROM usage_cloud_jobs WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND finished=0) AND event_id IN(SELECT event_id FROM usage_cloud_upload_members WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND batch_id=?4)",params![b,h,g,batch_id.as_str()]).map_err(failed)?;
         }
+        tx.execute("UPDATE usage_cloud_jobs SET retry_at_ms=NULL,retry_reason=NULL WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND finished=0",params![b,h,g]).map_err(failed)?;
         // Per-event progress survives, while acknowledged compressed retry copies
         // no longer consume the local pending budget. Original facts stay intact.
         tx.execute("UPDATE usage_cloud_expiry_guard SET active=1",[]).map_err(failed)?;
@@ -480,7 +495,21 @@ fn install_upload_batches(db: &Connection) -> Result<(), String> {
         CREATE TRIGGER IF NOT EXISTS usage_cloud_upload_member_sealed BEFORE INSERT ON usage_cloud_upload_members WHEN EXISTS(SELECT 1 FROM usage_cloud_upload_batches b WHERE b.binding=NEW.binding AND b.source_home_id=NEW.source_home_id AND b.data_generation=NEW.data_generation AND b.batch_id=NEW.batch_id AND b.sealed=1) BEGIN SELECT RAISE(ABORT,'sealed usage upload membership'); END;
         CREATE TRIGGER IF NOT EXISTS usage_cloud_upload_member_immutable BEFORE UPDATE ON usage_cloud_upload_members BEGIN SELECT RAISE(ABORT,'immutable usage upload membership'); END;
         CREATE TRIGGER IF NOT EXISTS usage_cloud_upload_batch_no_delete BEFORE DELETE ON usage_cloud_upload_batches WHEN (SELECT active FROM usage_cloud_expiry_guard)=0 BEGIN SELECT RAISE(ABORT,'immutable usage upload batch'); END;
-        CREATE TRIGGER IF NOT EXISTS usage_cloud_upload_member_no_delete BEFORE DELETE ON usage_cloud_upload_members WHEN (SELECT active FROM usage_cloud_expiry_guard)=0 BEGIN SELECT RAISE(ABORT,'immutable usage upload membership'); END;").map_err(failed)
+        CREATE TRIGGER IF NOT EXISTS usage_cloud_upload_member_no_delete BEFORE DELETE ON usage_cloud_upload_members WHEN (SELECT active FROM usage_cloud_expiry_guard)=0 BEGIN SELECT RAISE(ABORT,'immutable usage upload membership'); END;").map_err(failed)?;
+    for (name, definition) in [
+        ("retry_attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("retry_at_ms", "INTEGER"),
+        ("retry_reason", "TEXT"),
+    ] {
+        let present: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage_cloud_upload_batches') WHERE name=?1)", [name], |r|r.get(0)).map_err(failed)?;
+        if !present {
+            db.execute_batch(&format!(
+                "ALTER TABLE usage_cloud_upload_batches ADD COLUMN {name} {definition}"
+            ))
+            .map_err(failed)?;
+        }
+    }
+    Ok(())
 }
 fn load_upload_batch(
     db: &Connection,
@@ -554,8 +583,10 @@ where
         tx.commit().map_err(failed)?;
         return Ok(Some(batch));
     }
+    // A lower bound limits row materialization without guessing serialized
+    // overhead; the actual submission encoding below selects the exact prefix.
     let rows = {
-        let mut stmt=tx.prepare("SELECT original_text,timing_json FROM (SELECT original_text,timing_json,sequence,CAST(json_extract(original_text,'$.occurred_at_ms') AS INTEGER) AS event_time,SUM(length(CAST(original_text AS BLOB))+2048+length(COALESCE(timing_json,''))) OVER (ORDER BY CAST(json_extract(original_text,'$.occurred_at_ms') AS INTEGER),sequence) AS candidate_bytes FROM usage_cloud_queue WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND retained=0 AND quarantined=0 AND active_batch_id IS NULL AND CAST(json_extract(original_text,'$.occurred_at_ms') AS INTEGER)>=?4 AND (?5 IS NULL OR EXISTS(SELECT 1 FROM usage_cloud_job_members j WHERE j.job_id=?5 AND j.event_id=usage_cloud_queue.event_id AND j.state='pending' AND j.captured=1))) WHERE candidate_bytes<=8388608 ORDER BY event_time,sequence LIMIT 4096").map_err(failed)?;
+        let mut stmt=tx.prepare("SELECT original_text,timing_json FROM (SELECT original_text,timing_json,sequence,CAST(json_extract(original_text,'$.occurred_at_ms') AS INTEGER) AS event_time,SUM(length(CAST(original_text AS BLOB))+length(CAST(COALESCE(timing_json,'') AS BLOB))) OVER (ORDER BY CAST(json_extract(original_text,'$.occurred_at_ms') AS INTEGER),sequence) AS minimum_bytes FROM usage_cloud_queue WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND retained=0 AND quarantined=0 AND active_batch_id IS NULL AND CAST(json_extract(original_text,'$.occurred_at_ms') AS INTEGER)>=?4 AND (?5 IS NULL OR EXISTS(SELECT 1 FROM usage_cloud_job_members j WHERE j.job_id=?5 AND j.event_id=usage_cloud_queue.event_id AND j.state='pending' AND j.captured=1))) WHERE minimum_bytes<=8000000 ORDER BY event_time,sequence LIMIT 4096").map_err(failed)?;
         let rows = stmt
             .query_map(params![b, h, g, cutoff_ms, job_id], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
@@ -576,10 +607,10 @@ where
         )
         .map_err(contract)?;
         let encoded = serde_json::to_vec(&event).map_err(|_| invalid())?.len();
-        if bytes + encoded + events.len() + 2 > 8 * 1024 * 1024 {
+        if bytes + encoded + 1 > super::elastic::MAX_DECODED_BYTES {
             break;
         }
-        bytes += encoded;
+        bytes += encoded + 1;
         events.push(event);
     }
     if events.is_empty() {
@@ -612,20 +643,68 @@ where
     tx.commit().map_err(failed)?;
     Ok(Some(batch))
 }
-pub fn begin_upload_attempt(
+/// A reservation is committed before transmission, so a killed process cannot
+/// reset the physical attempt budget or immediately replay its fourth attempt.
+pub fn reserve_upload_attempt(
     db: &mut Connection,
     lease: &Lease,
-    batch_id: &CanonicalUuid,
+    job_id: &str,
+    batch: &UploadBatch,
+    now: i64,
+    timeout_ms: i64,
+) -> Result<u32, String> {
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(failed)?;
+    check_lease(&tx, lease, now)?;
+    authorized(&tx, lease.source(), batch.provenance())?;
+    let (b, h, g) = key(lease.source());
+    let (mut attempts,due,reason):(u32,Option<i64>,Option<String>)=tx.query_row("SELECT retry_attempts,retry_at_ms,retry_reason FROM usage_cloud_upload_batches WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND batch_id=?4 AND acknowledged=0",params![b,h,g,batch.id.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
+    if reason.as_deref() == Some("invalid_request") {
+        return Err("Invalid unchanged usage payload remains paused".into());
+    }
+    if due.is_some_and(|due| due > now) {
+        return Err("Usage upload retry is not due".into());
+    }
+    if attempts >= 4 || reason.as_deref() == Some("quota_paused") {
+        attempts = 0;
+    }
+    attempts += 1;
+    let reason = if attempts == 4 {
+        "retry_cooldown"
+    } else {
+        "retry_backoff"
+    };
+    let due = now
+        .saturating_add(timeout_ms)
+        .saturating_add(if attempts == 4 { 300_000 } else { 0 });
+    tx.execute("UPDATE usage_cloud_upload_batches SET attempts=attempts+1,retry_attempts=?5,retry_at_ms=?6,retry_reason=?7 WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND batch_id=?4",params![b,h,g,batch.id.as_str(),attempts,due,reason]).map_err(failed)?;
+    tx.execute("UPDATE usage_cloud_jobs SET retry_at_ms=?2,retry_reason=?3,outcome='outcome_unknown' WHERE job_id=?1",params![job_id,due,reason]).map_err(failed)?;
+    tx.commit().map_err(failed)?;
+    Ok(attempts)
+}
+
+pub fn pause_upload(
+    db: &mut Connection,
+    lease: &Lease,
+    job_id: &str,
+    batch: &UploadBatch,
+    retry_at: Option<i64>,
+    reason: &str,
+    outcome: &str,
     now: i64,
 ) -> Result<(), String> {
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;
     check_lease(&tx, lease, now)?;
-    let batch = load_upload_batch(&tx, &lease.source, batch_id)?;
-    authorized(&tx, &lease.source, batch.provenance())?;
-    let (b, h, g) = key(&lease.source);
-    tx.execute("UPDATE usage_cloud_upload_batches SET attempts=attempts+1 WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND batch_id=?4 AND acknowledged=0",params![b,h,g,batch_id.as_str()]).map_err(failed)?;
+    let (b, h, g) = key(lease.source());
+    tx.execute("UPDATE usage_cloud_upload_batches SET retry_at_ms=?5,retry_reason=?6 WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND batch_id=?4",params![b,h,g,batch.id.as_str(),retry_at,reason]).map_err(failed)?;
+    tx.execute(
+        "UPDATE usage_cloud_jobs SET retry_at_ms=?2,retry_reason=?3,outcome=?4 WHERE job_id=?1",
+        params![job_id, retry_at, reason, outcome],
+    )
+    .map_err(failed)?;
     tx.commit().map_err(failed)
 }
 

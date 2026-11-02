@@ -53,16 +53,38 @@ After disabling and enabling again, an explicit sync can renew that same target
 under the current consent. The passive runner cannot renew consent, and old
 ambiguous requests remain recorded.
 
-Each pass sends bounded compressed batches oldest first within a 15-second budget.
+Backlog batches target about 2,000,000 compressed bytes, stopping sooner at
+4,096 events or 8,000,000 decoded bytes. The hard compressed bound is
+3,000,000 bytes; the authenticated account envelope is at most 4,500,000 bytes.
+The target is not a minimum: a backlog tail or one-second capture latency flushes
+a smaller batch. Existing event and line limits still apply. Each pass admits new
+work for at most 15 seconds; an admitted request retains its own 10-second
+lifetime, so completing a pass can take longer than 15 seconds.
+
 One sender lease per environment prevents overlapping sends. The running CLI's
-existing `run` operation maintenance scope can resume an unfinished explicit job when available;
-it does not create jobs or run a background daemon. Generated agents keep their
-existing local-maintenance-only boundary and do not send cloud analytics. A paused quota job waits until
-the recorded UTC reset before trying again. Successful acknowledgment progress and
-unknown requests survive restart. Retries preserve exact event and batch identities.
+existing `run` operation maintenance scope can resume an unfinished explicit job
+when available; it does not create jobs or run a background daemon. Generated
+agents keep their existing local-maintenance-only boundary and do not send cloud
+analytics. A paused quota job waits until the recorded UTC reset before trying
+again. Successful acknowledgment progress and unknown requests survive restart.
+Retries preserve exact event and batch content and identities.
+
+Transient failures allow the initial upload plus at most three automatic retries,
+with full random delays of 0–1, 0–2 and 0–4 seconds. A longer server Retry-After
+wins. Retry timing and the physical attempt budget survive process restarts;
+a fourth unsuccessful upload pauses that batch for at least five minutes before
+a new cycle. An attempt slot is reserved before transmission, so a process crash
+can consume a local slot even if it interrupted the send. Credential renewal never adds an uncounted upload replay. An
+explicit invalid-payload rejection stops retries of that unchanged payload.
+Account or cloud-consent changes stop further sends. No global credential cache
+is introduced.
 
 Machine outcomes are `fully_synced`, `already_running`, `partial`, `quota_paused`,
-`plan_limit_denied`, `failed` and `outcome_unknown`. The result and local status show
+`plan_limit_denied`, `failed` and `outcome_unknown`. A transient pause uses an existing `partial` or `outcome_unknown` outcome and
+`reason:retry_backoff` or `reason:retry_cooldown`, with `retry_at_ms` naming the
+next eligible attempt. `reason:invalid_request` stops the unchanged payload.
+`reset_at_ms` is reserved for daily quota and is null for these transient pauses.
+The result and local status show
 the latest job identity, outcome, completion flag, fixed boundary, total, pending,
 uploaded, excluded and expired counts, including after completion. Server-expired
 identities remain separately counted and are excluded from later jobs for that
@@ -71,7 +93,11 @@ expired and never counted as synced. A durable upload acknowledgment preserves
 local history and does not establish analytical query readiness.
 
 The account-wide daily allowance is 1,000,000,000 decoded bytes and 1,000 upload
-requests, shared across environments and reset at UTC midnight. Transmitted retries
+requests, shared across environments and reset at UTC midnight. Authenticated admitted attempts consume the request allowance, including invalid
+payloads; valid decoded bytes consume the byte allowance. Rate or concurrency
+rejections occur before that debit. Upload admission allows two requests per
+second with burst capacity four, at most one active upload per Home and three
+per account. Admitted retries
 consume allowance. Cloud payload retention is 30 days from first server arrival,
 with up to one million newest unique events per account after daily cleanup.
 Overshoot between cleanup runs is accepted. Explicit remote status reports

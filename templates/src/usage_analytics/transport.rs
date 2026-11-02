@@ -3,6 +3,77 @@ use super::elastic::{Request, MAX_ACCOUNT_BYTES};
 use serde_json::{json, Value};
 use std::time::Duration;
 
+#[derive(Debug)]
+pub(crate) struct UploadFailure {
+    pub message: String,
+    pub retryable: bool,
+    pub retry_at_ms: Option<i64>,
+    pub invalid_payload: bool,
+    pub unknown: bool,
+}
+impl From<&str> for UploadFailure {
+    fn from(message: &str) -> Self {
+        Self {
+            message: message.into(),
+            retryable: false,
+            retry_at_ms: None,
+            invalid_payload: false,
+            unknown: true,
+        }
+    }
+}
+impl From<String> for UploadFailure {
+    fn from(message: String) -> Self {
+        Self::from(message.as_str())
+    }
+}
+impl UploadFailure {
+    fn transient(message: &str, retry_at_ms: Option<i64>) -> Self {
+        Self {
+            retryable: true,
+            retry_at_ms,
+            ..Self::from(message)
+        }
+    }
+    fn rejected(result: &Value, retry_at_ms: Option<i64>) -> Self {
+        let invalid_payload = matches!(
+            result["type"].as_str(),
+            Some("usage_analytics_invalid_request" | "invalid_request")
+        ) || result["outcome"] == "invalid_request";
+        let retryable = !invalid_payload
+            && (result["retryable"] == true
+                || matches!(
+                    result["outcome"].as_str(),
+                    Some("rate_limited" | "concurrency_limited")
+                ));
+        Self { retryable, retry_at_ms, invalid_payload, unknown:!invalid_payload, ..Self::from("Usage cloud operation was rejected; original history and pending payloads remain preserved") }
+    }
+}
+fn retry_at(value: &Value, header: Option<i64>) -> Option<i64> {
+    [
+        header,
+        value["retry_at_ms"].as_i64().filter(|n| *n >= 0),
+        value["retry_after_ms"]
+            .as_u64()
+            .map(|delay| super::now_ms().saturating_add(delay.min(i64::MAX as u64) as i64)),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+}
+fn retry_after_header(value: &str) -> Option<i64> {
+    if let Ok(seconds) = value.trim().parse::<u64>() {
+        return Some(
+            super::now_ms()
+                .saturating_add(seconds.saturating_mul(1000).min(i64::MAX as u64) as i64),
+        );
+    }
+    time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc2822)
+        .ok()
+        .and_then(|date| i64::try_from(date.unix_timestamp_nanos() / 1_000_000).ok())
+        .filter(|n| *n >= 0)
+}
+
 pub(crate) struct V2Transport {
     client: reqwest::Client,
     auth: crate::usage_backup::Auth,
@@ -33,6 +104,8 @@ impl V2Transport {
         check_credentials: bool,
     ) -> Result<Self, String> {
         let client = reqwest::Client::builder()
+            // Protocol NACK replay must not bypass the persisted upload budget.
+            .http1_only()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(timeout)
             .connect_timeout(timeout.min(Duration::from_secs(3)))
@@ -62,13 +135,7 @@ impl V2Transport {
         }
         Ok(())
     }
-    async fn send(&self, body: Value) -> Result<Value, String> {
-        self.send_bytes(
-            serde_json::to_string(&body).map_err(|_| "Cannot encode usage cloud request")?,
-        )
-        .await
-    }
-    async fn send_bytes(&self, body: String) -> Result<Value, String> {
+    async fn send_bytes(&self, body: String) -> Result<Value, UploadFailure> {
         self.unchanged()?;
         if body.len() > MAX_ACCOUNT_BYTES {
             return Err("Usage cloud authenticated envelope exceeds its limit".into());
@@ -80,8 +147,18 @@ impl V2Transport {
             .body(body)
             .send()
             .await
-            .map_err(|_| "Usage cloud connection failed; submitted outcomes remain unknown")?;
+            .map_err(|_| {
+                UploadFailure::transient(
+                    "Usage cloud connection failed; submitted outcomes remain unknown",
+                    None,
+                )
+            })?;
         let status = response.status();
+        let header = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|h| h.to_str().ok())
+            .and_then(retry_after_header);
         if status.is_redirection() {
             return Err("Usage cloud endpoint redirect refused".into());
         }
@@ -89,23 +166,40 @@ impl V2Transport {
             return Err("Usage cloud response exceeds its limit".into());
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| "Usage cloud response interrupted; pending payloads preserved")?
-        {
+        while let Some(chunk) = response.chunk().await.map_err(|_| {
+            UploadFailure::transient(
+                "Usage cloud response interrupted; pending payloads preserved",
+                header,
+            )
+        })? {
             if bytes.len() + chunk.len() > 320 * 1024 {
                 return Err("Usage cloud response exceeds its limit".into());
             }
             bytes.extend_from_slice(&chunk);
         }
-        let text = std::str::from_utf8(&bytes).map_err(|_| "Usage cloud response is invalid")?;
-        let result = super::contract::parse_exact_json(text)
-            .map_err(|_| "Usage cloud response is invalid")?;
+        let parsed = std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|text| super::contract::parse_exact_json(text).ok());
+        let transient =
+            status.as_u16() == 429 || status.as_u16() == 408 || status.is_server_error();
+        let Some(mut result) = parsed.filter(Value::is_object) else {
+            return Err(if transient {
+                UploadFailure::transient("Usage cloud service temporarily unavailable; submitted outcomes remain unknown",header)
+            } else {
+                "Usage cloud response is invalid".into()
+            });
+        };
+        let retry = retry_at(&result, header);
         if !status.is_success() && result["type"] != "access_token_expired" {
-            return Err(
-                "Usage cloud operation was rejected; submitted outcomes remain unknown".into(),
-            );
+            let mut failure = UploadFailure::rejected(&result, retry);
+            if transient && !failure.invalid_payload {
+                failure.retryable = true;
+            }
+            return Err(failure);
+        }
+        // Keep response metadata outside the public result body.
+        if let Some(retry) = retry {
+            result["__transport_retry_at_ms"] = json!(retry);
         }
         Ok(result)
     }
@@ -124,34 +218,53 @@ impl V2Transport {
         }
         Ok(())
     }
+    pub(crate) fn check_upload(&self, text: &str) -> Result<(), String> {
+        let request = text
+            .parse::<Request>()
+            .map_err(|_| "Usage cloud request is invalid")?;
+        Self::consent(&request)?;
+        self.unchanged()
+    }
     pub(crate) async fn call(&mut self, request: &Request) -> Result<Value, String> {
         let text =
             serde_json::to_string(request).map_err(|_| "Cannot encode usage cloud request")?;
         self.call_exact(&text).await
     }
-    /// The frozen request is embedded verbatim, including on an authenticated
-    /// expired-token retry. No stored event or request bytes are regenerated.
     pub(crate) async fn call_exact(&mut self, text: &str) -> Result<Value, String> {
+        self.call_bounded(text, true)
+            .await
+            .map_err(|failure| failure.message)
+    }
+    /// Upload replay belongs to the persisted batch budget. Refreshing credentials
+    /// can prepare the next attempt, but never sends a second upload here.
+    pub(crate) async fn upload_exact(&mut self, text: &str) -> Result<Value, UploadFailure> {
+        self.call_bounded(text, false).await
+    }
+    async fn call_bounded(
+        &mut self,
+        text: &str,
+        replay_expired: bool,
+    ) -> Result<Value, UploadFailure> {
         let timeout = self.timeout;
-        tokio::time::timeout(timeout, async {
+        tokio::time::timeout(timeout,async {
             tokio::select! {
                 biased;
-                result = self.call_exact_inner(text) => result,
-                () = async {
-                    while !super::scheduler::canceled() {
-                        tokio::time::sleep(Duration::from_millis(25)).await;
-                    }
-                } => Err("Usage cloud operation canceled; submitted outcomes remain unknown".into()),
+                result=self.call_inner(text,replay_expired)=>result,
+                ()=async {while !super::scheduler::canceled(){tokio::time::sleep(Duration::from_millis(25)).await;}}=>Err("Usage cloud operation canceled; submitted outcomes remain unknown".into()),
             }
-        }).await.map_err(|_| "Usage cloud request deadline elapsed; submitted outcomes remain unknown".to_owned())?
+        }).await.map_err(|_|UploadFailure::transient("Usage cloud request deadline elapsed; submitted outcomes remain unknown",None))?
     }
-    async fn call_exact_inner(&mut self, text: &str) -> Result<Value, String> {
+    async fn call_inner(
+        &mut self,
+        text: &str,
+        replay_expired: bool,
+    ) -> Result<Value, UploadFailure> {
         if text.len() > MAX_ACCOUNT_BYTES {
             return Err("Usage cloud request exceeds its limit".into());
         }
         let request = text
             .parse::<Request>()
-            .map_err(|_| "Usage cloud request is invalid")?;
+            .map_err(|_| UploadFailure::from("Usage cloud request is invalid"))?;
         Self::consent(&request)?;
         self.unchanged()?;
         let mut result = self.send_exact(text).await?;
@@ -164,7 +277,8 @@ impl V2Transport {
                 .refresh_token
                 .as_deref()
                 .ok_or("Sign in explicitly to resume usage cloud")?;
-            let refreshed=self.send(json!({"action":"status","credentials":{"access_token":self.auth.access_token,"refresh_token":refresh},"session_policy":{"allow_refresh":true}})).await?;
+            let body=json!({"action":"status","credentials":{"access_token":self.auth.access_token,"refresh_token":refresh},"session_policy":{"allow_refresh":true}}).to_string();
+            let refreshed = self.send_bytes(body).await?;
             if refreshed["status"] != "success" {
                 return Err("Usage cloud session refresh failed; sign in explicitly".into());
             }
@@ -175,18 +289,33 @@ impl V2Transport {
             self.unchanged()?;
             Self::consent(&request)?;
             self.auth.access_token = token;
+            if !replay_expired {
+                return Err(UploadFailure::transient(
+                    "Usage cloud session renewed; exact upload remains pending",
+                    None,
+                ));
+            }
             result = self.send_exact(text).await?;
         }
+        let header = result["__transport_retry_at_ms"].as_i64();
         if result["status"] == "success" && result["type"] == "usage_analytics_succeeded" {
-            return result
+            let body = result
                 .get("usage_analytics")
                 .filter(|value| value.is_object())
                 .cloned()
-                .ok_or("Usage cloud result is missing".into());
+                .ok_or("Usage cloud result is missing")?;
+            if matches!(
+                body["outcome"].as_str(),
+                Some("rate_limited" | "concurrency_limited" | "invalid_request")
+            ) || body["retryable"] == true
+            {
+                return Err(UploadFailure::rejected(&body, retry_at(&body, header)));
+            }
+            return Ok(body);
         }
-        Err("Usage cloud operation was rejected; original history and pending payloads remain preserved".into())
+        Err(UploadFailure::rejected(&result, retry_at(&result, header)))
     }
-    async fn send_exact(&self, text: &str) -> Result<Value, String> {
+    async fn send_exact(&self, text: &str) -> Result<Value, UploadFailure> {
         let credentials = serde_json::to_string(&json!({"access_token":self.auth.access_token}))
             .map_err(|_| "Cannot encode usage cloud credentials")?;
         self.send_bytes(format!("{{\"action\":\"usage_analytics\",\"credentials\":{credentials},\"usage_analytics\":{text}}}")).await
@@ -324,5 +453,55 @@ mod v2_tests {
             .contains("deadline"));
         assert!(started.elapsed() < Duration::from_secs(1));
         slow.assert_async().await;
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    #[test]
+    fn retry_after_accepts_seconds_and_http_dates_without_shortening_body_timing() {
+        let before = super::super::now_ms();
+        let seconds = retry_after_header("60").unwrap();
+        assert!((before + 60_000..=super::super::now_ms() + 60_000).contains(&seconds));
+        let date = time::OffsetDateTime::now_utc() + time::Duration::seconds(90);
+        let text = date
+            .format(&time::format_description::well_known::Rfc2822)
+            .unwrap();
+        assert_eq!(
+            retry_after_header(&text),
+            Some(date.unix_timestamp() * 1000)
+        );
+        assert_eq!(
+            retry_at(
+                &json!({"retry_at_ms":before+120_000,"retry_after_ms":30_000}),
+                Some(seconds)
+            ),
+            Some(before + 120_000)
+        );
+        assert!(retry_after_header("invalid private diagnostic").is_none());
+    }
+    #[test]
+    fn terminal_invalid_payload_overrides_a_retryable_flag() {
+        let failure = UploadFailure::rejected(
+            &json!({"type":"usage_analytics_invalid_request","retryable":true}),
+            None,
+        );
+        assert!(failure.invalid_payload);
+        assert!(!failure.retryable);
+        for outcome in ["rate_limited", "concurrency_limited"] {
+            assert!(UploadFailure::rejected(&json!({"outcome":outcome}), None).retryable);
+        }
+        assert!(
+            !UploadFailure::rejected(&json!({"type":"usage_analytics_unavailable"}), None)
+                .retryable
+        );
+        assert!(
+            UploadFailure::rejected(
+                &json!({"type":"usage_analytics_pending","retryable":true}),
+                None
+            )
+            .retryable
+        );
     }
 }

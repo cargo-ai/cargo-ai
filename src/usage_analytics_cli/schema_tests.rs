@@ -327,3 +327,15 @@ fn sync_schema_has_closed_actual_outcomes() {
         assert!(!matches(&unknown, &schema, &schema));
     }
 }
+
+#[test]
+fn sync_retry_pauses_preserve_the_existing_closed_payload() {
+    for (reason, outcome, retry) in [
+        ("retry_backoff", "outcome_unknown", Some(1000)),
+        ("retry_cooldown", "partial", Some(300_000)),
+        ("invalid_request", "partial", None),
+    ] {
+        let value = serde_json::json!({"schema_version":2,"operation":"usage cloud sync","result":{"schema_version":2,"outcome":outcome,"reason":reason,"batches":0,"partial":true,"retry_at_ms":retry,"reset_at_ms":null},"local":crate::usage_analytics::empty_local_status(),"effects":{"local":"read_only","remote":"unapplied"},"postconditions_verified":false});
+        assert_valid(&value);
+    }
+}

@@ -691,6 +691,7 @@
           "type": "boolean"
         },
         "reason": {
+          "description": "retry_backoff and retry_cooldown are transient pauses with retry_at_ms and no daily reset; invalid_request stops unchanged-payload retries. Other existing reasons remain valid.",
           "type": "string"
         },
         "policy_refreshed": {

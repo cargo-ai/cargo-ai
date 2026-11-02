@@ -9,6 +9,7 @@ pub struct Job {
     pub through: i64,
     pub history_days: Option<u32>,
     pub retry_at_ms: Option<i64>,
+    pub retry_reason: Option<String>,
 }
 pub fn install(db: &Connection) -> Result<(), String> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS usage_cloud_jobs(
@@ -31,7 +32,13 @@ pub fn install(db: &Connection) -> Result<(), String> {
         CREATE TRIGGER IF NOT EXISTS usage_cloud_job_member_immutable BEFORE UPDATE ON usage_cloud_job_members
         WHEN OLD.job_id IS NOT NEW.job_id OR OLD.event_id IS NOT NEW.event_id OR OLD.sequence IS NOT NEW.sequence OR OLD.occurred_ms IS NOT NEW.occurred_ms
         OR (OLD.state!='pending' AND OLD.state IS NOT NEW.state)
-        BEGIN SELECT RAISE(ABORT,'immutable sync member'); END;").map_err(failed)
+        BEGIN SELECT RAISE(ABORT,'immutable sync member'); END;").map_err(failed)?;
+    let present: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage_cloud_jobs') WHERE name='retry_reason')", [], |r| r.get(0)).map_err(failed)?;
+    if !present {
+        db.execute_batch("ALTER TABLE usage_cloud_jobs ADD COLUMN retry_reason TEXT")
+            .map_err(failed)?;
+    }
+    Ok(())
 }
 pub fn active(db: &Connection, source: &Source) -> Result<Option<Job>, String> {
     let exists: bool = db
@@ -45,7 +52,8 @@ pub fn active(db: &Connection, source: &Source) -> Result<Option<Job>, String> {
         return Ok(None);
     }
     let (b, h, g) = key(source);
-    db.query_row("SELECT job_id,started_ms,through_sequence,history_days,retry_at_ms FROM usage_cloud_jobs WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND finished=0",params![b,h,g],|r|Ok(Job{id:r.get(0)?,started_ms:r.get(1)?,through:r.get(2)?,history_days:r.get(3)?,retry_at_ms:r.get(4)?})).optional().map_err(failed)
+    let retry_reason=if db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage_cloud_jobs') WHERE name='retry_reason')",[],|r|r.get::<_,bool>(0)).map_err(failed)? {"retry_reason"} else {"NULL"};
+    db.query_row(&format!("SELECT job_id,started_ms,through_sequence,history_days,retry_at_ms,{retry_reason} FROM usage_cloud_jobs WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 AND finished=0"),params![b,h,g],|r|Ok(Job{id:r.get(0)?,started_ms:r.get(1)?,through:r.get(2)?,history_days:r.get(3)?,retry_at_ms:r.get(4)?,retry_reason:r.get(5)?})).optional().map_err(failed)
 }
 pub fn latest(db: &Connection, source: &Source) -> Result<Option<Job>, String> {
     let exists: bool = db
@@ -59,7 +67,8 @@ pub fn latest(db: &Connection, source: &Source) -> Result<Option<Job>, String> {
         return Ok(None);
     }
     let (b, h, g) = key(source);
-    db.query_row("SELECT job_id,started_ms,through_sequence,history_days,retry_at_ms FROM usage_cloud_jobs WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 ORDER BY started_ms DESC,rowid DESC LIMIT 1",params![b,h,g],|r|Ok(Job{id:r.get(0)?,started_ms:r.get(1)?,through:r.get(2)?,history_days:r.get(3)?,retry_at_ms:r.get(4)?})).optional().map_err(failed)
+    let retry_reason=if db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage_cloud_jobs') WHERE name='retry_reason')",[],|r|r.get::<_,bool>(0)).map_err(failed)? {"retry_reason"} else {"NULL"};
+    db.query_row(&format!("SELECT job_id,started_ms,through_sequence,history_days,retry_at_ms,{retry_reason} FROM usage_cloud_jobs WHERE binding=?1 AND source_home_id=?2 AND data_generation=?3 ORDER BY started_ms DESC,rowid DESC LIMIT 1"),params![b,h,g],|r|Ok(Job{id:r.get(0)?,started_ms:r.get(1)?,through:r.get(2)?,history_days:r.get(3)?,retry_at_ms:r.get(4)?,retry_reason:r.get(5)?})).optional().map_err(failed)
 }
 pub fn terminal_count(db: &Connection, source: &Source) -> Result<i64, String> {
     let exists: bool = db
@@ -133,6 +142,7 @@ fn start_inner(
         through: high(&tx)?,
         history_days,
         retry_at_ms: None,
+        retry_reason: None,
     };
     let (b, h, g) = key(lease.source());
     tx.execute("INSERT INTO usage_cloud_jobs(job_id,binding,source_home_id,data_generation,lifecycle_epoch,consent_interval,started_ms,through_sequence,history_days) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![job.id,b,h,g,provenance.lifecycle_epoch.get() as i64,provenance.consent_interval.get() as i64,now,job.through,history_days]).map_err(failed)?;
@@ -234,6 +244,9 @@ pub fn capture(db: &mut Connection, lease: &Lease, job: &Job, now: i64) -> Resul
     tx.commit().map_err(failed)?;
     Ok(rows.len())
 }
+pub fn captured_pending(db: &Connection, job: &Job) -> Result<usize, String> {
+    db.query_row("SELECT COUNT(*) FROM usage_cloud_job_members m JOIN usage_cloud_jobs j USING(job_id) JOIN usage_cloud_queue q ON q.event_id=m.event_id AND q.binding=j.binding AND q.source_home_id=j.source_home_id AND q.data_generation=j.data_generation WHERE m.job_id=?1 AND m.state='pending' AND m.captured=1 AND q.retained=0 AND q.quarantined=0", [&job.id], |r| r.get::<_,i64>(0)).map(|n|n as usize).map_err(failed)
+}
 pub fn progress(db: &Connection, job: &Job) -> Result<Value, String> {
     let(total,pending,uploaded,expired,excluded):(i64,i64,i64,i64,i64)=db.query_row("SELECT COUNT(*),COALESCE(SUM(state='pending'),0),COALESCE(SUM(state='uploaded'),0),COALESCE(SUM(state='expired'),0),COALESCE(SUM(state='excluded'),0) FROM usage_cloud_job_members WHERE job_id=?1",[&job.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(failed)?;
     let (outcome, finished): (String, bool) = db
@@ -251,12 +264,13 @@ pub fn finish_pass(
     db: &Connection,
     job: &Job,
     retry_at: Option<i64>,
+    reason: Option<&str>,
     outcome: &str,
 ) -> Result<Value, String> {
     let progress = progress(db, job)?;
     db.execute(
-        "UPDATE usage_cloud_jobs SET retry_at_ms=?2,finished=?3,outcome=?4 WHERE job_id=?1",
-        params![job.id, retry_at, progress["pending_events"] == 0, outcome],
+        "UPDATE usage_cloud_jobs SET retry_at_ms=?2,finished=?3,outcome=?4,retry_reason=?5 WHERE job_id=?1",
+        params![job.id, retry_at, progress["pending_events"] == 0, outcome, reason],
     )
     .map_err(failed)?;
     self::progress(db, job)

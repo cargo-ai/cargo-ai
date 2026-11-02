@@ -47,6 +47,8 @@ const DEADLINE: Duration = Duration::from_secs(15);
 #[cfg(any(cargo_ai_cli, test))]
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(any(cargo_ai_cli, test))]
+const BATCH_FILL_LATENCY: Duration = Duration::from_secs(1);
+#[cfg(any(cargo_ai_cli, test))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Selection {
@@ -369,7 +371,7 @@ pub(crate) async fn sync_pass(history_days: Option<u32>, explicit: bool) -> Resu
         );
     }
     let mut db = open()?;
-    let Some(lease) =
+    let Some(mut lease) =
         queue::acquire_lease(&mut db, &selection.source, now_ms(), queue::MAX_LEASE_MS)?
     else {
         return Ok(
@@ -378,8 +380,9 @@ pub(crate) async fn sync_pass(history_days: Option<u32>, explicit: bool) -> Resu
     };
     let result=async {
         let job=if explicit {queue::job::start(&mut db,&lease,now_ms(),history_days)?} else {queue::job::resume(&mut db,&lease,now_ms())?};
-        if job.retry_at_ms.is_some_and(|retry|retry>now_ms()) {
-            return Ok(json!({"schema_version":2,"outcome":"quota_paused","batches":0,"partial":true,"retry_at_ms":job.retry_at_ms,"reset_at_ms":job.retry_at_ms,"job":queue::job::progress(&db,&job)?}));
+        if job.retry_reason.as_deref()==Some("invalid_request") || job.retry_at_ms.is_some_and(|retry|retry>now_ms()) {
+            let quota=job.retry_reason.is_none() || job.retry_reason.as_deref()==Some("quota_paused");
+            return Ok(json!({"schema_version":2,"outcome":if quota {"quota_paused"} else {"partial"},"reason":job.retry_reason.as_deref().unwrap_or("quota_paused"),"batches":0,"partial":true,"retry_at_ms":job.retry_at_ms,"reset_at_ms":if quota {job.retry_at_ms} else {None},"job":queue::job::progress(&db,&job)?}));
         }
         let mut client=transport::V2Transport::new(REQUEST_TIMEOUT)?;
         let status=client.call(&Request::Status{protocol_version:Version}).await?;
@@ -391,7 +394,7 @@ pub(crate) async fn sync_pass(history_days: Option<u32>, explicit: bool) -> Resu
         }
         let registered=status["environments"].as_array().is_some_and(|environments|environments.iter().any(|environment|environment["source_home_id"]==json!(selection.source.source_home_id)&&environment["consent_interval"].as_u64()==Some(selection.provenance.consent_interval.get())));
         if !registered {return Err("Usage cloud environment is no longer enabled; pending job preserved".into());}
-        sync_leased(&mut db,&lease,&job,started).await
+        sync_leased(&mut db,&mut lease,&job,started,&mut client).await
     }.await;
     let _ = queue::release_lease(&mut db, &lease, now_ms());
     match result {
@@ -415,9 +418,10 @@ pub(crate) async fn resume_active() {
 #[cfg(any(cargo_ai_cli, test))]
 async fn sync_leased(
     db: &mut Connection,
-    lease: &queue::Lease,
+    lease: &mut queue::Lease,
     job: &queue::job::Job,
     started: Instant,
+    client: &mut transport::V2Transport,
 ) -> Result<Value, String> {
     let mut batches = 0usize;
     let mut uploaded = 0usize;
@@ -425,33 +429,50 @@ async fn sync_leased(
     let mut outcome = "partial";
     let mut error = None;
     let mut retry_at = None;
+    let mut reason = None;
     let mut quota = None;
     macro_rules! local_step {
-        ($work:expr) => {
+        ($label:lifetime, $work:expr) => {
             match $work {
                 Ok(value) => value,
                 Err(failure) => {
                     outcome = if batches > 0 { "partial" } else { "failed" };
                     error = Some(failure);
-                    break;
+                    break $label;
                 }
             }
         };
     }
-    while started.elapsed() < DEADLINE && !scheduler::canceled() {
-        // Each capture transaction examines at most 100 committed job members.
-        let captured = local_step!(queue::job::capture(db, lease, job, now_ms()));
-        if started.elapsed() >= DEADLINE {
+    'passes: while started.elapsed() < DEADLINE && !scheduler::canceled() {
+        local_step!('passes, queue::renew_lease(db, lease, now_ms()));
+        // Short capture transactions fill one bounded candidate pool. A tail or
+        // latency trigger is flushable without a minimum compressed batch size.
+        let fill_started = Instant::now();
+        let mut captured = 0;
+        while local_step!('passes, queue::job::captured_pending(db, job))
+            < elastic::MAX_BATCH_EVENTS
+        {
+            let count = local_step!('passes, queue::job::capture(db, lease, job, now_ms()));
+            captured += count;
+            if count == 0
+                || fill_started.elapsed() >= BATCH_FILL_LATENCY
+                || started.elapsed() >= DEADLINE
+                || scheduler::canceled()
+            {
+                break;
+            }
+        }
+        if started.elapsed() >= DEADLINE || scheduler::canceled() {
             break;
         }
-        let Some(batch) = local_step!(queue::prepare_job_upload(
+        let Some(batch) = local_step!('passes, queue::prepare_job_upload(
             db,
             lease,
             now_ms(),
             &job.id,
             build_upload
         )) else {
-            let progress = local_step!(queue::job::progress(db, job));
+            let progress = local_step!('passes, queue::job::progress(db, job));
             if progress["pending_events"] == 0 {
                 outcome = if progress["expired_events"] == 0 && progress["excluded_events"] == 0 {
                     "fully_synced"
@@ -463,30 +484,94 @@ async fn sync_leased(
             }
             break;
         };
-        let request = local_step!(batch.request_json().parse::<Request>().map_err(encode));
+        let request = local_step!('passes, batch.request_json().parse::<Request>().map_err(encode));
         if !matches!(&request,Request::Upload{ordered_membership_sha256,source,provenance,batch_id,..} if ordered_membership_sha256==batch.membership()&&source==batch.source()&&provenance==batch.provenance()&&batch_id==batch.id())
         {
             outcome = "outcome_unknown";
             error = Some("Saved usage batch authority changed; job preserved".into());
             break;
         }
-        let remaining = DEADLINE
-            .saturating_sub(started.elapsed())
-            .min(REQUEST_TIMEOUT);
-        if remaining.is_zero() {
-            break;
-        }
-        local_step!(queue::begin_upload_attempt(db, lease, batch.id(), now_ms()));
-        let mut client = local_step!(transport::V2Transport::new(remaining));
+        // The pass budget admits work; it does not shorten an admitted request.
+        local_step!('passes,client.check_upload(batch.request_json()));
+        let attempt = local_step!('passes, queue::reserve_upload_attempt(
+            db,
+            lease,
+            &job.id,
+            &batch,
+            now_ms(),
+            REQUEST_TIMEOUT.as_millis() as i64
+        ));
         batches += 1;
-        let body = match client.call_exact(batch.request_json()).await {
+        let body = match client.upload_exact(batch.request_json()).await {
             Ok(body) => body,
             Err(failure) => {
-                outcome = "outcome_unknown";
-                error = Some(failure);
+                outcome = if failure.unknown {
+                    "outcome_unknown"
+                } else {
+                    "partial"
+                };
+                error = Some(failure.message);
+                if failure.invalid_payload {
+                    reason = Some("invalid_request");
+                } else if failure.retryable || attempt >= 4 {
+                    let cooldown = attempt >= 4;
+                    reason = Some(if cooldown {
+                        "retry_cooldown"
+                    } else {
+                        "retry_backoff"
+                    });
+                    let delay = if cooldown {
+                        300_000
+                    } else {
+                        retry_delay_ms(attempt)
+                    };
+                    retry_at = Some(
+                        now_ms()
+                            .saturating_add(delay)
+                            .max(failure.retry_at_ms.unwrap_or(0)),
+                    );
+                }
+                local_step!('passes, queue::pause_upload(
+                    db,
+                    lease,
+                    &job.id,
+                    &batch,
+                    retry_at,
+                    reason.unwrap_or("outcome_unknown"),
+                    outcome,
+                    now_ms()
+                ));
+                if failure.retryable && attempt < 4 {
+                    let delay = Duration::from_millis(
+                        retry_at.unwrap().saturating_sub(now_ms()).max(0) as u64,
+                    );
+                    if delay < DEADLINE.saturating_sub(started.elapsed()) && !scheduler::canceled()
+                    {
+                        let until = tokio::time::Instant::now() + delay;
+                        while tokio::time::Instant::now() < until && !scheduler::canceled() {
+                            tokio::time::sleep(
+                                (until - tokio::time::Instant::now())
+                                    .min(Duration::from_millis(25)),
+                            )
+                            .await;
+                        }
+                        if scheduler::canceled() {
+                            break;
+                        }
+                        retry_at = None;
+                        reason = None;
+                        error = None;
+                        continue;
+                    }
+                }
                 break;
             }
         };
+        if attempt < 4 {
+            // A received response ends the in-flight reservation. Its content
+            // must still establish an exact acknowledgment or explicit pause.
+            local_step!('passes,queue::pause_upload(db,lease,&job.id,&batch,None,"outcome_unknown","outcome_unknown",now_ms()));
+        }
         if body["protocol_version"] == 2 && body["outcome"] == "quota_paused" {
             let retry = body["retry_at_ms"]
                 .as_i64()
@@ -502,6 +587,17 @@ async fn sync_leased(
             }
             outcome = "quota_paused";
             retry_at = retry;
+            reason = Some("quota_paused");
+            local_step!('passes, queue::pause_upload(
+                db,
+                lease,
+                &job.id,
+                &batch,
+                retry_at,
+                "quota_paused",
+                outcome,
+                now_ms()
+            ));
             quota = Some(body);
             break;
         }
@@ -538,6 +634,14 @@ async fn sync_leased(
         uploaded += batch.members().len();
         tokio::task::yield_now().await;
     }
+    if error.is_some() && retry_at.is_none() && reason.is_none() {
+        if let Ok(Some(saved)) = queue::job::active(db, lease.source()) {
+            if saved.retry_reason.as_deref() == Some("retry_cooldown") {
+                retry_at = saved.retry_at_ms;
+                reason = Some("retry_cooldown");
+            }
+        }
+    }
     let observed = queue::job::progress(db, job).ok();
     if error.is_none()
         && outcome == "partial"
@@ -549,7 +653,7 @@ async fn sync_leased(
     {
         outcome = "fully_synced";
     }
-    let progress = match queue::job::finish_pass(db, job, retry_at, outcome) {
+    let progress = match queue::job::finish_pass(db, job, retry_at, reason, outcome) {
         Ok(progress) => Some(progress),
         Err(failure) => {
             outcome = if batches > 0 { "partial" } else { "failed" };
@@ -557,9 +661,17 @@ async fn sync_leased(
             observed
         }
     };
-    Ok(
-        json!({"schema_version":2,"outcome":outcome,"batches":batches,"policy_refreshed":true,"uploaded_events":uploaded,"acknowledged_events":acknowledged,"processing_status":"not_observed","partial":outcome!="fully_synced","canceled":scheduler::canceled(),"deadline_reached":started.elapsed()>=DEADLINE,"stopped_error":error,"retry_at_ms":retry_at,"reset_at_ms":retry_at,"quota":quota,"job":progress}),
-    )
+    let mut result = json!({"schema_version":2,"outcome":outcome,"batches":batches,"policy_refreshed":true,"uploaded_events":uploaded,"acknowledged_events":acknowledged,"processing_status":"not_observed","partial":outcome!="fully_synced","canceled":scheduler::canceled(),"deadline_reached":started.elapsed()>=DEADLINE,"stopped_error":error,"reason":reason,"retry_at_ms":retry_at,"reset_at_ms":if outcome=="quota_paused" {retry_at} else {None},"quota":quota,"job":progress});
+    if reason.is_none() {
+        result.as_object_mut().unwrap().remove("reason");
+    }
+    Ok(result)
+}
+#[cfg(any(cargo_ai_cli, test))]
+fn retry_delay_ms(attempt: u32) -> i64 {
+    let ceiling = 1000u64 << attempt.saturating_sub(1).min(2);
+    let random = uuid::Uuid::new_v4().as_u128() as u64;
+    (random % (ceiling + 1)) as i64
 }
 #[cfg(cargo_ai_cli)]
 #[cfg(any(cargo_ai_cli, test))]
